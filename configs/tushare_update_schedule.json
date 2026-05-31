@@ -18,6 +18,12 @@
       "end_date_offset_days": 0,
       "skip_if_already_ok": true
     },
+    "cn_nightly_full_audit": {
+      "description": "Refresh the six formal data-quality status files over the full retained research window after the evening update.",
+      "operation": "audit_full",
+      "end_date_offset_days": 1,
+      "skip_if_already_ok": true
+    },
     "cn_preopen_margin_backfill_0905": {
       "description": "Pre-open targeted first attempt for previous-day margin data. Keep it light so downstream audit, feature freeze, and Agent decisions can finish before 09:25.",
       "operation": "download_event_flow",

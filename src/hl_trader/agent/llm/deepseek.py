@@ -19,6 +19,25 @@ SUPPORTED_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "de
 SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "max", "xhigh"}
 USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
 SECRET_PATTERN = re.compile(r"(sk-[A-Za-z0-9_-]{8,})")
+SENSITIVE_LOG_KEYS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "access_token",
+    "refresh_token",
+    "token",
+    "secret",
+    "password",
+    "access_key",
+    "private_key",
+}
+NON_SECRET_TOKEN_KEYS = {
+    "total_tokens",
+    "prompt_tokens",
+    "completion_tokens",
+    "cached_tokens",
+    "reasoning_tokens",
+}
 
 
 class DeepSeekAPIError(RuntimeError):
@@ -194,7 +213,19 @@ class DeepSeekClient:
         started_perf = time.perf_counter()
         log_path = self._conversation_log_path(started_at)
         if log_path is not None:
-            _ensure_log_parent(log_path)
+            self._write_conversation_log(
+                log_path,
+                _conversation_log_record(
+                    config=self.config,
+                    payload=payload,
+                    started_at=started_at,
+                    completed_at=None,
+                    duration_seconds=0.0,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    status="started",
+                ),
+            )
         request = Request(
             self.config.chat_completions_url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -335,6 +366,7 @@ class DeepSeekClient:
         if path is None:
             return
         try:
+            _ensure_log_parent(path)
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         except OSError as exc:
@@ -434,7 +466,7 @@ def _conversation_log_record(
     config: DeepSeekConfig,
     payload: dict[str, Any],
     started_at: str,
-    completed_at: str,
+    completed_at: str | None,
     duration_seconds: float,
     attempt: int,
     max_attempts: int,
@@ -465,8 +497,8 @@ def _conversation_log_record(
     if safe_response is not None:
         record["raw_response"] = safe_response
         record["response_hash"] = _stable_hash(safe_response)
-        record["response_id"] = str(raw_response.get("id", ""))
-        record["usage"] = dict(raw_response.get("usage") or {})
+        record["response_id"] = _redact_secrets(str(raw_response.get("id", "")))
+        record["usage"] = _redact_secrets_in_obj(dict(raw_response.get("usage") or {}))
     if safe_body is not None:
         record["response_body"] = safe_body
         record["response_body_hash"] = _stable_hash(safe_body)
@@ -484,7 +516,10 @@ def _redact_secrets_in_obj(value: Any) -> Any:
     if isinstance(value, str):
         return _redact_secrets(value)
     if isinstance(value, dict):
-        return {str(key): _redact_secrets_in_obj(item) for key, item in value.items()}
+        return {
+            str(key): "[REDACTED]" if _is_sensitive_log_key(str(key)) else _redact_secrets_in_obj(item)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
         return [_redact_secrets_in_obj(item) for item in value]
     if isinstance(value, tuple):
@@ -499,3 +534,18 @@ def _stable_hash(value: Any) -> str:
 
 def _redact_secrets(value: str) -> str:
     return SECRET_PATTERN.sub("sk-***", value)
+
+
+def _is_sensitive_log_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+    if normalized in NON_SECRET_TOKEN_KEYS:
+        return False
+    if normalized in SENSITIVE_LOG_KEYS:
+        return True
+    compact = normalized.replace("_", "")
+    if compact in SENSITIVE_LOG_KEYS:
+        return True
+    parts = set(normalized.split("_"))
+    if {"api", "key"}.issubset(parts):
+        return True
+    return bool(parts & {"token", "secret", "password"})

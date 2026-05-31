@@ -225,13 +225,15 @@ class DeepSeekClientTest(unittest.TestCase):
                 ])
             files = list(Path(tmpdir).rglob("*.jsonl"))
             self.assertEqual(len(files), 1)
-            record = json.loads(files[0].read_text(encoding="utf-8").strip())
+            records = [json.loads(line) for line in files[0].read_text(encoding="utf-8").splitlines()]
+            record = records[-1]
+        self.assertEqual([item["status"] for item in records], ["started", "ok"])
         self.assertEqual(record["status"], "ok")
         self.assertEqual(record["provider"], "deepseek")
         self.assertEqual(record["payload"]["messages"][1]["content"], "json please")
         self.assertEqual(record["raw_response"]["choices"][0]["message"]["content"], "{\"action\":\"hold\"}")
         self.assertEqual(record["usage"]["total_tokens"], 12)
-        self.assertNotIn(fake_secret, json.dumps(record))
+        self.assertNotIn(fake_secret, json.dumps(records))
 
     def test_http_error_writes_conversation_log(self):
         fake_secret = "sk-" + "secretvalue123456"
@@ -244,11 +246,57 @@ class DeepSeekClientTest(unittest.TestCase):
                     client.chat_json([ChatMessage("user", "json please")])
             files = list(Path(tmpdir).rglob("*.jsonl"))
             self.assertEqual(len(files), 1)
-            record = json.loads(files[0].read_text(encoding="utf-8").strip())
+            records = [json.loads(line) for line in files[0].read_text(encoding="utf-8").splitlines()]
+            record = records[-1]
+        self.assertEqual([item["status"] for item in records], ["started", "error"])
         self.assertEqual(record["status"], "error")
         self.assertEqual(record["error"]["status_code"], 401)
         self.assertIn("sk-***", record["error"]["message"])
-        self.assertNotIn(fake_secret, json.dumps(record))
+        self.assertNotIn(fake_secret, json.dumps(records))
+
+    def test_conversation_log_redacts_sensitive_dict_keys(self):
+        payload = {
+            "id": "resp-sk-secretvalue123456",
+            "model": "deepseek-v4-flash",
+            "choices": [{"message": {"content": "{\"action\":\"hold\"}"}}],
+            "usage": {"total_tokens": 12, "secret": "usage-secret"},
+            "api_key": "plain-secret",
+            "authorization": "Bearer plain-token",
+            "nested": {"token": "plain-token", "total_tokens": 12},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = DeepSeekClient(test_config(conversation_log_dir=tmpdir))
+            with patch("hl_trader.agent.llm.deepseek.urlopen", return_value=FakeHTTPResponse(payload)):
+                client.chat_json([
+                    ChatMessage("system", "Return JSON only."),
+                    ChatMessage("user", "json please"),
+                ])
+            log_path = next(Path(tmpdir).rglob("*.jsonl"))
+            records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+        record = records[-1]
+        self.assertEqual(record["raw_response"]["api_key"], "[REDACTED]")
+        self.assertEqual(record["raw_response"]["authorization"], "[REDACTED]")
+        self.assertEqual(record["raw_response"]["nested"]["token"], "[REDACTED]")
+        self.assertEqual(record["raw_response"]["nested"]["total_tokens"], 12)
+        self.assertEqual(record["response_id"], "resp-sk-***")
+        self.assertEqual(record["usage"]["total_tokens"], 12)
+        self.assertEqual(record["usage"]["secret"], "[REDACTED]")
+        self.assertNotIn("plain-secret", json.dumps(records))
+        self.assertNotIn("plain-token", json.dumps(records))
+        self.assertNotIn("usage-secret", json.dumps(records))
+
+    def test_conversation_log_failure_stops_before_provider_call(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            blocked = Path(tmpdir) / "blocked"
+            blocked.write_text("not a directory", encoding="utf-8")
+            client = DeepSeekClient(test_config(conversation_log_dir=blocked))
+            with patch("hl_trader.agent.llm.deepseek.urlopen") as mocked_urlopen:
+                with self.assertRaises(DeepSeekAPIError):
+                    client.chat_json([
+                        ChatMessage("system", "Return JSON only."),
+                        ChatMessage("user", "json please"),
+                    ])
+            mocked_urlopen.assert_not_called()
 
 
 # Source: test_evidence_events_shadow.py

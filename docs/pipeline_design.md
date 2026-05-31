@@ -1,12 +1,50 @@
 # Pipeline Design
 
-整理日期：2026-05-28
+整理日期：2026-05-31
 
 本文档记录 MacroQuant 的运行编排层：CLI 如何调用 feature build、development WFO、held-out control、LLM shadow，以及 Pipeline 如何组合 Environment 和 Agent。Environment 原语见 `docs/environment_design.md`；Agent 决策逻辑见 `docs/agent_design.md`；数据下载和审计见 `docs/data_documentation.md`；QMT 执行端见 `docs/QMT_documentation.md`。
 
-## 边界原则
+## 导航
+
+- [1. 边界原则](#1-边界原则)
+  - [1.1 职责范围](#11-职责范围)
+  - [1.2 导入方向](#12-导入方向)
+- [2. 代码组织](#2-代码组织)
+  - [2.1 文件职责](#21-文件职责)
+- [3. CLI 映射](#3-cli-映射)
+  - [3.1 子命令](#31-子命令)
+  - [3.2 CLI 规则](#32-cli-规则)
+- [4. Feature Build Pipeline](#4-feature-build-pipeline)
+  - [4.1 命令入口](#41-命令入口)
+  - [4.2 当前流程](#42-当前流程)
+  - [4.3 输出约束](#43-输出约束)
+- [5. Development WFO Pipeline](#5-development-wfo-pipeline)
+  - [5.1 命令入口与实现](#51-命令入口与实现)
+  - [5.2 运行流程](#52-运行流程)
+  - [5.3 训练阶段](#53-训练阶段)
+  - [5.4 测试、调仓与事件动作](#54-测试调仓与事件动作)
+- [6. Held-Out Control Pipeline](#6-held-out-control-pipeline)
+  - [6.1 命令入口](#61-命令入口)
+  - [6.2 规则](#62-规则)
+- [7. LLM Shadow Pipeline](#7-llm-shadow-pipeline)
+  - [7.1 构造 Evidence Pack](#71-构造-evidence-pack)
+  - [7.2 调用 Provider](#72-调用-provider)
+  - [7.3 Feature 到 Evidence 流程](#73-feature-到-evidence-流程)
+  - [7.4 Dry-run 与真实 Shadow](#74-dry-run-与真实-shadow)
+- [8. Ledger 和输出路径](#8-ledger-和输出路径)
+  - [8.1 本地输出](#81-本地输出)
+- [9. Freeze 和可复现](#9-freeze-和可复现)
+  - [9.1 Freeze 字段](#91-freeze-字段)
+- [10. Fail-Fast 规则](#10-fail-fast-规则)
+  - [10.1 失败条件](#101-失败条件)
+- [11. 后续 Pipeline 扩展](#11-后续-pipeline-扩展)
+  - [11.1 扩展方向](#111-扩展方向)
+
+## 1. 边界原则
 
 Pipeline 回答的是：“按照哪套冻结配置、输入、输出和审计规则，把 Environment 与 Agent 串起来运行一次实验或 shadow 流程。”
+
+### 1.1 职责范围
 
 Pipeline 负责：
 
@@ -25,6 +63,8 @@ Pipeline 不负责：
 - 不直接实现 prompt/provider/response 合同；那属于 Agent。
 - 不绕过 PIT feature 或 evidence pack 读取 raw 数据。
 
+### 1.2 导入方向
+
 导入方向：
 
 ```text
@@ -34,7 +74,9 @@ environment -> 不依赖 agent
 agent -> 不拥有 broker state
 ```
 
-## 代码组织
+## 2. 代码组织
+
+### 2.1 文件职责
 
 | 文件 | 职责 |
 |---|---|
@@ -45,9 +87,11 @@ agent -> 不拥有 broker state
 
 `build-features` 由 `scripts/hl.py` 调用 `DailyPITFeatureBuilder`，负责 raw 数据到 PIT feature 的构造。
 
-## CLI 映射
+## 3. CLI 映射
 
 `scripts/hl.py` 当前提供四个子命令：
+
+### 3.1 子命令
 
 | CLI | 运行边界 | 当前写入 |
 |---|---|---|
@@ -56,6 +100,8 @@ agent -> 不拥有 broker state
 | `run-heldout` | 冻结参数 held-out control | held-out ledger |
 | `llm-shadow` | evidence pack -> shadow decision | evidence JSONL、shadow ledger |
 
+### 3.2 CLI 规则
+
 CLI 规则：
 
 - 所有命令通过 `PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py ...` 运行。
@@ -63,7 +109,9 @@ CLI 规则：
 - CLI 捕获异常后输出 JSON error 并返回非 0。
 - CLI 输出使用 `to_jsonable` 序列化 dataclass、日期和 numpy/pandas 类型。
 
-## Feature Build Pipeline
+## 4. Feature Build Pipeline
+
+### 4.1 命令入口
 
 入口：
 
@@ -76,6 +124,8 @@ PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scr
   --end-date 20251231
 ```
 
+### 4.2 当前流程
+
 当前流程：
 
 1. `scripts/hl.py` 解析 `FeatureBuildConfig`。
@@ -85,13 +135,17 @@ PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scr
 5. 按 `feature_date` 分区写入 `data/features/<dataset>/`。
 6. 返回行数、分区数、首尾分区路径。
 
+### 4.3 输出约束
+
 输出约束：
 
 - 输出是 feature layer，不是 raw layer。
 - 写入前不应绕过 Environment 的 PIT 构造和泄漏检查。
 - 后续财务、宏观、事件、分钟、文本接入时，应扩展 Environment selector，再由 Pipeline 调用。
 
-## Development WFO Pipeline
+## 5. Development WFO Pipeline
+
+### 5.1 命令入口与实现
 
 入口：
 
@@ -107,6 +161,8 @@ PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scr
 - `DailyFormulaicExperimentRunner`
 - `FormulaicWfoRunner`
 
+### 5.2 运行流程
+
 运行流程：
 
 1. 读取 `ExperimentConfig`。
@@ -121,12 +177,16 @@ PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scr
    - 写入 `fold_result`。
 7. 汇总所有 fold，写入 `experiment_result`。
 
+### 5.3 训练阶段
+
 训练阶段：
 
 - `assert_result_available` 要求训练特征有 `result_available_time`，且不晚于训练结束。
 - 调仓日期为每个月最后一个 `feature_date`。
 - 每组参数在连续月末决策点之间计算入选股票的实现收益均值。
 - 没有足够样本时得分为负无穷；全部无效时归零。
+
+### 5.4 测试、调仓与事件动作
 
 测试阶段：
 
@@ -153,7 +213,9 @@ PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scr
 - Pipeline 写 `event_action` 和 `fill`。
 - LLM shadow 不能触发这些动作。
 
-## Held-Out Control Pipeline
+## 6. Held-Out Control Pipeline
+
+### 6.1 命令入口
 
 入口：
 
@@ -170,6 +232,8 @@ PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scr
   --treatment control_formulaic_mode
 ```
 
+### 6.2 规则
+
 规则：
 
 - 必须配置 `heldout_start`。
@@ -185,7 +249,9 @@ PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scr
 
 Held-out 结果只能用于冻结方案验证，不应反向修改 development 搜索逻辑。
 
-## LLM Shadow Pipeline
+## 7. LLM Shadow Pipeline
+
+### 7.1 构造 Evidence Pack
 
 入口：从 feature file 构造 evidence pack 并 dry-run。
 
@@ -200,6 +266,8 @@ PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py llm-shad
   --dry-run
 ```
 
+### 7.2 调用 Provider
+
 入口：从已有 evidence pack 调用 provider。
 
 ```bash
@@ -209,6 +277,8 @@ PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py llm-shad
   --shadow-ledger experiments/trial_ledger/llm_shadow.jsonl \
   --max-packs 1
 ```
+
+### 7.3 Feature 到 Evidence 流程
 
 Feature file -> evidence pack 流程：
 
@@ -233,6 +303,8 @@ Feature file -> evidence pack 流程：
 - `amount_ma20`
 - `ret_20d`
 
+### 7.4 Dry-run 与真实 Shadow
+
 Dry-run：
 
 - 不读取 provider API key。
@@ -249,7 +321,9 @@ Dry-run：
 - 写入每个 pack 的 `llm_shadow_pack`。
 - 所有记录保持 `can_affect_trading=False`。
 
-## Ledger 和输出路径
+## 8. Ledger 和输出路径
+
+### 8.1 本地输出
 
 常用本地输出：
 
@@ -263,7 +337,9 @@ Dry-run：
 
 正式运行应使用不同 ledger path，避免 smoke、development、held-out 和 shadow 混写。
 
-## Freeze 和可复现
+## 9. Freeze 和可复现
+
+### 9.1 Freeze 字段
 
 Pipeline 必须保留：
 
@@ -279,7 +355,9 @@ Pipeline 必须保留：
 
 Development runner 每个 fold 前会重新生成 freeze spec 并检查配置未漂移。
 
-## Fail-Fast 规则
+## 10. Fail-Fast 规则
+
+### 10.1 失败条件
 
 Pipeline 应失败而不是静默 fallback：
 
@@ -293,7 +371,9 @@ Pipeline 应失败而不是静默 fallback：
 - LLM response 缺失、重复或额外输出股票。
 - action 不可交易时不能被转为订单。
 
-## 后续 Pipeline 扩展
+## 11. 后续 Pipeline 扩展
+
+### 11.1 扩展方向
 
 建议新增 pipeline 时保持同一边界：
 

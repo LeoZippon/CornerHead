@@ -994,7 +994,7 @@ def load_stock_codes(raw_dir: Path) -> list[str]:
     data = read_many(files, columns=["ts_code"])
     return sorted(data["ts_code"].dropna().astype(str).str.strip().unique().tolist())
 
-def load_sse_open_dates(raw_dir: Path, start_date: str, end_date: str) -> list[str]:
+def load_sse_open_dates(raw_dir: Path, start_date: str, end_date: str, *, allow_empty: bool = False) -> list[str]:
     files = sorted((raw_dir / "trade_cal" / "exchange=SSE").glob("year=*.parquet"))
     if not files:
         raise RuntimeError("SSE trade_cal partitions are missing; run download --tier reference first")
@@ -1010,7 +1010,7 @@ def load_sse_open_dates(raw_dir: Path, start_date: str, end_date: str) -> list[s
         )
     mask = (calendar["is_open"].astype(str) == "1") & (calendar["cal_date"] >= start_date) & (calendar["cal_date"] <= end_date)
     dates = sorted(calendar.loc[mask, "cal_date"].tolist())
-    if not dates:
+    if not dates and not allow_empty:
         raise RuntimeError(f"no SSE open dates found for {start_date}-{end_date}")
     return dates
 
@@ -1536,7 +1536,16 @@ def intraday_expected_codes_for_day(raw_dir: Path, args: argparse.Namespace, tra
         return None
     if getattr(args, "codes", None):
         codes = {str(code).strip() for code in args.codes if str(code).strip()}
-    elif source == "daily":
+    elif source in {"daily", "minute"}:
+        if source == "minute":
+            dataset = getattr(args, "output_dataset", STK_MINS_BY_DATE_DATASET)
+            existing_path = stk_mins_by_date_path(raw_dir, dataset, trade_date)
+            if existing_path.exists() and parquet_rows(existing_path) > 0:
+                existing = pd.read_parquet(existing_path, columns=["ts_code"])
+                codes = set(existing["ts_code"].dropna().astype(str))
+                if getattr(args, "max_codes", None):
+                    codes = set(sorted(codes)[: int(args.max_codes)])
+                return codes
         daily_path = raw_dir / "daily" / f"trade_date={trade_date}.parquet"
         if not daily_path.exists():
             return set()
@@ -1612,7 +1621,7 @@ def augment_text_frame(df: pd.DataFrame, spec: TextDataset) -> pd.DataFrame:
         df["available_at"] = ""
         df["available_at_rule"] = "missing_source_time"
     if spec.time_column and spec.time_column in df.columns:
-        source_time = df[spec.time_column].astype(str).str.strip()
+        source_time = df[spec.time_column].map(normalize_source_datetime)
         mask = source_time.ne("") & source_time.ne("nan") & source_time.ne("None")
         df.loc[mask, "available_at"] = source_time[mask]
         df.loc[mask, "available_at_rule"] = f"source:{spec.time_column}"
@@ -1658,7 +1667,7 @@ def add_intraday_by_date_common_args(
     expected_codes_choices: list[str] | None = None,
     expected_codes_default: str = "none",
 ) -> None:
-    expected_choices = expected_codes_choices or ["none", "daily", "active"]
+    expected_choices = expected_codes_choices or ["none", "daily", "active", "minute"]
     add_raw_arg(parser)
     parser.add_argument("--start-date", default="20200101")
     parser.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))

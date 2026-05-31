@@ -44,7 +44,7 @@ trade_policy:
     - rotate_to_next_candidate
     - cash_buffer
 
-# This is deliberately simple: start with formulaic features already present in P1/P2,
+# This is deliberately simple: start with formulaic features from base research data,
 # then add event/NL tracks only after the PIT layer and daily replay are tested.
 template:
   template_id: value_quality_formulaic_v1

@@ -17,6 +17,10 @@ STOCK_PYTHON=/home/lzp/miniconda3/envs/stock/bin/python
 # moneyflow, block_trade, historical minutes, text evidence, macro/global.
 35 23 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_evening_full >> logs/tushare_cron_dispatch.log 2>&1
 
+# Refresh the six formal data-quality status files over the full retained
+# window after the evening update has normally finished.
+30 2 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_nightly_full_audit >> logs/tushare_cron_dispatch.log 2>&1
+
 # Pre-open light backfill for T+1 margin sources. These two jobs use distinct
 # names so 09:15 still retries if 09:05 returned successfully but source data
 # was not ready yet. Existing completed partitions are skipped by the downloader.

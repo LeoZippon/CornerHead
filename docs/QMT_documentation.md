@@ -1,26 +1,52 @@
 # QMT Documentation
 
-整理日期：2026-05-28
+整理日期：2026-05-31
 
 本文档记录 MacroQuant 项目接入阿里云 Windows + MiniQMT 的部署状态、当前日常流程和未来实盘上线门槛。当前阶段模型尚未训练完成，仓库也没有活动的 live 下单脚本，因此 QMT 侧只能作为已部署的执行环境保持 standby、只读检查和 dry-run 准备；不得启动自动实盘交易。研究侧 pipeline 边界见 `docs/pipeline_design.md`。
 
-## 当前状态
+## 导航
+
+- [1. 当前状态](#1-当前状态)
+- [2. 目标架构](#2-目标架构)
+- [3. 当前日常流程](#3-当前日常流程)
+  - [3.1 准备和健康检查](#31-准备和健康检查)
+  - [3.2 只读检查命令](#32-只读检查命令)
+- [4. 未来实盘流程](#4-未来实盘流程)
+  - [4.1 上线后日常顺序](#41-上线后日常顺序)
+- [5. 上线门槛](#5-上线门槛)
+- [6. 远端部署](#6-远端部署)
+  - [6.1 固定目录](#61-固定目录)
+  - [6.2 QMT 路径和官方参考](#62-qmt-路径和官方参考)
+  - [6.3 远端 Python 与环境变量](#63-远端-python-与环境变量)
+  - [6.4 本金口径](#64-本金口径)
+- [7. Payload 草案](#7-payload-草案)
+  - [7.1 Payload Schema](#71-payload-schema)
+  - [7.2 执行语义](#72-执行语义)
+- [8. Dry-run 与实盘执行](#8-dry-run-与实盘执行)
+  - [8.1 上传和执行命令](#81-上传和执行命令)
+  - [8.2 成交对账](#82-成交对账)
+- [9. 故障处理](#9-故障处理)
+  - [9.1 常见故障](#91-常见故障)
+
+## 1. 当前状态
 
 - 远端阿里云 Windows 服务器和 QMT/MiniQMT 环境已部署，可作为未来交易执行端。
 - 本项目当前代码重点仍是数据、PIT 特征、WFO/held-out、LLM shadow 和审计链路；尚未形成冻结可交易模型。
 - 当前仓库没有 `scripts/live/` 实盘调度入口，也没有已冻结的 MacroQuant 订单生成器。
 - 任何 QMT 操作默认只读或 dry-run。真实委托必须等到模型、策略、订单合约、风控和对账流程全部冻结后，才允许人工双确认执行。
 
-## 目标架构
+## 2. 目标架构
 
 - 本机 Linux：负责 TuShare/本地 raw 数据更新、审计、PIT 特征构造、模型推理、信号审计、订单 payload 生成。
 - 远端 Windows：负责 QMT/MiniQMT 连接、账户/持仓/成交查询、订单执行、策略 state、pending 委托和 payload 归档。
 - 通信：本机通过 `scp` 上传 JSON payload，通过 `ssh` 调用远端 Python 执行器。
 - 状态：远端策略 state 是实盘对账的权威来源；本机实验 ledger 只能作为研究和审计记录，不能替代 broker 成交状态。
 
-## 当前日常流程
+## 3. 当前日常流程
 
 在模型未训练完成之前，日常流程只做准备和健康检查：
+
+### 3.1 准备和健康检查
 
 1. 盘前或盘中只读检查远端 QMT。
    - 确认 QMT 已登录，账户 ID 正确。
@@ -34,6 +60,8 @@
    - dry-run 只验证远端解析、账户读取、预算计算和风险检查。
    - 未经单独批准，不提交真实委托。
 
+### 3.2 只读检查命令
+
 只读检查命令：
 
 ```bash
@@ -43,9 +71,11 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
 
 `reconcile` 不下单，只用 QMT 当日成交同步远端策略 state 和 pending 委托。
 
-## 未来实盘流程
+## 4. 未来实盘流程
 
 未来上线后，日常流程应按“先冻结、再生成、再 dry-run、最后人工确认”的顺序执行：
+
+### 4.1 上线后日常顺序
 
 1. 收盘后或指定决策时点构造 PIT 特征。
    - 默认日频策略只允许使用当时已可见数据。
@@ -62,7 +92,7 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
    - 实盘命令必须带双确认参数。
    - 下单后必须运行对账，不能把委托号当成成交。
 
-## 上线门槛
+## 5. 上线门槛
 
 真实交易前至少满足：
 
@@ -75,7 +105,9 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
 - 手工仓位和策略仓位边界明确，卖出逻辑不会误卖非策略仓位。
 - 已完成小额或模拟 dry-run 全链路：生成 payload、上传、远端解析、预算计算、拒单检查、reconcile。
 
-## 远端部署
+## 6. 远端部署
+
+### 6.1 固定目录
 
 远端建议固定目录：
 
@@ -92,6 +124,8 @@ C:\xquant\
 
 `inbox` 只放待执行 payload；执行过、测试过或废弃的 payload 应移到 `archive`，避免误执行。
 
+### 6.2 QMT 路径和官方参考
+
 QMT 常见路径：
 
 ```text
@@ -104,6 +138,8 @@ Windows 上应能看到 `XtMiniQmt.exe` 和 `miniquote.exe`。官方参考：
 - XtQuant 快速开始: http://dict.thinktrader.net/nativeApi/start_now.html
 - XtTrader 交易接口: http://dict.thinktrader.net/nativeApi/xttrader.html
 - 代码示例: http://dict.thinktrader.net/nativeApi/code_examples.html
+
+### 6.3 远端 Python 与环境变量
 
 远端 Python 建议使用独立 Python 3.8，不改系统 PATH：
 
@@ -121,6 +157,8 @@ setx CQ_XQUANT_ROOT "C:\xquant"
 setx CQ_EXPECTED_ACCOUNT_ID "<account_id>"
 ```
 
+### 6.4 本金口径
+
 如需限制策略总规模：
 
 ```powershell
@@ -129,9 +167,11 @@ setx CQ_MAX_PRINCIPAL "100000"
 
 不设置 `CQ_MAX_PRINCIPAL` 时，执行器默认使用 MiniQMT 返回的 `total_asset` 作为本金口径。是否采用这个口径必须与回测资金口径一致。
 
-## Payload 草案
+## 7. Payload 草案
 
 当前 payload schema 尚未冻结；以下只作为 MacroQuant 后续实现参考。真实接入前必须与远端 `qmt_executor.py` 实际代码核对。
+
+### 7.1 Payload Schema
 
 ```json
 {
@@ -162,6 +202,8 @@ setx CQ_MAX_PRINCIPAL "100000"
 }
 ```
 
+### 7.2 执行语义
+
 当前执行语义建议：
 
 - 无 `principal` 时，远端读取账户 `total_asset`。
@@ -170,7 +212,9 @@ setx CQ_MAX_PRINCIPAL "100000"
 - 卖出只根据远端策略 state 和 broker 可用持仓生成，不卖出非本策略仓位。
 - `rebalance` 最终应在本机拆成明确的 BUY/SELL 订单，远端不负责理解研究语义。
 
-## Dry-run 与实盘执行
+## 8. Dry-run 与实盘执行
+
+### 8.1 上传和执行命令
 
 上传 payload：
 
@@ -190,9 +234,13 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
 ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_executor.py execute C:\\xquant\\inbox\\order.json --execute --confirm LIVE"
 ```
 
+### 8.2 成交对账
+
 不要把 `order_stock` 返回值当成交。返回值只是委托号；成交后必须用 `reconcile` 根据 MiniQMT 当日成交回填策略 state。
 
-## 故障处理
+## 9. 故障处理
+
+### 9.1 常见故障
 
 - 连接失败：检查 QMT 是否登录、`userdata_mini` 路径是否正确、`XtMiniQmt.exe` / `miniquote.exe` 是否运行。
 - 多账户：设置 `CQ_EXPECTED_ACCOUNT_ID`，禁止自动选择。
