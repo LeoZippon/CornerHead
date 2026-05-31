@@ -404,7 +404,9 @@ def download_event_flow(args: argparse.Namespace) -> int:
                 f"event/flow trade-date datasets capped at local SSE trade_cal end {trade_end_date}; "
                 f"requested end_date={args.end_date}"
             )
-        trade_dates = load_sse_open_dates(raw_dir, args.start_date, trade_end_date)
+        trade_dates = load_sse_open_dates(raw_dir, args.start_date, trade_end_date, allow_empty=True)
+        if not trade_dates:
+            print(f"event/flow trade-date datasets skipped: no SSE open dates for {args.start_date}-{trade_end_date}")
     windows = month_windows(args.start_date, args.end_date)
     days = date_range_days(args.start_date, args.end_date)
     for dataset in datasets:
@@ -1429,9 +1431,14 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
     total_rows = 0
     for trade_date in trade_dates:
         path = stk_mins_by_date_path(raw_dir, args.output_dataset, trade_date)
-        expected_codes = intraday_expected_codes_for_day(raw_dir, args, trade_date) or set()
         if path.exists() and not args.force:
             existing = pd.read_parquet(path)
+            if args.expected_codes_source == "minute" and not existing.empty:
+                expected_codes = set(existing["ts_code"].dropna().astype(str))
+                if getattr(args, "max_codes", None):
+                    expected_codes = set(sorted(expected_codes)[: int(args.max_codes)])
+            else:
+                expected_codes = intraday_expected_codes_for_day(raw_dir, args, trade_date) or set()
             existing_allow_missing = max(int(args.allow_missing_codes), int(getattr(args, "existing_allow_missing_codes", 0)))
             ok, _ = validate_stk_mins_by_date_frame(
                 existing,
@@ -1443,6 +1450,8 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
             if ok:
                 skipped += 1
                 continue
+        else:
+            expected_codes = intraday_expected_codes_for_day(raw_dir, args, trade_date) or set()
         if not expected_codes:
             skipped += 1
             print(f"{args.output_dataset} trade_date={trade_date} skipped_empty_expected_codes")
@@ -2044,7 +2053,7 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         help="Update final by-date 1-minute files by default; use --no-include-intraday for lightweight metadata-only refreshes.",
     )
     parser.add_argument("--output-dataset", default=core.STK_MINS_BY_DATE_DATASET)
-    parser.add_argument("--expected-codes-source", choices=["daily", "active"], default="daily")
+    parser.add_argument("--expected-codes-source", choices=["daily", "active", "minute"], default="minute")
     parser.add_argument("--codes", nargs="+")
     parser.add_argument("--max-codes", type=int)
     parser.add_argument("--min-rows-per-day", type=int, default=0)
@@ -2087,7 +2096,7 @@ def add_intraday_parsers(sub: argparse._SubParsersAction) -> None:
     compact.add_argument("--allow-validation-warnings", action="store_true")
 
     update = sub.add_parser("update-intraday-by-date", help="download/retry trade dates directly into final daily minute files")
-    core.add_intraday_by_date_common_args(update, expected_codes_choices=["daily", "active"], expected_codes_default="daily")
+    core.add_intraday_by_date_common_args(update, expected_codes_choices=["daily", "active", "minute"], expected_codes_default="minute")
     update.add_argument("--force", action="store_true")
     update.add_argument("--allow-validation-warnings", action="store_true")
     update.add_argument("--max-retries", type=int, default=3)

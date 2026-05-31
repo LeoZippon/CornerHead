@@ -69,7 +69,101 @@ def build_context(args: argparse.Namespace) -> RunContext:
     return RunContext(config, repo_root, python, args.job, job, start_date, end_date, timezone_name)
 
 
-def build_job_command(ctx: RunContext) -> list[str]:
+def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
+    raw_dir = ctx.config.get("default_raw_dir", "data/raw")
+    return [
+        [
+            ctx.python,
+            "scripts/tushare/audit.py",
+            "base",
+            "--start-date",
+            ctx.start_date,
+            "--bak-start-date",
+            ctx.start_date,
+            "--end-date",
+            ctx.end_date,
+            "--fundamental-start-date",
+            ctx.start_date,
+            "--fundamental-end-date",
+            ctx.end_date,
+            "--include-limit-list",
+            "--raw-dir",
+            raw_dir,
+        ],
+        [
+            ctx.python,
+            "scripts/tushare/audit.py",
+            "macro",
+            "--start-date",
+            ctx.start_date,
+            "--end-date",
+            ctx.end_date,
+            "--raw-dir",
+            raw_dir,
+        ],
+        [
+            ctx.python,
+            "scripts/tushare/audit.py",
+            "intraday-by-date",
+            "--start-date",
+            ctx.start_date,
+            "--end-date",
+            ctx.end_date,
+            "--expected-codes-source",
+            "minute",
+            "--min-rows-per-day",
+            "1",
+            "--raw-dir",
+            raw_dir,
+        ],
+        [
+            ctx.python,
+            "scripts/tushare/audit.py",
+            "event-flow",
+            "--start-date",
+            ctx.start_date,
+            "--end-date",
+            ctx.end_date,
+            "--raw-dir",
+            raw_dir,
+        ],
+        [
+            ctx.python,
+            "scripts/tushare/audit.py",
+            "board-trading",
+            "--start-date",
+            ctx.start_date,
+            "--end-date",
+            ctx.end_date,
+            "--raw-dir",
+            raw_dir,
+        ],
+        [
+            ctx.python,
+            "scripts/tushare/audit.py",
+            "base",
+            "--include-text",
+            "--start-date",
+            ctx.start_date,
+            "--bak-start-date",
+            ctx.start_date,
+            "--end-date",
+            ctx.end_date,
+            "--fundamental-start-date",
+            ctx.start_date,
+            "--fundamental-end-date",
+            ctx.end_date,
+            "--text-start-date",
+            ctx.start_date,
+            "--text-end-date",
+            ctx.end_date,
+            "--raw-dir",
+            raw_dir,
+        ],
+    ]
+
+
+def build_job_commands(ctx: RunContext) -> list[list[str]]:
     raw_dir = ctx.config.get("default_raw_dir", "data/raw")
     operation = ctx.job.get("operation", "update")
     if operation == "update":
@@ -84,7 +178,10 @@ def build_job_command(ctx: RunContext) -> list[str]:
             "--raw-dir",
             raw_dir,
         ]
-    elif operation == "download_event_flow":
+        command.extend(ctx.config.get("default_update_args", []))
+        command.extend(ctx.job.get("extra_args", []))
+        return [command]
+    if operation == "download_event_flow":
         command = [
             ctx.python,
             "scripts/tushare/download.py",
@@ -98,11 +195,14 @@ def build_job_command(ctx: RunContext) -> list[str]:
             "--raw-dir",
             raw_dir,
         ]
-    else:
-        raise ValueError(f"unsupported cron operation: {operation}")
-    command.extend(ctx.config.get("default_update_args", []))
-    command.extend(ctx.job.get("extra_args", []))
-    return command
+        command.extend(ctx.config.get("default_update_args", []))
+        command.extend(ctx.job.get("extra_args", []))
+        return [command]
+    if operation == "audit_full":
+        commands = build_audit_full_commands(ctx)
+        commands.extend(ctx.job.get("extra_commands", []))
+        return commands
+    raise ValueError(f"unsupported cron operation: {operation}")
 
 
 def read_state() -> dict:
@@ -150,34 +250,38 @@ def run_probe(command: list[str], log_handle) -> None:
     subprocess.run(command, cwd=Path.cwd(), stdout=log_handle, stderr=subprocess.STDOUT, check=False)
 
 
-def run_update(ctx: RunContext, command: list[str], log_path: Path) -> int:
+def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = utc_now()
+    returncodes: list[int] = []
     with log_path.open("a", encoding="utf-8") as log:
         log.write(f"started_at={started}\njob={ctx.job_name}\nstart_date={ctx.start_date}\nend_date={ctx.end_date}\ntimezone={ctx.timezone_name}\n")
         run_probe(["nvidia-smi"], log)
         run_probe(["free", "-h"], log)
-        log.write(f"\n$ {' '.join(command)}\n")
-        log.flush()
-        process = subprocess.run(command, cwd=ctx.repo_root, stdout=log, stderr=subprocess.STDOUT, check=False)
-        log.write(f"\nreturncode={process.returncode}\n")
+        for index, command in enumerate(commands, start=1):
+            log.write(f"\n$ {' '.join(command)}\n")
+            log.flush()
+            process = subprocess.run(command, cwd=ctx.repo_root, stdout=log, stderr=subprocess.STDOUT, check=False)
+            returncodes.append(process.returncode)
+            log.write(f"\ncommand_index={index}\nreturncode={process.returncode}\n")
         run_probe(["nvidia-smi"], log)
         run_probe(["free", "-h"], log)
+        log.write(f"returncodes={returncodes}\n")
         log.write(f"finished_at={utc_now()}\n")
-    return process.returncode
+    return 1 if any(code != 0 for code in returncodes) else 0
 
 
 def main() -> int:
     args = parse_args()
     ctx = build_context(args)
-    command = build_job_command(ctx)
+    commands = build_job_commands(ctx)
     timestamp = datetime.now(ZoneInfo(ctx.timezone_name)).strftime("%Y%m%d_%H%M%S")
     log_path = Path("logs") / f"tushare_cron_{ctx.job_name}_{ctx.end_date}_{timestamp}.log"
     payload = {
         "job": ctx.job_name,
         "start_date": ctx.start_date,
         "end_date": ctx.end_date,
-        "command": command,
+        "commands": commands,
         "log_path": str(log_path),
         "timezone": ctx.timezone_name,
     }
@@ -209,7 +313,7 @@ def main() -> int:
 
     returncode = 1
     try:
-        returncode = run_update(ctx, command, log_path)
+        returncode = run_update(ctx, commands, log_path)
         status = "ok" if returncode == 0 else "error"
         state[ctx.job_name] = {
             "status": status,

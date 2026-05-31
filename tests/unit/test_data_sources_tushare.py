@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from hl_trader.data_sources.tushare import audit, common, download
+from hl_trader.data_sources.tushare import audit, common, cron_update, download
 
 
 class EmptyMinuteClient:
@@ -87,6 +87,11 @@ class BoardClient:
         return common.ApiResult(result_fields, [row], common.stable_hash({"api_name": api_name, "params": params}))
 
 
+class NoQueryClient:
+    def query(self, api_name, params=None, fields="", retries=5):
+        raise AssertionError(f"unexpected TuShare query: {api_name}")
+
+
 class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -96,10 +101,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _write_trade_cal(self, trade_date="20200102"):
+    def _write_trade_cal(self, trade_date="20200102", is_open="1"):
         path = self.raw_dir / "trade_cal" / "exchange=SSE" / f"year={trade_date[:4]}.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame([{"cal_date": trade_date, "is_open": "1"}]).to_parquet(path, index=False)
+        pd.DataFrame([{"cal_date": trade_date, "is_open": is_open}]).to_parquet(path, index=False)
 
     def _write_daily_universe(self, trade_date="20200102"):
         path = self.raw_dir / "daily" / f"trade_date={trade_date}.parquet"
@@ -136,6 +141,70 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "refusing to write zero-row intraday"):
                 download.update_intraday_by_date(args)
         self.assertFalse(output.exists())
+
+    def test_minute_expected_universe_uses_existing_minute_store_when_present(self):
+        self._write_daily_universe()
+        minute_path = self.raw_dir / common.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet"
+        minute_rows = pd.DataFrame([
+            {
+                "ts_code": "000001.SZ",
+                "trade_time": "2020-01-02 09:30:00",
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "vol": 100,
+                "amount": 100.0,
+                "trade_date": "20200102",
+                "available_at": "2020-01-02 09:30:00+08:00",
+                "available_at_rule": "source:trade_time_bar_close",
+            },
+            {
+                "ts_code": "000001.SZ",
+                "trade_time": "2020-01-02 15:00:00",
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "vol": 100,
+                "amount": 100.0,
+                "trade_date": "20200102",
+                "available_at": "2020-01-02 15:00:00+08:00",
+                "available_at_rule": "source:trade_time_bar_close",
+            },
+        ])
+        common.write_parquet(
+            minute_path,
+            minute_rows,
+            api_name=common.STK_MINS_API_NAME,
+            params={},
+            fields=list(minute_rows.columns),
+            source_hash="minute",
+        )
+
+        codes = common.intraday_expected_codes_for_day(
+            self.raw_dir,
+            argparse.Namespace(expected_codes_source="minute", output_dataset=common.STK_MINS_BY_DATE_DATASET, codes=None, max_codes=None),
+            "20200102",
+        )
+
+        self.assertEqual(codes, {"000001.SZ"})
+
+    def test_event_flow_trade_date_download_skips_non_trading_day(self):
+        self._write_trade_cal("20260530", is_open="0")
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20260530",
+            end_date="20260530",
+            datasets=["margin", "margin_detail"],
+            force=False,
+            page_limit=None,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=NoQueryClient()):
+            self.assertEqual(download.download_event_flow(args), 0)
 
     def test_share_float_union_rebuild_refuses_accidental_shrink(self):
         output = self.raw_dir / "share_float_complete" / "share_float_complete.parquet"
@@ -286,6 +355,33 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(findings[0][0], "warning")
         self.assertEqual(findings[0][3]["exact_common_limit_row_count_dates"], ["20200102"])
 
+    def test_cron_full_audit_builds_all_formal_status_commands(self):
+        ctx = cron_update.RunContext(
+            config={"default_raw_dir": "raw"},
+            repo_root=self.root,
+            python="/env/python",
+            job_name="cn_nightly_full_audit",
+            job={"operation": "audit_full"},
+            start_date="20200101",
+            end_date="20260531",
+            timezone_name="Asia/Shanghai",
+        )
+
+        commands = cron_update.build_job_commands(ctx)
+
+        self.assertEqual(len(commands), 6)
+        command_text = [" ".join(command) for command in commands]
+        self.assertIn("scripts/tushare/audit.py base", command_text[0])
+        self.assertIn("--include-limit-list", command_text[0])
+        self.assertIn("scripts/tushare/audit.py macro", command_text[1])
+        self.assertIn("scripts/tushare/audit.py intraday-by-date", command_text[2])
+        self.assertIn("--expected-codes-source minute", command_text[2])
+        self.assertIn("scripts/tushare/audit.py event-flow", command_text[3])
+        self.assertIn("scripts/tushare/audit.py board-trading", command_text[4])
+        self.assertIn("--include-text", command_text[5])
+        self.assertTrue(all("--start-date 20200101" in text for text in command_text))
+        self.assertTrue(all("--raw-dir raw" in text for text in command_text))
+
     def test_intraday_by_date_audit_errors_on_zero_row_partition(self):
         self._write_trade_cal()
         path = self.raw_dir / common.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet"
@@ -358,6 +454,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         status = json.loads(status_path.read_text(encoding="utf-8"))
         self.assertEqual(status["status"], "ok")
         self.assertIn("kpl_list", status["datasets"])
+
+    def test_text_source_time_is_normalized_to_china_timezone(self):
+        frame = pd.DataFrame([{"title": "sample", "pub_time": "2020-01-02 10:00:00", "src": "x"}])
+        out = common.augment_text_frame(frame, common.TEXT_SPECS["major_news"])
+        self.assertEqual(out.loc[0, "available_at"], "2020-01-02 10:00:00+08:00")
+        self.assertEqual(out.loc[0, "available_at_rule"], "source:pub_time")
 
 
 # Source: test_tushare_intraday_by_date.py
