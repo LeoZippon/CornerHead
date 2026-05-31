@@ -1,12 +1,48 @@
 # Agent Design
 
-整理日期：2026-05-28
+整理日期：2026-05-31
 
 本文档记录 MacroQuant 的决策者层：公式化 Agent、LLM shadow、evidence pack、prompt/response 合同、provider adapter 和未来可交易 Agent 的升级边界。Environment 市场环境见 `docs/environment_design.md`；Pipeline 运行编排见 `docs/pipeline_design.md`；数据下载和 raw PIT 规则见 `docs/data_documentation.md`。
 
-## 边界原则
+## 导航
+
+- [1. 边界原则](#1-边界原则)
+  - [1.1 职责范围](#11-职责范围)
+  - [1.2 当前安全边界](#12-当前安全边界)
+- [2. 代码组织](#2-代码组织)
+  - [2.1 模块职责](#21-模块职责)
+- [3. 公式化 Agent](#3-公式化-agent)
+  - [3.1 实现与参数](#31-实现与参数)
+  - [3.2 候选选择逻辑](#32-候选选择逻辑)
+- [4. Evidence Pack](#4-evidence-pack)
+  - [4.1 Pack 结构](#41-pack-结构)
+  - [4.2 PIT 校验与 Hash](#42-pit-校验与-hash)
+- [5. LLM Shadow Advisor](#5-llm-shadow-advisor)
+  - [5.1 输入与 Prompt](#51-输入与-prompt)
+  - [5.2 Action 标签与压缩](#52-action-标签与压缩)
+- [6. Response 合同](#6-response-合同)
+  - [6.1 Decision 校验](#61-decision-校验)
+  - [6.2 Hash 字段](#62-hash-字段)
+- [7. NL Shadow Recorder](#7-nl-shadow-recorder)
+  - [7.1 Shadow 决策约束](#71-shadow-决策约束)
+  - [7.2 写入与脱敏](#72-写入与脱敏)
+- [8. Provider Conversation Log](#8-provider-conversation-log)
+  - [8.1 日志路径](#81-日志路径)
+  - [8.2 Attempt 字段](#82-attempt-字段)
+  - [8.3 安全规则](#83-安全规则)
+- [9. Provider Adapter: DeepSeek](#9-provider-adapter-deepseek)
+  - [9.1 Adapter 配置](#91-adapter-配置)
+  - [9.2 请求规则](#92-请求规则)
+  - [9.3 多 Provider 边界](#93-多-provider-边界)
+- [10. 与交易系统的隔离](#10-与交易系统的隔离)
+  - [10.1 当前隔离](#101-当前隔离)
+  - [10.2 升级条件](#102-升级条件)
+
+## 1. 边界原则
 
 Agent 回答的是：“给定 Environment 产出的 PIT observation 或 evidence，我建议什么 action 或评分。”
+
+### 1.1 职责范围
 
 Agent 可以：
 
@@ -23,6 +59,8 @@ Agent 不可以：
 - 不直接写真实订单。
 - 在当前阶段不改变组合、权重、成交或 PnL。
 
+### 1.2 当前安全边界
+
 当前安全边界：
 
 - `nl_weight=0.0`。
@@ -30,9 +68,11 @@ Agent 不可以：
 - `can_affect_trading=False`。
 - LLM 输出只写 JSONL ledger，不进入订单生成。
 
-## 代码组织
+## 2. 代码组织
 
 Agent 层代码集中在 `src/hl_trader/agent/`。
+
+### 2.1 模块职责
 
 | 模块 | 职责 |
 |---|---|
@@ -45,7 +85,9 @@ Agent 层代码集中在 `src/hl_trader/agent/`。
 
 Environment 中的 `events/checkpoints.py` 可以给 Agent 提供上下文，但事件检测本身属于市场环境，不属于 Agent。
 
-## 公式化 Agent
+## 3. 公式化 Agent
+
+### 3.1 实现与参数
 
 实现：
 
@@ -67,6 +109,8 @@ src/hl_trader/agent/formulaic.py
 
 `parameter_grid(space)` 从 template parameter space 生成冻结参数组合；实际 train/test 选择由 Pipeline 执行。
 
+### 3.2 候选选择逻辑
+
 `select_formulaic_candidates(cross_section, params)` 逻辑：
 
 1. 排除停牌。
@@ -82,7 +126,9 @@ src/hl_trader/agent/formulaic.py
 
 公式化 Agent 只输出候选列表；下单、换手预算、成本、涨跌停和 T+1 由 Environment + Pipeline 执行。
 
-## Evidence Pack
+## 4. Evidence Pack
+
+### 4.1 Pack 结构
 
 实现：
 
@@ -111,6 +157,8 @@ Item 关键字段：
 - `payload`
 - `payload_hash`
 
+### 4.2 PIT 校验与 Hash
+
 PIT 校验：
 
 - 横截面内 `ts_code` 必须唯一。
@@ -126,7 +174,9 @@ Hash 规则：
 - `created_at` 不参与 `pack_hash`，保证同一内容重复构造时可对账。
 - JSONL 读取时复核 `payload_hash` 和 `pack_hash`。
 
-## LLM Shadow Advisor
+## 5. LLM Shadow Advisor
+
+### 5.1 输入与 Prompt
 
 实现：
 
@@ -148,6 +198,8 @@ Prompt payload：
 - `evidence_pack`
 - `event_checkpoints`
 
+### 5.2 Action 标签与压缩
+
 默认 allowed actions：
 
 - `hold`
@@ -166,9 +218,11 @@ Prompt payload：
 - 每个 item 只保留前 `max_evidence_rows` 行。
 - 超出部分记录 `truncated_rows`。
 
-## Response 合同
+## 6. Response 合同
 
 模型必须返回 JSON object，且包含 `decisions` list。
+
+### 6.1 Decision 校验
 
 每条 decision 必须满足：
 
@@ -180,6 +234,8 @@ Prompt payload：
 - `rationale` 可为空；为空时写入默认说明。
 - `risk_flags` 若存在，会追加到 rationale 中。
 
+### 6.2 Hash 字段
+
 写入前生成：
 
 - `prompt_hash`
@@ -187,7 +243,9 @@ Prompt payload：
 - `decision_id`
 - `decision_hash`
 
-## NL Shadow Recorder
+## 7. NL Shadow Recorder
+
+### 7.1 Shadow 决策约束
 
 实现：
 
@@ -204,6 +262,8 @@ src/hl_trader/agent/shadow/nl_shadow.py
 - `can_affect_trading == False`。
 - `confidence` 在 `[0, 1]`。
 
+### 7.2 写入与脱敏
+
 `NLShadowRecorder` 写入：
 
 - `event_type=nl_shadow_decision`
@@ -218,15 +278,19 @@ Provider metadata 会脱敏：
 - key 名包含 `api_key`、`token`、`secret`、`password` 等时替换为 `[REDACTED]`。
 - 字符串中的 `sk-...` 形态密钥替换为 `sk-***`。
 
-## Provider Conversation Log
+## 8. Provider Conversation Log
 
 所有真实 LLM provider API 调用都必须记录完整对话，用于后续审计、复盘和可能的蒸馏数据构造。日志属于本地敏感运行产物，默认写入 ignored 路径：
+
+### 8.1 日志路径
 
 ```text
 data/llm_conversations/<provider>/<model>/<YYYYMMDD>.jsonl
 ```
 
-每次 HTTP attempt 写一条 JSONL，而不是只记录最终结果。当前记录字段包括：
+### 8.2 Attempt 字段
+
+每次 HTTP attempt 在发送前先写 `status=started` 记录，完成后再写 `status=ok/error` 结果记录。这样可以在真实调用前验证日志可写，并在结果写入失败时保留请求上下文。当前记录字段包括：
 
 - provider、model、request/response 时间、耗时、attempt、HTTP status。
 - 原始 request payload，包含 system/user/assistant messages 和 JSON mode 参数。
@@ -234,9 +298,13 @@ data/llm_conversations/<provider>/<model>/<YYYYMMDD>.jsonl
 - 失败调用的错误类型、错误消息、retryable 标记和响应 body。
 - provider metadata。
 
-日志不得包含 API key 或 Authorization header。写入前会递归脱敏 `sk-...` 形态密钥；如果日志目录无法创建或写入，调用应 fail fast，避免产生“花费了 token 但没有留痕”的 shadow 决策。后续接入其他模型时，新 adapter 也必须遵循同一 conversation-log 合同。
+### 8.3 安全规则
 
-## DeepSeek Adapter
+日志不得包含 API key 或 Authorization header。写入前会递归脱敏敏感 key 名和 `sk-...` 形态密钥；如果日志目录无法创建或写入，调用应 fail fast，避免产生“花费了 token 但没有留痕”的 shadow 决策。后续接入其他模型时，新 adapter 也必须遵循同一 conversation-log 合同。
+
+## 9. Provider Adapter: DeepSeek
+
+### 9.1 Adapter 配置
 
 实现：
 
@@ -252,6 +320,8 @@ src/hl_trader/agent/llm/deepseek.py
 - `max_tokens`、`temperature`、`timeout_seconds`、`max_retries`。
 - `reasoning_effort`：只允许 adapter 支持的枚举值。
 
+### 9.2 请求规则
+
 请求规则：
 
 - 使用 OpenAI-compatible `/chat/completions`。
@@ -261,15 +331,21 @@ src/hl_trader/agent/llm/deepseek.py
 - 429、500、503 按重试策略处理。
 - HTTP、JSON 和 finish_reason 异常会抛出明确错误，不写伪结果。
 
+### 9.3 多 Provider 边界
+
 后续接入其他 provider 时，应新增 provider adapter，但复用 `LLMShadowAdvisor`、`EvidencePackBuilder` 和 ledger 合同，不把 provider 名写入通用文件名。
 
-## 与交易系统的隔离
+## 10. 与交易系统的隔离
+
+### 10.1 当前隔离
 
 当前 Agent 和交易系统的唯一交集由 Pipeline 控制：
 
 - 公式化 Agent 输出候选股，Pipeline 才能在冻结 `TradeStrategyPolicy` 下生成调仓订单。
 - LLM shadow 读取 checkpoint 作为上下文，但不能产生可交易订单。
 - LLM ledger 与实验 ledger 可以共存，但不能被 BrokerSimulator 读取为订单。
+
+### 10.2 升级条件
 
 要从 shadow 升级为可影响交易的 Agent，至少需要新增：
 
