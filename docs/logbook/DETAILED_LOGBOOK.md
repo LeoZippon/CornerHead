@@ -4129,3 +4129,22 @@ Results:
 - Compile passed.
 - Full unit discovery passed: 103 OK.
 - Post-test cache scans found no `__pycache__`, pytest/mypy/ruff cache directories, `*.pyc`, or `*.pyo` files.
+
+## 2026-06-01 GitHub Language Convention
+
+Task:
+- Record the preferred language policy for PR comments and commit messages.
+
+Changes:
+- Updated `AGENTS.md` and `CLAUDE.md` so PR titles, descriptions, review comments, and discussion comments may be written in Chinese when that is clearer for project collaboration.
+- Kept the default recommendation that commit subjects use concise English imperative wording for tooling/search consistency.
+- Documented that Chinese commit subjects remain acceptable for human-facing milestones or domain-specific wording, and that commit bodies may use Chinese for context and validation details.
+
+Verification:
+
+```bash
+git diff --check
+```
+
+Results:
+- `git diff --check` passed.

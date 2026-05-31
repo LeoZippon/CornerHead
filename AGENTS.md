@@ -16,6 +16,8 @@
 - Use branch prefixes by change type: `fix/` for bug or data-integrity fixes, `feat/` for new capabilities, `docs/` for documentation-only updates, `refactor/` for internal restructuring, `test/` for tests, `ops/` for deployment/scheduling changes, and `chore/` for maintenance.
 - Keep commits focused and self-contained. Code, tests, and living documentation for the same behavior change should usually be committed together.
 - Use concise imperative commit subjects, for example `Harden TuShare cron ingestion`; add a short body when validation commands or operational impact matter.
+- PR titles, descriptions, review comments, and discussion comments may be written in Chinese when that is clearer for project collaboration.
+- Prefer concise English imperative commit subjects for tooling/search consistency. Chinese commit subjects are acceptable for human-facing milestones or domain-specific wording; commit bodies may use Chinese for context and validation details.
 - Before committing, remove generated caches such as `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `*.pyc`, and `*.pyo`; never commit runtime logs, local state, data dumps, API keys, scratch notebooks, or ignored artifacts.
 - Run `git status` before and after changes, review `git diff --cached` before committing, and leave unrelated local changes unstaged.
 - Before each commit or PR, run the smallest meaningful verification set plus `git diff --check`, and record important results in `LOGBOOK.md` and `docs/logbook/DETAILED_LOGBOOK.md`.
