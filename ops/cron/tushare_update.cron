@@ -1,0 +1,24 @@
+# MacroQuant TuShare scheduled updates.
+# Template for the managed MacroQuant block. If the user already has other cron
+# jobs, append/refresh this block instead of replacing the whole crontab.
+# Install or refresh with: /home/lzp/miniconda3/envs/stock/bin/python ops/cron/install_tushare_cron.py
+#
+# The runner reads /Data/lzp/MacroQuant/.env when TUSHARE_TOKEN is not already
+# exported, writes detailed per-run logs under logs/, and skips duplicate
+# successful job/date runs.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=Asia/Shanghai
+MACROQUANT_ROOT=/Data/lzp/MacroQuant
+STOCK_PYTHON=/home/lzp/miniconda3/envs/stock/bin/python
+
+# After all normal same-day releases should have landed: daily, daily_basic,
+# moneyflow, block_trade, historical minutes, text evidence, macro/global.
+35 23 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_evening_full >> logs/tushare_cron_dispatch.log 2>&1
+
+# Pre-open light backfill for T+1 margin sources. These two jobs use distinct
+# names so 09:15 still retries if 09:05 returned successfully but source data
+# was not ready yet. Existing completed partitions are skipped by the downloader.
+5 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_margin_backfill_0905 >> logs/tushare_cron_dispatch.log 2>&1
+15 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_margin_retry_0915 >> logs/tushare_cron_dispatch.log 2>&1

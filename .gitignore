@@ -1,0 +1,39 @@
+# Runtime outputs and local experiment artifacts
+/logs/
+/data/
+/results/
+/wandb/
+/artifacts/
+/reports/
+/archive/
+/.runtime/
+/experiments/trial_ledger/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments and secrets
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+
+# Notebook and editor state
+.ipynb_checkpoints/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS metadata
+.DS_Store
+Thumbs.db

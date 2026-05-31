@@ -1,0 +1,1 @@
+"""MacroQuant test package."""
