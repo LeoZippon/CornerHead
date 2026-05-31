@@ -4096,3 +4096,36 @@ Results:
 - Full unit discovery passed: 103 OK.
 - Cache directory scan returned no remaining cache directories.
 - `check.ipynb` remains untracked and intentionally unstaged.
+
+## 2026-06-01 GitHub Branch Naming Cleanup
+
+Task:
+- Keep the agent collaboration instructions concise while adding standard branch naming rules before pushing the review branch.
+
+Changes:
+- Consolidated the separate `Git` and `GitHub Collaboration` sections in `AGENTS.md` and `CLAUDE.md` into one `Git and GitHub` section.
+- Added branch prefix conventions:
+  - `fix/` for bug or data-integrity fixes.
+  - `feat/` for new capabilities.
+  - `docs/` for documentation-only updates.
+  - `refactor/` for internal restructuring.
+  - `test/` for tests.
+  - `ops/` for deployment or scheduling changes.
+  - `chore/` for maintenance.
+- Corrected the repository-cleanliness spelling issue from `orgnized` to `organized`.
+
+Verification:
+
+```bash
+git diff --check
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src tests scripts
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
+find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache \) -prune -print
+```
+
+Results:
+- Resource checks stayed safe: about 417-418 GiB available system memory; GPU usage unchanged from existing processes.
+- `git diff --check` passed.
+- Compile passed.
+- Full unit discovery passed: 103 OK.
+- Post-test cache scans found no `__pycache__`, pytest/mypy/ruff cache directories, `*.pyc`, or `*.pyo` files.

@@ -9,25 +9,17 @@
 - Paths under `/home/coder/projects/...` may be wrapper artifacts and should not be trusted for writes.
 - Before editing or running commands that write files, confirm the real path with `pwd -P` or `realpath`.
 
-## Git
+## Git and GitHub
 
-- The canonical remote repository is already configured.
-- Prefer SSH-based Git operations and keep the `origin` remote aligned with the canonical repository.
-- Run `git status` before and after changes to confirm the working tree state.
-- Pull and rebase or merge carefully before pushing when the remote branch has moved.
-- Keep commits focused and descriptive; avoid bundling unrelated changes together.
-- Do not rewrite shared history unless the task explicitly requires it and all collaborators are aware.
-- Avoid destructive Git commands such as `git reset --hard` and forced pushes unless they are explicitly approved.
-
-## GitHub Collaboration
-
-- Prefer reviewable branches and pull requests for non-trivial work; do not push directly to a shared `main` unless the user explicitly asks for that workflow.
-- Split large work into focused commits by concern, such as data ingestion fixes, provider/Agent changes, documentation updates, and tests. If the concerns would be reviewed or reverted independently, they should usually be separate commits and may become separate PRs.
-- Keep every commit self-contained: code, tests, and living documentation for the same behavior change should be committed together when practical.
-- Use concise imperative commit subjects that describe the change, for example `Harden TuShare cron ingestion`. Add a short body when the validation commands or operational impact matter.
-- Before committing, remove generated caches such as `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `*.pyc`, and `*.pyo`; never commit runtime logs, local state, data dumps, API keys, notebooks used only for scratch work, or ignored artifacts.
+- The canonical remote repository is already configured; prefer SSH Git operations and keep `origin` aligned with it.
+- Work on reviewable branches and pull requests for non-trivial changes. Do not push directly to shared `main` unless explicitly requested.
+- Use branch prefixes by change type: `fix/` for bug or data-integrity fixes, `feat/` for new capabilities, `docs/` for documentation-only updates, `refactor/` for internal restructuring, `test/` for tests, `ops/` for deployment/scheduling changes, and `chore/` for maintenance.
+- Keep commits focused and self-contained. Code, tests, and living documentation for the same behavior change should usually be committed together.
+- Use concise imperative commit subjects, for example `Harden TuShare cron ingestion`; add a short body when validation commands or operational impact matter.
+- Before committing, remove generated caches such as `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `*.pyc`, and `*.pyo`; never commit runtime logs, local state, data dumps, API keys, scratch notebooks, or ignored artifacts.
+- Run `git status` before and after changes, review `git diff --cached` before committing, and leave unrelated local changes unstaged.
 - Before each commit or PR, run the smallest meaningful verification set plus `git diff --check`, and record important results in `LOGBOOK.md` and `docs/logbook/DETAILED_LOGBOOK.md`.
-- Review `git diff --cached` before every commit to ensure only intended files are staged. Leave unrelated local changes unstaged.
+- Pull and rebase or merge carefully before pushing when the remote branch has moved. Do not rewrite shared history, force-push, or use destructive Git commands unless explicitly approved.
 
 ## Mutagen
 - @data/, @results/, @wandb/ is ignored from local repository, but you can check and read using terminal commands.
@@ -78,7 +70,7 @@ free -h
 ## Operational Guardrails
 
 - Treat resource checks and logging as mandatory steps, not optional cleanup.
-- Keep the repository orgnized, clean and tidy.
+- Keep the repository organized, clean and tidy.
 - Prefer fail-fast behavior in core pipelines. Missing data files, cache splits, scaler/meta artifacts, or model weights should raise explicit errors instead of silently falling back.
 - When starting a sub-agent, always choose the best performing ones.
 - Do not add compatibility or fallback branches unless they are required by a real supported workflow and their trigger conditions are explicit.
