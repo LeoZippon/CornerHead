@@ -1,7 +1,7 @@
 # Consolidated unit tests: test_protocol_architecture.py
 
 
-# Source: test_architecture_boundaries.py
+# Source: protocol architecture boundary checks
 from __future__ import annotations
 
 import ast

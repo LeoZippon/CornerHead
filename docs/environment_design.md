@@ -1,12 +1,55 @@
 # Environment Design
 
-整理日期：2026-05-30
+整理日期：2026-05-31
 
 本文档记录 MacroQuant 的量化环境层：PIT 数据可见性、市场状态、回放、撮合、交易约束、事件检查、WFO fold、配置合同和可审计 ledger 原语。Agent 决策逻辑见 `docs/agent_design.md`；Pipeline 编排流程见 `docs/pipeline_design.md`；数据下载和 raw 审计见 `docs/data_documentation.md`。
 
-## 边界原则
+## 导航
+
+- [1. 边界原则](#1-边界原则)
+  - [1.1 职责范围](#11-职责范围)
+  - [1.2 导入方向](#12-导入方向)
+- [2. 代码组织](#2-代码组织)
+  - [2.1 子模块职责](#21-子模块职责)
+- [3. 配置合同](#3-配置合同)
+  - [3.1 ExperimentConfig 对象](#31-experimentconfig-对象)
+  - [3.2 核心校验](#32-核心校验)
+- [4. PIT 数据读取](#4-pit-数据读取)
+  - [4.1 数据合同与读取器](#41-数据合同与读取器)
+  - [4.2 当前日频可见性](#42-当前日频可见性)
+- [5. PIT 特征构造](#5-pit-特征构造)
+  - [5.1 日频特征构造](#51-日频特征构造)
+  - [5.2 竞价分钟条校正](#52-竞价分钟条校正)
+- [6. 泄漏检查](#6-泄漏检查)
+  - [6.1 日频泄漏规则](#61-日频泄漏规则)
+- [7. 跨域 PIT Selector](#7-跨域-pit-selector)
+  - [7.1 Selector 规则](#71-selector-规则)
+  - [7.2 当前扩展边界](#72-当前扩展边界)
+- [8. WFO Fold](#8-wfo-fold)
+  - [8.1 Fold 生成规则](#81-fold-生成规则)
+  - [8.2 Pilot 配置示例](#82-pilot-配置示例)
+- [9. 执行环境](#9-执行环境)
+  - [9.1 Broker 对象](#91-broker-对象)
+  - [9.2 交易约束](#92-交易约束)
+- [10. 回放环境](#10-回放环境)
+  - [10.1 Replay 骨架](#101-replay-骨架)
+  - [10.2 当前使用边界](#102-当前使用边界)
+- [11. 事件检查](#11-事件检查)
+  - [11.1 Checkpoint 定义](#111-checkpoint-定义)
+  - [11.2 交易转换边界](#112-交易转换边界)
+- [12. Portfolio 和 Evaluation](#12-portfolio-和-evaluation)
+  - [12.1 Portfolio 工具](#121-portfolio-工具)
+  - [12.2 Evaluation 工具](#122-evaluation-工具)
+- [13. Protocol 和 Ledger](#13-protocol-和-ledger)
+  - [13.1 FreezeSpec](#131-freezespec)
+  - [13.2 Ledger](#132-ledger)
+- [14. 待实现环境边界](#14-待实现环境边界)
+
+## 1. 边界原则
 
 Environment 回答的是：“在某个决策时点，市场环境能给决策者看到什么、能成交什么、如何记录状态。”
+
+### 1.1 职责范围
 
 Environment 负责：
 
@@ -24,6 +67,8 @@ Environment 不负责：
 - 不直接运行 development/held-out/LLM shadow pipeline。
 - 不读取 Agent 输出作为订单；订单只能由 pipeline 在冻结策略下交给执行环境。
 
+### 1.2 导入方向
+
 导入方向固定：
 
 ```text
@@ -33,11 +78,13 @@ pipelines -> 可以同时组合 environment 和 agent
 scripts -> 只做 CLI 参数和 pipeline 调度
 ```
 
-`tests/unit/test_architecture_boundaries.py` 会阻止 `environment` 反向 import `agent`。
+`tests/unit/test_protocol_architecture.py` 会阻止 `environment` 反向 import `agent`。
 
-## 代码组织
+## 2. 代码组织
 
 环境层代码集中在 `src/hl_trader/environment/`。
+
+### 2.1 子模块职责
 
 | 子模块 | 职责 |
 |---|---|
@@ -54,9 +101,11 @@ scripts -> 只做 CLI 参数和 pipeline 调度
 | `schemas` | HorizonTrack、Protocol、TradeStrategyPolicy、HeuristicTemplate、ExperimentConfig |
 | `storage` | TrialLedger、ExperimentLedger、稳定 hash、UTC 时间 |
 
-## 配置合同
+## 3. 配置合同
 
 示例配置：`configs/experiments/pilot_2020_daily.yaml`。
+
+### 3.1 ExperimentConfig 对象
 
 `ExperimentConfig` 包含 5 个核心对象：
 
@@ -68,6 +117,8 @@ scripts -> 只做 CLI 参数和 pipeline 调度
 | `HeuristicTemplate` | `strategy_family`、`variable_families`、`parameter_space`、`objective` | Agent 参数搜索空间的配置记录 |
 | `universe` | 交易所、ST、上市天数、流动性阈值等 | 当前为配置记录，后续接入 universe selector |
 
+### 3.2 核心校验
+
 核心校验：
 
 - `target_holding_months`、训练长度、测试长度和 step 必须为正。
@@ -77,7 +128,9 @@ scripts -> 只做 CLI 参数和 pipeline 调度
 - 当前初始实验配置从 2020 年以后开始；更早窗口需要先扩展和审计特征合同。
 - `TradeStrategyPolicy.allowed_actions` 不能为空。
 
-## PIT 数据读取
+## 4. PIT 数据读取
+
+### 4.1 数据合同与读取器
 
 实现：
 
@@ -88,6 +141,8 @@ scripts -> 只做 CLI 参数和 pipeline 调度
 
 Data 文档只定义 raw 下载、单位、sidecar 和可见时间候选；Environment 才负责在 `decision_time` 下选择“此刻可见”的记录，并构造 feature、observation 或 event checkpoint。
 
+### 4.2 当前日频可见性
+
 当前日频主路径默认遵循：
 
 - `daily` 和 `daily_basic` 只能用于当日收盘后或下一交易日决策。
@@ -96,7 +151,9 @@ Data 文档只定义 raw 下载、单位、sidecar 和可见时间候选；Envir
 
 完整 raw 数据规则见 `docs/data_documentation.md`。
 
-## PIT 特征构造
+## 5. PIT 特征构造
+
+### 5.1 日频特征构造
 
 入口由 Pipeline/CLI 调用，环境层实现为：
 
@@ -134,7 +191,7 @@ data/features/daily_alpha/feature_date=<YYYYMMDD>.parquet
 - `available_at` 和 `result_available_time` 使用日频合同的收盘后可见时间。
 - 分区写入采用临时文件替换，避免下游读取半成品。
 
-### 竞价分钟条校正
+### 5.2 竞价分钟条校正
 
 实现：
 
@@ -154,7 +211,9 @@ src/hl_trader/environment/features/auction.py
 - 全天分钟线汇总与 `daily` 的单位换算正常：`sum(stk_mins.vol) / daily.vol` 约 `100`，`sum(stk_mins.amount) / daily.amount` 约 `1000`，分别对应“股 vs 手”和“元 vs 千元”。
 - 系数需要通过 `scripts/tushare/audit.py auction-alignment` 定期复核；若后续接入逐笔或盘口数据，应重新标定或放弃固定系数。
 
-## 泄漏检查
+## 6. 泄漏检查
+
+### 6.1 日频泄漏规则
 
 实现：
 
@@ -173,9 +232,11 @@ src/hl_trader/environment/leakage/checks.py
 
 这些规则只证明当前日频下一交易日决策无泄漏；日内策略必须用分钟级 `available_at <= decision_time` 重新定义。
 
-## 跨域 PIT Selector
+## 7. 跨域 PIT Selector
 
 后续将财务、事件、宏观、文本和分钟数据接入 observation 时，统一放在 Environment selector，而不是在 Agent 或 Pipeline 中 raw join。
+
+### 7.1 Selector 规则
 
 Selector 规则：
 
@@ -186,6 +247,8 @@ Selector 规则：
 - 文本进入 Agent 前必须先通过 Environment 的时间过滤，再由 Agent evidence pack 生成 `evidence_id` 和 prompt payload。
 - 每个 selector 都必须有泄漏测试或审计 case study，证明未来日期不会提前进入 observation。
 
+### 7.2 当前扩展边界
+
 当前扩展边界：
 
 - 财务 selector：根据 `f_ann_date` 优先、`ann_date` 兜底构造 `available_at`，按 `ts_code + period + report_type/comp_type` 选择最新可见版本。
@@ -195,7 +258,9 @@ Selector 规则：
 - 分钟 selector：使用分钟 bar close 时间，日内策略必须以 `available_at <= decision_time` 过滤。
 - 文本 selector：只输出时间过滤后的候选 evidence 元数据，正文截断、hash 复核和 prompt 合同属于 Agent。
 
-## WFO Fold
+## 8. WFO Fold
+
+### 8.1 Fold 生成规则
 
 实现：
 
@@ -213,6 +278,8 @@ src/hl_trader/environment/wfo/splitter.py
 - 每次向前移动 `track.step_months`。
 - `development_folds` 会在 `heldout_start` 前截断。
 
+### 8.2 Pilot 配置示例
+
 以当前 pilot 配置为例：
 
 - 训练 36 个月。
@@ -220,7 +287,9 @@ src/hl_trader/environment/wfo/splitter.py
 - 每 3 个月滚动一次。
 - `heldout_start=2025-01-01`，所以 2025 年以后只允许由 held-out pipeline 评估。
 
-## 执行环境
+## 9. 执行环境
+
+### 9.1 Broker 对象
 
 实现：
 
@@ -236,6 +305,8 @@ src/hl_trader/environment/execution/broker.py
 - `PortfolioState`：现金和持仓。
 - `BrokerSimulator`：撮合和约束检查。
 
+### 9.2 交易约束
+
 交易约束：
 
 - 当前只支持 long-only 股票订单。
@@ -248,7 +319,9 @@ src/hl_trader/environment/execution/broker.py
 - 卖出不能超过可用股数。
 - 成本模型包含佣金、印花税和滑点，单位为 bps。
 
-## 回放环境
+## 10. 回放环境
+
+### 10.1 Replay 骨架
 
 实现：
 
@@ -263,9 +336,13 @@ src/hl_trader/environment/backtest/daily_replay.py
 - 记录成交、现金、持仓和权益事件。
 - 要求 replay 日期单调递增。
 
+### 10.2 当前使用边界
+
 当前完整 development/held-out 流程不直接使用该骨架，而是在 `pipelines/formulaic_wfo.py` 中围绕 PIT 横截面实现了更具体的日频回放。
 
-## 事件检查
+## 11. 事件检查
+
+### 11.1 Checkpoint 定义
 
 实现：
 
@@ -279,14 +356,20 @@ src/hl_trader/environment/events/checkpoints.py
 - `large_amount_spike`：`amount / amount_ma20 >= 3.0`，金额沿用日线千元口径。
 - `price_limit_status`：来自 `limit_status` 或 `limit`。
 
+### 11.2 交易转换边界
+
 Environment 只检测 checkpoint。是否把 checkpoint 转为 `event_de_risk` 或 `exit`，由 Pipeline 在冻结 `TradeStrategyPolicy` 下执行；LLM shadow 不得触发交易。
 
-## Portfolio 和 Evaluation
+## 12. Portfolio 和 Evaluation
+
+### 12.1 Portfolio 工具
 
 Portfolio 工具：
 
 - `equal_weight_targets(selected, max_names=...)`
 - `normalize_targets(targets, max_weight=...)`
+
+### 12.2 Evaluation 工具
 
 Evaluation 工具：
 
@@ -296,7 +379,9 @@ Evaluation 工具：
 
 这些都是原语，不负责决定候选股票或实验目标。
 
-## Protocol 和 Ledger
+## 13. Protocol 和 Ledger
+
+### 13.1 FreezeSpec
 
 `FreezeSpec` 覆盖：
 
@@ -313,6 +398,8 @@ Evaluation 工具：
 
 `assert_result_available` 用于确认训练窗口内的 `result_available_time` 不晚于训练结束。
 
+### 13.2 Ledger
+
 `TrialLedger`：
 
 - JSONL append-only。
@@ -325,7 +412,7 @@ Evaluation 工具：
 - 保留 phase、fold_id、parameters、metrics、payload。
 - 不替代真实 broker 成交状态。
 
-## 待实现环境边界
+## 14. 待实现环境边界
 
 - `universe` 配置尚未系统性接入股票池 selector。
 - 财务 raw 已下载并审计，但财务 PIT selector 尚未进入 `daily_alpha`。

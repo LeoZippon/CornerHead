@@ -3745,3 +3745,354 @@ rg -n "后续不要|旧的|仍保留|兼容手工|迁移|不再用|wrapper|薄�
   - Returned no matches.
 - `git diff --check`
   - Passed.
+
+## 2026-05-31 TuShare Nightly Full-Window Audit Cron
+
+Task:
+- Add a nightly full-window raw-data audit after the regular TuShare update.
+
+Resource checks:
+- Before work:
+  - `pwd -P` confirmed `/Data/lzp/MacroQuant`.
+  - `free -h` showed about `417Gi` available RAM.
+  - `nvidia-smi` showed existing GPU workloads; this change used CPU-only compile/tests and cron dry-runs.
+- After install:
+  - `free -h` showed about `415Gi` available RAM.
+  - `nvidia-smi` showed no new large GPU workload from this task.
+
+Files changed:
+- `src/hl_trader/data_sources/tushare/cron_update.py`
+  - Added `audit_full` cron operation.
+  - `build_job_commands` now supports one or more commands per cron job.
+  - Nightly audit runs the six formal status refresh commands: base, macro, intraday-by-date, event-flow, board-trading, and text evidence.
+  - The runner logs each command index and return code, then marks the job error if any command exits nonzero.
+- `configs/tushare_update_schedule.json`
+  - Added `cn_nightly_full_audit` with `operation=audit_full`.
+- `ops/cron/tushare_update.cron`
+  - Added the 02:30 Beijing-time `cn_nightly_full_audit` entry.
+- `docs/data_documentation.md`
+  - Documented the new nightly audit job and its boundary.
+  - Clarified that nightly minute audit is full-window inventory plus sampled deep checks by default; full historical row-level minute scan remains manual via `intraday-by-date --full-scan`.
+- `tests/unit/test_data_sources_tushare.py`
+  - Added coverage for the new cron audit command construction.
+
+Commands run:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src scripts tests
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest.test_cron_full_audit_builds_all_formal_status_commands
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_nightly_full_audit --dry-run
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python ops/cron/install_tushare_cron.py --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare
+git diff --check
+/home/lzp/miniconda3/envs/stock/bin/python ops/cron/install_tushare_cron.py
+crontab -l
+```
+
+Results:
+- Compile passed.
+- New cron command-construction test passed.
+- TuShare unit file passed: 11 tests.
+- `cron_update.py --job cn_nightly_full_audit --dry-run` produced six audit commands over `20200101-20260531`.
+- `install_tushare_cron.py --dry-run` preserved the existing ChouQuant crontab entry and refreshed only the MacroQuant managed block.
+- Installed the refreshed managed crontab; `crontab -l` shows:
+  - 23:35 `cn_evening_full`
+  - 02:30 `cn_nightly_full_audit`
+  - 09:05 `cn_preopen_margin_backfill_0905`
+  - 09:15 `cn_preopen_margin_retry_0915`
+- `git diff --check` passed.
+
+Conclusion:
+- Nightly full-window status refresh is now scheduled.
+- The six formal `results/data_quality/*_status.json` files will be refreshed by the 02:30 job if the previous update has finished and the global TuShare lock is free.
+
+## 2026-05-31 Data Documentation Restructure
+
+Task:
+- Reorganize `docs/data_documentation.md` so the document reads as a stable data contract rather than an accumulated download plan.
+
+Files changed:
+- `docs/data_documentation.md`
+  - Reordered the document into numbered sections:
+    - `1. 文档边界与数据域`
+    - `2. 数据域与数据表`
+    - `3. 下载与更新`
+    - `4. 审计与 Status`
+    - `5. Raw PIT 数据合同`
+    - `6. 官方文档索引`
+  - Moved data table/domain descriptions before download/update operations.
+  - Rewrote audit documentation with one shared audit layer plus concrete per-status logic for base research, macro context, intraday minutes, event/flow, board-trading, and text evidence.
+  - Kept the current `board_trading` boundary without candidate/priority table wording.
+
+Verification:
+
+```bash
+rg -n "^(#|##|###|####) " docs/data_documentation.md
+rg -n "优先级|条件补充|主要价值|下载与 PIT 边界|P0|P1|P2|旧|迁移|wrapper|兼容" docs/data_documentation.md
+wc -l docs/data_documentation.md
+git diff --check
+```
+
+Results:
+- Heading structure is numbered and ordered by contract flow.
+- Candidate-table wording is gone; only a normal use of `优先级` remains in the fundamental audit explanation.
+- Document length is 616 lines.
+- `git diff --check` passed.
+
+## 2026-05-31 Living Docs Navigation And Numbering
+
+Task:
+- Add a navigation block to the beginning of each current living document.
+- Number headings consistently.
+- Audit the high-level document flow for the five maintained docs.
+
+Files changed:
+- `docs/data_documentation.md`
+  - Added a top navigation block.
+  - Kept the new contract order: document boundary, data domains/tables, downloads/updates, audit/status logic, Raw PIT contract, official document links.
+- `docs/agent_design.md`
+  - Added navigation.
+  - Numbered the main sections from boundary principles through provider adapter and trading isolation.
+- `docs/environment_design.md`
+  - Added navigation.
+  - Numbered the main sections and the auction correction subsection.
+- `docs/pipeline_design.md`
+  - Added navigation.
+  - Numbered the pipeline sections from boundary principles through future extensions.
+- `docs/QMT_documentation.md`
+  - Added navigation.
+  - Numbered the QMT operational sections from current state through failure handling.
+
+Logic audit:
+- Data documentation now presents data definitions before download/update operations.
+- Agent documentation already followed a sensible boundary -> code -> agent/evidence/LLM -> logging/provider -> trading isolation flow; numbering and navigation made that explicit.
+- Environment documentation already followed boundary -> contracts -> PIT/features -> execution/replay -> ledger/future boundary; numbering and navigation made that explicit.
+- Pipeline documentation already followed boundary -> CLI -> build/development/held-out/shadow -> outputs/reproducibility/fail-fast; numbering and navigation made that explicit.
+- QMT documentation already followed current state -> target architecture -> current flow -> future live flow -> deployment/payload/execution/failure handling; numbering and navigation made that explicit.
+
+Verification:
+
+```bash
+rg -n "^(#|##|###|####) " docs/data_documentation.md docs/agent_design.md docs/environment_design.md docs/pipeline_design.md docs/QMT_documentation.md
+rg -n "优先级\s*\|\s*接口|优先级.*接口.*主要价值|下载与 PIT 边界|主要价值|条件补充|当前接入|P0|P1|P2|旧版本|历史迁移|wrapper|兼容" docs/data_documentation.md docs/agent_design.md docs/environment_design.md docs/pipeline_design.md docs/QMT_documentation.md
+git diff --check
+```
+
+Results:
+- All five living docs have navigation and numbered business headings.
+- The residual keyword scan only matched `llm/deepseek.py` documentation text saying the adapter is compatible with OpenAI JSON mode, which is an active provider contract rather than a migration note.
+- `git diff --check` passed.
+
+## 2026-05-31 Living Docs Detailed Navigation
+
+Task:
+- Make the navigation blocks more detailed and useful for direct jumping inside each living document.
+
+Files changed:
+- `docs/data_documentation.md`
+  - Expanded navigation to include all current numbered subsections and the nested `2.2.x` data-table sections.
+- `docs/agent_design.md`
+  - Expanded navigation to include second-level topics such as responsibilities, safety boundary, pack structure, response validation, conversation logging, adapter config, and trading isolation.
+  - Added corresponding `###` headings where the content already had natural prose blocks.
+- `docs/environment_design.md`
+  - Expanded navigation to include PIT, selector, WFO, execution, replay, checkpoint, portfolio, freeze, and ledger subtopics.
+  - Added corresponding `###` headings for existing logical blocks.
+- `docs/pipeline_design.md`
+  - Expanded navigation to command, flow, output, training, testing, held-out, shadow, ledger, freeze, fail-fast, and extension subtopics.
+  - Added corresponding `###` headings.
+- `docs/QMT_documentation.md`
+  - Expanded navigation to health checks, read-only commands, future live order, remote deployment, payload schema, execution semantics, dry-run/live commands, reconcile, and failure handling.
+  - Added corresponding `###` headings.
+
+Verification:
+
+```bash
+rg -n "^(#|##|###|####) " docs/data_documentation.md docs/agent_design.md docs/environment_design.md docs/pipeline_design.md docs/QMT_documentation.md
+for f in docs/data_documentation.md docs/agent_design.md docs/environment_design.md docs/pipeline_design.md docs/QMT_documentation.md; do grep -c '^```' "$f"; done
+rg -n "优先级\s*\|\s*接口|优先级.*接口.*主要价值|下载与 PIT 边界|主要价值|条件补充|当前接入|P0|P1|P2|旧版本|历史迁移|wrapper" docs/data_documentation.md docs/agent_design.md docs/environment_design.md docs/pipeline_design.md docs/QMT_documentation.md
+git diff --check
+```
+
+Results:
+- Heading structure now includes the detailed anchors used in each navigation block.
+- Code-fence counts are even in all five docs.
+- Stale candidate-table wording scan returned no matches.
+- `git diff --check` passed.
+
+## 2026-05-31 Full Code and Documentation Audit Follow-up
+
+Task:
+- Open a best-performing SubAgent for a full code/document audit, close it after completion, and address the actionable findings.
+
+SubAgent:
+- Spawned GPT-5.5 xhigh SubAgent `McClintock`.
+- Audit scope covered source code, tests, configs, operational scripts, and living documents.
+- Result: no blocking finding. Actionable findings were one high-risk logging contract issue, two medium-risk data/security consistency issues, and two low-risk stale references.
+
+Fixes:
+- `src/hl_trader/agent/llm/deepseek.py`
+  - Conversation logging now writes a `status=started` JSONL record before each provider HTTP attempt, then writes the terminal `status=ok/error` record after completion.
+  - Final response logging still includes raw provider response, usage, hashes, and error metadata.
+  - Recursive log sanitization now redacts values under sensitive dict keys such as `api_key`, `authorization`, `token`, `secret`, and `password`, while preserving normal usage counters like `total_tokens`.
+  - Derived `response_id` and standalone `usage` fields are sanitized consistently with the raw provider response.
+- `src/hl_trader/data_sources/tushare/common.py`
+  - Text evidence `available_at` now uses the same source-time normalization path as board-trading data, adding explicit Asia/Shanghai `+08:00` offsets for standard TuShare timestamp strings.
+- `docs/agent_design.md`
+  - Documented the `started` plus terminal conversation-log records and sensitive-key redaction.
+- `docs/environment_design.md`
+  - Updated the architecture boundary test reference to `tests/unit/test_protocol_architecture.py`.
+- `configs/experiments/pilot_2020_daily.yaml`
+  - Removed the stale P1/P2 comment and described the current semantic data source boundary.
+- `tests/unit/test_agent.py`, `tests/unit/test_data_sources_tushare.py`
+  - Added regression coverage for pre-call logging, sensitive-key redaction, logging fail-fast behavior, and text timestamp normalization.
+
+Resource checks:
+
+```bash
+free -h
+nvidia-smi
+```
+
+Result:
+- System memory remained about 417 GiB available.
+- No new GPU workload was launched; existing GPU allocations were unchanged.
+
+Verification:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src tests scripts
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_agent tests.unit.test_data_sources_tushare
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
+git diff --check
+find . -type d -name __pycache__ -prune -exec rm -rf {} +
+```
+
+Results:
+- Compile passed.
+- Targeted agent/TuShare test run passed: 46 tests OK.
+- Full unit discovery passed: 101 tests OK.
+- `git diff --check` passed.
+- Post-test `__pycache__` directories were removed.
+
+## 2026-06-01 Claude TuShare Cron Audit Validation
+
+Task:
+- Validate whether Claude's external audit summary about TuShare scheduled ingestion failures is reasonable.
+
+Scope:
+- Read-only inspection of `.runtime/tushare/cron_state.json`, `logs/tushare_cron_dispatch.log`, per-job cron logs, `configs/tushare_update_schedule.json`, installed crontab, TuShare update/audit code, top-level data-quality status files, and sampled raw partitions under `data/raw`.
+
+Key checks:
+
+```bash
+cat .runtime/tushare/cron_state.json
+tail -n 120 logs/tushare_cron_dispatch.log
+sed -n '220,270p' logs/tushare_cron_cn_evening_full_20260531_20260531_233501.log
+sed -n '1370,1510p' src/hl_trader/data_sources/tushare/download.py
+sed -n '60,130p' src/hl_trader/data_sources/tushare/cron_update.py
+crontab -l
+```
+
+Raw data samples:
+
+```text
+20200102 daily=3797 minute=3750 gap=58  bj_gap=56  extra=11
+20210104 daily=4208 minute=4126 gap=89  bj_gap=87  extra=7
+20220104 daily=4737 minute=4600 gap=146 bj_gap=144 extra=9
+20230103 daily=5062 minute=5066 gap=2   bj_gap=0   extra=6
+20250102 daily=5369 minute=5383 gap=2   bj_gap=0   extra=16
+20260529 daily=5505 minute=5505 gap=0   bj_gap=0   extra=0
+```
+
+Findings:
+- Claude's main operational finding is correct: `cn_evening_full` failed on 20260529, 20260530, and 20260531 with `RuntimeError: 20200102: 57 minute codes still missing after retries`.
+- The failure path is exactly `update -> intraday_by_date`; `update` then stops before `share_float_complete` and `text_evidence`.
+- The root coverage mismatch is real: `expected_codes_source=daily` uses every `daily/trade_date=YYYYMMDD` code, while early historical `stk_mins_1min_by_date` files do not contain many NEEQ/BSE-renamed `.BJ` codes and the persistent `300114.SZ`/`302132.SZ` gap.
+- The local explanation for why this appeared on 20260529 is weaker than Claude stated. `data/raw/daily/trade_date=20200102.parquet` has filesystem mtime `2026-05-19`, so the local corpus already had the >50 early-date gap before the cron was installed and before the 20260529 update path was enabled.
+- Blindly excluding all `.BJ` codes is not correct: sampled 2023/2025/20260529 minute files include complete `.BJ` coverage. The fix should be a minute-coverage expected-universe rule that excludes historical no-minute source rows only for dates where the source does not provide them, plus known persistent no-minute exceptions or a documented tolerance for existing historical files.
+- Claude's non-trading-day pre-open margin finding is correct: the 20260531 09:05 and 09:15 jobs targeted 20260530 and failed with `no SSE open dates found for 20260530-20260530`.
+- Status staleness is correct: most top-level status files were last generated for 20260528/20260529, while only `board_trading_status.json` was refreshed on 20260531. The nightly audit job had been installed but had not yet reached its first 02:30 Beijing run at inspection time.
+- The audit warning forecast is directionally correct, but not exactly as phrased: `cn_nightly_full_audit` passes `--expected-codes-source daily`, but the default intraday audit checks only the first 20 files unless `--full-scan` is set; those first 20 sampled early-2020 files all fail coverage under the daily universe.
+
+Conclusion:
+- The audit is mostly reasonable and caught a real critical automation failure.
+- Recommended fixes: make pre-open event-flow jobs skip non-trading target dates; change minute expected coverage to a source-aware minute universe instead of full daily universe; avoid re-downloading an entire existing day when only stable source-unavailable codes are missing; and rerun the cron dry-run/update-window tests plus intraday audit after patching.
+
+## 2026-06-01 TuShare Cron Ingestion Fix
+
+Task:
+- Fix the confirmed cron ingestion failures with minimal code churn.
+
+Changes:
+- `src/hl_trader/data_sources/tushare/common.py`
+  - Added optional `allow_empty` to `load_sse_open_dates`; default remains strict.
+  - Added `expected_codes_source=minute` for intraday by-date validation. If the final by-date minute file already exists, this uses the file's own `ts_code` coverage as the source-aware expected universe. If the file does not exist, it falls back to the `daily` universe for new-day ingestion.
+- `src/hl_trader/data_sources/tushare/download.py`
+  - `download_event_flow` now treats empty SSE trading windows as a successful skip. This fixes weekend/holiday `margin` and `margin_detail` pre-open jobs.
+  - Daily `update` and manual `update-intraday-by-date` now default to `expected_codes_source=minute`.
+- `src/hl_trader/data_sources/tushare/cron_update.py`
+  - Nightly full audit now calls intraday-by-date audit with `--expected-codes-source minute`.
+- `configs/tushare_update_schedule.json`
+  - `cn_nightly_full_audit` now uses `end_date_offset_days=1`, because the 02:30 job runs after the prior day's 23:35 update and should not audit a date that has not yet had an evening update.
+- `docs/data_documentation.md`
+  - Documented the source-aware minute universe, non-trading-day margin skip, and previous-natural-day nightly audit window.
+- `tests/unit/test_data_sources_tushare.py`
+  - Added regression coverage for source-aware minute expected codes and non-trading event-flow skip.
+
+Verification:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src tests scripts
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_nightly_full_audit --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/audit.py intraday-by-date --start-date 20200101 --end-date 20200131 --expected-codes-source minute --min-rows-per-day 1 --output /tmp/macroquant_intraday_minute_audit_fix.json
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/download.py update-intraday-by-date --start-date 20200102 --end-date 20200102 --expected-codes-source minute --min-interval-seconds 0.22 --timeout-seconds 120
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/download.py download --tier event_flow --start-date 20260530 --end-date 20260530 --datasets margin margin_detail --min-interval-seconds 0.22 --timeout-seconds 120
+```
+
+Results:
+- TuShare unit tests passed: 14 OK.
+- Full unit discovery passed: 103 OK.
+- Cron audit dry-run uses `--expected-codes-source minute` and targets the previous natural day.
+- January 2020 intraday-by-date audit with `minute` coverage was ok.
+- `update-intraday-by-date 20200102` wrote nothing and skipped the existing file.
+- Non-trading `20260530` margin/margin_detail backfill skipped cleanly with return code 0.
+
+## 2026-06-01 GitHub Collaboration Commit Prep
+
+Task:
+- Clean generated files, document GitHub collaboration standards, and prepare the current work for reviewable commits.
+
+Changes:
+- Removed generated Python cache directories and files:
+  - `__pycache__`
+  - `.pytest_cache`
+  - `.mypy_cache`
+  - `.ruff_cache`
+  - `*.pyc`
+  - `*.pyo`
+- Updated `AGENTS.md` and `CLAUDE.md` with collaboration rules:
+  - Prefer reviewable branches and pull requests for non-trivial work.
+  - Split commits by independently reviewable concern.
+  - Keep code, tests, and living docs together where practical.
+  - Use concise imperative commit subjects.
+  - Never commit runtime logs, local state, data dumps, API keys, scratch notebooks, or ignored artifacts.
+  - Run meaningful verification plus `git diff --check` before commits or PRs.
+  - Review `git diff --cached` before every commit.
+
+Verification:
+
+```bash
+git diff --check
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src tests scripts
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
+find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache \) -print
+```
+
+Results:
+- `git diff --check` passed.
+- Compile passed.
+- Full unit discovery passed: 103 OK.
+- Cache directory scan returned no remaining cache directories.
+- `check.ipynb` remains untracked and intentionally unstaged.

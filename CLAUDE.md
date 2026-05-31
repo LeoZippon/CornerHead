@@ -19,6 +19,16 @@
 - Do not rewrite shared history unless the task explicitly requires it and all collaborators are aware.
 - Avoid destructive Git commands such as `git reset --hard` and forced pushes unless they are explicitly approved.
 
+## GitHub Collaboration
+
+- Prefer reviewable branches and pull requests for non-trivial work; do not push directly to a shared `main` unless the user explicitly asks for that workflow.
+- Split large work into focused commits by concern, such as data ingestion fixes, provider/Agent changes, documentation updates, and tests. If the concerns would be reviewed or reverted independently, they should usually be separate commits and may become separate PRs.
+- Keep every commit self-contained: code, tests, and living documentation for the same behavior change should be committed together when practical.
+- Use concise imperative commit subjects that describe the change, for example `Harden TuShare cron ingestion`. Add a short body when the validation commands or operational impact matter.
+- Before committing, remove generated caches such as `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `*.pyc`, and `*.pyo`; never commit runtime logs, local state, data dumps, API keys, notebooks used only for scratch work, or ignored artifacts.
+- Before each commit or PR, run the smallest meaningful verification set plus `git diff --check`, and record important results in `LOGBOOK.md` and `docs/logbook/DETAILED_LOGBOOK.md`.
+- Review `git diff --cached` before every commit to ensure only intended files are staged. Leave unrelated local changes unstaged.
+
 ## Mutagen
 - @data/, @results/, @wandb/ is ignored from local repository, but you can check and read using terminal commands.
 
