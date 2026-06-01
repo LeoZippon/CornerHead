@@ -20,11 +20,15 @@ def download_reference(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
+    refresh_datasets = set(getattr(args, "refresh_reference_datasets", None) or [])
+
+    def should_force(dataset: str) -> bool:
+        return bool(args.force or dataset in refresh_datasets)
 
     stock_basic_fields = "ts_code,symbol,name,area,industry,fullname,enname,cnspell,market,exchange,curr_type,list_status,list_date,delist_date,is_hs,act_name,act_ent_type"
     for status in ("L", "D", "P"):
         path = raw_dir / "stock_basic" / f"list_status={status}.parquet"
-        if path.exists() and not args.force:
+        if path.exists() and not should_force("stock_basic"):
             continue
         params = {"exchange": "", "list_status": status}
         result = client.query("stock_basic", params, stock_basic_fields)
@@ -33,18 +37,18 @@ def download_reference(args: argparse.Namespace) -> int:
     company_fields = "ts_code,com_name,com_id,exchange,chairman,manager,secretary,reg_capital,setup_date,province,city,introduction"
     for exchange in ("SSE", "SZSE", "BSE"):
         path = raw_dir / "stock_company" / f"exchange={exchange}.parquet"
-        if path.exists() and not args.force:
+        if path.exists() and not should_force("stock_company"):
             continue
         params = {"exchange": exchange}
         result = client.query("stock_company", params, company_fields)
         write_parquet(path, frame(result), api_name="stock_company", params=params, fields=result.fields, source_hash=result.source_hash)
 
-    open_dates = download_trade_cal(client, raw_dir, args.start_date, args.end_date, args.force)
+    open_dates = download_trade_cal(client, raw_dir, args.start_date, args.end_date, should_force("trade_cal"))
     if not args.skip_bak_basic:
-        download_bak_basic(client, raw_dir, open_dates, args.bak_start_date, args.force)
-    download_namechange(client, raw_dir, args.force)
-    classify = download_index_classify(client, raw_dir, args.force)
-    download_index_member_all(client, raw_dir, classify, args.force)
+        download_bak_basic(client, raw_dir, open_dates, args.bak_start_date, should_force("bak_basic"))
+    download_namechange(client, raw_dir, should_force("namechange"))
+    classify = download_index_classify(client, raw_dir, should_force("index_classify"))
+    download_index_member_all(client, raw_dir, classify, should_force("index_member_all"))
     print(f"reference download finished under {raw_dir}")
     return 0
 
@@ -526,7 +530,9 @@ def download_board_trading(args: argparse.Namespace) -> int:
                 f"board-trading trade-date datasets capped at local SSE trade_cal end {trade_end_date}; "
                 f"requested end_date={args.end_date}"
             )
-        trade_dates = load_sse_open_dates(raw_dir, args.start_date, trade_end_date)
+        trade_dates = load_sse_open_dates(raw_dir, args.start_date, trade_end_date, allow_empty=True)
+        if not trade_dates:
+            print(f"board-trading trade-date datasets skipped: no SSE open dates for {args.start_date}-{trade_end_date}")
     for dataset in datasets:
         spec = BOARD_TRADING_SPECS[dataset]
         start_date = max(args.start_date, spec.start_date)
@@ -1849,7 +1855,8 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             datasets=None,
             force=args.force,
             page_limit=args.page_limit,
-            min_interval_seconds=args.min_interval_seconds,
+            refresh_reference_datasets=getattr(args, "refresh_reference_datasets", []),
+            min_interval_seconds=getattr(args, "reference_min_interval_seconds", None) or args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
         ),
         summary,
@@ -2016,6 +2023,7 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--datasets", nargs="+")
     parser.add_argument("--include-limit-list", action="store_true")
     parser.add_argument("--skip-bak-basic", action="store_true")
+    parser.add_argument("--refresh-reference-datasets", nargs="+", choices=core.REFERENCE_DATASETS, default=[])
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--max-codes", type=int)
     parser.add_argument("--codes", nargs="+", help="Optional explicit ts_code list for intraday minute window tests or targeted refreshes.")
@@ -2034,6 +2042,14 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--bak-start-date", help="Optional bak_basic lower bound. Defaults to --start-date.")
     parser.add_argument("--daily-datasets", nargs="+", choices=core.DAILY_REQUIRED_DATASETS + core.DAILY_OPTIONAL_DATASETS)
     parser.add_argument("--include-limit-list", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--refresh-reference-datasets",
+        nargs="+",
+        choices=core.REFERENCE_DATASETS,
+        default=["stock_basic", "namechange", "index_classify", "index_member_all"],
+        help="Reference datasets to force-refresh during daily update; heavier datasets should be explicit.",
+    )
+    parser.add_argument("--reference-min-interval-seconds", type=float, help="Optional lower call frequency for the reference refresh step.")
     parser.add_argument("--fundamental-datasets", nargs="+", choices=core.FUNDAMENTAL_DATASETS)
     parser.add_argument("--macro-datasets", nargs="+", choices=core.MACRO_DATASETS)
     parser.add_argument("--global-datasets", nargs="+", choices=core.MACRO_DATASETS)

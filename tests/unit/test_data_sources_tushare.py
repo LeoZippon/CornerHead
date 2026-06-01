@@ -92,6 +92,26 @@ class NoQueryClient:
         raise AssertionError(f"unexpected TuShare query: {api_name}")
 
 
+class ReferenceClient:
+    def __init__(self):
+        self.calls = []
+
+    def query(self, api_name, params=None, fields="", retries=5):
+        params = params or {}
+        self.calls.append((api_name, dict(params)))
+        result_fields = fields.split(",") if fields else []
+        rows = []
+        if api_name == "stock_basic" and params.get("list_status") == "L":
+            rows = [["000001.SZ" if field == "ts_code" else params.get("list_status", "") if field == "list_status" else "" for field in result_fields]]
+        elif api_name == "namechange":
+            rows = [[params.get("ts_code", ""), "sample", "20200101", "", "20200101", "name"]]
+        elif api_name == "index_classify":
+            rows = [["801010.SI" if field == "index_code" else "L1" if field == "level" else "sample" for field in result_fields]]
+        elif api_name == "index_member_all":
+            rows = [["801010.SI" if field == "l1_code" else "000001.SZ" if field == "ts_code" else "" for field in result_fields]]
+        return common.ApiResult(result_fields, rows, common.stable_hash({"api_name": api_name, "params": params}))
+
+
 class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -382,6 +402,92 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertTrue(all("--start-date 20200101" in text for text in command_text))
         self.assertTrue(all("--raw-dir raw" in text for text in command_text))
 
+    def test_cron_update_job_can_use_rolling_start_lookback(self):
+        config_path = self.root / "schedule.json"
+        config_path.write_text(json.dumps({
+            "timezone": "Asia/Shanghai",
+            "repo_root": str(self.root),
+            "python": "/env/python",
+            "default_start_date": "20200101",
+            "jobs": {
+                "cn_evening_full": {"start_date_lookback_days": 14},
+                "cn_preopen_margin_backfill_0905": {"operation": "download_event_flow", "end_date_offset_days": 1},
+            },
+        }), encoding="utf-8")
+
+        args = argparse.Namespace(config=str(config_path), job="cn_evening_full", start_date=None, end_date="20260601", dry_run=False, force_run=False)
+        ctx = cron_update.build_context(args)
+        self.assertEqual(ctx.start_date, "20260518")
+        self.assertEqual(ctx.end_date, "20260601")
+
+        margin_args = argparse.Namespace(config=str(config_path), job="cn_preopen_margin_backfill_0905", start_date=None, end_date="20260601", dry_run=False, force_run=False)
+        margin_ctx = cron_update.build_context(margin_args)
+        self.assertEqual(margin_ctx.start_date, "20260601")
+
+    def test_cron_download_tier_job_builds_targeted_command(self):
+        ctx = cron_update.RunContext(
+            config={"default_raw_dir": "raw", "default_update_args": ["--min-interval-seconds", "0.22"]},
+            repo_root=self.root,
+            python="/env/python",
+            job_name="cn_preopen_board_backfill_0850",
+            job={"operation": "download_tier", "tier": "board_trading", "extra_args": ["--datasets", "kpl_list", "--force"]},
+            start_date="20260601",
+            end_date="20260601",
+            timezone_name="Asia/Shanghai",
+        )
+
+        commands = cron_update.build_job_commands(ctx)
+
+        self.assertEqual(len(commands), 1)
+        text = " ".join(commands[0])
+        self.assertIn("scripts/tushare/download.py download --tier board_trading", text)
+        self.assertIn("--start-date 20260601 --end-date 20260601", text)
+        self.assertIn("--raw-dir raw", text)
+        self.assertIn("--datasets kpl_list --force", text)
+
+    def test_reference_refresh_datasets_force_only_selected_tables(self):
+        self._write_trade_cal("20200102")
+        for status in ("L", "D", "P"):
+            path = self.raw_dir / "stock_basic" / f"list_status={status}.parquet"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame([{"ts_code": "999999.SZ", "list_status": status}]).to_parquet(path, index=False)
+        for exchange in ("SSE", "SZSE", "BSE"):
+            path = self.raw_dir / "stock_company" / f"exchange={exchange}.parquet"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame([{"ts_code": "999999.SZ", "exchange": exchange}]).to_parquet(path, index=False)
+        namechange = self.raw_dir / "namechange" / "namechange.parquet"
+        namechange.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"ts_code": "999999.SZ", "name": "old"}]).to_parquet(namechange, index=False)
+        classify = self.raw_dir / "index_classify" / "src=SW2021.parquet"
+        classify.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"index_code": "801999.SI", "level": "L1"}]).to_parquet(classify, index=False)
+        member = self.raw_dir / "index_member_all" / "l1_code=801999.SI.parquet"
+        member.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"l1_code": "801999.SI", "ts_code": "999999.SZ"}]).to_parquet(member, index=False)
+
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            bak_start_date="20200102",
+            skip_bak_basic=True,
+            force=False,
+            refresh_reference_datasets=["stock_basic", "namechange", "index_classify", "index_member_all"],
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+        client = ReferenceClient()
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
+            self.assertEqual(download.download_reference(args), 0)
+
+        called_apis = [api_name for api_name, _ in client.calls]
+        self.assertEqual(called_apis.count("stock_basic"), 3)
+        self.assertIn("namechange", called_apis)
+        self.assertIn("index_classify", called_apis)
+        self.assertIn("index_member_all", called_apis)
+        self.assertNotIn("stock_company", called_apis)
+
     def test_intraday_by_date_audit_errors_on_zero_row_partition(self):
         self._write_trade_cal()
         path = self.raw_dir / common.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet"
@@ -454,6 +560,28 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         status = json.loads(status_path.read_text(encoding="utf-8"))
         self.assertEqual(status["status"], "ok")
         self.assertIn("kpl_list", status["datasets"])
+
+    def test_board_trading_skips_non_trading_window(self):
+        self._write_trade_cal("20260530", is_open="0")
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20260530",
+            end_date="20260530",
+            datasets=["kpl_list", "limit_step", "limit_cpt_list"],
+            force=True,
+            page_limit=None,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+            kpl_tag=["涨停"],
+            ths_limit_type=["涨停池"],
+            ths_hot_market=["热股"],
+            dc_hot_market=["A股市场"],
+            dc_hot_type=["人气榜"],
+            hot_is_new=["N"],
+        )
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=NoQueryClient()):
+            self.assertEqual(download.download_board_trading(args), 0)
 
     def test_text_source_time_is_normalized_to_china_timezone(self):
         frame = pd.DataFrame([{"title": "sample", "pub_time": "2020-01-02 10:00:00", "src": "x"}])

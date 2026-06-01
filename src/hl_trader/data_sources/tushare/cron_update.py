@@ -61,9 +61,15 @@ def build_context(args: argparse.Namespace) -> RunContext:
     offset_days = int(job.get("end_date_offset_days", 0))
     end_date = args.end_date or (now.date() - timedelta(days=offset_days)).strftime("%Y%m%d")
     env_start_date = os.environ.get("TUSHARE_UPDATE_START_DATE")
-    start_date = args.start_date or env_start_date or config["default_start_date"]
-    if job.get("operation") == "download_event_flow" and not args.start_date and not env_start_date:
+    if args.start_date or env_start_date:
+        start_date = args.start_date or env_start_date or config["default_start_date"]
+    elif job.get("operation") == "download_event_flow":
         start_date = end_date
+    elif "start_date_lookback_days" in job:
+        end_day = datetime.strptime(end_date, "%Y%m%d").date()
+        start_date = (end_day - timedelta(days=int(job["start_date_lookback_days"]))).strftime("%Y%m%d")
+    else:
+        start_date = config["default_start_date"]
     repo_root = Path(config.get("repo_root", ".")).resolve()
     python = config.get("python") or sys.executable
     return RunContext(config, repo_root, python, args.job, job, start_date, end_date, timezone_name)
@@ -188,6 +194,26 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
             "download",
             "--tier",
             "event_flow",
+            "--start-date",
+            ctx.start_date,
+            "--end-date",
+            ctx.end_date,
+            "--raw-dir",
+            raw_dir,
+        ]
+        command.extend(ctx.config.get("default_update_args", []))
+        command.extend(ctx.job.get("extra_args", []))
+        return [command]
+    if operation == "download_tier":
+        tier = ctx.job.get("tier")
+        if not tier:
+            raise ValueError("download_tier job requires a tier")
+        command = [
+            ctx.python,
+            "scripts/tushare/download.py",
+            "download",
+            "--tier",
+            tier,
             "--start-date",
             ctx.start_date,
             "--end-date",
