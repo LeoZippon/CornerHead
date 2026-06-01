@@ -4094,6 +4094,78 @@ Results:
 - `git diff --check` passed.
 
 
+
+## 2026-06-01 GitHub Branch Naming Cleanup
+
+Task:
+- Keep the agent collaboration instructions concise while adding standard branch naming rules before pushing the review branch.
+
+Changes:
+- Consolidated the separate `Git` and `GitHub Collaboration` sections in `AGENTS.md` and `CLAUDE.md` into one `Git and GitHub` section.
+- Added branch prefix conventions:
+  - `fix/` for bug or data-integrity fixes.
+  - `feat/` for new capabilities.
+  - `docs/` for documentation-only updates.
+  - `refactor/` for internal restructuring.
+  - `test/` for tests.
+  - `ops/` for deployment or scheduling changes.
+  - `chore/` for maintenance.
+- Corrected the repository-cleanliness spelling issue from `orgnized` to `organized`.
+
+Verification:
+
+```bash
+git diff --check
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src tests scripts
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
+find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache \) -prune -print
+```
+
+Results:
+- Resource checks stayed safe: about 417-418 GiB available system memory; GPU usage unchanged from existing processes.
+- `git diff --check` passed.
+- Compile passed.
+- Full unit discovery passed: 103 OK.
+- Post-test cache scans found no `__pycache__`, pytest/mypy/ruff cache directories, `*.pyc`, or `*.pyo` files.
+
+## 2026-06-01 GitHub Language Convention
+
+Task:
+- Record the preferred language policy for PR comments and commit messages.
+
+Changes:
+- Updated `AGENTS.md` and `CLAUDE.md` so PR titles, descriptions, review comments, and discussion comments may be written in Chinese when that is clearer for project collaboration.
+- Kept the default recommendation that commit subjects use concise English imperative wording for tooling/search consistency.
+- Documented that Chinese commit subjects remain acceptable for human-facing milestones or domain-specific wording, and that commit bodies may use Chinese for context and validation details.
+
+Verification:
+
+```bash
+git diff --check
+```
+
+Results:
+- `git diff --check` passed.
+
+## 2026-06-02 GitHub PR Splitting Guidance
+
+Task:
+- Clarify whether large changes should be split into multiple commits and pull requests.
+
+Changes:
+- Updated `AGENTS.md` and `CLAUDE.md` to state that broad work should be split by the smallest coherent review and revert unit.
+- Documented that multiple PRs are preferred when changes can be reviewed, tested, deployed, or reverted independently.
+- Documented the matching exception: tightly coupled changes should stay in one PR, and small follow-up docs/log updates may stay in the current PR when they do not distract from review.
+
+Verification:
+
+```bash
+git diff --check
+```
+
+Results:
+- `git diff --check` passed.
+
 ## 2026-06-02 TuShare Daily Update Policy Hardening
 
 Task:
@@ -4202,55 +4274,3 @@ Results:
 - First-pass revision verification passed before the second SubAgent audit.
 - Second-pass audit findings were incorporated: `page_limit=None` is normalized, reference forced refreshes skip empty overwrites, required zero-row daily/event-flow partitions raise, and pre-open event-flow status is refreshed after margin retry.
 - Current verification passed: JSON config parse, compileall, TuShare unit tests 34 OK, full unit discovery 123 OK, cron dry-runs for evening/audit/revision/pre-open jobs, `git diff --check`, cache cleanup, final three-way SubAgent review with no blockers, and local cron reinstall/inspection.
-
-## 2026-06-01 GitHub Branch Naming Cleanup
-
-Task:
-- Keep the agent collaboration instructions concise while adding standard branch naming rules before pushing the review branch.
-
-Changes:
-- Consolidated the separate `Git` and `GitHub Collaboration` sections in `AGENTS.md` and `CLAUDE.md` into one `Git and GitHub` section.
-- Added branch prefix conventions:
-  - `fix/` for bug or data-integrity fixes.
-  - `feat/` for new capabilities.
-  - `docs/` for documentation-only updates.
-  - `refactor/` for internal restructuring.
-  - `test/` for tests.
-  - `ops/` for deployment or scheduling changes.
-  - `chore/` for maintenance.
-- Corrected the repository-cleanliness spelling issue from `orgnized` to `organized`.
-
-Verification:
-
-```bash
-git diff --check
-PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src tests scripts
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
-find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache \) -prune -print
-```
-
-Results:
-- Resource checks stayed safe: about 417-418 GiB available system memory; GPU usage unchanged from existing processes.
-- `git diff --check` passed.
-- Compile passed.
-- Full unit discovery passed: 103 OK.
-- Post-test cache scans found no `__pycache__`, pytest/mypy/ruff cache directories, `*.pyc`, or `*.pyo` files.
-
-## 2026-06-01 GitHub Language Convention
-
-Task:
-- Record the preferred language policy for PR comments and commit messages.
-
-Changes:
-- Updated `AGENTS.md` and `CLAUDE.md` so PR titles, descriptions, review comments, and discussion comments may be written in Chinese when that is clearer for project collaboration.
-- Kept the default recommendation that commit subjects use concise English imperative wording for tooling/search consistency.
-- Documented that Chinese commit subjects remain acceptable for human-facing milestones or domain-specific wording, and that commit bodies may use Chinese for context and validation details.
-
-Verification:
-
-```bash
-git diff --check
-```
-
-Results:
-- `git diff --check` passed.
