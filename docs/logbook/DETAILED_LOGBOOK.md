@@ -4093,6 +4093,7 @@ find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache 
 Results:
 - `git diff --check` passed.
 
+
 ## 2026-06-02 TuShare Daily Update Policy Hardening
 
 Task:
@@ -4102,7 +4103,7 @@ Task:
 
 Changes:
 - `configs/tushare_update_schedule.json`
-  - Changed `cn_evening_full` from full-window default to `start_date_lookback_days=14`.
+  - Changed `cn_evening_full` from full-window default to `start_date_lookback_days=30`.
   - Added `--reference-min-interval-seconds 0.50` only to `cn_evening_full`.
   - Added `cn_preopen_board_backfill_0850` for previous-day `kpl_list/limit_step/limit_cpt_list`.
   - Added `cn_preopen_text_backfill_0855` for recent `cctv_news/news` refresh.
@@ -4149,7 +4150,7 @@ Results:
 - JSON config parse passed.
 - Compile passed.
 - Cron dry-runs showed:
-  - evening job uses `20260518-20260601` rolling window and `--reference-min-interval-seconds 0.50`;
+  - evening job uses a rolling `end_date-30` to `end_date` window and `--reference-min-interval-seconds 0.50`;
   - board pre-open job targets `20260601` and forces `kpl_list/limit_step/limit_cpt_list`;
   - text pre-open job targets `20260530-20260601` and forces `cctv_news/news`;
   - margin and full audit commands remain scoped as intended.
@@ -4163,6 +4164,44 @@ Results:
 - Full unit discovery passed: 103 OK.
 - Cache directory scan returned no remaining cache directories.
 - `check.ipynb` remains untracked and intentionally unstaged.
+
+## 2026-06-02 TuShare Revision Supervision
+
+Task:
+- Add daily recent-window force refresh and historical sentinel checks for source-side data corrections.
+- Make source-correction monitoring visible without silently overwriting zero-ok partitions or hiding failed probes.
+
+Changes:
+- Added shared revision comparison helpers and a JSONL revision ledger contract at `results/data_quality/revision_events.jsonl`.
+- Changed cron-driven daily `update` so retained daily trade-date datasets are force-refreshed inside the rolling update window while revision differences append `REVISION_ALERT` events.
+- Added `stock_company` to the daily forced reference refresh set.
+- Added `audit.py revision-sentinel` to sample historical daily trade-date partitions, compare TuShare source responses with local raw files, and write `results/data_quality/revision_summary.json` without overwriting raw data.
+- Added cron job `cn_daily_revision_sentinel` at 04:00 Beijing time for daily sentinel sampling of `daily`, `adj_factor`, `daily_basic`, `stk_limit`, `suspend_d`, and `limit_list_d`.
+- Expanded the evening rolling window from 14 to 30 natural days to cover longer holiday/late-correction windows.
+- Hardened cron locking so jobs wait for the global lock, clear stale dead-PID locks, return nonzero on lock timeout, and compare command/config hashes before skip-existing.
+- Protected `suspend_d` and `limit_list_d` nonempty raw partitions from empty overwrite unless `--allow-empty-revision-overwrite` is explicit.
+- Kept T+1 `margin` and `margin_detail` out of the 23:35 full update, forced the 09:05/09:15 margin backfills, and added a 09:20 event-flow status refresh for pre-open gates.
+- Updated data documentation to explain the revision ledger schema, pending-review workflow, cron timing, lock semantics, and date-partition refresh boundary.
+
+Verification:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python -m json.tool configs/tushare_update_schedule.json
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest.test_update_parser_force_refreshes_stock_company_by_default tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest.test_daily_refresh_datasets_force_only_selected_trade_date_dataset tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest.test_revision_sentinel_compares_without_overwriting_raw tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest.test_cron_revision_sentinel_job_builds_audit_command
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src tests scripts ops
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_evening_full --end-date 20260602 --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_daily_revision_sentinel --end-date 20260601 --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/audit.py revision-sentinel --help
+git diff --check
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python ops/cron/install_tushare_cron.py
+crontab -l
+```
+
+Results:
+- First-pass revision verification passed before the second SubAgent audit.
+- Second-pass audit findings were incorporated: `page_limit=None` is normalized, reference forced refreshes skip empty overwrites, required zero-row daily/event-flow partitions raise, and pre-open event-flow status is refreshed after margin retry.
+- Current verification passed: JSON config parse, compileall, TuShare unit tests 34 OK, full unit discovery 123 OK, cron dry-runs for evening/audit/revision/pre-open jobs, `git diff --check`, cache cleanup, final three-way SubAgent review with no blockers, and local cron reinstall/inspection.
 
 ## 2026-06-01 GitHub Branch Naming Cleanup
 

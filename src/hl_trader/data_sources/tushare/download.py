@@ -16,6 +16,24 @@ else:
     from . import common as core
     from .common import *  # noqa: F401,F403
 
+def write_reference_query_result(
+    path: Path,
+    result: ApiResult,
+    *,
+    api_name: str,
+    params: dict[str, Any],
+    required_nonempty: bool,
+) -> pd.DataFrame:
+    df = frame(result)
+    if df.empty and path.exists():
+        print(f"{api_name} params={params} returned zero rows for existing partition; skipped_empty_reference_overwrite")
+        return pd.read_parquet(path)
+    if df.empty and required_nonempty:
+        raise RuntimeError(f"{api_name} params={params} returned zero rows for required reference partition")
+    write_parquet(path, df, api_name=api_name, params=params, fields=result.fields, source_hash=result.source_hash)
+    return df
+
+
 def download_reference(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
@@ -32,7 +50,13 @@ def download_reference(args: argparse.Namespace) -> int:
             continue
         params = {"exchange": "", "list_status": status}
         result = client.query("stock_basic", params, stock_basic_fields)
-        write_parquet(path, frame(result), api_name="stock_basic", params=params, fields=result.fields, source_hash=result.source_hash)
+        write_reference_query_result(
+            path,
+            result,
+            api_name="stock_basic",
+            params=params,
+            required_nonempty=status == "L",
+        )
 
     company_fields = "ts_code,com_name,com_id,exchange,chairman,manager,secretary,reg_capital,setup_date,province,city,introduction"
     for exchange in ("SSE", "SZSE", "BSE"):
@@ -41,7 +65,13 @@ def download_reference(args: argparse.Namespace) -> int:
             continue
         params = {"exchange": exchange}
         result = client.query("stock_company", params, company_fields)
-        write_parquet(path, frame(result), api_name="stock_company", params=params, fields=result.fields, source_hash=result.source_hash)
+        write_reference_query_result(
+            path,
+            result,
+            api_name="stock_company",
+            params=params,
+            required_nonempty=True,
+        )
 
     open_dates = download_trade_cal(client, raw_dir, args.start_date, args.end_date, should_force("trade_cal"))
     if not args.skip_bak_basic:
@@ -109,6 +139,9 @@ def download_namechange(client: TuShareClient, raw_dir: Path, force: bool) -> No
         if index % 500 == 0:
             print(f"namechange {index}")
     combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=fields.split(","))
+    if combined.empty and path.exists():
+        print("namechange returned zero rows for existing partition; skipped_empty_reference_overwrite")
+        return
     deduped = combined.drop_duplicates().sort_values(["ts_code", "start_date", "name"], na_position="last").reset_index(drop=True)
     write_parquet(path, deduped, api_name="namechange", params={"strategy": "per_ts_code_all_stock_basic"}, fields=fields.split(","), source_hash=stable_hash(deduped.fillna("").astype(str).to_dict("records")))
 
@@ -119,9 +152,13 @@ def download_index_classify(client: TuShareClient, raw_dir: Path, force: bool) -
     fields = "index_code,industry_name,level,industry_code,is_pub,parent_code,src"
     params = {"src": "SW2021"}
     result = client.query("index_classify", params, fields)
-    df = frame(result)
-    write_parquet(path, df, api_name="index_classify", params=params, fields=result.fields, source_hash=result.source_hash)
-    return df
+    return write_reference_query_result(
+        path,
+        result,
+        api_name="index_classify",
+        params=params,
+        required_nonempty=True,
+    )
 
 def download_index_member_all(client: TuShareClient, raw_dir: Path, classify: pd.DataFrame, force: bool) -> None:
     fields = "l1_code,l1_name,l2_code,l2_name,l3_code,l3_name,ts_code,name,in_date,out_date,is_new"
@@ -132,22 +169,72 @@ def download_index_member_all(client: TuShareClient, raw_dir: Path, classify: pd
             continue
         params = {"l1_code": code}
         result = client.query("index_member_all", params, fields)
-        write_parquet(path, frame(result), api_name="index_member_all", params=params, fields=result.fields, source_hash=result.source_hash)
+        write_reference_query_result(
+            path,
+            result,
+            api_name="index_member_all",
+            params=params,
+            required_nonempty=False,
+        )
 
 def download_daily(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
+    refresh_datasets = set(getattr(args, "refresh_daily_datasets", None) or [])
+    revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
+    if not revision_ledger.is_absolute():
+        revision_ledger = repo_root / revision_ledger
+    required_zero_skipped: list[str] = []
     for dataset in selected_daily_datasets(args):
         spec = DAILY_SPECS[dataset]
         start_date = max(args.start_date, spec.start_date)
         dates = [d for d in trade_dates if start_date <= d <= args.end_date]
-        download_trade_date_dataset(client, raw_dir, spec, dates, args.force, args.page_limit)
+        zero_skipped = download_trade_date_dataset(
+            client,
+            raw_dir,
+            spec,
+            dates,
+            args.force or dataset in refresh_datasets,
+            args.page_limit,
+            revision_ledger,
+            getattr(args, "allow_empty_revision_overwrite", False),
+        )
+        if zero_skipped and not spec.zero_rows_ok:
+            required_zero_skipped.append(f"{spec.api_name}:{zero_skipped}")
+    if required_zero_skipped:
+        raise RuntimeError(f"required daily partitions returned zero rows and were not written: {required_zero_skipped}")
     print(f"daily market download finished under {raw_dir}")
     return 0
 
-def download_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec: TradeDateDataset, trade_dates: list[str], force: bool, page_limit: int) -> None:
+def emit_trade_date_revision_alert(path: Path, old_df: pd.DataFrame, new_df: pd.DataFrame, spec: TradeDateDataset, trade_date: str, ledger_path: Path) -> dict[str, Any] | None:
+    event = build_revision_event(
+        dataset=spec.api_name,
+        partition=f"trade_date={trade_date}",
+        path=path,
+        old_df=old_df,
+        new_df=new_df,
+        key_columns=list(spec.key_columns),
+        source="force_refresh",
+    )
+    if not event:
+        return None
+    append_jsonl(ledger_path, event)
+    print("REVISION_ALERT " + json.dumps(event, ensure_ascii=False, sort_keys=True))
+    return event
+
+def download_trade_date_dataset(
+    client: TuShareClient,
+    raw_dir: Path,
+    spec: TradeDateDataset,
+    trade_dates: list[str],
+    force: bool,
+    page_limit: int,
+    revision_ledger: Path,
+    allow_empty_revision_overwrite: bool,
+) -> int:
+    page_limit = page_limit or TRADE_DATE_PAGE_LIMIT
     dataset_dir = raw_dir / spec.api_name
     written = 0
     skipped = 0
@@ -171,6 +258,13 @@ def download_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec: Trad
             zero_skipped += 1
             print(f"{spec.api_name} trade_date={trade_date} returned zero rows; skipped_write")
             continue
+        if path.exists():
+            old_df = pd.read_parquet(path)
+            emit_trade_date_revision_alert(path, old_df, df, spec, trade_date, revision_ledger)
+            if spec.zero_rows_ok and old_df.shape[0] > 0 and df.empty and not allow_empty_revision_overwrite:
+                zero_skipped += 1
+                print(f"{spec.api_name} trade_date={trade_date} returned zero rows for existing nonempty partition; skipped_empty_revision_overwrite")
+                continue
         meta_params = dict(params)
         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
         write_parquet(path, df, api_name=spec.api_name, params=meta_params, fields=result.fields, source_hash=result.source_hash)
@@ -179,6 +273,7 @@ def download_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec: Trad
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} zero_skipped={zero_skipped} rows_written={total_rows}")
+    return zero_skipped
 
 def download_macro(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
@@ -413,12 +508,15 @@ def download_event_flow(args: argparse.Namespace) -> int:
             print(f"event/flow trade-date datasets skipped: no SSE open dates for {args.start_date}-{trade_end_date}")
     windows = month_windows(args.start_date, args.end_date)
     days = date_range_days(args.start_date, args.end_date)
+    required_zero_skipped: list[str] = []
     for dataset in datasets:
         spec = EVENT_FLOW_SPECS[dataset]
         start_date = max(args.start_date, spec.start_date)
         if spec.strategy == "trade_date":
             dates = [d for d in trade_dates if start_date <= d <= trade_end_date]
-            download_event_trade_date_dataset(client, raw_dir, spec, dates, args.force, event_page_limit(spec, args.page_limit))
+            zero_skipped = download_event_trade_date_dataset(client, raw_dir, spec, dates, args.force, event_page_limit(spec, args.page_limit))
+            if zero_skipped and not spec.zero_rows_ok:
+                required_zero_skipped.append(f"{spec.api_name}:{zero_skipped}")
         elif spec.strategy == "range_month":
             dataset_windows = [(s, e, m) for s, e, m in windows if e >= start_date]
             download_event_range_month(client, raw_dir, spec, dataset_windows, args.force, event_page_limit(spec, args.page_limit))
@@ -427,6 +525,8 @@ def download_event_flow(args: argparse.Namespace) -> int:
             download_event_day_dataset(client, raw_dir, spec, dataset_days, args.force)
         else:
             raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {dataset}")
+    if required_zero_skipped:
+        raise RuntimeError(f"required event/flow partitions returned zero rows and were not written: {required_zero_skipped}")
     print(f"event/flow download finished under {raw_dir}")
     return 0
 
@@ -443,7 +543,8 @@ def selected_event_flow_download_datasets(args: argparse.Namespace) -> list[str]
         )
     return datasets
 
-def download_event_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec: EventDataset, trade_dates: list[str], force: bool, page_limit: int) -> None:
+def download_event_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec: EventDataset, trade_dates: list[str], force: bool, page_limit: int | None) -> int:
+    page_limit = page_limit or spec.page_limit
     written = 0
     skipped = 0
     zero_skipped = 0
@@ -474,6 +575,7 @@ def download_event_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} zero_skipped={zero_skipped} rows_written={total_rows} pages={total_pages}")
+    return zero_skipped
 
 def download_event_range_month(client: TuShareClient, raw_dir: Path, spec: EventDataset, windows: list[tuple[str, str, str]], force: bool, page_limit: int) -> None:
     written = 0
@@ -1871,6 +1973,9 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             end_date=args.end_date,
             datasets=args.daily_datasets,
             include_limit_list=args.include_limit_list,
+            refresh_daily_datasets=getattr(args, "refresh_daily_datasets", []),
+            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             force=args.force,
             page_limit=args.page_limit,
             min_interval_seconds=args.min_interval_seconds,
@@ -2022,6 +2127,9 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))
     parser.add_argument("--datasets", nargs="+")
     parser.add_argument("--include-limit-list", action="store_true")
+    parser.add_argument("--refresh-daily-datasets", nargs="+", choices=core.DAILY_REQUIRED_DATASETS + core.DAILY_OPTIONAL_DATASETS, default=[])
+    parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
+    parser.add_argument("--allow-empty-revision-overwrite", action="store_true")
     parser.add_argument("--skip-bak-basic", action="store_true")
     parser.add_argument("--refresh-reference-datasets", nargs="+", choices=core.REFERENCE_DATASETS, default=[])
     parser.add_argument("--force", action="store_true")
@@ -2043,10 +2151,17 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--daily-datasets", nargs="+", choices=core.DAILY_REQUIRED_DATASETS + core.DAILY_OPTIONAL_DATASETS)
     parser.add_argument("--include-limit-list", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
+        "--refresh-daily-datasets",
+        nargs="+",
+        choices=core.DAILY_REQUIRED_DATASETS + core.DAILY_OPTIONAL_DATASETS,
+        default=[],
+        help="Daily trade-date datasets to force-refresh within the update window; cron config selects the routine recent-window revision set.",
+    )
+    parser.add_argument(
         "--refresh-reference-datasets",
         nargs="+",
         choices=core.REFERENCE_DATASETS,
-        default=["stock_basic", "namechange", "index_classify", "index_member_all"],
+        default=["stock_basic", "stock_company", "namechange", "index_classify", "index_member_all"],
         help="Reference datasets to force-refresh during daily update; heavier datasets should be explicit.",
     )
     parser.add_argument("--reference-min-interval-seconds", type=float, help="Optional lower call frequency for the reference refresh step.")
@@ -2095,6 +2210,8 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         help="Allow share_float_complete union rebuilds that produce fewer rows than the existing union.",
     )
     parser.add_argument("--share-float-process-output", help="Optional temporary process report path for share_float_complete.")
+    parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
+    parser.add_argument("--allow-empty-revision-overwrite", action="store_true")
     parser.add_argument("--skip-bak-basic", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--page-limit", type=int)

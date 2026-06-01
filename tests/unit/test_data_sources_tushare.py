@@ -3,9 +3,12 @@
 
 # Source: test_tushare_download_update_guards.py
 import argparse
+import io
 import json
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -103,6 +106,8 @@ class ReferenceClient:
         rows = []
         if api_name == "stock_basic" and params.get("list_status") == "L":
             rows = [["000001.SZ" if field == "ts_code" else params.get("list_status", "") if field == "list_status" else "" for field in result_fields]]
+        elif api_name == "stock_company":
+            rows = [["000001.SZ" if field == "ts_code" else params.get("exchange", "") if field == "exchange" else "" for field in result_fields]]
         elif api_name == "namechange":
             rows = [[params.get("ts_code", ""), "sample", "20200101", "", "20200101", "name"]]
         elif api_name == "index_classify":
@@ -110,6 +115,52 @@ class ReferenceClient:
         elif api_name == "index_member_all":
             rows = [["801010.SI" if field == "l1_code" else "000001.SZ" if field == "ts_code" else "" for field in result_fields]]
         return common.ApiResult(result_fields, rows, common.stable_hash({"api_name": api_name, "params": params}))
+
+
+class EmptyReferenceClient:
+    def __init__(self):
+        self.calls = []
+
+    def query(self, api_name, params=None, fields="", retries=5):
+        params = params or {}
+        self.calls.append((api_name, dict(params)))
+        return common.ApiResult(fields.split(",") if fields else [], [], common.stable_hash({"api_name": api_name, "params": params}))
+
+
+class DailyMarketClient:
+    def __init__(self):
+        self.calls = []
+
+    def query(self, api_name, params=None, fields="", retries=5):
+        params = params or {}
+        self.calls.append((api_name, dict(params)))
+        result_fields = fields.split(",") if fields else []
+        row = []
+        for field in result_fields:
+            if field == "trade_date":
+                row.append(params.get("trade_date", "20200102"))
+            elif field == "ts_code":
+                row.append("000001.SZ")
+            elif field == "adj_factor":
+                row.append(1.0)
+            else:
+                row.append(0)
+        return common.ApiResult(result_fields, [row], common.stable_hash({"api_name": api_name, "params": params}))
+
+
+class EmptyTradeDateClient:
+    def __init__(self):
+        self.calls = []
+
+    def query(self, api_name, params=None, fields="", retries=5):
+        params = params or {}
+        self.calls.append((api_name, dict(params)))
+        return common.ApiResult(fields.split(",") if fields else [], [], common.stable_hash({"api_name": api_name, "params": params}))
+
+
+class ErrorTradeDateClient:
+    def query(self, api_name, params=None, fields="", retries=5):
+        raise RuntimeError("mock source failure")
 
 
 class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
@@ -381,9 +432,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             repo_root=self.root,
             python="/env/python",
             job_name="cn_nightly_full_audit",
-            job={"operation": "audit_full"},
+            job={"operation": "audit_full", "event_flow_end_extra_offset_days": 1},
             start_date="20200101",
-            end_date="20260531",
+            end_date="20260601",
             timezone_name="Asia/Shanghai",
         )
 
@@ -397,6 +448,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn("scripts/tushare/audit.py intraday-by-date", command_text[2])
         self.assertIn("--expected-codes-source minute", command_text[2])
         self.assertIn("scripts/tushare/audit.py event-flow", command_text[3])
+        self.assertIn("--end-date 20260531", command_text[3])
         self.assertIn("scripts/tushare/audit.py board-trading", command_text[4])
         self.assertIn("--include-text", command_text[5])
         self.assertTrue(all("--start-date 20200101" in text for text in command_text))
@@ -410,15 +462,20 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             "python": "/env/python",
             "default_start_date": "20200101",
             "jobs": {
-                "cn_evening_full": {"start_date_lookback_days": 14},
+                "cn_evening_full": {
+                    "start_date_lookback_days": 30,
+                    "extra_args": ["--refresh-daily-datasets", "daily", "adj_factor"],
+                },
                 "cn_preopen_margin_backfill_0905": {"operation": "download_event_flow", "end_date_offset_days": 1},
             },
         }), encoding="utf-8")
 
         args = argparse.Namespace(config=str(config_path), job="cn_evening_full", start_date=None, end_date="20260601", dry_run=False, force_run=False)
         ctx = cron_update.build_context(args)
-        self.assertEqual(ctx.start_date, "20260518")
+        self.assertEqual(ctx.start_date, "20260502")
         self.assertEqual(ctx.end_date, "20260601")
+        command = " ".join(cron_update.build_job_commands(ctx)[0])
+        self.assertIn("--refresh-daily-datasets daily adj_factor", command)
 
         margin_args = argparse.Namespace(config=str(config_path), job="cn_preopen_margin_backfill_0905", start_date=None, end_date="20260601", dry_run=False, force_run=False)
         margin_ctx = cron_update.build_context(margin_args)
@@ -445,7 +502,80 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn("--raw-dir raw", text)
         self.assertIn("--datasets kpl_list --force", text)
 
-    def test_reference_refresh_datasets_force_only_selected_tables(self):
+    def test_cron_revision_sentinel_job_builds_audit_command(self):
+        ctx = cron_update.RunContext(
+            config={"default_raw_dir": "raw", "default_update_args": ["--min-interval-seconds", "0.22"]},
+            repo_root=self.root,
+            python="/env/python",
+            job_name="cn_daily_revision_sentinel",
+            job={"operation": "revision_sentinel", "extra_args": ["--sample-size", "12", "--datasets", "adj_factor"]},
+            start_date="20200101",
+            end_date="20260601",
+            timezone_name="Asia/Shanghai",
+        )
+
+        commands = cron_update.build_job_commands(ctx)
+
+        self.assertEqual(len(commands), 1)
+        text = " ".join(commands[0])
+        self.assertIn("scripts/tushare/audit.py revision-sentinel", text)
+        self.assertIn("--start-date 20200101 --end-date 20260601", text)
+        self.assertIn("--raw-dir raw", text)
+        self.assertIn("--sample-size 12 --datasets adj_factor", text)
+
+    def test_cron_event_flow_audit_job_builds_targeted_status_refresh(self):
+        ctx = cron_update.RunContext(
+            config={"default_raw_dir": "raw"},
+            repo_root=self.root,
+            python="/env/python",
+            job_name="cn_preopen_event_flow_audit_0920",
+            job={"operation": "audit_event_flow"},
+            start_date="20200101",
+            end_date="20260601",
+            timezone_name="Asia/Shanghai",
+        )
+
+        commands = cron_update.build_job_commands(ctx)
+
+        self.assertEqual(len(commands), 1)
+        text = " ".join(commands[0])
+        self.assertIn("scripts/tushare/audit.py event-flow", text)
+        self.assertIn("--start-date 20200101 --end-date 20260601", text)
+        self.assertIn("--raw-dir raw", text)
+
+    def test_cron_lock_waits_and_reports_live_locks(self):
+        runtime = self.root / ".runtime" / "tushare"
+        lock = runtime / "locks" / "tushare_update.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text("pid=1\nstarted_at=2099-01-01T00:00:00+00:00\n", encoding="utf-8")
+
+        with patch.object(cron_update, "RUNTIME_ROOT", runtime):
+            with self.assertRaisesRegex(RuntimeError, "lock exists"):
+                cron_update.acquire_lock("tushare_update", wait_seconds=0, stale_seconds=21600)
+
+    def test_cron_lock_removes_stale_dead_pid_lock(self):
+        runtime = self.root / ".runtime" / "tushare"
+        lock = runtime / "locks" / "tushare_update.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text("pid=999999999\nstarted_at=2020-01-01T00:00:00+00:00\n", encoding="utf-8")
+
+        with patch.object(cron_update, "RUNTIME_ROOT", runtime), patch.object(cron_update, "DISPATCH_LOG_PATH", self.root / "dispatch.log"):
+            acquired = cron_update.acquire_lock("tushare_update", wait_seconds=0, stale_seconds=21600)
+        self.assertTrue(acquired.exists())
+        acquired.unlink()
+
+    def test_cron_lock_does_not_remove_live_pid_lock_by_age(self):
+        runtime = self.root / ".runtime" / "tushare"
+        lock = runtime / "locks" / "tushare_update.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.write_text("pid=1\nstarted_at=2020-01-01T00:00:00+00:00\n", encoding="utf-8")
+
+        with patch.object(cron_update, "RUNTIME_ROOT", runtime), patch.object(cron_update, "pid_is_alive", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "lock exists"):
+                cron_update.acquire_lock("tushare_update", wait_seconds=0, stale_seconds=1)
+        self.assertTrue(lock.exists())
+
+    def test_reference_refresh_datasets_force_selected_tables(self):
         self._write_trade_cal("20200102")
         for status in ("L", "D", "P"):
             path = self.raw_dir / "stock_basic" / f"list_status={status}.parquet"
@@ -472,7 +602,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             bak_start_date="20200102",
             skip_bak_basic=True,
             force=False,
-            refresh_reference_datasets=["stock_basic", "namechange", "index_classify", "index_member_all"],
+            refresh_reference_datasets=["stock_basic", "stock_company", "namechange", "index_classify", "index_member_all"],
             min_interval_seconds=0,
             timeout_seconds=1,
         )
@@ -483,10 +613,295 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         called_apis = [api_name for api_name, _ in client.calls]
         self.assertEqual(called_apis.count("stock_basic"), 3)
+        self.assertEqual(called_apis.count("stock_company"), 3)
         self.assertIn("namechange", called_apis)
         self.assertIn("index_classify", called_apis)
         self.assertIn("index_member_all", called_apis)
-        self.assertNotIn("stock_company", called_apis)
+
+    def test_reference_refresh_does_not_overwrite_existing_stock_company_on_empty_response(self):
+        self._write_trade_cal("20200102")
+        for status in ("L", "D", "P"):
+            stock_path = self.raw_dir / "stock_basic" / f"list_status={status}.parquet"
+            stock_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame([{"ts_code": "000001.SZ", "list_status": status}]).to_parquet(stock_path, index=False)
+        path = self.raw_dir / "stock_company" / "exchange=SSE.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        original = pd.DataFrame([{"ts_code": "000001.SH", "exchange": "SSE", "com_name": "old"}])
+        original.to_parquet(path, index=False)
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            bak_start_date="20200102",
+            skip_bak_basic=True,
+            force=False,
+            refresh_reference_datasets=["stock_company"],
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=EmptyReferenceClient()):
+            with self.assertRaisesRegex(RuntimeError, "required reference partition"):
+                download.download_reference(args)
+        self.assertTrue(pd.read_parquet(path).equals(original))
+
+    def test_update_parser_force_refreshes_stock_company_by_default(self):
+        argv = [
+            "download.py",
+            "update",
+            "--start-date",
+            "20260601",
+            "--end-date",
+            "20260601",
+        ]
+        with patch.object(sys, "argv", argv):
+            args = download.parse_args()
+
+        self.assertIn("stock_basic", args.refresh_reference_datasets)
+        self.assertIn("stock_company", args.refresh_reference_datasets)
+        self.assertIn("namechange", args.refresh_reference_datasets)
+        self.assertIn("index_classify", args.refresh_reference_datasets)
+        self.assertIn("index_member_all", args.refresh_reference_datasets)
+        self.assertEqual(args.refresh_daily_datasets, [])
+
+    def test_daily_refresh_datasets_force_only_selected_trade_date_dataset(self):
+        self._write_trade_cal("20200102")
+        for dataset in ("daily", "adj_factor"):
+            path = self.raw_dir / dataset / "trade_date=20200102.parquet"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame([{"trade_date": "20200102", "ts_code": "999999.SZ"}]).to_parquet(path, index=False)
+
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            datasets=["daily", "adj_factor"],
+            include_limit_list=False,
+            refresh_daily_datasets=["adj_factor"],
+            revision_ledger=str(self.root / "revision_events.jsonl"),
+            force=False,
+            page_limit=None,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+        client = DailyMarketClient()
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(download.download_daily(args), 0)
+
+        self.assertEqual([api_name for api_name, _ in client.calls], ["adj_factor"])
+        self.assertIn("REVISION_ALERT", output.getvalue())
+        self.assertIn('"api_name": "adj_factor"', output.getvalue())
+        self.assertIn('"removed_keys": 1', output.getvalue())
+        ledger_lines = (self.root / "revision_events.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(ledger_lines), 1)
+        self.assertEqual(json.loads(ledger_lines[0])["downstream_status"], "pending_review")
+
+    def test_revision_sentinel_compares_without_overwriting_raw(self):
+        self._write_trade_cal("20200102")
+        path = self.raw_dir / "adj_factor" / "trade_date=20200102.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        original = pd.DataFrame([{"trade_date": "20200102", "ts_code": "999999.SZ", "adj_factor": 9.9}])
+        original.to_parquet(path, index=False)
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            datasets=["adj_factor"],
+            sample_size=0,
+            seed=None,
+            page_limit=10000,
+            revision_ledger=str(self.root / "sentinel_events.jsonl"),
+            output=str(self.root / "sentinel_summary.json"),
+            fail_on_revision=False,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+
+        with patch.object(audit, "load_token", return_value="token"), patch.object(audit, "TuShareClient", return_value=DailyMarketClient()):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(audit.audit_revision_sentinel(args), 0)
+
+        self.assertIn("REVISION_ALERT", output.getvalue())
+        self.assertTrue((self.root / "sentinel_events.jsonl").exists())
+        summary = json.loads((self.root / "sentinel_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["status"], "warning")
+        self.assertEqual(summary["revision_events"], 1)
+        self.assertTrue(pd.read_parquet(path).equals(original))
+
+    def test_revision_comparison_flags_missing_and_duplicate_keys(self):
+        missing = common.build_revision_event(
+            dataset="daily",
+            partition="trade_date=20200102",
+            path=self.raw_dir / "daily" / "trade_date=20200102.parquet",
+            old_df=pd.DataFrame([{"trade_date": "20200102", "open": 1.0}]),
+            new_df=pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "open": 1.0}]),
+            key_columns=["trade_date", "ts_code"],
+            source="unit",
+        )
+        self.assertIsNotNone(missing)
+        self.assertEqual(missing["comparison_issue"], "missing_key_columns")
+        self.assertEqual(missing["missing_key_columns_old"], ["ts_code"])
+
+        duplicate = common.build_revision_event(
+            dataset="daily",
+            partition="trade_date=20200102",
+            path=self.raw_dir / "daily" / "trade_date=20200102.parquet",
+            old_df=pd.DataFrame([
+                {"trade_date": "20200102", "ts_code": "000001.SZ", "open": 1.0},
+                {"trade_date": "20200102", "ts_code": "000001.SZ", "open": 1.0},
+            ]),
+            new_df=pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "open": 1.0}]),
+            key_columns=["trade_date", "ts_code"],
+            source="unit",
+        )
+        self.assertIsNotNone(duplicate)
+        self.assertEqual(duplicate["comparison_issue"], "duplicate_key_rows")
+        self.assertEqual(duplicate["duplicate_key_rows_old"], 1)
+
+    def test_revision_comparison_canonicalizes_numeric_values(self):
+        old_df = pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "adj_factor": 1}])
+        new_df = pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "adj_factor": 1.0}])
+        event = common.build_revision_event(
+            dataset="adj_factor",
+            partition="trade_date=20200102",
+            path=self.raw_dir / "adj_factor" / "trade_date=20200102.parquet",
+            old_df=old_df,
+            new_df=new_df,
+            key_columns=["trade_date", "ts_code"],
+            source="unit",
+        )
+        self.assertIsNone(event)
+
+    def test_zero_ok_force_refresh_does_not_overwrite_existing_nonempty_partition(self):
+        self._write_trade_cal("20200102")
+        path = self.raw_dir / "limit_list_d" / "trade_date=20200102.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        original = pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "limit": "U"}])
+        original.to_parquet(path, index=False)
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            datasets=["limit_list_d"],
+            include_limit_list=True,
+            refresh_daily_datasets=["limit_list_d"],
+            revision_ledger=str(self.root / "zero_ok_revision_events.jsonl"),
+            allow_empty_revision_overwrite=False,
+            force=False,
+            page_limit=10000,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=EmptyTradeDateClient()):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(download.download_daily(args), 0)
+
+        self.assertIn("skipped_empty_revision_overwrite", output.getvalue())
+        self.assertTrue(pd.read_parquet(path).equals(original))
+        ledger = (self.root / "zero_ok_revision_events.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(ledger), 1)
+        self.assertEqual(json.loads(ledger[0])["removed_keys"], 1)
+
+    def test_required_event_flow_zero_rows_raise_instead_of_cron_ok(self):
+        self._write_trade_cal("20200102")
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            datasets=["margin"],
+            force=True,
+            page_limit=None,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=EmptyTradeDateClient()):
+            with self.assertRaisesRegex(RuntimeError, "required event/flow partitions returned zero rows"):
+                download.download_event_flow(args)
+
+    def test_revision_sentinel_marks_source_failures_as_error(self):
+        self._write_trade_cal("20200102")
+        path = self.raw_dir / "daily" / "trade_date=20200102.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ"}]).to_parquet(path, index=False)
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            datasets=["daily"],
+            sample_size=0,
+            seed=None,
+            page_limit=10000,
+            revision_ledger=str(self.root / "sentinel_error_events.jsonl"),
+            output=str(self.root / "sentinel_error_summary.json"),
+            fail_on_revision=False,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+
+        with patch.object(audit, "load_token", return_value="token"), patch.object(audit, "TuShareClient", return_value=ErrorTradeDateClient()):
+            self.assertEqual(audit.audit_revision_sentinel(args), 1)
+
+        summary = json.loads((self.root / "sentinel_error_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["status"], "error")
+        self.assertEqual(summary["errors"], 1)
+
+    def test_revision_sentinel_warns_on_missing_local_partition(self):
+        self._write_trade_cal("20200102")
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            datasets=["adj_factor"],
+            sample_size=0,
+            seed=None,
+            page_limit=10000,
+            revision_ledger=str(self.root / "sentinel_missing_events.jsonl"),
+            output=str(self.root / "sentinel_missing_summary.json"),
+            fail_on_revision=False,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+
+        with patch.object(audit, "load_token", return_value="token"), patch.object(audit, "TuShareClient", return_value=DailyMarketClient()):
+            self.assertEqual(audit.audit_revision_sentinel(args), 0)
+
+        summary = json.loads((self.root / "sentinel_missing_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["status"], "warning")
+        self.assertEqual(summary["missing_local_dates"], 1)
+
+    def test_revision_sentinel_marks_required_remote_zero_as_error(self):
+        self._write_trade_cal("20200102")
+        path = self.raw_dir / "daily" / "trade_date=20200102.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ"}]).to_parquet(path, index=False)
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            datasets=["daily"],
+            sample_size=0,
+            seed=None,
+            page_limit=10000,
+            revision_ledger=str(self.root / "sentinel_zero_events.jsonl"),
+            output=str(self.root / "sentinel_zero_summary.json"),
+            fail_on_revision=False,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+
+        with patch.object(audit, "load_token", return_value="token"), patch.object(audit, "TuShareClient", return_value=EmptyTradeDateClient()):
+            self.assertEqual(audit.audit_revision_sentinel(args), 1)
+
+        summary = json.loads((self.root / "sentinel_zero_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["status"], "error")
+        self.assertEqual(summary["remote_zero_dates"], 1)
 
     def test_intraday_by_date_audit_errors_on_zero_row_partition(self):
         self._write_trade_cal()
