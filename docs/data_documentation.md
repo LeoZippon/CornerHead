@@ -286,10 +286,10 @@ TuShare 实现位于 `src/hl_trader/data_sources/tushare/`：
 日常增量更新入口：
 
 ```bash
-~/miniconda3/bin/conda run -n stock python scripts/tushare/download.py update --start-date 20200101 --end-date <YYYYMMDD>
+~/miniconda3/bin/conda run -n stock python scripts/tushare/download.py update --start-date <YYYYMMDD> --end-date <YYYYMMDD>
 ```
 
-`update` 固定从当前研究窗口下界扫到 `end_date`，不是只更新当天。默认语义是 skip-existing：
+`update` 从给定 `start_date` 扫到 `end_date`，不是只更新当天。第一次补历史缺口时可以把 `start_date` 设为研究窗口下界；日常 cron 使用滚动 14 个自然日窗口，补最近缺口，同时避免每天重扫 2020 起的历史分钟线。默认语义是 skip-existing：
 
 - 已存在且 sidecar 覆盖当前请求范围的分区直接跳过。
 - 缺失分区自动补充。
@@ -297,7 +297,7 @@ TuShare 实现位于 `src/hl_trader/data_sources/tushare/`：
 - 日期覆盖比较会把 `YYYYMMDD`、`YYYYMMDDHHMMSS` 和 `YYYY-MM-DD HH:MM:SS` 归一到同一时间边界。
 - 只有显式 `--force` 才强制重拉已有分区。
 
-`update` 会按基础维表、日频行情、财务、宏观、全球、事件/资金、打板专题、按日分钟线、解禁 union 和文本 evidence 的顺序补齐全维度数据。临时跳过重型数据可加 `--no-include-intraday`、`--no-include-share-float-complete` 或 `--no-include-board-trading`；跳过 `bak_basic` 可加 `--skip-bak-basic`。
+`update` 会按基础维表、日频行情、财务、宏观、全球、事件/资金、打板专题、按日分钟线、解禁 union 和文本 evidence 的顺序补齐全维度数据。基础维表中，日常更新默认强制刷新 `stock_basic`、`namechange`、`index_classify` 和 `index_member_all`；`namechange` 是全股票循环接口，cron 通过 `--reference-min-interval-seconds 0.50` 降低调用频率。`stock_company`、`trade_cal`、`bak_basic` 等仍按缺失或覆盖不足时刷新。临时跳过重型数据可加 `--no-include-intraday`、`--no-include-share-float-complete` 或 `--no-include-board-trading`；跳过 `bak_basic` 可加 `--skip-bak-basic`。
 
 当日源端尚未发布时，必需的日频和交易日事件接口若返回 0 行，更新脚本只打印 `skipped_write`，不写半成品分区；按日分钟线若预期股票池非空也拒绝写 0 行文件。分钟线日常更新默认使用 `--expected-codes-source minute`：已有按日文件用本地分钟覆盖作为 source-aware universe，避免早期 NEEQ/BSE 迁移代码触发全日重下；新交易日文件不存在时仍回退到 `daily` 股票池。
 
@@ -343,6 +343,8 @@ TuShare 接口更新时间目录维护在 `configs/tushare_update_schedule.json`
 ```cron
 35 23 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_evening_full >> logs/tushare_cron_dispatch.log 2>&1
 30 2 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_nightly_full_audit >> logs/tushare_cron_dispatch.log 2>&1
+50 8 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_board_backfill_0850 >> logs/tushare_cron_dispatch.log 2>&1
+55 8 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_text_backfill_0855 >> logs/tushare_cron_dispatch.log 2>&1
 5 9 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_margin_backfill_0905 >> logs/tushare_cron_dispatch.log 2>&1
 15 9 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_margin_retry_0915 >> logs/tushare_cron_dispatch.log 2>&1
 ```
@@ -350,7 +352,10 @@ TuShare 接口更新时间目录维护在 `configs/tushare_update_schedule.json`
 任务含义：
 
 - `cn_evening_full`：23:35 更新当天，覆盖 A 股日线、每日指标、分钟线、资金流、大宗交易、打板专题、文本 evidence、宏观/全球上下文等常规落库窗口。
+- `cn_evening_full` 默认从 `end_date-14` 滚动补缺到 `end_date`，不会每天从 `20200101` 重扫历史；其中 `stock_basic`、`namechange`、`index_classify`、`index_member_all` 每日强制刷新。
 - `cn_nightly_full_audit`：02:30 刷新 6 个正式 data-quality status，审计窗口默认从 `20200101` 到前一自然日。分钟线每天做全窗口文件/sidecar/schema/零行检查和抽样深检，使用 `minute` 覆盖口径，不默认启用逐日全量行级 `--full-scan`。
+- `cn_preopen_board_backfill_0850`：强制刷新前一自然日 `kpl_list`、`limit_step`、`limit_cpt_list`，覆盖开盘啦次日 08:30 发布和其他打板专题源端迟到风险。
+- `cn_preopen_text_backfill_0855`：强制刷新前一自然日及再往前 2 天的 `cctv_news`、`news`，用于修复周末/夜间文本源未落库或零行占位。
 - `cn_preopen_margin_backfill_0905` 与 `cn_preopen_margin_retry_0915`：只回补前一自然日 `margin` 和 `margin_detail`，给 09:25 前的快速审计、特征冻结和 Agent 决策留出时间；若前一自然日不是 SSE 交易日，任务成功跳过。
 
 runner 使用全局 `.runtime/tushare/locks/tushare_update.lock`，因此 cron job 不会并发读写同一套 raw 数据和状态文件。每次运行都会把资源检查、完整命令和返回码写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，状态写入 ignored 的 `.runtime/tushare/cron_state.json`。
@@ -369,6 +374,8 @@ crontab -l
 - 10000 积分基础频次：常规数据 500 次/分钟，特色数据 300 次/分钟。
 - 独立文本权限频次：新闻资讯 400 次/分钟，公告信息 500 次/分钟，政策法规库 500 次/分钟。
 - 脚本默认用保守间隔：常规下载以 `0.18s` 或更慢为宜；分钟线和混合文本下载使用 `0.22s` 可落在 300 次/分钟内；单独 `news` 可用 `0.16s`，仍低于 400 次/分钟。
+- 每日 cron 的 reference 步骤使用 `0.50s` 间隔，允许 `namechange` 全市场循环在夜间窗口内完成，同时降低对接口的持续压力。
+- TuShare 当前约束重点是接口频率、权限和单次返回行数上限；日常更新没有按调用次数消耗积分的本地预算逻辑。
 - 任一接口返回行数触及官方上限时，不假设全量完整，必须缩小日期窗口、按股票代码、按来源或按 offset 继续分页。
 - 当前脚本会 clamp 文本接口单次上限：`anns_d=2000`、`major_news=400`、`npr=500`、`research_report=1000`、`report_rc=3000`、`news=1500`；`stk_mins` 单页上限按 `8000` 处理。
 - 宏观/全球上下文使用 `0.22s` 默认间隔；`eco_cal`、`index_global`、`fx_daily`、`libor` 等按月、年份、代码或货币分区分页。

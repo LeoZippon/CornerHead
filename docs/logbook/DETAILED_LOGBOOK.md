@@ -4092,6 +4092,73 @@ find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache 
 
 Results:
 - `git diff --check` passed.
+
+## 2026-06-02 TuShare Daily Update Policy Hardening
+
+Task:
+- Make daily TuShare cron updates fit the overnight window without re-scanning all historical minute data every night.
+- Refresh important low-frequency reference data daily now that the overnight window is available.
+- Recheck update cycles for delayed sources and install the revised cron after independent audit.
+
+Changes:
+- `configs/tushare_update_schedule.json`
+  - Changed `cn_evening_full` from full-window default to `start_date_lookback_days=14`.
+  - Added `--reference-min-interval-seconds 0.50` only to `cn_evening_full`.
+  - Added `cn_preopen_board_backfill_0850` for previous-day `kpl_list/limit_step/limit_cpt_list`.
+  - Added `cn_preopen_text_backfill_0855` for recent `cctv_news/news` refresh.
+  - Updated cron policies for `stock_basic`, `namechange`, `index_classify`, `index_member_all`, `kpl_list`, `cctv_news`, and `news`.
+- `src/hl_trader/data_sources/tushare/download.py`
+  - Added selective reference refresh: daily update force-refreshes only configured reference datasets instead of forcing the whole reference tier.
+  - Defaults daily update reference refresh to `stock_basic/namechange/index_classify/index_member_all`.
+  - Added `--reference-min-interval-seconds`.
+  - Made board-trading trade-date downloads skip successfully when the target SSE window has no open dates.
+- `src/hl_trader/data_sources/tushare/cron_update.py`
+  - Added `start_date_lookback_days`.
+  - Added generic `download_tier` cron operation for targeted pre-open downloads.
+- `ops/cron/tushare_update.cron`
+  - Added 08:50 board and 08:55 text refresh jobs.
+- `docs/data_documentation.md`
+  - Documented the rolling update window, daily reference refreshes, delayed source backfills, and reference pacing.
+- `tests/unit/test_data_sources_tushare.py`
+  - Added tests for rolling cron start dates, targeted download-tier jobs, selective reference refresh, and board non-trading-day skip.
+
+SubAgent audit:
+- Spawned GPT-5.5 xhigh explorer `Aquinas`.
+- Blocking finding: 08:50 board backfill would fail on non-trading target dates because board-trading used strict SSE calendar loading.
+- Fix applied: `download_board_trading` now uses `allow_empty=True` and succeeds with zero tasks when no SSE open date exists.
+- Medium/low findings were reviewed: installed cron was still old before this change, explicit `TUSHARE_UPDATE_START_DATE` remains an intentional override, and reference refresh selection was confirmed correct.
+
+Verification:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python -m json.tool configs/tushare_update_schedule.json >/tmp/mq_tushare_schedule.json
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src tests scripts ops
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_evening_full --end-date 20260601 --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_board_backfill_0850 --end-date 20260601 --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_text_backfill_0855 --end-date 20260601 --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_margin_backfill_0905 --end-date 20260601 --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_nightly_full_audit --end-date 20260601 --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
+git diff --check
+/home/lzp/miniconda3/envs/stock/bin/python ops/cron/install_tushare_cron.py
+crontab -l | sed -n '/BEGIN MacroQuant TuShare update/,/END MacroQuant TuShare update/p'
+```
+
+Results:
+- JSON config parse passed.
+- Compile passed.
+- Cron dry-runs showed:
+  - evening job uses `20260518-20260601` rolling window and `--reference-min-interval-seconds 0.50`;
+  - board pre-open job targets `20260601` and forces `kpl_list/limit_step/limit_cpt_list`;
+  - text pre-open job targets `20260530-20260601` and forces `cctv_news/news`;
+  - margin and full audit commands remain scoped as intended.
+- TuShare unit file passed: 18 OK.
+- Full unit discovery passed: 107 OK.
+- `git diff --check` passed.
+- Post-test cache cleanup removed generated Python caches.
+- Cron managed block was installed and inspected successfully.
+- The old 2026-06-01 23:35 cron process was still running during the change; it was not stopped and will not use the new rolling-window config until the next scheduled run.
 - Compile passed.
 - Full unit discovery passed: 103 OK.
 - Cache directory scan returned no remaining cache directories.
