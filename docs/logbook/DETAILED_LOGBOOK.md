@@ -4093,6 +4093,25 @@ find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache 
 Results:
 - `git diff --check` passed.
 
+## 2026-06-02 GitHub PR Splitting Guidance
+
+Task:
+- Clarify whether large changes should be split into multiple commits and pull requests.
+
+Changes:
+- Updated `AGENTS.md` and `CLAUDE.md` to state that broad work should be split by the smallest coherent review and revert unit.
+- Documented that multiple PRs are preferred when changes can be reviewed, tested, deployed, or reverted independently.
+- Documented the matching exception: tightly coupled changes should stay in one PR, and small follow-up docs/log updates may stay in the current PR when they do not distract from review.
+
+Verification:
+
+```bash
+git diff --check
+```
+
+Results:
+- `git diff --check` passed.
+
 ## 2026-06-02 TuShare Daily Update Policy Hardening
 
 Task:

@@ -15,6 +15,10 @@
 - Work on reviewable branches and pull requests for non-trivial changes. Do not push directly to shared `main` unless explicitly requested.
 - Use branch prefixes by change type: `fix/` for bug or data-integrity fixes, `feat/` for new capabilities, `docs/` for documentation-only updates, `refactor/` for internal restructuring, `test/` for tests, `ops/` for deployment/scheduling changes, and `chore/` for maintenance.
 - Keep commits focused and self-contained. Code, tests, and living documentation for the same behavior change should usually be committed together.
+- For broad work, split commits by the smallest coherent review and revert unit.
+- Split work into multiple PRs when changes can be reviewed, tested, deployed, or reverted independently, such as data-ingestion fixes, Agent logic, Environment logic, ops/cron changes, and documentation-only updates.
+- Keep one PR when the changes are tightly coupled and must land together to keep the repository runnable. Small follow-up docs/log updates may stay in the current PR when they do not distract from the main review.
+- Do not mix unrelated changes in one PR solely because they were done in the same session.
 - Use concise imperative commit subjects, for example `Harden TuShare cron ingestion`; add a short body when validation commands or operational impact matter.
 - PR titles, descriptions, review comments, and discussion comments may be written in Chinese when that is clearer for project collaboration.
 - Prefer concise English imperative commit subjects for tooling/search consistency. Chinese commit subjects are acceptable for human-facing milestones or domain-specific wording; commit bodies may use Chinese for context and validation details.
