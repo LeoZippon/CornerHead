@@ -1,6 +1,6 @@
 # Data Documentation
 
-整理日期：2026-05-31
+整理日期：2026-06-02
 
 本文档记录 MacroQuant 当前认可的数据边界、下载与更新流程、审计规则、单位口径和 Raw PIT 合同。历史执行细节和阶段性排查记录写入 `LOGBOOK.md` 与 `docs/logbook/DETAILED_LOGBOOK.md`，不放在本文档里。
 
@@ -30,9 +30,10 @@ export TUSHARE_TOKEN="..."
 - [3. 下载与更新](#3-下载与更新)
   - [3.1 初始下载与整理](#31-初始下载与整理)
   - [3.2 日常增量更新](#32-日常增量更新)
-  - [3.3 share_float 完整补全](#33-share_float-完整补全)
-  - [3.4 定时更新与夜间审计](#34-定时更新与夜间审计)
-  - [3.5 限频、分页与下载前检查](#35-限频分页与下载前检查)
+  - [3.3 修正监督与 Revision Ledger](#33-修正监督与-revision-ledger)
+  - [3.4 share_float 完整补全](#34-share_float-完整补全)
+  - [3.5 定时更新与夜间审计](#35-定时更新与夜间审计)
+  - [3.6 限频、分页与下载前检查](#36-限频分页与下载前检查)
 - [4. 审计与 Status](#4-审计与-status)
   - [4.1 顶层 status 文件](#41-顶层-status-文件)
   - [4.2 Status 文件结构](#42-status-文件结构)
@@ -125,13 +126,15 @@ TuShare 实现位于 `src/hl_trader/data_sources/tushare/`：
 | 数据 | 接口 | 范围/拉取方式 | 用途 |
 |---|---|---|---|
 | 日线行情 | `daily` | 按 `trade_date` | OHLCV、成交额 |
-| 复权因子 | `adj_factor` | 按 `trade_date` | 复权收益 |
+| 复权因子 | `adj_factor` | 按 `trade_date` | 复权价格构造和收益校验；默认不作为 PIT alpha 收益输入 |
 | 每日指标 | `daily_basic` | 按 `trade_date` | PE/PB/PS、股息率、市值、换手率、股本 |
 | 涨跌停价格 | `stk_limit` | 按 `trade_date` | 涨跌停执行约束 |
 | 停复牌 | `suspend_d` | 按 `trade_date` 或日期区间 | 停牌/复牌 |
 | 涨跌停/炸板列表 | `limit_list_d` | 默认保留 | 打板标签、炸板/回封事件和次日事件特征 |
 
 日频行情结构完整。已知语义边界是 `daily`、`daily_basic`、`stk_limit` 覆盖口径不同，特征层必须显式处理缺失或使用内连接。
+
+`limit_list_d` 在 raw 和审计域里属于 `daily`/基础研究数据，因为它按交易日分区并服务交易约束、日终事件标签和 cross-check；打板专题研究会复用它，但它不是 `board_trading` tier 的下载项。
 
 #### 2.2.3 财务与基本面
 
@@ -289,19 +292,54 @@ TuShare 实现位于 `src/hl_trader/data_sources/tushare/`：
 ~/miniconda3/bin/conda run -n stock python scripts/tushare/download.py update --start-date <YYYYMMDD> --end-date <YYYYMMDD>
 ```
 
-`update` 从给定 `start_date` 扫到 `end_date`，不是只更新当天。第一次补历史缺口时可以把 `start_date` 设为研究窗口下界；日常 cron 使用滚动 14 个自然日窗口，补最近缺口，同时避免每天重扫 2020 起的历史分钟线。默认语义是 skip-existing：
+`update` 从给定 `start_date` 扫到 `end_date`，不是只更新当天。第一次补历史缺口时可以把 `start_date` 设为研究窗口下界；日常 cron 回看 30 天，范围为 `end_date-30` 至 `end_date`，补最近缺口并覆盖长假后的迟到修正，同时避免每天重扫 2020 起的历史分钟线。默认语义是 skip-existing：
 
 - 已存在且 sidecar 覆盖当前请求范围的分区直接跳过。
 - 缺失分区自动补充。
 - 当前月、当前年这类聚合分区如果 sidecar 覆盖不到新的 `end_date`，会重新拉取该分区。
 - 日期覆盖比较会把 `YYYYMMDD`、`YYYYMMDDHHMMSS` 和 `YYYY-MM-DD HH:MM:SS` 归一到同一时间边界。
-- 只有显式 `--force` 才强制重拉已有分区。
+- 显式 `--force` 会强制重拉已有分区；日常 cron 还会通过 `--refresh-reference-datasets` 和 `--refresh-daily-datasets` 对指定 reference 和日频分区做定向强刷。
 
-`update` 会按基础维表、日频行情、财务、宏观、全球、事件/资金、打板专题、按日分钟线、解禁 union 和文本 evidence 的顺序补齐全维度数据。基础维表中，日常更新默认强制刷新 `stock_basic`、`namechange`、`index_classify` 和 `index_member_all`；`namechange` 是全股票循环接口，cron 通过 `--reference-min-interval-seconds 0.50` 降低调用频率。`stock_company`、`trade_cal`、`bak_basic` 等仍按缺失或覆盖不足时刷新。临时跳过重型数据可加 `--no-include-intraday`、`--no-include-share-float-complete` 或 `--no-include-board-trading`；跳过 `bak_basic` 可加 `--skip-bak-basic`。
+`update` 会按基础维表、日频行情、财务、宏观、全球、事件/资金、打板专题、按日分钟线、解禁 union 和文本 evidence 的顺序补齐全维度数据。基础维表中，日常更新默认强制刷新 `stock_basic`、`stock_company`、`namechange`、`index_classify` 和 `index_member_all`；`namechange` 是全股票循环接口，cron 通过 `--reference-min-interval-seconds 0.50` 降低调用频率。被强刷的 reference 分区如果本地已有非空数据而本次远端返回空，默认跳过覆盖，防止临时空响应污染 raw。`trade_cal`、`bak_basic` 等仍按缺失或覆盖不足时刷新。临时跳过重型数据可加 `--no-include-intraday`、`--no-include-share-float-complete` 或 `--no-include-board-trading`；跳过 `bak_basic` 可加 `--skip-bak-basic`。
+
+日频行情中，日常 cron 会在本次更新窗口内强制刷新 `daily`、`adj_factor`、`daily_basic`、`stk_limit`、`suspend_d`、`limit_list_d`。原因是这些交易日分区可能随源端迟到、补录或修正而变化；raw 层按 `trade_date` 分区存储，定向刷新单只股票需要读写多个日期分区中的行，当前不作为默认路径。手动 `update` 默认仍以补缺为主，只有显式传 `--refresh-daily-datasets` 才强制刷新已有日频分区，避免大窗口手动补历史时意外重拉全历史。
+
+`suspend_d`、`limit_list_d` 允许真实 0 行分区，但强制刷新时如果“本地已有非空分区、远端本次返回空”，默认只记录修正事件并跳过覆盖，避免源端临时空响应污染 raw。只有显式传 `--allow-empty-revision-overwrite` 才允许这种空分区覆盖。
 
 当日源端尚未发布时，必需的日频和交易日事件接口若返回 0 行，更新脚本只打印 `skipped_write`，不写半成品分区；按日分钟线若预期股票池非空也拒绝写 0 行文件。分钟线日常更新默认使用 `--expected-codes-source minute`：已有按日文件用本地分钟覆盖作为 source-aware universe，避免早期 NEEQ/BSE 迁移代码触发全日重下；新交易日文件不存在时仍回退到 `daily` 股票池。
 
-### 3.3 share_float 完整补全
+### 3.3 修正监督与 Revision Ledger
+
+Revision ledger 是源端修正事件账本，路径为 `results/data_quality/revision_events.jsonl`。它不是顶层 status 文件，而是 append-only 事件流，用于提示哪些 raw 分区发生了源端回写或本地/远端不一致，进而触发衍生特征、PIT cache、回测缓存或实验 ledger 的人工/自动复核。
+
+写入来源：
+
+- `force_refresh`：日常 cron 在滚动窗口内强制刷新日频交易日分区。若本地旧分区和 TuShare 当前返回不一致，先写 `REVISION_ALERT`，再按安全规则决定是否覆盖 raw。
+- `sentinel_probe`：`audit.py revision-sentinel` 抽样检查历史日频分区，只比较当前源端返回和本地 raw，不覆盖 raw。
+
+事件字段：
+
+| 字段 | 含义 |
+|---|---|
+| `detected_at` | 发现时间，UTC |
+| `source` | `force_refresh` 或 `sentinel_probe` |
+| `dataset` / `partition` / `path` | 发生差异的数据项、分区和本地文件 |
+| `severity` | 数据项级别的影响强度，例如日线和涨跌停为 high |
+| `downstream_status` | 默认 `pending_review`，表示下游缓存和实验结果尚未确认 |
+| `key_columns` | 用于比较业务键的列 |
+| `old_rows` / `new_rows` | 本地旧分区和源端当前响应行数 |
+| `changed_keys` / `added_keys` / `removed_keys` | 业务键级差异计数 |
+| `missing_key_columns_*` / `duplicate_key_rows_*` / `comparison_issue` | key 缺失或重复键等比较异常 |
+| `affected_ts_codes*` | 可识别股票代码的影响数量和样本 |
+
+处理规则：
+
+- `force_refresh` 对普通非空修正会覆盖 raw，因此 ledger 用于提示下游重建；对 zero-ok 数据集的“旧非空、新空”默认不覆盖。
+- `sentinel_probe` 不覆盖 raw；若发现 revision、本地样本分区缺失或样本无有效检查，summary 为 `warning`，默认返回 0，便于 cron 持续运行；若出现 API 错误或必需数据集远端 0 行，summary 为 `error` 并返回非 0。
+- `revision_summary.json` 记录最近一次 sentinel 的样本、错误、缺本地分区和事件样本；正式数据质量仍以 6 个顶层 status 文件为准。
+- `pending_review` 的关闭不在下载脚本里自动完成。后续应由 Environment/PIT 或实验流程在重建相关缓存后写入独立处理记录，或在人工确认后归档事件。
+
+### 3.4 share_float 完整补全
 
 每日 `update` 默认运行 `share_float_complete`。近期 `ann_date`/`float_date` 下载窗口使用本次 `--start-date` 到 `--end-date`；union 重建窗口固定覆盖 `ann_date=20100101-<end_date>` 和 `float_date=20200101-<end_date>`，所以不会丢失历史 union。
 
@@ -334,7 +372,7 @@ PYTHONUNBUFFERED=1 ~/miniconda3/bin/conda run -n stock python scripts/tushare/do
 
 救援默认使用 `--rescue-universe candidate`，不会全 A 扫描。`--max-rescue-calls` 默认 50000，超过预算会 fail fast。`--rescue-universe all_a` 是完整扫描备用入口，不作为默认路线。
 
-### 3.4 定时更新与夜间审计
+### 3.5 定时更新与夜间审计
 
 TuShare 接口更新时间目录维护在 `configs/tushare_update_schedule.json`。该文件逐项记录当前脚本使用的全部接口、数据域、官方更新时间或更新频率、cron 覆盖策略和官方文档链接。
 
@@ -343,22 +381,27 @@ TuShare 接口更新时间目录维护在 `configs/tushare_update_schedule.json`
 ```cron
 35 23 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_evening_full >> logs/tushare_cron_dispatch.log 2>&1
 30 2 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_nightly_full_audit >> logs/tushare_cron_dispatch.log 2>&1
+0 4 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_daily_revision_sentinel >> logs/tushare_cron_dispatch.log 2>&1
 50 8 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_board_backfill_0850 >> logs/tushare_cron_dispatch.log 2>&1
 55 8 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_text_backfill_0855 >> logs/tushare_cron_dispatch.log 2>&1
 5 9 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_margin_backfill_0905 >> logs/tushare_cron_dispatch.log 2>&1
 15 9 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_margin_retry_0915 >> logs/tushare_cron_dispatch.log 2>&1
+20 9 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_event_flow_audit_0920 >> logs/tushare_cron_dispatch.log 2>&1
 ```
 
 任务含义：
 
-- `cn_evening_full`：23:35 更新当天，覆盖 A 股日线、每日指标、分钟线、资金流、大宗交易、打板专题、文本 evidence、宏观/全球上下文等常规落库窗口。
-- `cn_evening_full` 默认从 `end_date-14` 滚动补缺到 `end_date`，不会每天从 `20200101` 重扫历史；其中 `stock_basic`、`namechange`、`index_classify`、`index_member_all` 每日强制刷新。
-- `cn_nightly_full_audit`：02:30 刷新 6 个正式 data-quality status，审计窗口默认从 `20200101` 到前一自然日。分钟线每天做全窗口文件/sidecar/schema/零行检查和抽样深检，使用 `minute` 覆盖口径，不默认启用逐日全量行级 `--full-scan`。
+- `cn_evening_full`：23:35 更新当天，覆盖 A 股日线、每日指标、分钟线、资金流、大宗交易、打板专题、文本 evidence、宏观/全球上下文等常规落库窗口；两融汇总和明细不在晚间 full update 中拉取，由次日早盘强制回补负责。
+- `cn_evening_full` 默认从 `end_date-30` 滚动补缺到 `end_date`，不会每天从 `20200101` 重扫历史；其中 `stock_basic`、`stock_company`、`namechange`、`index_classify`、`index_member_all` 每日强制刷新。
+- 上述滚动窗口内，保留的日频交易日分区每日强制刷新，用日期分区级重拉跟住近期源端修正；不默认重写全历史。
+- `cn_nightly_full_audit`：02:30 刷新 6 个正式 data-quality status，基础、宏观、分钟、打板和文本审计窗口默认从 `20200101` 到前一自然日；事件/资金 status 在该轮审计中额外后移 1 天，避免早于 09:00 两融数据窗口而产生预期内 error。分钟线每天做全窗口文件/sidecar/schema/零行检查和抽样深检，使用 `minute` 覆盖口径，不默认启用逐日全量行级 `--full-scan`。
+- `cn_daily_revision_sentinel`：04:00 抽样检查历史日频分区，只比较 TuShare 当前返回与本地 raw 是否一致，不覆盖 raw；若发现差异，写入 revision ledger 并刷新 `results/data_quality/revision_summary.json`。
 - `cn_preopen_board_backfill_0850`：强制刷新前一自然日 `kpl_list`、`limit_step`、`limit_cpt_list`，覆盖开盘啦次日 08:30 发布和其他打板专题源端迟到风险。
 - `cn_preopen_text_backfill_0855`：强制刷新前一自然日及再往前 2 天的 `cctv_news`、`news`，用于修复周末/夜间文本源未落库或零行占位。
-- `cn_preopen_margin_backfill_0905` 与 `cn_preopen_margin_retry_0915`：只回补前一自然日 `margin` 和 `margin_detail`，给 09:25 前的快速审计、特征冻结和 Agent 决策留出时间；若前一自然日不是 SSE 交易日，任务成功跳过。
+- `cn_preopen_margin_backfill_0905` 与 `cn_preopen_margin_retry_0915`：强制回补前一自然日 `margin` 和 `margin_detail`，给 09:25 前的快速审计、特征冻结和 Agent 决策留出时间；若前一自然日不是 SSE 交易日，任务成功跳过。
+- `cn_preopen_event_flow_audit_0920`：在 09:15 两融重试后刷新事件/资金 status，使 09:25 前的门控看到最新两融覆盖状态。
 
-runner 使用全局 `.runtime/tushare/locks/tushare_update.lock`，因此 cron job 不会并发读写同一套 raw 数据和状态文件。每次运行都会把资源检查、完整命令和返回码写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，状态写入 ignored 的 `.runtime/tushare/cron_state.json`。
+runner 使用全局 `.runtime/tushare/locks/tushare_update.lock`，因此 cron job 不会并发读写同一套 raw 数据和状态文件。锁冲突时 runner 会等待配置的 `lock_wait_seconds`，发现死进程或超过 `lock_stale_seconds` 的锁会清理；等待超时返回非 0 并写入 cron state，避免静默丢任务。每次运行都会把资源检查、完整命令和返回码写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，状态写入 ignored 的 `.runtime/tushare/cron_state.json`。`skip_if_already_ok` 同时比较日期、命令 hash 和配置 hash；同一天修改调度参数后不会被旧 ok 状态误跳过。
 
 安装或刷新 cron 使用：
 
@@ -369,7 +412,7 @@ crontab -l
 
 不要直接用 `crontab ops/cron/tushare_update.cron` 安装；该形式会替换当前用户整份 crontab。安装脚本只替换 `# BEGIN MacroQuant TuShare update` 与 `# END MacroQuant TuShare update` 之间的托管块，保留其他项目任务。
 
-### 3.5 限频、分页与下载前检查
+### 3.6 限频、分页与下载前检查
 
 - 10000 积分基础频次：常规数据 500 次/分钟，特色数据 300 次/分钟。
 - 独立文本权限频次：新闻资讯 400 次/分钟，公告信息 500 次/分钟，政策法规库 500 次/分钟。

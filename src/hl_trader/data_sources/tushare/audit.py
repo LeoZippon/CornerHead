@@ -84,6 +84,118 @@ def audit_partition_keys(files: list[Path], spec: TradeDateDataset) -> dict[str,
         "missing_key_column_sample": missing_key_column_files[:10],
     }
 
+def select_revision_sentinel_dates(trade_dates: list[str], sample_size: int, seed: str) -> list[str]:
+    if sample_size <= 0 or len(trade_dates) <= sample_size:
+        return sorted(trade_dates)
+    ranked = sorted(trade_dates, key=lambda item: stable_hash({"seed": seed, "trade_date": item}))
+    return sorted(ranked[:sample_size])
+
+def audit_revision_sentinel(args: argparse.Namespace) -> int:
+    repo_root = Path.cwd().resolve()
+    raw_dir = (repo_root / args.raw_dir).resolve()
+    output = Path(args.output or REVISION_SUMMARY_PATH)
+    if not output.is_absolute():
+        output = repo_root / output
+    ledger = Path(args.revision_ledger)
+    if not ledger.is_absolute():
+        ledger = repo_root / ledger
+
+    client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
+    datasets = list(args.datasets or (DAILY_REQUIRED_DATASETS + DAILY_OPTIONAL_DATASETS))
+    trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
+    events: list[dict[str, Any]] = []
+    dataset_reports: list[dict[str, Any]] = []
+    page_limit = args.page_limit or TRADE_DATE_PAGE_LIMIT
+    total_missing_local = 0
+    total_remote_zero = 0
+    total_errors = 0
+    total_no_effective_checks = 0
+
+    for dataset in datasets:
+        spec = DAILY_SPECS[dataset]
+        candidate_dates = [date_value for date_value in trade_dates if max(args.start_date, spec.start_date) <= date_value <= args.end_date]
+        sample_dates = select_revision_sentinel_dates(candidate_dates, args.sample_size, f"{args.seed or args.end_date}:{dataset}")
+        checked = 0
+        missing_local: list[str] = []
+        remote_zero: list[str] = []
+        errors: list[dict[str, str]] = []
+        dataset_events = 0
+        for trade_date in sample_dates:
+            path = raw_dir / spec.api_name / f"trade_date={trade_date}.parquet"
+            if not path.exists():
+                missing_local.append(trade_date)
+                continue
+            try:
+                result, _pages = query_paged(client, spec.api_name, {"trade_date": trade_date}, spec.fields, page_limit)
+            except Exception as exc:  # pragma: no cover - defensive runtime path
+                errors.append({"trade_date": trade_date, "error": str(exc)})
+                continue
+            new_df = frame(result)
+            if new_df.empty and not spec.zero_rows_ok:
+                remote_zero.append(trade_date)
+                continue
+            checked += 1
+            event = build_revision_event(
+                dataset=spec.api_name,
+                partition=f"trade_date={trade_date}",
+                path=path,
+                old_df=pd.read_parquet(path),
+                new_df=new_df,
+                key_columns=list(spec.key_columns),
+                source="sentinel_probe",
+            )
+            if event:
+                append_jsonl(ledger, event)
+                print("REVISION_ALERT " + json.dumps(event, ensure_ascii=False, sort_keys=True))
+                events.append(event)
+                dataset_events += 1
+        no_effective_checks = int(bool(sample_dates) and checked == 0)
+        total_missing_local += len(missing_local)
+        total_remote_zero += len(remote_zero)
+        total_errors += len(errors)
+        total_no_effective_checks += no_effective_checks
+        dataset_reports.append({
+            "dataset": dataset,
+            "candidate_dates": len(candidate_dates),
+            "sampled_dates": len(sample_dates),
+            "checked_dates": checked,
+            "revision_events": dataset_events,
+            "missing_local_dates": len(missing_local),
+            "remote_zero_dates": len(remote_zero),
+            "errors": len(errors),
+            "no_effective_checks": no_effective_checks,
+            "sample_dates": sample_dates[:20],
+            "missing_local_sample": missing_local[:20],
+            "remote_zero_sample": remote_zero[:20],
+            "error_sample": errors[:10],
+        })
+
+    has_error = bool(total_errors or total_remote_zero)
+    has_warning = bool(events or total_missing_local or total_no_effective_checks)
+    status = "error" if has_error else "warning" if has_warning else "ok"
+    report = {
+        "schema_version": 1,
+        "status": status,
+        "audit": "revision_sentinel",
+        "start_date": args.start_date,
+        "end_date": args.end_date,
+        "sample_size": args.sample_size,
+        "seed": args.seed or args.end_date,
+        "raw_dir": str(raw_dir),
+        "revision_ledger": str(ledger),
+        "revision_events": len(events),
+        "missing_local_dates": total_missing_local,
+        "remote_zero_dates": total_remote_zero,
+        "errors": total_errors,
+        "datasets_without_effective_checks": total_no_effective_checks,
+        "datasets": dataset_reports,
+        "revision_event_sample": events[:20],
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"revision sentinel status={status} events={len(events)} errors={total_errors} remote_zero={total_remote_zero} no_effective_checks={total_no_effective_checks} output={output} ledger={ledger}")
+    return 1 if has_error or (events and args.fail_on_revision) else 0
+
 def audit_intraday_by_date(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = (repo_root / args.raw_dir).resolve()
@@ -2297,6 +2409,20 @@ def add_board_parser(sub: argparse._SubParsersAction) -> None:
     core.add_board_filter_args(board)
     board.add_argument("--output", help=f"Defaults to {core.BOARD_TRADING_STATUS_PATH}.")
 
+def add_revision_parser(sub: argparse._SubParsersAction) -> None:
+    revision = sub.add_parser("revision-sentinel", help="sample TuShare source partitions and compare them with local raw data without overwriting raw files")
+    core.add_raw_arg(revision)
+    revision.add_argument("--start-date", default="20200101")
+    revision.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))
+    revision.add_argument("--datasets", nargs="+", choices=core.DAILY_REQUIRED_DATASETS + core.DAILY_OPTIONAL_DATASETS)
+    revision.add_argument("--sample-size", type=int, default=12, help="Deterministic sample size per dataset; <=0 checks all dates.")
+    revision.add_argument("--seed", help="Deterministic sampling seed. Defaults to --end-date.")
+    revision.add_argument("--page-limit", type=int, default=core.TRADE_DATE_PAGE_LIMIT)
+    revision.add_argument("--revision-ledger", default=core.REVISION_EVENTS_PATH)
+    revision.add_argument("--output", default=core.REVISION_SUMMARY_PATH)
+    revision.add_argument("--fail-on-revision", action="store_true", help="Return nonzero when source revisions are found.")
+    core.add_runtime_args(revision, min_interval=0.22, timeout=120)
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2304,6 +2430,7 @@ def parse_args() -> argparse.Namespace:
     add_intraday_parser(sub)
     add_event_macro_parsers(sub)
     add_board_parser(sub)
+    add_revision_parser(sub)
     return parser.parse_args()
 
 def main() -> int:
@@ -2322,6 +2449,8 @@ def main() -> int:
         return audit_macro_only(args)
     if args.command == "board-trading":
         return audit_board_trading_only(args)
+    if args.command == "revision-sentinel":
+        return audit_revision_sentinel(args)
     raise RuntimeError(f"unknown command {args.command}")
 
 if __name__ == "__main__":

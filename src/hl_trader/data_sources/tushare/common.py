@@ -12,6 +12,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 import pandas as pd
@@ -26,6 +27,10 @@ BASE_RESEARCH_STATUS_PATH = "results/data_quality/base_research_status.json"
 TEXT_EVIDENCE_STATUS_PATH = "results/data_quality/text_evidence_status.json"
 
 INTRADAY_MINUTES_STATUS_PATH = "results/data_quality/intraday_minutes_status.json"
+
+REVISION_EVENTS_PATH = "results/data_quality/revision_events.jsonl"
+
+REVISION_SUMMARY_PATH = "results/data_quality/revision_summary.json"
 
 MACRO_CONTEXT_STATUS_PATH = "results/data_quality/macro_context_status.json"
 
@@ -931,7 +936,8 @@ def load_token(repo_root: Path) -> str:
 def frame(result: ApiResult) -> pd.DataFrame:
     return pd.DataFrame(result.items, columns=result.fields)
 
-def query_paged(client: TuShareClient, api_name: str, params: dict[str, Any], fields: str = "", page_limit: int = 10000) -> tuple[ApiResult, int]:
+def query_paged(client: TuShareClient, api_name: str, params: dict[str, Any], fields: str = "", page_limit: int | None = 10000) -> tuple[ApiResult, int]:
+    page_limit = page_limit or 10000
     all_items: list[list[Any]] = []
     result_fields: list[str] = []
     pages = 0
@@ -968,6 +974,164 @@ def write_parquet(path: Path, df: pd.DataFrame, *, api_name: str, params: dict[s
         "format": "parquet",
     }
     path.with_suffix(path.suffix + ".meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+def canonical_revision_value(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if text.lower() in {"nan", "none", "nat"}:
+        return ""
+    try:
+        decimal = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return text
+    if not decimal.is_finite():
+        return text
+    normalized = format(decimal.normalize(), "f")
+    if "." in normalized:
+        normalized = normalized.rstrip("0").rstrip(".")
+    return normalized or "0"
+
+def compare_keyed_frames(old_df: pd.DataFrame, new_df: pd.DataFrame, key_columns: list[str]) -> dict[str, Any]:
+    keys = list(key_columns)
+    missing_old = [column for column in keys if column not in old_df.columns]
+    missing_new = [column for column in keys if column not in new_df.columns]
+    base: dict[str, Any] = {
+        "key_columns": keys,
+        "old_rows": int(len(old_df)),
+        "new_rows": int(len(new_df)),
+        "missing_key_columns_old": missing_old,
+        "missing_key_columns_new": missing_new,
+        "duplicate_key_rows_old": 0,
+        "duplicate_key_rows_new": 0,
+        "comparison_issue": "",
+    }
+    if missing_old or missing_new:
+        return {
+            **base,
+            "changed": True,
+            "comparison_issue": "missing_key_columns",
+            "changed_keys": [],
+            "added_keys": [],
+            "removed_keys": [],
+        }
+    duplicate_old = int(old_df.duplicated(keys).sum()) if not old_df.empty else 0
+    duplicate_new = int(new_df.duplicated(keys).sum()) if not new_df.empty else 0
+    base["duplicate_key_rows_old"] = duplicate_old
+    base["duplicate_key_rows_new"] = duplicate_new
+    if duplicate_old or duplicate_new:
+        return {
+            **base,
+            "changed": True,
+            "comparison_issue": "duplicate_key_rows",
+            "changed_keys": [],
+            "added_keys": [],
+            "removed_keys": [],
+        }
+    value_columns = sorted((set(old_df.columns) | set(new_df.columns)) - set(keys))
+
+    def keyed_hashes(df: pd.DataFrame) -> dict[tuple[str, ...], str]:
+        if df.empty:
+            return {}
+        normalized = df.copy()
+        for column in keys + value_columns:
+            if column not in normalized.columns:
+                normalized[column] = ""
+        normalized = normalized[keys + value_columns]
+        rows: dict[tuple[str, ...], str] = {}
+        for record in normalized.to_dict("records"):
+            key = tuple(canonical_revision_value(record[column]) for column in keys)
+            values = {column: canonical_revision_value(record[column]) for column in value_columns}
+            rows[key] = stable_hash(values)
+        return rows
+
+    old_rows = keyed_hashes(old_df)
+    new_rows = keyed_hashes(new_df)
+    old_keys = set(old_rows)
+    new_keys = set(new_rows)
+    changed_keys = sorted(key for key in old_keys & new_keys if old_rows[key] != new_rows[key])
+    added_keys = sorted(new_keys - old_keys)
+    removed_keys = sorted(old_keys - new_keys)
+    return {
+        **base,
+        "changed": bool(changed_keys or added_keys or removed_keys),
+        "changed_keys": changed_keys,
+        "added_keys": added_keys,
+        "removed_keys": removed_keys,
+    }
+
+def revision_severity(dataset: str) -> str:
+    if dataset in {"daily", "stk_limit", "suspend_d"}:
+        return "high"
+    if dataset in {"adj_factor", "daily_basic", "limit_list_d", "share_float_complete"}:
+        return "medium"
+    return "low"
+
+def build_revision_event(
+    *,
+    dataset: str,
+    partition: str,
+    path: Path,
+    old_df: pd.DataFrame,
+    new_df: pd.DataFrame,
+    key_columns: list[str],
+    source: str,
+) -> dict[str, Any] | None:
+    comparison = compare_keyed_frames(old_df, new_df, key_columns)
+    if not comparison.get("changed"):
+        return None
+    keys = comparison["key_columns"]
+    ts_code_index = keys.index("ts_code") if "ts_code" in keys else None
+    all_changed = comparison["changed_keys"] + comparison["added_keys"] + comparison["removed_keys"]
+    affected_codes = sorted(
+        {
+            key[ts_code_index]
+            for key in all_changed
+            if ts_code_index is not None and len(key) > ts_code_index and key[ts_code_index]
+        }
+    )
+    event = {
+        "detected_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source": source,
+        "dataset": dataset,
+        "api_name": dataset,
+        "partition": partition,
+        "path": str(path),
+        "severity": revision_severity(dataset),
+        "downstream_status": "pending_review",
+        "key_columns": keys,
+        "old_rows": comparison["old_rows"],
+        "new_rows": comparison["new_rows"],
+        "changed_keys": len(comparison["changed_keys"]),
+        "added_keys": len(comparison["added_keys"]),
+        "removed_keys": len(comparison["removed_keys"]),
+        "missing_key_columns_old": comparison.get("missing_key_columns_old", []),
+        "missing_key_columns_new": comparison.get("missing_key_columns_new", []),
+        "duplicate_key_rows_old": comparison.get("duplicate_key_rows_old", 0),
+        "duplicate_key_rows_new": comparison.get("duplicate_key_rows_new", 0),
+        "comparison_issue": comparison.get("comparison_issue", ""),
+        "affected_ts_codes": len(affected_codes),
+        "affected_ts_codes_sample": affected_codes[:20],
+        "changed_keys_sample": [list(key) for key in comparison["changed_keys"][:5]],
+        "added_keys_sample": [list(key) for key in comparison["added_keys"][:5]],
+        "removed_keys_sample": [list(key) for key in comparison["removed_keys"][:5]],
+    }
+    event["event_id"] = stable_hash({
+        key: value
+        for key, value in event.items()
+        if key not in {"detected_at", "downstream_status"}
+    })
+    return event
+
+def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 def read_many(files: list[Path], columns: list[str] | None = None) -> pd.DataFrame:
     frames = [pd.read_parquet(path, columns=columns) for path in files]

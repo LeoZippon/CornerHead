@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +20,8 @@ DEFAULT_CONFIG = Path("configs/tushare_update_schedule.json")
 RUNTIME_ROOT = Path(".runtime/tushare")
 STATE_PATH = RUNTIME_ROOT / "cron_state.json"
 DISPATCH_LOG_PATH = Path("logs/tushare_cron_dispatch.log")
+DEFAULT_LOCK_WAIT_SECONDS = 900
+DEFAULT_LOCK_STALE_SECONDS = 21600
 
 
 @dataclass
@@ -77,6 +81,12 @@ def build_context(args: argparse.Namespace) -> RunContext:
 
 def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
     raw_dir = ctx.config.get("default_raw_dir", "data/raw")
+    event_flow_end_date = ctx.end_date
+    event_extra_offset = int(ctx.job.get("event_flow_end_extra_offset_days", 0))
+    if event_extra_offset:
+        event_flow_end_date = (
+            datetime.strptime(ctx.end_date, "%Y%m%d").date() - timedelta(days=event_extra_offset)
+        ).strftime("%Y%m%d")
     return [
         [
             ctx.python,
@@ -129,7 +139,7 @@ def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
             "--start-date",
             ctx.start_date,
             "--end-date",
-            ctx.end_date,
+            event_flow_end_date,
             "--raw-dir",
             raw_dir,
         ],
@@ -224,6 +234,46 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
         command.extend(ctx.config.get("default_update_args", []))
         command.extend(ctx.job.get("extra_args", []))
         return [command]
+    if operation == "audit_event_flow":
+        command = [
+            ctx.python,
+            "scripts/tushare/audit.py",
+            "event-flow",
+            "--start-date",
+            ctx.start_date,
+            "--end-date",
+            ctx.end_date,
+            "--raw-dir",
+            raw_dir,
+        ]
+        command.extend(ctx.job.get("extra_args", []))
+        return [command]
+    if operation == "revision_sentinel":
+        revision_config = ctx.config.get("revision_monitor", {})
+        command = [
+            ctx.python,
+            "scripts/tushare/audit.py",
+            "revision-sentinel",
+            "--start-date",
+            ctx.start_date,
+            "--end-date",
+            ctx.end_date,
+            "--raw-dir",
+            raw_dir,
+        ]
+        if revision_config.get("ledger_path"):
+            command.extend(["--revision-ledger", str(revision_config["ledger_path"])])
+        if revision_config.get("summary_path"):
+            command.extend(["--output", str(revision_config["summary_path"])])
+        command.extend(ctx.config.get("default_update_args", []))
+        extra_args = list(ctx.job.get("extra_args", []))
+        if "--sample-size" not in extra_args and revision_config.get("sentinel_sample_size") is not None:
+            extra_args.extend(["--sample-size", str(revision_config["sentinel_sample_size"])])
+        if "--datasets" not in extra_args and revision_config.get("sentinel_datasets"):
+            extra_args.append("--datasets")
+            extra_args.extend(str(dataset) for dataset in revision_config["sentinel_datasets"])
+        command.extend(extra_args)
+        return [command]
     if operation == "audit_full":
         commands = build_audit_full_commands(ctx)
         commands.extend(ctx.job.get("extra_commands", []))
@@ -247,14 +297,64 @@ def write_state(state: dict) -> None:
     tmp.replace(STATE_PATH)
 
 
-def acquire_lock(lock_name: str) -> Path:
+def stable_hash(value: object) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def lock_is_stale(lock: Path, stale_seconds: int) -> bool:
+    try:
+        lines = lock.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return False
+    values = dict(line.split("=", 1) for line in lines if "=" in line)
+    pid_text = values.get("pid", "")
+    if pid_text.isdigit():
+        return not pid_is_alive(int(pid_text))
+    started_at = values.get("started_at", "")
+    if started_at:
+        try:
+            started = datetime.fromisoformat(started_at)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            if (datetime.now(timezone.utc) - started).total_seconds() > stale_seconds:
+                return True
+        except ValueError:
+            return False
+    return False
+
+
+def acquire_lock(lock_name: str, wait_seconds: int, stale_seconds: int) -> Path:
     lock = RUNTIME_ROOT / "locks" / f"{lock_name}.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-    try:
-        fd = os.open(lock, flags)
-    except FileExistsError as exc:
-        raise RuntimeError(f"lock exists, another run may be active: {lock}") from exc
+    deadline = time.monotonic() + max(0, wait_seconds)
+    while True:
+        try:
+            fd = os.open(lock, flags)
+            break
+        except FileExistsError as exc:
+            if lock_is_stale(lock, stale_seconds):
+                try:
+                    lock.unlink()
+                    append_dispatch(f"{utc_now()} removed_stale_lock path={lock}")
+                    continue
+                except FileNotFoundError:
+                    continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(f"lock exists after waiting {wait_seconds}s, another run may be active: {lock}") from exc
+            time.sleep(min(15.0, remaining))
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(f"pid={os.getpid()}\nstarted_at={utc_now()}\n")
     return lock
@@ -297,6 +397,18 @@ def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path) -> in
     return 1 if any(code != 0 for code in returncodes) else 0
 
 
+def should_skip_completed(ctx: RunContext, args: argparse.Namespace, job_state: dict, payload: dict) -> bool:
+    return bool(
+        ctx.job.get("skip_if_already_ok", True)
+        and not args.force_run
+        and job_state.get("start_date") == ctx.start_date
+        and job_state.get("end_date") == ctx.end_date
+        and job_state.get("status") == "ok"
+        and job_state.get("command_hash") == payload["command_hash"]
+        and job_state.get("config_hash") == payload["config_hash"]
+    )
+
+
 def main() -> int:
     args = parse_args()
     ctx = build_context(args)
@@ -308,6 +420,8 @@ def main() -> int:
         "start_date": ctx.start_date,
         "end_date": ctx.end_date,
         "commands": commands,
+        "command_hash": stable_hash(commands),
+        "config_hash": stable_hash(ctx.config),
         "log_path": str(log_path),
         "timezone": ctx.timezone_name,
     }
@@ -318,27 +432,45 @@ def main() -> int:
     os.chdir(ctx.repo_root)
     state = read_state()
     job_state = state.get(ctx.job_name, {})
-    if (
-        ctx.job.get("skip_if_already_ok", True)
-        and not args.force_run
-        and job_state.get("end_date") == ctx.end_date
-        and job_state.get("status") == "ok"
-    ):
+    if should_skip_completed(ctx, args, job_state, payload):
         message = json.dumps({"status": "skipped_already_ok", **payload}, ensure_ascii=False)
         append_dispatch(f"{utc_now()} {message}")
         print(message)
         return 0
 
     try:
-        lock = acquire_lock("tushare_update")
+        lock = acquire_lock(
+            "tushare_update",
+            int(ctx.job.get("lock_wait_seconds", ctx.config.get("default_lock_wait_seconds", DEFAULT_LOCK_WAIT_SECONDS))),
+            int(ctx.job.get("lock_stale_seconds", ctx.config.get("default_lock_stale_seconds", DEFAULT_LOCK_STALE_SECONDS))),
+        )
     except RuntimeError as exc:
-        message = json.dumps({"status": "skipped_lock_exists", "job": ctx.job_name, "end_date": ctx.end_date, "error": str(exc)}, ensure_ascii=False)
+        state[ctx.job_name] = {
+            "status": "error",
+            "returncode": 1,
+            "start_date": ctx.start_date,
+            "end_date": ctx.end_date,
+            "command_hash": payload["command_hash"],
+            "config_hash": payload["config_hash"],
+            "log_path": str(log_path),
+            "error": str(exc),
+            "updated_at": utc_now(),
+        }
+        write_state(state)
+        message = json.dumps({**state[ctx.job_name], "job": ctx.job_name}, ensure_ascii=False)
         append_dispatch(f"{utc_now()} {message}")
         print(message)
-        return 0
+        return 1
 
     returncode = 1
     try:
+        state = read_state()
+        job_state = state.get(ctx.job_name, {})
+        if should_skip_completed(ctx, args, job_state, payload):
+            message = json.dumps({"status": "skipped_already_ok_after_lock", **payload}, ensure_ascii=False)
+            append_dispatch(f"{utc_now()} {message}")
+            print(message)
+            return 0
         returncode = run_update(ctx, commands, log_path)
         status = "ok" if returncode == 0 else "error"
         state[ctx.job_name] = {
@@ -346,6 +478,8 @@ def main() -> int:
             "returncode": returncode,
             "start_date": ctx.start_date,
             "end_date": ctx.end_date,
+            "command_hash": payload["command_hash"],
+            "config_hash": payload["config_hash"],
             "log_path": str(log_path),
             "updated_at": utc_now(),
         }
