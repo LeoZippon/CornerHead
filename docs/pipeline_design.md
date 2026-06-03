@@ -1,6 +1,6 @@
 # Pipeline Design
 
-整理日期：2026-05-31
+整理日期：2026-06-03
 
 本文档记录 MacroQuant 的运行编排层：CLI 如何调用 feature build、development WFO、held-out control、LLM shadow，以及 Pipeline 如何组合 Environment 和 Agent。Environment 原语见 `docs/environment_design.md`；Agent 决策逻辑见 `docs/agent_design.md`；数据下载和审计见 `docs/data_documentation.md`；QMT 执行端见 `docs/QMT_documentation.md`。
 
@@ -89,13 +89,15 @@ agent -> 不拥有 broker state
 
 ## 3. CLI 映射
 
-`scripts/hl.py` 当前提供四个子命令：
+`scripts/hl.py` 当前提供六个子命令：
 
 ### 3.1 子命令
 
 | CLI | 运行边界 | 当前写入 |
 |---|---|---|
 | `build-features` | raw -> PIT feature | `data/features/<dataset>/feature_date=<YYYYMMDD>.parquet` |
+| `build-fundamental-events` | raw fundamental -> PIT event layer | `data/features/fundamental_events/<dataset>/available_month=<YYYYMM>.parquet` |
+| `audit-fundamental-events` | PIT event layer audit | `results/data_quality/fundamental_events_status.json` |
 | `run-development` | held-out 前 rolling WFO | experiment ledger |
 | `run-heldout` | 冻结参数 held-out control | held-out ledger |
 | `llm-shadow` | evidence pack -> shadow decision | evidence JSONL、shadow ledger |
@@ -116,10 +118,23 @@ CLI 规则：
 入口：
 
 ```bash
+PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py build-fundamental-events \
+  --raw-dir data/raw \
+  --output-root data/features/fundamental_events \
+  --start-date 20200101 \
+  --end-date 20251231
+
+PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py audit-fundamental-events \
+  --events-root data/features/fundamental_events \
+  --start-date 20200101 \
+  --end-date 20251231 \
+  --require-partitions
+
 PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py build-features \
   --raw-dir data/raw \
   --output-root data/features \
   --dataset daily_alpha \
+  --fundamental-events-dir data/features/fundamental_events \
   --start-date 20200102 \
   --end-date 20251231
 ```
@@ -128,12 +143,14 @@ PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scr
 
 当前流程：
 
-1. `scripts/hl.py` 解析 `FeatureBuildConfig`。
-2. 调用 `DailyPITFeatureBuilder(args.raw_dir)`。
-3. 从 raw 日频分区读取 `daily`、`daily_basic`、`stk_limit`、`suspend_d`、可选 `limit_list_d`。
-4. 构造下一交易日可交易的 `daily_alpha`。
-5. 按 `feature_date` 分区写入 `data/features/<dataset>/`。
-6. 返回行数、分区数、首尾分区路径。
+1. `build-fundamental-events` 可先从 raw 财务与基本面数据构造 `fundamental_events`，并用 `audit-fundamental-events` 检查事件层；自动化接入 `daily_alpha` 前使用 `--require-partitions` 作为门控。
+2. `scripts/hl.py` 解析 `FeatureBuildConfig`。
+3. 调用 `DailyPITFeatureBuilder(args.raw_dir)`。
+4. 从 raw 日频分区读取 `daily`、`daily_basic`、`stk_limit`、`suspend_d`、可选 `limit_list_d`。
+5. 如果传入 `--fundamental-events-dir`，按 `available_at <= feature available_at` 接入最新可见财务指标和分红事件。
+6. 构造下一交易日可交易的 `daily_alpha`。夜间 cron 首次发现 `fundamental_events` 缺少分区时从研究起点初始化；已有分区后维护最近 120 天滚动窗口。
+7. 按 `feature_date` 分区写入 `data/features/<dataset>/`。
+8. 返回行数、分区数、首尾分区路径。
 
 ### 4.3 输出约束
 

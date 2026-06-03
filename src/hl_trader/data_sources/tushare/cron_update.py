@@ -248,6 +248,62 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
         ]
         command.extend(ctx.job.get("extra_args", []))
         return [command]
+    if operation == "hl_feature_pipeline":
+        raw_dir = ctx.config.get("default_raw_dir", "data/raw")
+        feature_root = ctx.config.get("default_feature_root", "data/features")
+        fundamental_root = ctx.job.get("fundamental_events_root", f"{feature_root}/fundamental_events")
+        feature_start_date = feature_pipeline_start_date(ctx, fundamental_root)
+        daily_dataset = ctx.job.get("daily_alpha_dataset", "daily_alpha")
+        commands = [
+            [
+                ctx.python,
+                "scripts/hl.py",
+                "build-fundamental-events",
+                "--raw-dir",
+                raw_dir,
+                "--output-root",
+                fundamental_root,
+                "--start-date",
+                feature_start_date,
+                "--end-date",
+                ctx.end_date,
+            ],
+            [
+                ctx.python,
+                "scripts/hl.py",
+                "audit-fundamental-events",
+                "--events-root",
+                fundamental_root,
+                "--start-date",
+                feature_start_date,
+                "--end-date",
+                ctx.end_date,
+                "--output",
+                ctx.job.get("fundamental_events_status", "results/data_quality/fundamental_events_status.json"),
+                "--require-partitions",
+            ],
+            [
+                ctx.python,
+                "scripts/hl.py",
+                "build-features",
+                "--raw-dir",
+                raw_dir,
+                "--output-root",
+                feature_root,
+                "--dataset",
+                daily_dataset,
+                "--fundamental-events-dir",
+                fundamental_root,
+                "--start-date",
+                feature_start_date,
+                "--end-date",
+                ctx.end_date,
+            ],
+        ]
+        commands[0].extend(ctx.job.get("fundamental_events_extra_args", []))
+        commands[1].extend(ctx.job.get("fundamental_events_audit_extra_args", []))
+        commands[2].extend(ctx.job.get("daily_alpha_extra_args", []))
+        return commands
     if operation == "revision_sentinel":
         revision_config = ctx.config.get("revision_monitor", {})
         command = [
@@ -279,6 +335,16 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
         commands.extend(ctx.job.get("extra_commands", []))
         return commands
     raise ValueError(f"unsupported cron operation: {operation}")
+
+
+def feature_pipeline_start_date(ctx: RunContext, fundamental_root: str) -> str:
+    if not ctx.job.get("initialize_from_default_start_date_when_missing", True):
+        return ctx.start_date
+    root = ctx.repo_root / fundamental_root
+    has_partitions = root.exists() and any(root.glob("*/available_month=*.parquet"))
+    if has_partitions:
+        return ctx.start_date
+    return str(ctx.config.get("default_start_date", ctx.start_date))
 
 
 def read_state() -> dict:
@@ -387,9 +453,15 @@ def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path) -> in
         for index, command in enumerate(commands, start=1):
             log.write(f"\n$ {' '.join(command)}\n")
             log.flush()
-            process = subprocess.run(command, cwd=ctx.repo_root, stdout=log, stderr=subprocess.STDOUT, check=False)
+            env = os.environ.copy()
+            src_path = str(ctx.repo_root / "src")
+            env["PYTHONPATH"] = src_path if not env.get("PYTHONPATH") else f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
+            process = subprocess.run(command, cwd=ctx.repo_root, stdout=log, stderr=subprocess.STDOUT, check=False, env=env)
             returncodes.append(process.returncode)
             log.write(f"\ncommand_index={index}\nreturncode={process.returncode}\n")
+            if process.returncode != 0 and ctx.job.get("fail_fast", True):
+                log.write(f"fail_fast=true; skipped_remaining_commands={len(commands) - index}\n")
+                break
         run_probe(["nvidia-smi"], log)
         run_probe(["free", "-h"], log)
         log.write(f"returncodes={returncodes}\n")

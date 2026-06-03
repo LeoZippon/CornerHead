@@ -1,6 +1,6 @@
 # Data Documentation
 
-整理日期：2026-06-02
+整理日期：2026-06-03
 
 本文档记录 MacroQuant 当前认可的数据边界、下载与更新流程、审计规则、单位口径和 Raw PIT 合同。历史执行细节和阶段性排查记录写入 `LOGBOOK.md` 与 `docs/logbook/DETAILED_LOGBOOK.md`，不放在本文档里。
 
@@ -138,20 +138,20 @@ TuShare 实现位于 `src/hl_trader/data_sources/tushare/`：
 
 #### 2.2.3 财务与基本面
 
-| 数据 | 接口 | 范围/拉取方式 | PIT 注意 |
-|---|---|---|---|
-| 利润表 | `income_vip` | 按报告期 | 保留 `f_ann_date/report_type/comp_type` |
-| 资产负债表 | `balancesheet_vip` | 按报告期 | 单次大窗口可能触顶 |
-| 现金流量表 | `cashflow_vip` | 按报告期 | 单次大窗口可能触顶 |
-| 财务指标 | `fina_indicator_vip` | 按报告期 | 无 `f_ann_date` 时按 `ann_date` 更保守 |
-| 业绩预告 | `forecast_vip` | 按公告月 | 事件和预期修正 |
-| 业绩快报 | `express_vip` | 按公告月 | 财报前置可用信息 |
-| 分红送股 | `dividend` | 全 `stock_basic` 代码 | `ann_date` 可为空，结合 `imp_ann_date/ex_date/record_date/pay_date` |
-| 审计意见 | `fina_audit` | 全 `stock_basic` 代码 | 需按 `ts_code` 拉取 |
-| 主营业务构成 | `fina_mainbz_vip` | 全 `stock_basic` 代码 | period 查询易触顶，优先按股票代码 |
-| 披露计划 | `disclosure_date` | 按报告期 | 披露计划/实际披露日期，不是数值表 |
+| 数据 | 接口 | raw 拉取方式 | 日常刷新策略 | PIT 注意 |
+|---|---|---|---|---|
+| 利润表 | `income_vip` | 按报告期 | 最近 6 个报告期强刷 | 保留 `f_ann_date/report_type/comp_type` |
+| 资产负债表 | `balancesheet_vip` | 按报告期 | 最近 6 个报告期强刷 | 单次大窗口可能触顶 |
+| 现金流量表 | `cashflow_vip` | 按报告期 | 最近 6 个报告期强刷 | 单次大窗口可能触顶 |
+| 财务指标 | `fina_indicator_vip` | 按报告期 | 最近 6 个报告期强刷 | 无 `f_ann_date` 时按 `ann_date` 更保守 |
+| 业绩预告 | `forecast_vip` | 按公告月 | 最近 3 个公告月强刷 | 事件和预期修正 |
+| 业绩快报 | `express_vip` | 按公告月 | 最近 3 个公告月强刷 | 财报前置可用信息 |
+| 分红送股 | `dividend` | 全 `stock_basic` 代码 | 90 日内财务公告/披露命中股票定向强刷，并用 90 日日期探针补充分红候选股票 | PIT 可见性只用 `imp_ann_date/ann_date`；`ex_date/record_date/pay_date` 仅作事件属性 |
+| 审计意见 | `fina_audit` | 全 `stock_basic` 代码 | 90 日内财务公告/披露命中股票定向强刷 | 需按 `ts_code` 拉取 |
+| 主营业务构成 | `fina_mainbz_vip` | 全 `stock_basic` 代码 | 90 日内财务公告/披露命中股票定向强刷 | period 查询易触顶，优先按股票代码 |
+| 披露计划 | `disclosure_date` | 按报告期 | 最近 6 个报告期强刷 | 披露计划/实际披露日期，不是数值表 |
 
-财务基本面原始层保留多版本记录、重复业务键、少量空公告日和稀疏事件分区；进入 PIT 特征层时再按可见时间和业务键选择。
+财务基本面原始层保留多版本记录、重复业务键、少量空公告日和稀疏事件分区。raw 层仍按 TuShare 稳妥查询方式存储：报表按报告期、预告/快报按公告月、分红/审计意见/主营业务构成按 `ts_code` 快照。Environment 会再构造 `fundamental_events` PIT-ready 事件层，按 `available_month` 输出，供 `daily_alpha` 或 Agent evidence 按可见时间选择。
 
 ### 2.3 宏观与全球上下文
 
@@ -304,6 +304,8 @@ TuShare 实现位于 `src/hl_trader/data_sources/tushare/`：
 
 日频行情中，日常 cron 会在本次更新窗口内强制刷新 `daily`、`adj_factor`、`daily_basic`、`stk_limit`、`suspend_d`、`limit_list_d`。原因是这些交易日分区可能随源端迟到、补录或修正而变化；raw 层按 `trade_date` 分区存储，定向刷新单只股票需要读写多个日期分区中的行，当前不作为默认路径。手动 `update` 默认仍以补缺为主，只有显式传 `--refresh-daily-datasets` 才强制刷新已有日频分区，避免大窗口手动补历史时意外重拉全历史。
 
+财务基本面中，日常 cron 会显式传入 `--fundamental-refresh-period-count 6`、`--fundamental-refresh-ann-month-count 3`、`--fundamental-refresh-event-days 90`、`--fundamental-refresh-ts-code-datasets dividend fina_audit fina_mainbz_vip` 和 `--fundamental-dividend-probe-days 90`。这表示最近 6 个报告期、最近 3 个公告月会强刷；`dividend/fina_audit/fina_mainbz_vip` 不做全市场每日强刷，而是从这些新拉分区中筛选 90 日内 `f_ann_date/ann_date/first_ann_date/imp_ann_date/actual_date/pre_date` 命中的股票，再加上分红 90 日日期探针发现的候选股票，定向刷新这些 `ts_code` 快照。
+
 `suspend_d`、`limit_list_d` 允许真实 0 行分区，但强制刷新时如果“本地已有非空分区、远端本次返回空”，默认只记录修正事件并跳过覆盖，避免源端临时空响应污染 raw。只有显式传 `--allow-empty-revision-overwrite` 才允许这种空分区覆盖。
 
 当日源端尚未发布时，必需的日频和交易日事件接口若返回 0 行，更新脚本只打印 `skipped_write`，不写半成品分区；按日分钟线若预期股票池非空也拒绝写 0 行文件。分钟线日常更新默认使用 `--expected-codes-source minute`：已有按日文件用本地分钟覆盖作为 source-aware universe，避免早期 NEEQ/BSE 迁移代码触发全日重下；新交易日文件不存在时仍回退到 `daily` 股票池。
@@ -381,6 +383,7 @@ TuShare 接口更新时间目录维护在 `configs/tushare_update_schedule.json`
 ```cron
 35 23 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_evening_full >> logs/tushare_cron_dispatch.log 2>&1
 30 2 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_nightly_full_audit >> logs/tushare_cron_dispatch.log 2>&1
+35 3 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_nightly_feature_build >> logs/tushare_cron_dispatch.log 2>&1
 0 4 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_daily_revision_sentinel >> logs/tushare_cron_dispatch.log 2>&1
 50 8 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_board_backfill_0850 >> logs/tushare_cron_dispatch.log 2>&1
 55 8 * * * cd /Data/lzp/MacroQuant && mkdir -p logs && /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_text_backfill_0855 >> logs/tushare_cron_dispatch.log 2>&1
@@ -395,6 +398,7 @@ TuShare 接口更新时间目录维护在 `configs/tushare_update_schedule.json`
 - `cn_evening_full` 默认从 `end_date-30` 滚动补缺到 `end_date`，不会每天从 `20200101` 重扫历史；其中 `stock_basic`、`stock_company`、`namechange`、`index_classify`、`index_member_all` 每日强制刷新。
 - 上述滚动窗口内，保留的日频交易日分区每日强制刷新，用日期分区级重拉跟住近期源端修正；不默认重写全历史。
 - `cn_nightly_full_audit`：02:30 刷新 6 个正式 data-quality status，基础、宏观、分钟、打板和文本审计窗口默认从 `20200101` 到前一自然日；事件/资金 status 在该轮审计中额外后移 1 天，避免早于 09:00 两融数据窗口而产生预期内 error。分钟线每天做全窗口文件/sidecar/schema/零行检查和抽样深检，使用 `minute` 覆盖口径，不默认启用逐日全量行级 `--full-scan`。
+- `cn_nightly_feature_build`：03:35 构造并审计 `fundamental_events` PIT 事件层，再用该事件层刷新 `daily_alpha`。若 `fundamental_events` 尚无分区，任务从 `default_start_date` 做首次初始化；已有分区后按最近 120 天滚动维护。cron 审计会要求目标窗口至少存在 PIT 事件行，并在 `audit-fundamental-events` 发现结构性 error 时返回非 0，不继续把坏事件层接入 `daily_alpha`。
 - `cn_daily_revision_sentinel`：04:00 抽样检查历史日频分区，只比较 TuShare 当前返回与本地 raw 是否一致，不覆盖 raw；若发现差异，写入 revision ledger 并刷新 `results/data_quality/revision_summary.json`。
 - `cn_preopen_board_backfill_0850`：强制刷新前一自然日 `kpl_list`、`limit_step`、`limit_cpt_list`，覆盖开盘啦次日 08:30 发布和其他打板专题源端迟到风险。
 - `cn_preopen_text_backfill_0855`：强制刷新前一自然日及再往前 2 天的 `cctv_news`、`news`，用于修复周末/夜间文本源未落库或零行占位。
@@ -681,8 +685,8 @@ Data 层只定义 raw 数据能否支持 PIT，不负责生成 feature、observa
 
 ### 5.5 跨域 PIT 要求
 
-- 财务：raw 层保留 `f_ann_date`、`ann_date`、`period`、`report_type`、`comp_type` 和多版本记录；Environment 选择 `available_at <= decision_time` 的最新可见版本。
-- 分红、解禁、回购、股东事件：raw 层同时保留公告日期和事件生效日期；Environment 做 PIT 时只能用公告可见性决定是否暴露未来事件属性。
+- 财务：raw 层保留 `f_ann_date`、`ann_date`、`period`、`report_type`、`comp_type` 和多版本记录；Environment 构造 `data/features/fundamental_events/<dataset>/available_month=<YYYYMM>.parquet` 后，再选择 `available_at <= decision_time` 的最新可见版本。
+- 分红、解禁、回购、股东事件：raw 层同时保留公告日期和事件生效日期；Environment 做 PIT 时只能用公告可见性决定是否暴露未来事件属性，缺少公告可见日的分红记录不进入 `fundamental_events`。
 - 资金流、两融、大宗：raw 层记录交易日和保守可见时间；日频策略默认只能影响下一交易日及以后。
 - 宏观：raw 层保留原始月份、季度、发布日期、发布日程和保守可见时间；Environment 后续可用 `cn_schedule.publish_date` 或更精确发布时间替换保守规则。
 - 文本：raw 层保留来源、URL/标题、发布时间、正文或 HTML hash；Agent evidence 层再生成 `evidence_id`、`document_hash`、截断正文和实体映射。

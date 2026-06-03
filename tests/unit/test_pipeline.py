@@ -188,6 +188,28 @@ class ExperimentRunnerTest(unittest.TestCase):
         spec.loader.exec_module(module)
         self.assertTrue(callable(module.main))
 
+    def test_fundamental_event_audit_raises_on_error_status(self):
+        script_path = Path("scripts/hl.py").resolve()
+        spec = importlib.util.spec_from_file_location("hl_cli_test_audit", script_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events_dir = root / "events" / "dividend"
+            events_dir.mkdir(parents=True)
+            pd.DataFrame([{"dataset": "wrong"}]).to_parquet(events_dir / "available_month=202001.parquet", index=False)
+            args = type("Args", (), {
+                "events_root": root / "events",
+                "start_date": "20200101",
+                "end_date": "20200131",
+                "dataset": ["dividend"],
+                "output": root / "status.json",
+            })()
+            with self.assertRaisesRegex(ValueError, "fundamental event audit failed"):
+                module.run_audit_fundamental_events(args)
+
 
 # Source: test_formulaic_wfo_runner.py
 import unittest

@@ -148,6 +148,25 @@ class DailyMarketClient:
         return common.ApiResult(result_fields, [row], common.stable_hash({"api_name": api_name, "params": params}))
 
 
+class FundamentalClient:
+    def __init__(self):
+        self.calls = []
+
+    def query(self, api_name, params=None, fields="", retries=5):
+        params = params or {}
+        self.calls.append((api_name, dict(params)))
+        if api_name == "income_vip":
+            result_fields = ["ts_code", "ann_date", "f_ann_date", "end_date", "report_type", "comp_type", "end_type"]
+            row = ["000001.SZ", "20200430", "20200430", params.get("period", "20200331"), "1", "1", "1"]
+        elif api_name in {"dividend", "fina_audit", "fina_mainbz_vip"}:
+            result_fields = ["ts_code", "ann_date", "end_date"]
+            row = [params.get("ts_code", "000001.SZ"), "20200430", "20200331"]
+        else:
+            result_fields = ["ts_code"]
+            row = ["000001.SZ"]
+        return common.ApiResult(result_fields, [row], common.stable_hash({"api_name": api_name, "params": params}))
+
+
 class EmptyTradeDateClient:
     def __init__(self):
         self.calls = []
@@ -543,6 +562,71 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn("--start-date 20200101 --end-date 20260601", text)
         self.assertIn("--raw-dir raw", text)
 
+    def test_cron_feature_pipeline_builds_fundamental_events_then_daily_alpha(self):
+        ctx = cron_update.RunContext(
+            config={"default_raw_dir": "raw", "default_feature_root": "features"},
+            repo_root=self.root,
+            python="/env/python",
+            job_name="cn_nightly_feature_build",
+            job={
+                "operation": "hl_feature_pipeline",
+                "fundamental_events_root": "features/fundamental_events",
+                "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
+                "daily_alpha_dataset": "daily_alpha",
+            },
+            start_date="20260201",
+            end_date="20260601",
+            timezone_name="Asia/Shanghai",
+        )
+
+        commands = cron_update.build_job_commands(ctx)
+
+        self.assertEqual(len(commands), 3)
+        self.assertIn("scripts/hl.py build-fundamental-events", " ".join(commands[0]))
+        self.assertIn("--raw-dir raw --output-root features/fundamental_events", " ".join(commands[0]))
+        self.assertIn("scripts/hl.py audit-fundamental-events", " ".join(commands[1]))
+        self.assertIn("--events-root features/fundamental_events", " ".join(commands[1]))
+        self.assertIn("--require-partitions", " ".join(commands[1]))
+        self.assertIn("scripts/hl.py build-features", " ".join(commands[2]))
+        self.assertIn("--dataset daily_alpha --fundamental-events-dir features/fundamental_events", " ".join(commands[2]))
+
+    def test_cron_feature_pipeline_initializes_missing_event_layer_from_default_start(self):
+        ctx = cron_update.RunContext(
+            config={"default_raw_dir": "raw", "default_feature_root": "features", "default_start_date": "20200101"},
+            repo_root=self.root,
+            python="/env/python",
+            job_name="cn_nightly_feature_build",
+            job={"operation": "hl_feature_pipeline", "start_date_lookback_days": 120},
+            start_date="20260201",
+            end_date="20260601",
+            timezone_name="Asia/Shanghai",
+        )
+
+        commands = cron_update.build_job_commands(ctx)
+
+        self.assertIn("--start-date 20200101 --end-date 20260601", " ".join(commands[0]))
+        self.assertIn("--start-date 20200101 --end-date 20260601", " ".join(commands[1]))
+        self.assertIn("--start-date 20200101 --end-date 20260601", " ".join(commands[2]))
+
+    def test_cron_feature_pipeline_uses_rolling_window_after_event_layer_exists(self):
+        partition = self.root / "features" / "fundamental_events" / "dividend" / "available_month=202605.parquet"
+        partition.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"ts_code": "000001.SZ"}]).to_parquet(partition, index=False)
+        ctx = cron_update.RunContext(
+            config={"default_raw_dir": "raw", "default_feature_root": "features", "default_start_date": "20200101"},
+            repo_root=self.root,
+            python="/env/python",
+            job_name="cn_nightly_feature_build",
+            job={"operation": "hl_feature_pipeline", "start_date_lookback_days": 120},
+            start_date="20260201",
+            end_date="20260601",
+            timezone_name="Asia/Shanghai",
+        )
+
+        commands = cron_update.build_job_commands(ctx)
+
+        self.assertIn("--start-date 20260201 --end-date 20260601", " ".join(commands[0]))
+
     def test_cron_lock_waits_and_reports_live_locks(self):
         runtime = self.root / ".runtime" / "tushare"
         lock = runtime / "locks" / "tushare_update.lock"
@@ -574,6 +658,34 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "lock exists"):
                 cron_update.acquire_lock("tushare_update", wait_seconds=0, stale_seconds=1)
         self.assertTrue(lock.exists())
+
+    def test_cron_multi_command_jobs_fail_fast(self):
+        ctx = cron_update.RunContext(
+            config={},
+            repo_root=self.root,
+            python="/env/python",
+            job_name="unit_fail_fast",
+            job={"fail_fast": True},
+            start_date="20200101",
+            end_date="20200102",
+            timezone_name="Asia/Shanghai",
+        )
+        commands = [["cmd1"], ["cmd2"], ["cmd3"]]
+        calls = []
+
+        class Result:
+            def __init__(self, returncode):
+                self.returncode = returncode
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            return Result(1 if command == ["cmd2"] else 0)
+
+        with patch.object(cron_update, "run_probe"), patch.object(cron_update.subprocess, "run", side_effect=fake_run):
+            code = cron_update.run_update(ctx, commands, self.root / "cron.log")
+
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [["cmd1"], ["cmd2"]])
 
     def test_reference_refresh_datasets_force_selected_tables(self):
         self._write_trade_cal("20200102")
@@ -698,6 +810,66 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ledger_lines = (self.root / "revision_events.jsonl").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(ledger_lines), 1)
         self.assertEqual(json.loads(ledger_lines[0])["downstream_status"], "pending_review")
+
+    def test_fundamental_update_refreshes_recent_periods_and_affected_ts_code_snapshots(self):
+        stock_basic = self.raw_dir / "stock_basic" / "list_status=L.parquet"
+        stock_basic.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"ts_code": "000001.SZ"}]).to_parquet(stock_basic, index=False)
+        for dataset in ("dividend", "fina_audit", "fina_mainbz_vip"):
+            path = self.raw_dir / dataset / "ts_code=000001.SZ.parquet"
+            common.write_parquet(
+                path,
+                pd.DataFrame([{"ts_code": "000001.SZ", "ann_date": "20190101", "end_date": "20181231"}]),
+                api_name=dataset,
+                params={"ts_code": "000001.SZ"},
+                fields=["ts_code", "ann_date", "end_date"],
+                source_hash="old",
+            )
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200601",
+            end_date="20200603",
+            datasets=["dividend", "fina_audit", "fina_mainbz_vip", "income_vip"],
+            force=False,
+            page_limit=None,
+            max_codes=None,
+            fundamental_refresh_period_count=2,
+            fundamental_refresh_ann_month_count=0,
+            fundamental_refresh_ts_code_datasets=["dividend", "fina_audit", "fina_mainbz_vip"],
+            fundamental_dividend_probe_days=0,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+
+        client = FundamentalClient()
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
+            self.assertEqual(download.download_fundamental(args), 0)
+
+        calls = [(api, params) for api, params in client.calls if params.get("offset") == 0]
+        income_periods = [params["period"] for api, params in calls if api == "income_vip"]
+        self.assertEqual(income_periods, ["20191231", "20200331"])
+        refreshed_ts_code_calls = [(api, params.get("ts_code")) for api, params in calls if api in {"dividend", "fina_audit", "fina_mainbz_vip"}]
+        self.assertEqual(refreshed_ts_code_calls, [("dividend", "000001.SZ"), ("fina_audit", "000001.SZ"), ("fina_mainbz_vip", "000001.SZ")])
+
+    def test_recent_fundamental_event_codes_filters_period_rows_by_visible_date(self):
+        period_path = self.raw_dir / "income_vip" / "period=20200331.parquet"
+        period_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([
+            {"ts_code": "000001.SZ", "ann_date": "20200430", "end_date": "20200331"},
+            {"ts_code": "000002.SZ", "ann_date": "20190430", "end_date": "20190331"},
+        ]).to_parquet(period_path, index=False)
+
+        codes = download.recent_fundamental_event_codes(
+            self.raw_dir,
+            {"20200331"},
+            set(),
+            ["income_vip"],
+            [],
+            "20200401",
+            "20200603",
+        )
+
+        self.assertEqual(codes, {"000001.SZ"})
 
     def test_revision_sentinel_compares_without_overwriting_raw(self):
         self._write_trade_cal("20200102")
