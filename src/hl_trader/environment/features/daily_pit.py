@@ -9,6 +9,7 @@ import pandas as pd
 
 from hl_trader.environment.data import PITDataStore, default_tushare_contracts
 from hl_trader.environment.data.pit import yyyymmdd
+from .fundamental_events import read_fundamental_events
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,7 @@ class FeatureBuildConfig:
     lookback_days: int = 80
     output_dataset: str = "daily_alpha"
     include_limit_list: bool = True
+    fundamental_events_dir: Path | None = None
 
 
 class DailyPITFeatureBuilder:
@@ -139,6 +141,8 @@ class DailyPITFeatureBuilder:
         frame = frame[frame["tradable_date"].notna()].copy()
         frame["available_at"] = frame["feature_date"].map(self._available_at_for_feature_date)
         frame["result_available_time"] = frame["available_at"]
+        if config.fundamental_events_dir is not None:
+            frame = self._join_fundamental_events(frame, Path(config.fundamental_events_dir))
 
         keep = [
             "feature_date",
@@ -178,7 +182,8 @@ class DailyPITFeatureBuilder:
             "is_suspended",
             "limit",
         ]
-        return frame[[col for col in keep if col in frame.columns]].reset_index(drop=True)
+        derived_keep = [col for col in frame.columns if col.startswith(("fund_", "dividend_"))]
+        return frame[[col for col in keep + derived_keep if col in frame.columns]].reset_index(drop=True)
 
     def write_partitioned(self, features: pd.DataFrame, output_root: str | Path, dataset: str = "daily_alpha") -> list[Path]:
         output_root = Path(output_root) / dataset
@@ -226,3 +231,90 @@ class DailyPITFeatureBuilder:
         return frame.groupby("ts_code", sort=False)["ret_1d"].transform(
             lambda s: s.rolling(window, min_periods=window).apply(compound, raw=True)
         )
+
+    def _join_fundamental_events(self, frame: pd.DataFrame, events_dir: Path) -> pd.DataFrame:
+        if frame.empty or not events_dir.exists():
+            return frame
+        max_available_at = str(frame["available_at"].max())
+        events = read_fundamental_events(events_dir, max_available_at, datasets=("fina_indicator_vip", "dividend"))
+        if events.empty:
+            return frame
+        out = frame.copy()
+        joins: list[pd.DataFrame] = []
+        for feature_date, cross_section in out.groupby("feature_date", sort=True):
+            decision_time = pd.Timestamp(cross_section["available_at"].iloc[0])
+            visible = events[pd.to_datetime(events["available_at"], errors="coerce") <= decision_time]
+            if visible.empty:
+                continue
+            joined = pd.DataFrame({"_row_id": cross_section.index, "ts_code": cross_section["ts_code"].values})
+            indicator = self._latest_by_symbol(visible[visible["dataset"] == "fina_indicator_vip"], prefer_end_date=True)
+            if not indicator.empty:
+                indicator = self._fundamental_indicator_columns(indicator)
+                joined = joined.merge(indicator, on="ts_code", how="left")
+            dividend = self._latest_by_symbol(visible[visible["dataset"] == "dividend"], prefer_end_date=False)
+            if not dividend.empty:
+                dividend = self._dividend_columns(dividend, str(feature_date))
+                joined = joined.merge(dividend, on="ts_code", how="left")
+            joins.append(joined.set_index("_row_id"))
+        if not joins:
+            return out
+        features = pd.concat(joins, axis=0).sort_index()
+        for column in features.columns:
+            if column != "ts_code":
+                out.loc[features.index, column] = features[column]
+        return out
+
+    @staticmethod
+    def _latest_by_symbol(events: pd.DataFrame, *, prefer_end_date: bool) -> pd.DataFrame:
+        if events.empty or "ts_code" not in events.columns:
+            return pd.DataFrame()
+        preferred = ["end_date", "available_at", "ann_date"] if prefer_end_date else ["available_at", "ex_date", "record_date", "pay_date"]
+        sort_cols = [col for col in preferred if col in events.columns]
+        return events.sort_values(sort_cols).drop_duplicates("ts_code", keep="last")
+
+    @staticmethod
+    def _fundamental_indicator_columns(events: pd.DataFrame) -> pd.DataFrame:
+        columns = ["ts_code"]
+        rename = {
+            "end_date": "fund_latest_end_date",
+            "available_at": "fund_latest_available_at",
+            "roe": "fund_roe",
+            "roe_dt": "fund_roe_dt",
+            "roa": "fund_roa",
+            "grossprofit_margin": "fund_grossprofit_margin",
+            "netprofit_margin": "fund_netprofit_margin",
+            "debt_to_assets": "fund_debt_to_assets",
+            "assets_turn": "fund_assets_turn",
+            "or_yoy": "fund_or_yoy",
+            "netprofit_yoy": "fund_netprofit_yoy",
+        }
+        columns.extend(col for col in rename if col in events.columns)
+        out = events[columns].copy()
+        out = out.rename(columns={col: rename[col] for col in columns if col in rename})
+        for column in out.columns:
+            if column.startswith("fund_") and column not in {"fund_latest_end_date", "fund_latest_available_at"}:
+                out[column] = pd.to_numeric(out[column], errors="coerce")
+        return out
+
+    @staticmethod
+    def _dividend_columns(events: pd.DataFrame, feature_date: str) -> pd.DataFrame:
+        columns = ["ts_code"]
+        rename = {
+            "available_at": "dividend_latest_available_at",
+            "ex_date": "dividend_latest_ex_date",
+            "record_date": "dividend_latest_record_date",
+            "pay_date": "dividend_latest_pay_date",
+            "cash_div": "dividend_cash_div",
+            "cash_div_tax": "dividend_cash_div_tax",
+            "base_share": "dividend_base_share",
+        }
+        columns.extend(col for col in rename if col in events.columns)
+        out = events[columns].copy().rename(columns={col: rename[col] for col in columns if col in rename})
+        for column in ("dividend_cash_div", "dividend_cash_div_tax", "dividend_base_share"):
+            if column in out.columns:
+                out[column] = pd.to_numeric(out[column], errors="coerce")
+        if "dividend_latest_ex_date" in out.columns:
+            ex_date = pd.to_datetime(out["dividend_latest_ex_date"], errors="coerce")
+            feature_dt = pd.Timestamp(feature_date)
+            out["dividend_days_to_ex"] = (ex_date - feature_dt).dt.days
+        return out

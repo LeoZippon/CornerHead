@@ -997,6 +997,11 @@ def canonical_revision_value(value: Any) -> str:
         normalized = normalized.rstrip("0").rstrip(".")
     return normalized or "0"
 
+REVISION_CHANGED_KEY_SAMPLE_SIZE = 5
+REVISION_CHANGED_COLUMN_SAMPLE_SIZE = 12
+REVISION_ADDED_REMOVED_ROW_SAMPLE_SIZE = 5
+
+
 def compare_keyed_frames(old_df: pd.DataFrame, new_df: pd.DataFrame, key_columns: list[str]) -> dict[str, Any]:
     keys = list(key_columns)
     missing_old = [column for column in keys if column not in old_df.columns]
@@ -1019,6 +1024,10 @@ def compare_keyed_frames(old_df: pd.DataFrame, new_df: pd.DataFrame, key_columns
             "changed_keys": [],
             "added_keys": [],
             "removed_keys": [],
+            "changed_columns": {},
+            "changed_columns_sample": [],
+            "added_rows_sample": [],
+            "removed_rows_sample": [],
         }
     duplicate_old = int(old_df.duplicated(keys).sum()) if not old_df.empty else 0
     duplicate_new = int(new_df.duplicated(keys).sum()) if not new_df.empty else 0
@@ -1032,10 +1041,14 @@ def compare_keyed_frames(old_df: pd.DataFrame, new_df: pd.DataFrame, key_columns
             "changed_keys": [],
             "added_keys": [],
             "removed_keys": [],
+            "changed_columns": {},
+            "changed_columns_sample": [],
+            "added_rows_sample": [],
+            "removed_rows_sample": [],
         }
     value_columns = sorted((set(old_df.columns) | set(new_df.columns)) - set(keys))
 
-    def keyed_hashes(df: pd.DataFrame) -> dict[tuple[str, ...], str]:
+    def keyed_rows(df: pd.DataFrame) -> dict[tuple[str, ...], dict[str, str]]:
         if df.empty:
             return {}
         normalized = df.copy()
@@ -1043,26 +1056,52 @@ def compare_keyed_frames(old_df: pd.DataFrame, new_df: pd.DataFrame, key_columns
             if column not in normalized.columns:
                 normalized[column] = ""
         normalized = normalized[keys + value_columns]
-        rows: dict[tuple[str, ...], str] = {}
+        rows: dict[tuple[str, ...], dict[str, str]] = {}
         for record in normalized.to_dict("records"):
             key = tuple(canonical_revision_value(record[column]) for column in keys)
             values = {column: canonical_revision_value(record[column]) for column in value_columns}
-            rows[key] = stable_hash(values)
+            rows[key] = values
         return rows
 
-    old_rows = keyed_hashes(old_df)
-    new_rows = keyed_hashes(new_df)
+    old_rows = keyed_rows(old_df)
+    new_rows = keyed_rows(new_df)
     old_keys = set(old_rows)
     new_keys = set(new_rows)
-    changed_keys = sorted(key for key in old_keys & new_keys if old_rows[key] != new_rows[key])
+    changed_keys = sorted(key for key in old_keys & new_keys if stable_hash(old_rows[key]) != stable_hash(new_rows[key]))
     added_keys = sorted(new_keys - old_keys)
     removed_keys = sorted(old_keys - new_keys)
+    changed_columns: dict[str, int] = {}
+    changed_columns_sample: list[dict[str, Any]] = []
+    for key in changed_keys:
+        changed_values = []
+        for column in value_columns:
+            old_value = old_rows[key].get(column, "")
+            new_value = new_rows[key].get(column, "")
+            if old_value == new_value:
+                continue
+            changed_columns[column] = changed_columns.get(column, 0) + 1
+            if len(changed_values) < REVISION_CHANGED_COLUMN_SAMPLE_SIZE:
+                changed_values.append({"column": column, "old": old_value, "new": new_value})
+        if changed_values and len(changed_columns_sample) < REVISION_CHANGED_KEY_SAMPLE_SIZE:
+            changed_columns_sample.append({"key": list(key), "changes": changed_values})
+    added_rows_sample = [
+        {"key": list(key), "values": new_rows[key]}
+        for key in added_keys[:REVISION_ADDED_REMOVED_ROW_SAMPLE_SIZE]
+    ]
+    removed_rows_sample = [
+        {"key": list(key), "values": old_rows[key]}
+        for key in removed_keys[:REVISION_ADDED_REMOVED_ROW_SAMPLE_SIZE]
+    ]
     return {
         **base,
         "changed": bool(changed_keys or added_keys or removed_keys),
         "changed_keys": changed_keys,
         "added_keys": added_keys,
         "removed_keys": removed_keys,
+        "changed_columns": changed_columns,
+        "changed_columns_sample": changed_columns_sample,
+        "added_rows_sample": added_rows_sample,
+        "removed_rows_sample": removed_rows_sample,
     }
 
 def revision_severity(dataset: str) -> str:
@@ -1120,6 +1159,10 @@ def build_revision_event(
         "changed_keys_sample": [list(key) for key in comparison["changed_keys"][:5]],
         "added_keys_sample": [list(key) for key in comparison["added_keys"][:5]],
         "removed_keys_sample": [list(key) for key in comparison["removed_keys"][:5]],
+        "changed_columns": comparison.get("changed_columns", {}),
+        "changed_columns_sample": comparison.get("changed_columns_sample", []),
+        "added_rows_sample": comparison.get("added_rows_sample", []),
+        "removed_rows_sample": comparison.get("removed_rows_sample", []),
     }
     event["event_id"] = stable_hash({
         key: value

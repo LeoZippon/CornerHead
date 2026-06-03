@@ -4274,3 +4274,106 @@ Results:
 - First-pass revision verification passed before the second SubAgent audit.
 - Second-pass audit findings were incorporated: `page_limit=None` is normalized, reference forced refreshes skip empty overwrites, required zero-row daily/event-flow partitions raise, and pre-open event-flow status is refreshed after margin retry.
 - Current verification passed: JSON config parse, compileall, TuShare unit tests 34 OK, full unit discovery 123 OK, cron dry-runs for evening/audit/revision/pre-open jobs, `git diff --check`, cache cleanup, final three-way SubAgent review with no blockers, and local cron reinstall/inspection.
+
+## 2026-06-03 Fundamental PIT Refresh Groundwork
+
+Task:
+- Update financial/fundamental raw refresh strategy before deploying it.
+- Add a PIT-ready `fundamental_events` layer.
+- Connect the new PIT layer to `daily_alpha` without changing raw storage semantics.
+
+Changes:
+- `src/hl_trader/data_sources/tushare/download.py`
+  - Added daily refresh controls for 2.2.3 financial data:
+    - latest 6 report periods;
+    - latest 3 announcement months;
+    - targeted affected-code refresh for `dividend`, `fina_audit`, and `fina_mainbz_vip`;
+    - 90-day dividend date-field probes across `ann_date`, `imp_ann_date`, `ex_date`, `record_date`, and `pay_date` to discover affected stocks.
+  - Kept raw storage aligned with stable TuShare query patterns: report-period files, announcement-month files, and `ts_code` snapshots.
+- `configs/tushare_update_schedule.json`
+  - Added the new fundamental refresh arguments to `cn_evening_full`.
+  - Updated financial interface cron policies to reflect latest-period/latest-month/affected-code refresh behavior.
+- `src/hl_trader/environment/features/fundamental_events.py`
+  - Added `FundamentalEventsBuilder`, `FundamentalEventsConfig`, `audit_fundamental_events`, and event readers.
+  - Writes PIT-ready partitions under `data/features/fundamental_events/<dataset>/available_month=<YYYYMM>.parquet`.
+  - Derives conservative `available_at` using `f_ann_date`, `ann_date`, `first_ann_date`, or `imp_ann_date`; dividend rows without `imp_ann_date/ann_date` are excluded from PIT events instead of using future event dates.
+  - Uses statement availability as fallback for `fina_audit` and `fina_mainbz_vip` when their raw rows lack announcement dates.
+- `src/hl_trader/environment/features/daily_pit.py`
+  - Added optional `fundamental_events_dir` support.
+  - Joins latest visible `fina_indicator_vip` and `dividend` PIT event features into `daily_alpha` only when explicitly provided.
+- `scripts/hl.py`
+  - Added `build-fundamental-events` and `audit-fundamental-events`.
+  - Added optional `--fundamental-events-dir` to `build-features`.
+- Updated `docs/data_documentation.md`, `docs/environment_design.md`, and `docs/pipeline_design.md`.
+- SubAgent pre-deploy audit fixes:
+  - `audit-fundamental-events` returns nonzero through CLI error handling when structural errors exist.
+  - Dividend rows without `imp_ann_date/ann_date` are excluded from PIT events.
+  - `available_month` writes use full-month replace and partial-month merge semantics.
+  - Fundamental raw refresh now runs period/announcement-month datasets before affected-code `ts_code` snapshots.
+  - PIT event audit checks window bounds, dataset/path consistency, `available_at_rule` allowlist, `source_path`, `source_hash`, and `source_row_id`.
+  - Complete-month replace also deletes stale PIT partitions when a rebuilt month has no rows for a dataset.
+  - `cn_nightly_feature_build` was added to the managed cron template after raw audit to build/audit `fundamental_events` and refresh recent `daily_alpha` with `--fundamental-events-dir`.
+
+Verification:
+
+```bash
+free -h
+nvidia-smi
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src tests scripts ops
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_environment -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare -v
+```
+
+Results:
+- Resource checks were safe: about 423 GiB available system memory; GPU usage was from existing processes.
+- Compile passed.
+- Environment unit tests passed: 22 OK.
+- TuShare unit tests passed: 35 OK.
+- Follow-up SubAgent audit initially found two deployment risks:
+  - affected `ts_code` selection could become near-full-market because it read whole recent period partitions;
+  - the feature cron was rolling-only when `fundamental_events` had not been initialized.
+- Fixes added after that audit:
+  - affected-code selection now filters refreshed financial rows by a 90-day visible-date window using `f_ann_date/ann_date/first_ann_date/imp_ann_date/actual_date/pre_date`, while dividend also uses 90-day date probes;
+  - `cn_nightly_feature_build` initializes from `default_start_date` when `data/features/fundamental_events` has no partitions;
+  - `audit-fundamental-events --require-partitions` is passed only by cron before `daily_alpha` construction;
+  - `run_update` fail-fast prevents `daily_alpha` build after a failed event-layer audit.
+- The managed cron block was installed and inspected; it includes `cn_nightly_feature_build` at 03:35 Asia/Shanghai.
+- Final verification passed:
+  - `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src tests scripts ops`
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit` -> 135 tests OK
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_nightly_feature_build --end-date 20260603 --dry-run`
+  - `git diff --check`
+- Final SubAgent audit found no blocker/high and explicitly cleared the changes for commit/PR.
+- No real TuShare download or feature build was run during this deployment-prep pass.
+
+## 2026-06-03 Revision Ledger Field-Diff Samples
+
+Task:
+- Make future revision events more actionable by recording which fields changed, not only how many business keys changed.
+
+Changes:
+- `src/hl_trader/data_sources/tushare/common.py`
+  - `compare_keyed_frames` now returns:
+    - `changed_columns`: per-column changed-key counts;
+    - `changed_columns_sample`: up to 5 changed business keys with up to 12 normalized old/new field values each;
+    - `added_rows_sample` and `removed_rows_sample`: up to 5 normalized row-value samples for added/removed business keys.
+  - Existing numeric canonicalization remains in place, so `1` and `1.0` do not create false revisions.
+- `docs/data_documentation.md`
+  - Documented the new revision event fields and the boundary that old JSONL rows are not backfilled.
+
+Verification:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest.test_revision_event_records_changed_columns_and_row_samples tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest.test_revision_comparison_canonicalizes_numeric_values tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest.test_daily_refresh_datasets_force_only_selected_trade_date_dataset -v
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src tests
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
+git diff --check
+```
+
+Results:
+- Targeted revision tests passed: 3 OK.
+- Full unit discovery passed: 136 OK.
+- Compile passed.
+- `git diff --check` passed.
+- A readonly TuShare probe for `limit_list_d` on `20250428` compared the current raw partition with a fresh API response without writing data. The comparator reported 101 old rows, 101 fresh rows, 25 changed keys, 0 added keys, 0 removed keys, and `changed_columns={"limit_amount": 25}`.
+- No data download or ledger rewrite was run; the new fields will appear on future revision events.

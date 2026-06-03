@@ -1,6 +1,6 @@
 # Environment Design
 
-整理日期：2026-05-31
+整理日期：2026-06-03
 
 本文档记录 MacroQuant 的量化环境层：PIT 数据可见性、市场状态、回放、撮合、交易约束、事件检查、WFO fold、配置合同和可审计 ledger 原语。Agent 决策逻辑见 `docs/agent_design.md`；Pipeline 编排流程见 `docs/pipeline_design.md`；数据下载和 raw 审计见 `docs/data_documentation.md`。
 
@@ -19,7 +19,8 @@
   - [4.2 当前日频可见性](#42-当前日频可见性)
 - [5. PIT 特征构造](#5-pit-特征构造)
   - [5.1 日频特征构造](#51-日频特征构造)
-  - [5.2 竞价分钟条校正](#52-竞价分钟条校正)
+  - [5.2 财务事件 PIT 层](#52-财务事件-pit-层)
+  - [5.3 竞价分钟条校正](#53-竞价分钟条校正)
 - [6. 泄漏检查](#6-泄漏检查)
   - [6.1 日频泄漏规则](#61-日频泄漏规则)
 - [7. 跨域 PIT Selector](#7-跨域-pit-selector)
@@ -168,6 +169,7 @@ src/hl_trader/environment/features/daily_pit.py::DailyPITFeatureBuilder
 - `stk_limit`
 - `suspend_d`
 - 可选 `limit_list_d`
+- 可选 `fundamental_events`
 
 当前输出：
 
@@ -186,12 +188,49 @@ data/features/daily_alpha/feature_date=<YYYYMMDD>.parquet
 - `volatility_20d` 为 `ret_1d` 的 20 日滚动标准差。
 - `is_suspended` 来自 `suspend_d`。
 - 涨跌停价格来自 `stk_limit`。
+- 如果传入 `fundamental_events_dir`，按 `available_at <= feature available_at` 选择最新可见财务指标和分红事件，生成 `fund_*`、`dividend_*` 字段。
 - `feature_date = source_trade_date = trade_date`。
 - `tradable_date = 下一交易日`；没有下一交易日的末尾样本丢弃。
 - `available_at` 和 `result_available_time` 使用日频合同的收盘后可见时间。
 - 分区写入采用临时文件替换，避免下游读取半成品。
 
-### 5.2 竞价分钟条校正
+### 5.2 财务事件 PIT 层
+
+实现：
+
+```text
+src/hl_trader/environment/features/fundamental_events.py
+```
+
+`FundamentalEventsBuilder` 从 `data/raw` 的财务与基本面 raw 文件构造 PIT-ready 事件层：
+
+```text
+data/features/fundamental_events/<dataset>/available_month=<YYYYMM>.parquet
+```
+
+构造规则：
+
+- raw 层不改写：报表仍按 `period`，预告/快报按 `ann_month`，分红/审计意见/主营业务构成按 `ts_code` 快照。
+- 输出层统一带 `dataset`、`ts_code`、`available_at`、`available_at_rule`、`available_month`、`business_key`、`source_path`、`source_hash`。
+- 三大报表优先用 `f_ann_date`，否则用 `ann_date`；财务指标用 `ann_date`。
+- 业绩预告和业绩快报优先用 `first_ann_date`，否则用 `ann_date`。
+- 分红优先用 `imp_ann_date`，否则用 `ann_date`；如果二者均缺失，该行不进入 PIT 事件层，`ex_date/record_date/pay_date` 只作为已可见分红事件的未来属性。
+- 审计意见和主营业务构成缺少公告日时，可用同股票同报告期报表的最晚可见时间兜底。
+- 同一业务键多版本记录保留在事件层，具体 feature 或 evidence 选择时再按 `available_at <= decision_time` 取最新可见版本。
+- 写入 `available_month` 分区时，完整月份窗口使用 replace 语义以清理源端删除或改期后的旧事件；非完整月份窗口使用 merge 语义，避免短窗口构造误删同月其他事件。
+
+审计入口：
+
+```bash
+PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py audit-fundamental-events \
+  --events-root data/features/fundamental_events \
+  --start-date 20200101 \
+  --end-date 20260531
+```
+
+审计检查分区存在、必需字段、`available_at` 可解析性、`available_month` 与文件分区一致性、审计窗口内外行、行内 `dataset` 与路径一致性、`available_at_rule` allowlist、`source_path/source_hash/source_row_id` 来源可追溯性、重复 `dataset/business_key/available_at`。人工审计下空分区是 warning；cron 在接入 `daily_alpha` 前会额外传 `--require-partitions`，目标窗口没有任何 PIT 事件行时直接 error 并停止后续 feature build。该审计针对 PIT-ready 事件层，不替代 raw 层 `base_research_status.json`。
+
+### 5.3 竞价分钟条校正
 
 实现：
 
@@ -251,7 +290,7 @@ Selector 规则：
 
 当前扩展边界：
 
-- 财务 selector：根据 `f_ann_date` 优先、`ann_date` 兜底构造 `available_at`，按 `ts_code + period + report_type/comp_type` 选择最新可见版本。
+- 财务 selector：使用 `fundamental_events` 的 `available_at`，按 `ts_code + business_key` 或具体特征业务键选择最新可见版本。
 - 事件 selector：分红、解禁、回购、股东事件用公告日期控制可见性，事件生效日只作为未来事件字段。
 - 资金 selector：资金流、两融和大宗交易使用审计中的盘后或下一日可见规则。
 - 宏观 selector：先使用 raw 保守可见时间，后续优先用 `cn_schedule.publish_date` 或更精确发布时间修正。
@@ -415,7 +454,7 @@ Evaluation 工具：
 ## 14. 待实现环境边界
 
 - `universe` 配置尚未系统性接入股票池 selector。
-- 财务 raw 已下载并审计，但财务 PIT selector 尚未进入 `daily_alpha`。
+- 财务 raw 已下载并审计，`fundamental_events` 已可构造并可选进入 `daily_alpha`。
 - 宏观、全球、文本和分钟数据尚未进入默认公式化特征。
 - 日内交易 track 需要单独使用分钟级 `available_at <= decision_time` 的 PIT 过滤规则。
 - Benchmark、行业中性、风险暴露和超额收益归因需要补充环境/评估原语。

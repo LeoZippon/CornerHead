@@ -1261,28 +1261,172 @@ def download_fundamental(args: argparse.Namespace) -> int:
         stock_codes = load_stock_codes(raw_dir)
         if args.max_codes:
             stock_codes = stock_codes[: args.max_codes]
-    periods = quarter_periods(args.start_date, args.end_date)
-    windows = month_windows(args.start_date, args.end_date)
-    for dataset in datasets:
+    refresh_periods = set(recent_quarter_periods(args.end_date, getattr(args, "fundamental_refresh_period_count", 0)))
+    refresh_months = set(recent_month_keys(args.end_date, getattr(args, "fundamental_refresh_ann_month_count", 0)))
+    periods = sorted(set(quarter_periods(args.start_date, args.end_date)) | refresh_periods)
+    windows_by_month = {month: (start, end, month) for start, end, month in month_windows(args.start_date, args.end_date)}
+    for month in refresh_months:
+        windows_by_month.setdefault(month, month_window_for_key(month, args.end_date))
+    windows = [windows_by_month[month] for month in sorted(windows_by_month)]
+
+    unsupported = [dataset for dataset in datasets if FUNDAMENTAL_SPECS[dataset].strategy not in {"period", "ann_month", "ts_code"}]
+    if unsupported:
+        raise RuntimeError(f"unsupported fundamental strategy for datasets: {unsupported}")
+
+    period_datasets = [dataset for dataset in datasets if FUNDAMENTAL_SPECS[dataset].strategy == "period"]
+    ann_month_datasets = [dataset for dataset in datasets if FUNDAMENTAL_SPECS[dataset].strategy == "ann_month"]
+    ts_code_datasets = [dataset for dataset in datasets if FUNDAMENTAL_SPECS[dataset].strategy == "ts_code"]
+
+    for dataset in period_datasets:
         spec = FUNDAMENTAL_SPECS[dataset]
-        if spec.strategy == "period":
-            download_fundamental_period_dataset(client, raw_dir, spec, periods, args.force, args.page_limit)
-        elif spec.strategy == "ann_month":
-            download_fundamental_ann_month_dataset(client, raw_dir, spec, windows, args.force, args.page_limit)
-        elif spec.strategy == "ts_code":
-            download_fundamental_ts_code_dataset(client, raw_dir, spec, stock_codes, args.force, args.page_limit)
-        else:
-            raise RuntimeError(f"unsupported fundamental strategy {spec.strategy} for {dataset}")
+        download_fundamental_period_dataset(client, raw_dir, spec, periods, args.force, args.page_limit, refresh_periods)
+    for dataset in ann_month_datasets:
+        spec = FUNDAMENTAL_SPECS[dataset]
+        download_fundamental_ann_month_dataset(client, raw_dir, spec, windows, args.force, args.page_limit, refresh_months)
+
+    affected_days = int(getattr(args, "fundamental_refresh_event_days", 90) or 0)
+    affected_start = format_yyyymmdd(parse_yyyymmdd(args.end_date) - timedelta(days=max(affected_days, 1) - 1))
+    affected_codes = recent_fundamental_event_codes(
+        raw_dir,
+        refresh_periods,
+        refresh_months,
+        period_datasets,
+        ann_month_datasets,
+        affected_start,
+        args.end_date,
+    )
+    dividend_probe_codes: set[str] = set()
+    if "dividend" in ts_code_datasets and getattr(args, "fundamental_dividend_probe_days", 0):
+        dividend_probe_codes = probe_recent_dividend_codes(client, args.end_date, args.fundamental_dividend_probe_days, args.page_limit)
+    refresh_ts_code_datasets = set(getattr(args, "fundamental_refresh_ts_code_datasets", []) or [])
+    for dataset in ts_code_datasets:
+        spec = FUNDAMENTAL_SPECS[dataset]
+        force_codes = set()
+        if dataset in refresh_ts_code_datasets:
+            force_codes = set(affected_codes)
+            if dataset == "dividend":
+                force_codes.update(dividend_probe_codes)
+        download_fundamental_ts_code_dataset(client, raw_dir, spec, stock_codes, args.force, args.page_limit, force_codes)
     print(f"fundamental download finished under {raw_dir}")
     return 0
 
-def download_fundamental_period_dataset(client: TuShareClient, raw_dir: Path, spec: FundamentalDataset, periods: list[str], force: bool, page_limit: int) -> None:
+def recent_quarter_periods(end_date: str, count: int) -> list[str]:
+    if count <= 0:
+        return []
+    end = parse_yyyymmdd(end_date)
+    candidates: list[date] = []
+    for year in range(end.year, end.year - 4, -1):
+        for month, day in ((12, 31), (9, 30), (6, 30), (3, 31)):
+            value = date(year, month, day)
+            if value <= end:
+                candidates.append(value)
+    return [format_yyyymmdd(value) for value in sorted(candidates, reverse=True)[:count]]
+
+
+def recent_month_keys(end_date: str, count: int) -> list[str]:
+    if count <= 0:
+        return []
+    end = parse_yyyymmdd(end_date)
+    current = date(end.year, end.month, 1)
+    months: list[str] = []
+    for _ in range(count):
+        months.append(f"{current.year}{current.month:02d}")
+        if current.month == 1:
+            current = date(current.year - 1, 12, 1)
+        else:
+            current = date(current.year, current.month - 1, 1)
+    return months
+
+
+def month_window_for_key(month: str, end_date: str) -> tuple[str, str, str]:
+    year = int(month[:4])
+    month_num = int(month[4:])
+    start = date(year, month_num, 1)
+    last = date(year, month_num, calendar.monthrange(year, month_num)[1])
+    end = min(last, parse_yyyymmdd(end_date))
+    return format_yyyymmdd(start), format_yyyymmdd(end), month
+
+
+def recent_fundamental_event_codes(
+    raw_dir: Path,
+    refresh_periods: set[str],
+    refresh_months: set[str],
+    period_datasets: list[str],
+    ann_month_datasets: list[str],
+    start_date: str,
+    end_date: str,
+) -> set[str]:
+    codes: set[str] = set()
+    for dataset in period_datasets:
+        for period in refresh_periods:
+            codes.update(read_partition_ts_codes(raw_dir / dataset / f"period={period}.parquet", start_date, end_date, require_date_match=True))
+    for dataset in ann_month_datasets:
+        for month in refresh_months:
+            codes.update(read_partition_ts_codes(raw_dir / dataset / f"ann_month={month}.parquet", start_date, end_date, require_date_match=False))
+    return codes
+
+
+FUNDAMENTAL_EVENT_DATE_COLUMNS = ("f_ann_date", "ann_date", "first_ann_date", "imp_ann_date", "actual_date", "pre_date")
+
+
+def read_partition_ts_codes(path: Path, start_date: str | None = None, end_date: str | None = None, require_date_match: bool = False) -> set[str]:
+    if not path.exists():
+        return set()
+    try:
+        frame = pd.read_parquet(path)
+    except Exception:
+        return set()
+    if "ts_code" not in frame.columns:
+        return set()
+    if start_date and end_date:
+        date_columns = [column for column in FUNDAMENTAL_EVENT_DATE_COLUMNS if column in frame.columns]
+        if date_columns:
+            mask = pd.Series(False, index=frame.index)
+            for column in date_columns:
+                mask |= frame[column].map(lambda value: date_value_in_window(value, start_date, end_date))
+            frame = frame[mask]
+        elif require_date_match:
+            return set()
+    return set(frame["ts_code"].dropna().astype(str))
+
+
+def date_value_in_window(value: object, start_date: str, end_date: str) -> bool:
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "nat"}:
+        return False
+    try:
+        parsed = pd.Timestamp(text).strftime("%Y%m%d")
+    except Exception:
+        return False
+    return start_date <= parsed <= end_date
+
+
+def probe_recent_dividend_codes(client: TuShareClient, end_date: str, days: int, page_limit: int | None) -> set[str]:
+    if days <= 0:
+        return set()
+    end = parse_yyyymmdd(end_date)
+    start = end - timedelta(days=days - 1)
+    codes: set[str] = set()
+    for offset in range(days):
+        key = format_yyyymmdd(start + timedelta(days=offset))
+        for param_name in ("ann_date", "imp_ann_date", "ex_date", "record_date", "pay_date"):
+            result, _pages = query_paged(client, "dividend", {param_name: key}, "ts_code", page_limit)
+            df = frame(result)
+            if "ts_code" in df.columns:
+                codes.update(df["ts_code"].dropna().astype(str))
+    if codes:
+        print(f"dividend recent date probes found {len(codes)} candidate codes over {days} days")
+    return codes
+
+
+def download_fundamental_period_dataset(client: TuShareClient, raw_dir: Path, spec: FundamentalDataset, periods: list[str], force: bool, page_limit: int, force_periods: set[str] | None = None) -> None:
+    force_periods = force_periods or set()
     written = 0
     skipped = 0
     total_rows = 0
     for index, period in enumerate(periods, start=1):
         path = raw_dir / spec.api_name / f"period={period}.parquet"
-        if path.exists() and not force:
+        if path.exists() and not force and period not in force_periods:
             skipped += 1
             continue
         params = {spec.period_param: period}
@@ -1297,14 +1441,15 @@ def download_fundamental_period_dataset(client: TuShareClient, raw_dir: Path, sp
             print(f"{spec.api_name} periods {index}/{len(periods)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done periods={len(periods)} skipped={skipped} written={written} rows_written={total_rows}")
 
-def download_fundamental_ann_month_dataset(client: TuShareClient, raw_dir: Path, spec: FundamentalDataset, windows: list[tuple[str, str, str]], force: bool, page_limit: int) -> None:
+def download_fundamental_ann_month_dataset(client: TuShareClient, raw_dir: Path, spec: FundamentalDataset, windows: list[tuple[str, str, str]], force: bool, page_limit: int, force_months: set[str] | None = None) -> None:
+    force_months = force_months or set()
     written = 0
     skipped = 0
     total_rows = 0
     for index, (start_date, end_date, ann_month) in enumerate(windows, start=1):
         path = raw_dir / spec.api_name / f"ann_month={ann_month}.parquet"
         params = {"start_date": start_date, "end_date": end_date}
-        if should_skip_existing_partition(path, force=force, requested_params=params):
+        if ann_month not in force_months and should_skip_existing_partition(path, force=force, requested_params=params):
             skipped += 1
             continue
         result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
@@ -1319,13 +1464,14 @@ def download_fundamental_ann_month_dataset(client: TuShareClient, raw_dir: Path,
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
 
-def download_fundamental_ts_code_dataset(client: TuShareClient, raw_dir: Path, spec: FundamentalDataset, stock_codes: list[str], force: bool, page_limit: int) -> None:
+def download_fundamental_ts_code_dataset(client: TuShareClient, raw_dir: Path, spec: FundamentalDataset, stock_codes: list[str], force: bool, page_limit: int, force_codes: set[str] | None = None) -> None:
+    force_codes = force_codes or set()
     written = 0
     skipped = 0
     total_rows = 0
     for index, ts_code in enumerate(stock_codes, start=1):
         path = raw_dir / spec.api_name / f"ts_code={ts_code}.parquet"
-        if path.exists() and not force:
+        if path.exists() and not force and ts_code not in force_codes:
             skipped += 1
             if index % 500 == 0:
                 print(f"{spec.api_name} codes {index}/{len(stock_codes)} skipped={skipped} written={written}")
@@ -1992,6 +2138,11 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             start_date=start_date,
             end_date=args.end_date,
             datasets=args.fundamental_datasets,
+            fundamental_refresh_period_count=getattr(args, "fundamental_refresh_period_count", 6),
+            fundamental_refresh_ann_month_count=getattr(args, "fundamental_refresh_ann_month_count", 3),
+            fundamental_refresh_ts_code_datasets=getattr(args, "fundamental_refresh_ts_code_datasets", ["dividend", "fina_audit", "fina_mainbz_vip"]),
+            fundamental_refresh_event_days=getattr(args, "fundamental_refresh_event_days", 90),
+            fundamental_dividend_probe_days=getattr(args, "fundamental_dividend_probe_days", 90),
             force=args.force,
             page_limit=args.page_limit,
             min_interval_seconds=args.min_interval_seconds,
@@ -2132,6 +2283,11 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--allow-empty-revision-overwrite", action="store_true")
     parser.add_argument("--skip-bak-basic", action="store_true")
     parser.add_argument("--refresh-reference-datasets", nargs="+", choices=core.REFERENCE_DATASETS, default=[])
+    parser.add_argument("--fundamental-refresh-period-count", type=int, default=0)
+    parser.add_argument("--fundamental-refresh-ann-month-count", type=int, default=0)
+    parser.add_argument("--fundamental-refresh-ts-code-datasets", nargs="+", choices=["dividend", "fina_audit", "fina_mainbz_vip"], default=[])
+    parser.add_argument("--fundamental-refresh-event-days", type=int, default=90)
+    parser.add_argument("--fundamental-dividend-probe-days", type=int, default=0)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--max-codes", type=int)
     parser.add_argument("--codes", nargs="+", help="Optional explicit ts_code list for intraday minute window tests or targeted refreshes.")
@@ -2166,6 +2322,37 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
     )
     parser.add_argument("--reference-min-interval-seconds", type=float, help="Optional lower call frequency for the reference refresh step.")
     parser.add_argument("--fundamental-datasets", nargs="+", choices=core.FUNDAMENTAL_DATASETS)
+    parser.add_argument(
+        "--fundamental-refresh-period-count",
+        type=int,
+        default=6,
+        help="Force-refresh the latest N financial report periods during update, even when the rolling update window does not include quarter-end dates.",
+    )
+    parser.add_argument(
+        "--fundamental-refresh-ann-month-count",
+        type=int,
+        default=3,
+        help="Force-refresh the latest N announcement months for forecast/express style datasets.",
+    )
+    parser.add_argument(
+        "--fundamental-refresh-ts-code-datasets",
+        nargs="+",
+        choices=["dividend", "fina_audit", "fina_mainbz_vip"],
+        default=["dividend", "fina_audit", "fina_mainbz_vip"],
+        help="ts_code snapshot datasets to refresh for recently affected stocks instead of forcing the whole market.",
+    )
+    parser.add_argument(
+        "--fundamental-refresh-event-days",
+        type=int,
+        default=90,
+        help="Select affected ts_code snapshots from recently visible financial announcement/disclosure rows in this trailing-day window.",
+    )
+    parser.add_argument(
+        "--fundamental-dividend-probe-days",
+        type=int,
+        default=90,
+        help="Probe recent dividend date fields to discover affected stocks for targeted ts_code snapshot refresh.",
+    )
     parser.add_argument("--macro-datasets", nargs="+", choices=core.MACRO_DATASETS)
     parser.add_argument("--global-datasets", nargs="+", choices=core.MACRO_DATASETS)
     parser.add_argument("--event-datasets", nargs="+", choices=[dataset for dataset in core.EVENT_FLOW_DATASETS if dataset != "share_float"])
