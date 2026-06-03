@@ -331,6 +331,9 @@ Revision ledger 是源端修正事件账本，路径为 `results/data_quality/re
 | `key_columns` | 用于比较业务键的列 |
 | `old_rows` / `new_rows` | 本地旧分区和源端当前响应行数 |
 | `changed_keys` / `added_keys` / `removed_keys` | 业务键级差异计数 |
+| `changed_columns` | changed key 中各字段发生变化的次数统计 |
+| `changed_columns_sample` | 最多 5 个 changed key 的字段级 old/new 样本，每个 key 最多记录 12 个变化字段 |
+| `added_rows_sample` / `removed_rows_sample` | 最多 5 条新增或删除业务键的规范化行值样本 |
 | `missing_key_columns_*` / `duplicate_key_rows_*` / `comparison_issue` | key 缺失或重复键等比较异常 |
 | `affected_ts_codes*` | 可识别股票代码的影响数量和样本 |
 
@@ -339,6 +342,7 @@ Revision ledger 是源端修正事件账本，路径为 `results/data_quality/re
 - `force_refresh` 对普通非空修正会覆盖 raw，因此 ledger 用于提示下游重建；对 zero-ok 数据集的“旧非空、新空”默认不覆盖。
 - `sentinel_probe` 不覆盖 raw；若发现 revision、本地样本分区缺失或样本无有效检查，summary 为 `warning`，默认返回 0，便于 cron 持续运行；若出现 API 错误或必需数据集远端 0 行，summary 为 `error` 并返回非 0。
 - `revision_summary.json` 记录最近一次 sentinel 的样本、错误、缺本地分区和事件样本；正式数据质量仍以 6 个顶层 status 文件为准。
+- 字段级样本只对新产生的 revision event 生效；历史已写入的 JSONL 事件不会回填 old/new 字段值。
 - `pending_review` 的关闭不在下载脚本里自动完成。后续应由 Environment/PIT 或实验流程在重建相关缓存后写入独立处理记录，或在人工确认后归档事件。
 
 ### 3.4 share_float 完整补全

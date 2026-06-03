@@ -948,6 +948,38 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         self.assertIsNone(event)
 
+    def test_revision_event_records_changed_columns_and_row_samples(self):
+        old_df = pd.DataFrame([
+            {"trade_date": "20200102", "ts_code": "000001.SZ", "close": 10.0, "amount": 100.0},
+            {"trade_date": "20200102", "ts_code": "000002.SZ", "close": 20.0, "amount": 200.0},
+            {"trade_date": "20200102", "ts_code": "000003.SZ", "close": 30.0, "amount": 300.0},
+        ])
+        new_df = pd.DataFrame([
+            {"trade_date": "20200102", "ts_code": "000001.SZ", "close": 10.5, "amount": 100.0},
+            {"trade_date": "20200102", "ts_code": "000002.SZ", "close": 20.0, "amount": 201.5},
+            {"trade_date": "20200102", "ts_code": "000004.SZ", "close": 40.0, "amount": 400.0},
+        ])
+
+        event = common.build_revision_event(
+            dataset="daily",
+            partition="trade_date=20200102",
+            path=self.raw_dir / "daily" / "trade_date=20200102.parquet",
+            old_df=old_df,
+            new_df=new_df,
+            key_columns=["trade_date", "ts_code"],
+            source="unit",
+        )
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event["changed_keys"], 2)
+        self.assertEqual(event["added_keys"], 1)
+        self.assertEqual(event["removed_keys"], 1)
+        self.assertEqual(event["changed_columns"], {"amount": 1, "close": 1})
+        self.assertEqual(event["changed_columns_sample"][0]["key"], ["20200102", "000001.SZ"])
+        self.assertEqual(event["changed_columns_sample"][0]["changes"], [{"column": "close", "old": "10", "new": "10.5"}])
+        self.assertEqual(event["added_rows_sample"][0]["key"], ["20200102", "000004.SZ"])
+        self.assertEqual(event["removed_rows_sample"][0]["key"], ["20200102", "000003.SZ"])
+
     def test_zero_ok_force_refresh_does_not_overwrite_existing_nonempty_partition(self):
         self._write_trade_cal("20200102")
         path = self.raw_dir / "limit_list_d" / "trade_date=20200102.parquet"
