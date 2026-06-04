@@ -25,10 +25,21 @@ class FoldRunResult:
     start_equity: float
     end_equity: float
     fills: int
+    short_theoretical_return: float = 0.0
+    short_cash_collateral: float = 0.0
+    long_return: float | None = None
 
     @property
     def test_return(self) -> float:
         return self.end_equity / self.start_equity - 1.0 if self.start_equity else 0.0
+
+    @property
+    def test_long_return(self) -> float:
+        return self.test_return if self.long_return is None else self.long_return
+
+    @property
+    def test_short_return(self) -> float:
+        return self.short_theoretical_return
 
 
 def monthly_decision_dates(features: pd.DataFrame) -> list[str]:
@@ -222,6 +233,9 @@ class FormulaicWfoRunner:
                 result.start_equity,
                 result.end_equity,
                 result.fills,
+                result.short_theoretical_return,
+                result.short_cash_collateral,
+                result.long_return,
             ))
             if self.ledger:
                 self.ledger.append({"event_type": "fold_result", "result": results[-1]})

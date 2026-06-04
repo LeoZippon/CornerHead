@@ -146,9 +146,9 @@ PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scr
 1. `build-fundamental-events` 可先从 raw 财务与基本面数据构造 `fundamental_events`，并用 `audit-fundamental-events` 检查事件层；自动化接入 `daily_alpha` 前使用 `--require-partitions` 作为门控。
 2. `scripts/hl.py` 解析 `FeatureBuildConfig`。
 3. 调用 `DailyPITFeatureBuilder(args.raw_dir)`。
-4. 从 raw 日频分区读取 `daily`、`daily_basic`、`stk_limit`、`suspend_d`、可选 `limit_list_d`。
+4. 从 raw 日频分区读取 `daily`、`daily_basic`、`stk_limit`、`suspend_d`、可选 `limit_list_d`；`limit_list_d` 当前只白名单接入 `limit`，不把不稳定的 `limit_amount` 写入 `daily_alpha`。
 5. 如果传入 `--fundamental-events-dir`，按 `available_at <= feature available_at` 接入最新可见财务指标和分红事件。
-6. 构造下一交易日可交易的 `daily_alpha`。夜间 cron 首次发现 `fundamental_events` 缺少分区时从研究起点初始化；已有分区后维护最近 120 天滚动窗口。
+6. 构造下一交易日可交易的 `daily_alpha`；`tradable_date` 优先由 SSE `trade_cal` 映射，不要求次日 `daily` 已经落库。夜间 cron 首次发现 `fundamental_events` 缺少分区时从研究起点初始化；已有分区后维护最近 120 天滚动窗口。
 7. 按 `feature_date` 分区写入 `data/features/<dataset>/`。
 8. 返回行数、分区数、首尾分区路径。
 
@@ -191,8 +191,8 @@ PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scr
    - 写入 `fold_start`。
    - `fit_parameters` 在训练窗口选择参数。
    - `run_fold` 在测试窗口运行冻结参数回放。
-   - 写入 `fold_result`。
-7. 汇总所有 fold，写入 `experiment_result`。
+   - 写入 `fold_result`，指标包含 `test_return`、`long_test_return` 和 `short_test_return`。
+7. 汇总所有 fold，写入 `experiment_result`，同时保留 overall、long、short 三组收益统计。
 
 ### 5.3 训练阶段
 
@@ -219,6 +219,7 @@ PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scr
 - Environment portfolio 工具生成等权目标。
 - Pipeline 生成 `enter/add/trim/exit` order reason。
 - Environment BrokerSimulator 执行 T+1、lot、涨跌停、停牌、现金和成本约束。
+- 当前真实执行收益仍是 long-only，`test_return` 与 `long_test_return` 一致；`short_test_return` 只记录理论做空 sleeve，默认无短仓时为 0。
 
 事件动作：
 
@@ -229,6 +230,12 @@ PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scr
   - 跌停状态触发 `exit` 或 `event_de_risk`，但实际成交仍受跌停约束。
 - Pipeline 写 `event_action` 和 `fill`。
 - LLM shadow 不能触发这些动作。
+
+做空研究边界：
+
+- `margin_short_sell` 只来自 LLM shadow 或研究信号，不会自动生成融券订单。
+- 理论做空收益使用 Environment 的 `theoretical_short_return` 计算，默认 100% 现金担保和 18% 年化融券费率。
+- 现金担保会作为独立 short sleeve 统计；如果后续要模拟其占用做多资金，Pipeline 应显式降低 long sleeve 资金，而不是把短仓收益混入 long-only 实盘口径。
 
 ## 6. Held-Out Control Pipeline
 

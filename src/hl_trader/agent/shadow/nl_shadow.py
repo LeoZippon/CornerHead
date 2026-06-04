@@ -10,7 +10,17 @@ from hl_trader.environment.storage import TrialLedger
 from hl_trader.environment.storage.ledger import stable_hash, utc_now_iso
 
 
-DEFAULT_NL_SHADOW_ACTIONS = ("hold", "enter", "exit", "trim", "add", "rebalance", "human_review")
+MARGIN_SHORT_SELL_ACTION = "margin_short_sell"
+DEFAULT_NL_SHADOW_ACTIONS = (
+    "hold",
+    "enter",
+    "exit",
+    "trim",
+    "add",
+    "rebalance",
+    MARGIN_SHORT_SELL_ACTION,
+    "human_review",
+)
 _ALLOWED_NL_SHADOW_ACTIONS = frozenset(DEFAULT_NL_SHADOW_ACTIONS)
 _SECRET_VALUE_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]{8,}")
 _SECRET_KEY_NAMES = {

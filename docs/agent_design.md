@@ -208,9 +208,12 @@ Prompt payload：
 - `trim`
 - `add`
 - `rebalance`
+- `margin_short_sell`
 - `human_review`
 
 这些 action 当前只是自然语言标签。即使模型返回 `enter` 或 `exit`，也只写 shadow ledger，不会转为订单。
+
+`margin_short_sell` 表示“建议关注融券卖出/做空侧观点”，只能用于 shadow 研究记录。它不等同于普通 `sell`，也不会自动生成订单。当前可参考 `margin_secs` 判断交易所融资融券标的资格，但真实执行前仍必须由 Environment/Pipeline 增加券商券源可融、担保品折算、融券费率、强平线、标的白名单和人工确认等约束。
 
 为控制上下文长度，advisor 会压缩 evidence pack：
 
@@ -343,6 +346,7 @@ src/hl_trader/agent/llm/deepseek.py
 
 - 公式化 Agent 输出候选股，Pipeline 才能在冻结 `TradeStrategyPolicy` 下生成调仓订单。
 - LLM shadow 读取 checkpoint 作为上下文，但不能产生可交易订单。
+- LLM shadow 可以记录 `margin_short_sell` 建议，但 BrokerSimulator 当前仍按 long-only 订单边界运行，不读取该建议；做空收益只可作为理论 short sleeve 单独统计。
 - LLM ledger 与实验 ledger 可以共存，但不能被 BrokerSimulator 读取为订单。
 
 ### 10.2 升级条件
