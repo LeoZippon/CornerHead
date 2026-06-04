@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections import defaultdict
 from datetime import date
 from pathlib import Path
 
@@ -89,6 +90,595 @@ def select_revision_sentinel_dates(trade_dates: list[str], sample_size: int, see
         return sorted(trade_dates)
     ranked = sorted(trade_dates, key=lambda item: stable_hash({"seed": seed, "trade_date": item}))
     return sorted(ranked[:sample_size])
+
+REVISION_HISTORY_SAMPLE_STATUS_PATH = "results/data_quality/process/revision_history_sample_status.json"
+REVISION_HISTORY_SAMPLE_EVENTS_PATH = "results/data_quality/process/revision_history_sample_events.jsonl"
+
+def select_revision_history_dates_by_year(trade_dates: list[str], sample_per_year: int, seed: str) -> dict[str, list[str]]:
+    by_year: dict[str, list[str]] = defaultdict(list)
+    for trade_date in sorted(trade_dates):
+        by_year[trade_date[:4]].append(trade_date)
+    selected: dict[str, list[str]] = {}
+    for year, dates in sorted(by_year.items()):
+        if sample_per_year <= 0 or len(dates) <= sample_per_year:
+            selected[year] = sorted(dates)
+            continue
+        ranked = sorted(dates, key=lambda item: stable_hash({"seed": seed, "year": year, "trade_date": item}))
+        selected[year] = sorted(ranked[:sample_per_year])
+    return selected
+
+def revision_numeric_deltas(old_df: pd.DataFrame, new_df: pd.DataFrame, key_columns: list[str]) -> dict[str, Any]:
+    keys = list(key_columns)
+    if old_df.empty or new_df.empty:
+        return {"issue": "empty_side", "columns": {}}
+    missing_old = [column for column in keys if column not in old_df.columns]
+    missing_new = [column for column in keys if column not in new_df.columns]
+    if missing_old or missing_new:
+        return {"issue": "missing_key_columns", "columns": {}}
+    if old_df.duplicated(keys).any() or new_df.duplicated(keys).any():
+        return {"issue": "duplicate_key_rows", "columns": {}}
+
+    def keyed(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        out["__revision_key"] = [
+            tuple(canonical_revision_value(record[column]) for column in keys)
+            for record in out[keys].to_dict("records")
+        ]
+        return out.set_index("__revision_key", drop=True)
+
+    old_keyed = keyed(old_df)
+    new_keyed = keyed(new_df)
+    common_keys = old_keyed.index.intersection(new_keyed.index)
+    common_columns = sorted((set(old_keyed.columns) & set(new_keyed.columns)) - set(keys))
+    columns: dict[str, dict[str, Any]] = {}
+    for column in common_columns:
+        old_values = pd.to_numeric(old_keyed.loc[common_keys, column], errors="coerce")
+        new_values = pd.to_numeric(new_keyed.loc[common_keys, column], errors="coerce")
+        mask = old_values.notna() & new_values.notna() & (old_values != new_values)
+        if not bool(mask.any()):
+            continue
+        deltas = (new_values[mask] - old_values[mask]).astype(float)
+        abs_deltas = deltas.abs()
+        samples = []
+        for key, old_value, new_value, delta in zip(deltas.index[:5], old_values[mask].iloc[:5], new_values[mask].iloc[:5], deltas.iloc[:5]):
+            samples.append({
+                "key": list(key) if isinstance(key, tuple) else [str(key)],
+                "old": float(old_value),
+                "new": float(new_value),
+                "delta": float(delta),
+            })
+        columns[column] = {
+            "changed_cells": int(mask.sum()),
+            "sum_abs_delta": float(abs_deltas.sum()),
+            "sum_signed_delta": float(deltas.sum()),
+            "max_abs_delta": float(abs_deltas.max()),
+            "abs_deltas": [float(value) for value in abs_deltas.tolist()],
+            "samples": samples,
+        }
+    return {"issue": "", "columns": columns}
+
+def keyed_revision_rows(df: pd.DataFrame, key_columns: list[str], value_columns: list[str]) -> dict[tuple[str, ...], dict[str, str]]:
+    if df.empty:
+        return {}
+    normalized = df.copy()
+    for column in key_columns + value_columns:
+        if column not in normalized.columns:
+            normalized[column] = ""
+    rows: dict[tuple[str, ...], dict[str, str]] = {}
+    for record in normalized[key_columns + value_columns].to_dict("records"):
+        key = tuple(canonical_revision_value(record[column]) for column in key_columns)
+        rows[key] = {column: canonical_revision_value(record[column]) for column in value_columns}
+    return rows
+
+def revision_number(value: str) -> float | None:
+    if value == "":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+def revision_value_transitions(old_df: pd.DataFrame, new_df: pd.DataFrame, key_columns: list[str]) -> dict[str, Any]:
+    keys = list(key_columns)
+    missing_old = [column for column in keys if column not in old_df.columns]
+    missing_new = [column for column in keys if column not in new_df.columns]
+    if missing_old or missing_new:
+        return {"issue": "missing_key_columns", "columns": {}}
+    if old_df.duplicated(keys).any() or new_df.duplicated(keys).any():
+        return {"issue": "duplicate_key_rows", "columns": {}}
+    value_columns = sorted((set(old_df.columns) | set(new_df.columns)) - set(keys))
+    old_rows = keyed_revision_rows(old_df, keys, value_columns)
+    new_rows = keyed_revision_rows(new_df, keys, value_columns)
+    columns: dict[str, dict[str, Any]] = {}
+    for key in sorted(set(old_rows) & set(new_rows)):
+        for column in value_columns:
+            old_value = old_rows[key].get(column, "")
+            new_value = new_rows[key].get(column, "")
+            if old_value == new_value:
+                continue
+            old_number = revision_number(old_value)
+            new_number = revision_number(new_value)
+            transition = ""
+            magnitude: float | None = None
+            if old_value and not new_value and old_number is not None:
+                transition = "numeric_to_blank"
+                magnitude = abs(old_number)
+            elif not old_value and new_value and new_number is not None:
+                transition = "blank_to_numeric"
+                magnitude = abs(new_number)
+            if not transition or magnitude is None:
+                continue
+            stats = columns.setdefault(column, {}).setdefault(transition, {"count": 0, "sum_abs_value": 0.0, "max_abs_value": 0.0, "abs_values": [], "samples": []})
+            stats["count"] += 1
+            stats["sum_abs_value"] += magnitude
+            stats["max_abs_value"] = max(float(stats["max_abs_value"]), magnitude)
+            stats["abs_values"].append(magnitude)
+            if len(stats["samples"]) < 8:
+                stats["samples"].append({"key": list(key), "old": old_value, "new": new_value})
+    return {"issue": "", "columns": columns}
+
+def percentile(values: list[float], pct: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = int(round((len(ordered) - 1) * pct))
+    return float(ordered[index])
+
+def merge_numeric_deltas(summary: dict[str, Any], numeric: dict[str, Any]) -> None:
+    if numeric.get("issue"):
+        issue = str(numeric["issue"])
+        summary["numeric_delta_issues"][issue] = summary["numeric_delta_issues"].get(issue, 0) + 1
+        return
+    for column, stats in numeric.get("columns", {}).items():
+        aggregate = summary["numeric_deltas"].setdefault(column, {
+            "changed_cells": 0,
+            "sum_abs_delta": 0.0,
+            "sum_signed_delta": 0.0,
+            "max_abs_delta": 0.0,
+            "abs_deltas": [],
+            "samples": [],
+        })
+        aggregate["changed_cells"] += int(stats["changed_cells"])
+        aggregate["sum_abs_delta"] += float(stats["sum_abs_delta"])
+        aggregate["sum_signed_delta"] += float(stats["sum_signed_delta"])
+        aggregate["max_abs_delta"] = max(float(aggregate["max_abs_delta"]), float(stats["max_abs_delta"]))
+        aggregate["abs_deltas"].extend(stats.get("abs_deltas", []))
+        if len(aggregate["samples"]) < 8:
+            aggregate["samples"].extend(stats.get("samples", [])[: 8 - len(aggregate["samples"])])
+
+def merge_value_transitions(summary: dict[str, Any], transitions: dict[str, Any]) -> None:
+    if transitions.get("issue"):
+        issue = str(transitions["issue"])
+        summary["value_transition_issues"][issue] = summary["value_transition_issues"].get(issue, 0) + 1
+        return
+    for column, by_transition in transitions.get("columns", {}).items():
+        column_stats = summary["value_transitions"].setdefault(column, {})
+        for transition_name, stats in by_transition.items():
+            aggregate = column_stats.setdefault(transition_name, {"count": 0, "sum_abs_value": 0.0, "max_abs_value": 0.0, "abs_values": [], "samples": []})
+            aggregate["count"] += int(stats["count"])
+            aggregate["sum_abs_value"] += float(stats["sum_abs_value"])
+            aggregate["max_abs_value"] = max(float(aggregate["max_abs_value"]), float(stats["max_abs_value"]))
+            aggregate["abs_values"].extend(stats.get("abs_values", []))
+            if len(aggregate["samples"]) < 8:
+                aggregate["samples"].extend(stats.get("samples", [])[: 8 - len(aggregate["samples"])])
+
+def finalize_numeric_deltas(numeric_deltas: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    finalized: dict[str, dict[str, Any]] = {}
+    for column, stats in sorted(numeric_deltas.items()):
+        changed_cells = int(stats["changed_cells"])
+        abs_deltas = list(stats.get("abs_deltas", []))
+        finalized[column] = {
+            "changed_cells": changed_cells,
+            "mean_abs_delta": float(stats["sum_abs_delta"] / changed_cells) if changed_cells else 0.0,
+            "mean_signed_delta": float(stats["sum_signed_delta"] / changed_cells) if changed_cells else 0.0,
+            "max_abs_delta": float(stats["max_abs_delta"]),
+            "p50_abs_delta": percentile(abs_deltas, 0.50),
+            "p95_abs_delta": percentile(abs_deltas, 0.95),
+            "samples": stats.get("samples", [])[:8],
+        }
+    return finalized
+
+def finalize_value_transitions(value_transitions: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    finalized: dict[str, dict[str, Any]] = {}
+    for column, by_transition in sorted(value_transitions.items()):
+        finalized[column] = {}
+        for transition_name, stats in sorted(by_transition.items()):
+            count = int(stats["count"])
+            abs_values = list(stats.get("abs_values", []))
+            finalized[column][transition_name] = {
+                "count": count,
+                "mean_abs_value": float(stats["sum_abs_value"] / count) if count else 0.0,
+                "max_abs_value": float(stats["max_abs_value"]),
+                "p50_abs_value": percentile(abs_values, 0.50),
+                "p95_abs_value": percentile(abs_values, 0.95),
+                "samples": stats.get("samples", [])[:8],
+            }
+    return finalized
+
+def make_revision_history_summary(dataset: str, group: str) -> dict[str, Any]:
+    return {
+        "dataset": dataset,
+        "group": group,
+        "planned_partitions": 0,
+        "queried_partitions": 0,
+        "compared_partitions": 0,
+        "stable_partitions": 0,
+        "revision_partitions": 0,
+        "structural_issue_partitions": 0,
+        "missing_local_partitions": 0,
+        "remote_zero_partitions": 0,
+        "remote_empty_local_missing_partitions": 0,
+        "errors": 0,
+        "old_rows": 0,
+        "new_rows": 0,
+        "changed_keys": 0,
+        "added_keys": 0,
+        "removed_keys": 0,
+        "changed_columns": {},
+        "numeric_deltas": {},
+        "numeric_delta_issues": {},
+        "value_transitions": {},
+        "value_transition_issues": {},
+        "revision_samples": [],
+        "missing_local_sample": [],
+        "remote_zero_sample": [],
+        "error_sample": [],
+    }
+
+def record_revision_history_check(
+    *,
+    client: TuShareClient,
+    raw_dir: Path,
+    events_output: Path,
+    summary: dict[str, Any],
+    by_year: dict[str, dict[str, Any]],
+    dataset: str,
+    group: str,
+    trade_date: str,
+    path: Path,
+    params: dict[str, Any],
+    fields: str,
+    key_columns: list[str],
+    page_limit: int,
+    zero_rows_ok: bool,
+    augment_kind: str = "",
+    spec: Any = None,
+) -> None:
+    dataset_summary = summary.setdefault(dataset, make_revision_history_summary(dataset, group))
+    year_summary = by_year.setdefault(trade_date[:4], {"planned_partitions": 0, "revision_partitions": 0, "missing_local_partitions": 0, "remote_zero_partitions": 0, "errors": 0})
+    dataset_summary["planned_partitions"] += 1
+    year_summary["planned_partitions"] += 1
+    try:
+        result, pages = query_paged(client, dataset, params, fields, page_limit)
+        new_df = frame(result)
+        if augment_kind == "event":
+            new_df = augment_event_frame(new_df, spec)
+        elif augment_kind == "board":
+            new_df = augment_board_frame(new_df, spec, params)
+    except Exception as exc:  # pragma: no cover - runtime API failures are summarized
+        dataset_summary["errors"] += 1
+        year_summary["errors"] += 1
+        if len(dataset_summary["error_sample"]) < 10:
+            dataset_summary["error_sample"].append({"trade_date": trade_date, "path": str(path), "params": params, "error": str(exc)})
+        return
+
+    dataset_summary["queried_partitions"] += 1
+    if new_df.empty and not zero_rows_ok:
+        dataset_summary["remote_zero_partitions"] += 1
+        year_summary["remote_zero_partitions"] += 1
+        if len(dataset_summary["remote_zero_sample"]) < 10:
+            dataset_summary["remote_zero_sample"].append({"trade_date": trade_date, "path": str(path), "params": params})
+        return
+
+    if not path.exists():
+        if new_df.empty:
+            dataset_summary["remote_empty_local_missing_partitions"] += 1
+            return
+        dataset_summary["missing_local_partitions"] += 1
+        year_summary["missing_local_partitions"] += 1
+        if len(dataset_summary["missing_local_sample"]) < 10:
+            dataset_summary["missing_local_sample"].append({"trade_date": trade_date, "path": str(path), "params": params, "remote_rows": int(len(new_df))})
+        return
+
+    old_df = pd.read_parquet(path)
+    dataset_summary["compared_partitions"] += 1
+    dataset_summary["old_rows"] += int(len(old_df))
+    dataset_summary["new_rows"] += int(len(new_df))
+    event = build_revision_event(
+        dataset=dataset,
+        partition=path.with_suffix("").name if path.parent.name == dataset else f"trade_date={trade_date}",
+        path=path,
+        old_df=old_df,
+        new_df=new_df,
+        key_columns=key_columns,
+        source="history_sample_probe",
+    )
+    if not event:
+        dataset_summary["stable_partitions"] += 1
+        return
+
+    event["group"] = group
+    event["params"] = params
+    event["pages"] = pages
+    append_jsonl(events_output, event)
+    if event.get("comparison_issue"):
+        dataset_summary["structural_issue_partitions"] += 1
+        if len(dataset_summary["revision_samples"]) < 8:
+            dataset_summary["revision_samples"].append({
+                "trade_date": trade_date,
+                "path": str(path),
+                "params": params,
+                "comparison_issue": event.get("comparison_issue"),
+                "duplicate_key_rows_old": event.get("duplicate_key_rows_old", 0),
+                "duplicate_key_rows_new": event.get("duplicate_key_rows_new", 0),
+                "missing_key_columns_old": event.get("missing_key_columns_old", []),
+                "missing_key_columns_new": event.get("missing_key_columns_new", []),
+            })
+        return
+    dataset_summary["revision_partitions"] += 1
+    year_summary["revision_partitions"] += 1
+    for key in ("changed_keys", "added_keys", "removed_keys"):
+        dataset_summary[key] += int(event.get(key, 0))
+    for column, count in event.get("changed_columns", {}).items():
+        dataset_summary["changed_columns"][column] = dataset_summary["changed_columns"].get(column, 0) + int(count)
+    merge_numeric_deltas(dataset_summary, revision_numeric_deltas(old_df, new_df, key_columns))
+    merge_value_transitions(dataset_summary, revision_value_transitions(old_df, new_df, key_columns))
+    if len(dataset_summary["revision_samples"]) < 8:
+        dataset_summary["revision_samples"].append({
+            "trade_date": trade_date,
+            "path": str(path),
+            "params": params,
+            "changed_keys": event.get("changed_keys", 0),
+            "added_keys": event.get("added_keys", 0),
+            "removed_keys": event.get("removed_keys", 0),
+            "changed_columns_sample": event.get("changed_columns_sample", [])[:3],
+        })
+
+def audit_revision_history_sample(args: argparse.Namespace) -> int:
+    repo_root = Path.cwd().resolve()
+    raw_dir = (repo_root / args.raw_dir).resolve()
+    output = Path(args.output or REVISION_HISTORY_SAMPLE_STATUS_PATH)
+    events_output = Path(args.events_output or REVISION_HISTORY_SAMPLE_EVENTS_PATH)
+    if not output.is_absolute():
+        output = repo_root / output
+    if not events_output.is_absolute():
+        events_output = repo_root / events_output
+    output.parent.mkdir(parents=True, exist_ok=True)
+    events_output.parent.mkdir(parents=True, exist_ok=True)
+    if events_output.exists():
+        events_output.unlink()
+
+    seed = args.seed or args.end_date
+    trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
+    selected_by_year = select_revision_history_dates_by_year(trade_dates, args.sample_per_year, seed)
+    sampled_dates = [trade_date for dates in selected_by_year.values() for trade_date in dates]
+    client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
+    groups = set(args.groups or ["daily", "reference", "event_flow", "board_trading"])
+    summaries: dict[str, dict[str, Any]] = {}
+    by_year: dict[str, dict[str, Any]] = {}
+
+    daily_datasets = list(args.daily_datasets or (DAILY_REQUIRED_DATASETS + DAILY_OPTIONAL_DATASETS))
+    event_datasets = [
+        dataset for dataset in list(args.event_datasets or EVENT_FLOW_DATASETS)
+        if EVENT_FLOW_SPECS[dataset].strategy == "trade_date"
+    ]
+    board_datasets = [
+        dataset for dataset in list(args.board_datasets or BOARD_TRADING_DEFAULT_DATASETS)
+        if BOARD_TRADING_SPECS[dataset].strategy != "static_once"
+    ]
+
+    for trade_date in sampled_dates:
+        if "daily" in groups:
+            for dataset in daily_datasets:
+                spec = DAILY_SPECS[dataset]
+                if trade_date < max(args.start_date, spec.start_date):
+                    continue
+                record_revision_history_check(
+                    client=client,
+                    raw_dir=raw_dir,
+                    events_output=events_output,
+                    summary=summaries,
+                    by_year=by_year,
+                    dataset=dataset,
+                    group="daily",
+                    trade_date=trade_date,
+                    path=raw_dir / spec.api_name / f"trade_date={trade_date}.parquet",
+                    params={"trade_date": trade_date},
+                    fields=spec.fields,
+                    key_columns=list(spec.key_columns),
+                    page_limit=args.page_limit or TRADE_DATE_PAGE_LIMIT,
+                    zero_rows_ok=spec.zero_rows_ok,
+                )
+        if "reference" in groups and args.include_bak_basic and trade_date >= max(args.start_date, BAK_BASIC_SPEC.start_date):
+            record_revision_history_check(
+                client=client,
+                raw_dir=raw_dir,
+                events_output=events_output,
+                summary=summaries,
+                by_year=by_year,
+                dataset="bak_basic",
+                group="reference",
+                trade_date=trade_date,
+                path=raw_dir / "bak_basic" / f"trade_date={trade_date}.parquet",
+                params={"trade_date": trade_date},
+                fields=BAK_BASIC_SPEC.fields,
+                key_columns=list(BAK_BASIC_SPEC.key_columns),
+                page_limit=args.page_limit or TRADE_DATE_PAGE_LIMIT,
+                zero_rows_ok=BAK_BASIC_SPEC.zero_rows_ok,
+            )
+        if "event_flow" in groups:
+            for dataset in event_datasets:
+                spec = EVENT_FLOW_SPECS[dataset]
+                if trade_date < max(args.start_date, spec.start_date):
+                    continue
+                record_revision_history_check(
+                    client=client,
+                    raw_dir=raw_dir,
+                    events_output=events_output,
+                    summary=summaries,
+                    by_year=by_year,
+                    dataset=dataset,
+                    group="event_flow",
+                    trade_date=trade_date,
+                    path=raw_dir / spec.api_name / f"trade_date={trade_date}.parquet",
+                    params={"trade_date": trade_date},
+                    fields=spec.fields,
+                    key_columns=list(spec.key_columns),
+                    page_limit=event_page_limit(spec, args.page_limit),
+                    zero_rows_ok=spec.zero_rows_ok,
+                    augment_kind="event",
+                    spec=spec,
+                )
+        if "board_trading" in groups:
+            board_args = argparse.Namespace(
+                kpl_tag=args.kpl_tag,
+                ths_limit_type=args.ths_limit_type,
+                ths_hot_market=args.ths_hot_market,
+                dc_hot_market=args.dc_hot_market,
+                dc_hot_type=args.dc_hot_type,
+                hot_is_new=args.hot_is_new,
+            )
+            for dataset in board_datasets:
+                spec = BOARD_TRADING_SPECS[dataset]
+                if trade_date < max(args.start_date, spec.start_date):
+                    continue
+                page_limit = board_page_limit(spec, args.page_limit)
+                tasks: list[tuple[Path, dict[str, Any]]] = []
+                if spec.strategy == "trade_date":
+                    tasks.append((raw_dir / spec.api_name / f"trade_date={trade_date}.parquet", {"trade_date": trade_date}))
+                elif spec.strategy == "trade_date_by_tag":
+                    tasks.extend(
+                        (
+                            raw_dir / spec.api_name / f"tag={safe_partition_value(tag)}" / f"trade_date={trade_date}.parquet",
+                            {"trade_date": trade_date, "tag": tag},
+                        )
+                        for tag in selected_board_kpl_tags(board_args)
+                    )
+                elif spec.strategy == "trade_date_by_limit_type":
+                    tasks.extend(
+                        (
+                            raw_dir / spec.api_name / f"limit_type={safe_partition_value(limit_type)}" / f"trade_date={trade_date}.parquet",
+                            {"trade_date": trade_date, "limit_type": limit_type},
+                        )
+                        for limit_type in selected_board_ths_limit_types(board_args)
+                    )
+                elif spec.strategy == "trade_date_by_market":
+                    tasks.extend(
+                        (
+                            raw_dir / spec.api_name / f"market={safe_partition_value(market)}" / f"is_new={is_new}" / f"trade_date={trade_date}.parquet",
+                            {"trade_date": trade_date, "market": market, "is_new": is_new},
+                        )
+                        for market in selected_board_ths_hot_markets(board_args)
+                        for is_new in selected_board_hot_is_new(board_args)
+                    )
+                elif spec.strategy == "trade_date_by_market_hot_type":
+                    tasks.extend(
+                        (
+                            raw_dir / spec.api_name / f"market={safe_partition_value(market)}" / f"hot_type={safe_partition_value(hot_type)}" / f"is_new={is_new}" / f"trade_date={trade_date}.parquet",
+                            {"trade_date": trade_date, "market": market, "hot_type": hot_type, "is_new": is_new},
+                        )
+                        for market in selected_board_dc_hot_markets(board_args)
+                        for hot_type in selected_board_dc_hot_types(board_args)
+                        for is_new in selected_board_hot_is_new(board_args)
+                    )
+                for path, params in tasks:
+                    record_revision_history_check(
+                        client=client,
+                        raw_dir=raw_dir,
+                        events_output=events_output,
+                        summary=summaries,
+                        by_year=by_year,
+                        dataset=dataset,
+                        group="board_trading",
+                        trade_date=trade_date,
+                        path=path,
+                        params=params,
+                        fields=spec.fields,
+                        key_columns=list(spec.key_columns),
+                        page_limit=page_limit,
+                        zero_rows_ok=spec.zero_rows_ok,
+                        augment_kind="board",
+                        spec=spec,
+                    )
+
+    dataset_reports = []
+    for dataset, details in sorted(summaries.items()):
+        numeric = finalize_numeric_deltas(details["numeric_deltas"])
+        transitions = finalize_value_transitions(details["value_transitions"])
+        report = {key: value for key, value in details.items() if key not in {"numeric_deltas", "value_transitions"}}
+        report["numeric_deltas"] = numeric
+        report["value_transitions"] = transitions
+        report["revision_rate"] = (
+            float(details["revision_partitions"] / details["compared_partitions"])
+            if details["compared_partitions"]
+            else None
+        )
+        dataset_reports.append(report)
+    most_changed = sorted(
+        dataset_reports,
+        key=lambda item: (item["revision_partitions"], item["changed_keys"] + item["added_keys"] + item["removed_keys"]),
+        reverse=True,
+    )
+    stable = [
+        item["dataset"]
+        for item in dataset_reports
+        if item["compared_partitions"]
+        and item["revision_partitions"] == 0
+        and item["structural_issue_partitions"] == 0
+        and item["missing_local_partitions"] == 0
+        and item["remote_zero_partitions"] == 0
+    ]
+    status = "error" if any(item["errors"] or item["remote_zero_partitions"] for item in dataset_reports) else "warning" if any(item["revision_partitions"] or item["structural_issue_partitions"] or item["missing_local_partitions"] for item in dataset_reports) else "ok"
+    report = {
+        "schema_version": 1,
+        "audit": "revision_history_sample",
+        "status": status,
+        "scope": "trade_date_partitioned_active_tushare_interfaces",
+        "raw_mutation": "none",
+        "start_date": args.start_date,
+        "end_date": args.end_date,
+        "sample_per_year": args.sample_per_year,
+        "seed": seed,
+        "sampled_trade_dates_by_year": selected_by_year,
+        "sampled_trade_dates": sampled_dates,
+        "groups": sorted(groups),
+        "events_output": str(events_output),
+        "datasets": dataset_reports,
+        "most_changed_interfaces": [
+            {
+                "dataset": item["dataset"],
+                "group": item["group"],
+                "revision_partitions": item["revision_partitions"],
+                "revision_rate": item["revision_rate"],
+                "changed_keys": item["changed_keys"],
+                "added_keys": item["added_keys"],
+                "removed_keys": item["removed_keys"],
+                "changed_columns_top": sorted(item["changed_columns"].items(), key=lambda pair: pair[1], reverse=True)[:8],
+            }
+            for item in most_changed[:12]
+            if item["revision_partitions"] or item["changed_keys"] or item["added_keys"] or item["removed_keys"]
+        ],
+        "stable_interfaces": stable,
+        "structural_issue_interfaces": [
+            {
+                "dataset": item["dataset"],
+                "group": item["group"],
+                "structural_issue_partitions": item["structural_issue_partitions"],
+                "sample": item["revision_samples"][:3],
+            }
+            for item in dataset_reports
+            if item["structural_issue_partitions"]
+        ],
+        "by_year": by_year,
+        "caveats": [
+            "This command checks active trade-date partitioned interfaces only. Macro, fundamental, text month/day source, and share_float union need their own month/period/code sampling plans.",
+            "Required trade-date interfaces returning zero rows are counted as remote_zero instead of source revisions.",
+            "Missing local partition with non-empty remote response is reported as a local gap, not a source revision.",
+        ],
+    }
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"revision history sample status={status} datasets={len(dataset_reports)} dates={len(sampled_dates)} output={output} events={events_output}")
+    return 1 if status == "error" and args.fail_on_error else 0
 
 def audit_revision_sentinel(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
@@ -1328,7 +1918,7 @@ def audit_macro_dataset(raw_dir: Path, spec: MacroDataset, expected_paths: set[P
     row_counts = {str(path): parquet_rows(path) for path in files}
     zero_files = [path for path, rows in row_counts.items() if rows == 0]
     exact_limit_files = [path for path, rows in row_counts.items() if rows in {1000, 3000, 5000, 8000, 10000}]
-    has_error = bool(missing_expected or missing_meta or orphan_meta or not files)
+    has_error = bool(missing_expected or missing_meta or orphan_meta or (not files and expected_set))
     add("error" if has_error else "warning" if exact_limit_files else "info", f"{spec.api_name}_macro_partitions", f"{spec.api_name} macro/global partition inventory", {
         "strategy": spec.strategy,
         "files": len(files),
@@ -1474,6 +2064,7 @@ def expected_event_paths(raw_dir: Path, spec: EventDataset, start_date: str, end
 def event_unit_rules() -> dict[str, str]:
     return {
         "margin/margin_detail": "financing/margin balance and amount fields are preserved in TuShare raw units; rqyl is securities-lending quantity.",
+        "margin_secs": "margin eligibility table has no numeric market amount; exchange is SSE/SZSE/BSE and does not guarantee broker-level borrow inventory.",
         "moneyflow": "volume fields are raw TuShare moneyflow volume units and amount fields are raw TuShare amount units; normalize before mixing with daily/stk_mins.",
         "stk_holdernumber": "holder_num is shareholder account count.",
         "stk_holdertrade": "change_vol/after_share/total_share are raw share fields; ratios are percent-style raw fields.",
@@ -1486,6 +2077,7 @@ def event_pit_rules() -> dict[str, str]:
     return {
         "margin": "available_at uses next-day 09:00+08 from trade_date.",
         "margin_detail": "available_at uses next-day 09:00+08 from trade_date.",
+        "margin_secs": "available_at uses same-day 09:00+08 from trade_date because this is a pre-open eligibility table.",
         "moneyflow": "available_at uses 19:00+08 from trade_date.",
         "block_trade": "available_at uses 21:00+08 from trade_date.",
         "stk_holdernumber": "available_at uses ann_date end-of-day.",
@@ -2423,6 +3015,24 @@ def add_revision_parser(sub: argparse._SubParsersAction) -> None:
     revision.add_argument("--fail-on-revision", action="store_true", help="Return nonzero when source revisions are found.")
     core.add_runtime_args(revision, min_interval=0.22, timeout=120)
 
+    history = sub.add_parser("revision-history-sample", help="yearly stratified source-vs-local checks for active trade-date partitioned TuShare interfaces")
+    core.add_raw_arg(history)
+    history.add_argument("--start-date", default="20200101")
+    history.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))
+    history.add_argument("--sample-per-year", type=int, default=3, help="Deterministic trade-date sample count per year; <=0 checks all dates.")
+    history.add_argument("--seed", help="Deterministic sampling seed. Defaults to --end-date.")
+    history.add_argument("--groups", nargs="+", choices=["daily", "reference", "event_flow", "board_trading"], default=["daily", "reference", "event_flow", "board_trading"])
+    history.add_argument("--daily-datasets", nargs="+", choices=core.DAILY_REQUIRED_DATASETS + core.DAILY_OPTIONAL_DATASETS)
+    history.add_argument("--event-datasets", nargs="+", choices=core.EVENT_FLOW_DATASETS)
+    history.add_argument("--board-datasets", nargs="+", choices=core.BOARD_TRADING_DATASETS)
+    history.add_argument("--include-bak-basic", action=argparse.BooleanOptionalAction, default=True)
+    history.add_argument("--page-limit", type=int)
+    history.add_argument("--events-output", default=REVISION_HISTORY_SAMPLE_EVENTS_PATH)
+    history.add_argument("--output", default=REVISION_HISTORY_SAMPLE_STATUS_PATH)
+    history.add_argument("--fail-on-error", action="store_true", help="Return nonzero when API errors or required remote-zero responses are found.")
+    core.add_board_filter_args(history)
+    core.add_runtime_args(history, min_interval=0.22, timeout=120)
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2449,6 +3059,8 @@ def main() -> int:
         return audit_macro_only(args)
     if args.command == "board-trading":
         return audit_board_trading_only(args)
+    if args.command == "revision-history-sample":
+        return audit_revision_history_sample(args)
     if args.command == "revision-sentinel":
         return audit_revision_sentinel(args)
     raise RuntimeError(f"unknown command {args.command}")

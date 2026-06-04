@@ -14,9 +14,9 @@ MACROQUANT_ROOT=/Data/lzp/MacroQuant
 STOCK_PYTHON=/home/lzp/miniconda3/envs/stock/bin/python
 
 # After normal same-day releases should have landed. The job uses a rolling
-# recent window plus selected reference/daily refreshes, not a full-history
-# re-scan from the research lower bound. T+1 margin sources are handled by
-# the pre-open jobs below.
+# recent window with open-window refreshes plus selected reference/daily
+# refreshes, not a full-history re-scan from the research lower bound. T+1
+# margin sources are handled by the pre-open jobs below.
 35 23 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_evening_full >> logs/tushare_cron_dispatch.log 2>&1
 
 # Refresh the six formal data-quality status files over the full retained
@@ -37,10 +37,12 @@ STOCK_PYTHON=/home/lzp/miniconda3/envs/stock/bin/python
 50 8 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_board_backfill_0850 >> logs/tushare_cron_dispatch.log 2>&1
 55 8 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_text_backfill_0855 >> logs/tushare_cron_dispatch.log 2>&1
 
-# Pre-open forced backfill for T+1 margin sources. These two jobs use distinct
-# names so 09:15 still re-queries even if 09:05 returned successfully while
-# source data was not fully ready yet.
+# Pre-open forced backfill for same-day margin eligibility and T+1 margin
+# sources. Distinct retry job names keep the second query active if the first
+# one returned before the source was fully ready.
+3 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_margin_secs_backfill_0903 >> logs/tushare_cron_dispatch.log 2>&1
 5 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_margin_backfill_0905 >> logs/tushare_cron_dispatch.log 2>&1
+13 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_margin_secs_retry_0913 >> logs/tushare_cron_dispatch.log 2>&1
 15 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_margin_retry_0915 >> logs/tushare_cron_dispatch.log 2>&1
 
 # Refresh event/flow status after margin retry so 09:25 pre-open gates do not

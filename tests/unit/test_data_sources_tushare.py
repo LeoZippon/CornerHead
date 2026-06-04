@@ -34,6 +34,8 @@ class CountingMacroClient:
         for field in result_fields:
             if field == "month":
                 row.append(params.get("m", "202605"))
+            elif field in {"date", "trade_date"}:
+                row.append(params.get("end_date", "20260529"))
             elif field == "publish_date":
                 row.append("20260529")
             elif field == "title":
@@ -117,6 +119,28 @@ class ReferenceClient:
         return common.ApiResult(result_fields, rows, common.stable_hash({"api_name": api_name, "params": params}))
 
 
+class TradeCalClient:
+    def __init__(self):
+        self.calls = []
+
+    def query(self, api_name, params=None, fields="", retries=5):
+        params = params or {}
+        self.calls.append((api_name, dict(params)))
+        result_fields = fields.split(",") if fields else []
+        rows = []
+        if api_name == "trade_cal":
+            cal_date = params.get("end_date", "20260604")
+            rows = [[
+                params.get("exchange", "") if field == "exchange" else
+                cal_date if field == "cal_date" else
+                "1" if field == "is_open" else
+                "20260603" if field == "pretrade_date" else
+                ""
+                for field in result_fields
+            ]]
+        return common.ApiResult(result_fields, rows, common.stable_hash({"api_name": api_name, "params": params}))
+
+
 class EmptyReferenceClient:
     def __init__(self):
         self.calls = []
@@ -167,6 +191,43 @@ class FundamentalClient:
         return common.ApiResult(result_fields, [row], common.stable_hash({"api_name": api_name, "params": params}))
 
 
+class CalendarEventClient:
+    def __init__(self):
+        self.calls = []
+
+    def query(self, api_name, params=None, fields="", retries=5):
+        params = params or {}
+        self.calls.append((api_name, dict(params)))
+        result_fields = fields.split(",") if fields else []
+        if api_name == "trade_cal":
+            row = []
+            for field in result_fields:
+                if field == "exchange":
+                    row.append(params.get("exchange", "SSE"))
+                elif field == "cal_date":
+                    row.append(params.get("end_date", "20260604"))
+                elif field == "is_open":
+                    row.append("1")
+                elif field == "pretrade_date":
+                    row.append("20260603")
+                else:
+                    row.append("")
+            return common.ApiResult(result_fields, [row], common.stable_hash({"api_name": api_name, "params": params}))
+        if api_name == "margin_secs":
+            row = []
+            for field in result_fields:
+                if field == "trade_date":
+                    row.append(params.get("trade_date", "20260604"))
+                elif field == "ts_code":
+                    row.append("000001.SZ")
+                elif field in {"name", "exchange"}:
+                    row.append("sample")
+                else:
+                    row.append("")
+            return common.ApiResult(result_fields, [row], common.stable_hash({"api_name": api_name, "params": params}))
+        return common.ApiResult(result_fields, [], common.stable_hash({"api_name": api_name, "params": params}))
+
+
 class EmptyTradeDateClient:
     def __init__(self):
         self.calls = []
@@ -203,6 +264,21 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"trade_date": trade_date, "ts_code": "000001.SZ"},
             {"trade_date": trade_date, "ts_code": "000002.SZ"},
         ]).to_parquet(path, index=False)
+
+    def test_trade_cal_helpers_normalize_date_strings(self):
+        path = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                {"cal_date": "2026-06-03", "is_open": "1"},
+                {"cal_date": "20260604", "is_open": "0"},
+                {"cal_date": "2026/06/05", "is_open": "1"},
+            ]
+        ).to_parquet(path, index=False)
+
+        self.assertEqual(common.load_sse_open_dates(self.raw_dir, "20260603", "20260605"), ["20260603", "20260605"])
+        self.assertEqual(common.latest_sse_calendar_date(self.raw_dir), "20260605")
+        self.assertTrue(download.sse_trade_cal_covers(self.raw_dir, "20260603", "20260605"))
 
     def test_update_intraday_by_date_refuses_zero_row_write_for_nonempty_universe(self):
         self._write_trade_cal()
@@ -286,7 +362,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             raw_dir=str(self.raw_dir),
             start_date="20260530",
             end_date="20260530",
-            datasets=["margin", "margin_detail"],
+            datasets=["margin", "margin_detail", "margin_secs"],
             force=False,
             page_limit=None,
             min_interval_seconds=0,
@@ -322,9 +398,45 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 download.write_share_float_union(self.raw_dir, args, {})
         self.assertEqual(common.parquet_rows(output), 2)
 
+    def test_share_float_empty_refresh_keeps_existing_cap_risk_signal(self):
+        path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
+        fields = common.SHARE_FLOAT_FIELDS.split(",")
+        existing = pd.DataFrame([
+            {
+                field: (
+                    f"{index:06d}.SZ" if field == "ts_code"
+                    else "20200101" if field == "ann_date"
+                    else "20200102" if field == "float_date"
+                    else str(index) if field == "holder_name"
+                    else "type" if field == "share_type"
+                    else 1
+                )
+                for field in fields
+            }
+            for index in range(common.SHARE_FLOAT_ROW_LIMIT)
+        ])
+        common.write_parquet(path, existing, api_name="share_float", params={}, fields=fields, source_hash="old")
+
+        result = download.query_share_float_to_path(
+            EmptyTradeDateClient(),
+            self.raw_dir,
+            path,
+            {"ann_date": "20200101"},
+            "ann_date",
+            True,
+            revision_ledger=None,
+            allow_empty_revision_overwrite=False,
+        )
+
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["rows"], common.SHARE_FLOAT_ROW_LIMIT)
+        self.assertTrue(result["source_cap_risk"])
+        self.assertEqual(common.parquet_rows(path), common.SHARE_FLOAT_ROW_LIMIT)
+
     def test_generic_event_flow_download_excludes_dedicated_share_float_path(self):
         selected = download.selected_event_flow_download_datasets(argparse.Namespace(datasets=None))
         self.assertNotIn("share_float", selected)
+        self.assertIn("margin_secs", selected)
         with self.assertRaisesRegex(RuntimeError, "download-share-float-complete"):
             download.selected_event_flow_download_datasets(argparse.Namespace(datasets=["share_float"]))
 
@@ -432,6 +544,69 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(refreshed_meta["params"]["end_date"], "20260529")
         closed_meta = json.loads((self.raw_dir / "cn_schedule" / "month=202604.parquet.meta.json").read_text(encoding="utf-8"))
         self.assertNotIn("end_date", closed_meta["params"])
+
+    def test_window_merged_partition_preserves_rows_outside_refresh_window(self):
+        path = self.raw_dir / "repurchase" / "month=202605.parquet"
+        existing = pd.DataFrame([
+            {"ts_code": "000001.SZ", "ann_date": "20260501", "amount": 1},
+            {"ts_code": "000002.SZ", "ann_date": "20260515", "amount": 2},
+        ])
+        common.write_parquet(
+            path,
+            existing,
+            api_name="repurchase",
+            params={"start_date": "20260501", "end_date": "20260531"},
+            fields=list(existing.columns),
+            source_hash="old",
+        )
+        refreshed = pd.DataFrame([
+            {"ts_code": "000002.SZ", "ann_date": "20260515", "amount": 20},
+            {"ts_code": "000003.SZ", "ann_date": "20260516", "amount": 30},
+        ])
+
+        rows = download.write_window_merged_partition(
+            path,
+            refreshed,
+            api_name="repurchase",
+            params={"start_date": "20260510", "end_date": "20260520"},
+            fields=list(refreshed.columns),
+            source_hash="fresh",
+            key_columns=["ts_code", "ann_date"],
+            date_columns=["ann_date"],
+            start_date="20260510",
+            end_date="20260520",
+            revision_ledger=str(self.root / "revision_events.jsonl"),
+            allow_empty_revision_overwrite=False,
+        )
+
+        merged = pd.read_parquet(path).sort_values("ts_code").reset_index(drop=True)
+        self.assertEqual(rows, 3)
+        self.assertEqual(merged["ts_code"].tolist(), ["000001.SZ", "000002.SZ", "000003.SZ"])
+        self.assertEqual(merged["amount"].tolist(), [1, 20, 30])
+
+    def test_macro_range_once_uses_retained_start_during_rolling_update(self):
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            tier="macro",
+            start_date="20260504",
+            macro_start_date="20200101",
+            end_date="20260603",
+            datasets=["cn_cpi"],
+            force=True,
+            page_limit=None,
+            revision_ledger=str(self.root / "revision_events.jsonl"),
+            allow_empty_revision_overwrite=False,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+        client = CountingMacroClient()
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
+            self.assertEqual(download.download_macro(args), 0)
+
+        cpi_calls = [params for api_name, params in client.calls if api_name == "cn_cpi"]
+        self.assertEqual(cpi_calls[0]["start_m"], "202001")
+        self.assertTrue((self.raw_dir / "cn_cpi" / "range=202001_202606.parquet").exists())
 
     def test_daily_audit_warns_on_exact_limit_without_pagination_probe(self):
         path = self.raw_dir / "daily" / "trade_date=20200102.parquet"
@@ -687,6 +862,34 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(calls, [["cmd1"], ["cmd2"]])
 
+    def test_cron_multi_command_jobs_can_continue_after_error(self):
+        ctx = cron_update.RunContext(
+            config={},
+            repo_root=self.root,
+            python="/env/python",
+            job_name="unit_continue",
+            job={"fail_fast": False},
+            start_date="20200101",
+            end_date="20200102",
+            timezone_name="Asia/Shanghai",
+        )
+        commands = [["cmd1"], ["cmd2"], ["cmd3"]]
+        calls = []
+
+        class Result:
+            def __init__(self, returncode):
+                self.returncode = returncode
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            return Result(1 if command == ["cmd2"] else 0)
+
+        with patch.object(cron_update, "run_probe"), patch.object(cron_update.subprocess, "run", side_effect=fake_run):
+            code = cron_update.run_update(ctx, commands, self.root / "cron_continue.log")
+
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, commands)
+
     def test_reference_refresh_datasets_force_selected_tables(self):
         self._write_trade_cal("20200102")
         for status in ("L", "D", "P"):
@@ -757,6 +960,20 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 download.download_reference(args)
         self.assertTrue(pd.read_parquet(path).equals(original))
 
+    def test_trade_cal_force_refresh_merges_without_shrinking_year_partition(self):
+        path = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([
+            {"exchange": "SSE", "cal_date": "20260603", "is_open": "1", "pretrade_date": "20260602"},
+        ]).to_parquet(path, index=False)
+        client = TradeCalClient()
+
+        open_dates = download.download_trade_cal(client, self.raw_dir, "20260604", "20260604", force=True)
+
+        refreshed = pd.read_parquet(path)
+        self.assertEqual(sorted(refreshed["cal_date"].astype(str).tolist()), ["20260603", "20260604"])
+        self.assertIn("20260604", open_dates)
+
     def test_update_parser_force_refreshes_stock_company_by_default(self):
         argv = [
             "download.py",
@@ -775,6 +992,58 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn("index_classify", args.refresh_reference_datasets)
         self.assertIn("index_member_all", args.refresh_reference_datasets)
         self.assertEqual(args.refresh_daily_datasets, [])
+        self.assertEqual(args.macro_start_date, "20200101")
+
+    def test_update_all_dimensions_uses_retained_start_for_macro_context(self):
+        args = argparse.Namespace(
+            start_date="20260504",
+            end_date="20260603",
+            macro_start_date="20200101",
+            bak_start_date=None,
+            force=False,
+            refresh_open_window=True,
+            trade_cal_lookahead_days=7,
+            raw_dir=str(self.raw_dir),
+            page_limit=None,
+            revision_ledger=str(self.root / "revision_events.jsonl"),
+            allow_empty_revision_overwrite=False,
+            reference_min_interval_seconds=None,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+            refresh_reference_datasets=[],
+            daily_datasets=None,
+            include_limit_list=True,
+            refresh_daily_datasets=[],
+            macro_datasets=["cn_gdp"],
+            global_datasets=["index_global"],
+            event_datasets=[],
+            include_board_trading=False,
+            include_intraday=False,
+            include_share_float_complete=False,
+            text_datasets=[],
+            fundamental_datasets=[],
+            fundamental_refresh_period_count=0,
+            fundamental_refresh_ann_month_count=0,
+            fundamental_refresh_ts_code_datasets=[],
+            fundamental_refresh_event_days=0,
+            fundamental_dividend_probe_days=0,
+        )
+        seen = {}
+
+        def capture(label, _fn, step_args, summary):
+            seen[label] = step_args
+            summary.append({"step": label, "exit_code": 0})
+
+        with patch.object(download, "run_update_step", side_effect=capture):
+            summary = []
+            download.update_all_dimensions(args, summary)
+
+        self.assertEqual(seen["daily"].start_date, "20260504")
+        self.assertEqual(seen["event_flow"].start_date, "20260504")
+        self.assertEqual(seen["macro"].start_date, "20260504")
+        self.assertEqual(seen["macro"].macro_start_date, "20200101")
+        self.assertEqual(seen["global"].start_date, "20260504")
+        self.assertEqual(seen["global"].macro_start_date, "20200101")
 
     def test_daily_refresh_datasets_force_only_selected_trade_date_dataset(self):
         self._write_trade_cal("20200102")
@@ -809,7 +1078,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn('"removed_keys": 1', output.getvalue())
         ledger_lines = (self.root / "revision_events.jsonl").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(ledger_lines), 1)
-        self.assertEqual(json.loads(ledger_lines[0])["downstream_status"], "pending_review")
+        ledger_event = json.loads(ledger_lines[0])
+        self.assertEqual(ledger_event["downstream_status"], "pending_review")
+        self.assertEqual(ledger_event["write_action"], "overwrite")
+        self.assertIn("new_source_hash", ledger_event)
 
     def test_fundamental_update_refreshes_recent_periods_and_affected_ts_code_snapshots(self):
         stock_basic = self.raw_dir / "stock_basic" / "list_status=L.parquet"
@@ -850,6 +1122,44 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(income_periods, ["20191231", "20200331"])
         refreshed_ts_code_calls = [(api, params.get("ts_code")) for api, params in calls if api in {"dividend", "fina_audit", "fina_mainbz_vip"}]
         self.assertEqual(refreshed_ts_code_calls, [("dividend", "000001.SZ"), ("fina_audit", "000001.SZ"), ("fina_mainbz_vip", "000001.SZ")])
+
+    def test_dividend_probe_uses_only_supported_date_params(self):
+        client = FundamentalClient()
+
+        codes = download.probe_recent_dividend_codes(client, "20200603", 1, page_limit=1000)
+
+        self.assertEqual(codes, {"000001.SZ"})
+        probe_params = [
+            set(params) - {"limit", "offset"}
+            for api_name, params in client.calls
+            if api_name == "dividend"
+        ]
+        self.assertEqual(probe_params, [{"ann_date"}, {"imp_ann_date"}, {"ex_date"}, {"record_date"}])
+        self.assertNotIn("pay_date", {key for params in probe_params for key in params})
+
+    def test_event_flow_refreshes_trade_cal_before_same_day_margin_secs(self):
+        self._write_trade_cal("20260603")
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20260604",
+            end_date="20260604",
+            datasets=["margin_secs"],
+            force=True,
+            page_limit=None,
+            revision_ledger=str(self.root / "revision_events.jsonl"),
+            allow_empty_revision_overwrite=False,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+        client = CalendarEventClient()
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
+            self.assertEqual(download.download_event_flow(args), 0)
+
+        self.assertTrue((self.raw_dir / "margin_secs" / "trade_date=20260604.parquet").exists())
+        self.assertIn(("trade_cal", {"exchange": "SSE", "start_date": "20260604", "end_date": "20260604"}), client.calls)
+        margin_calls = [params for api_name, params in client.calls if api_name == "margin_secs"]
+        self.assertEqual(margin_calls[0]["trade_date"], "20260604")
 
     def test_recent_fundamental_event_codes_filters_period_rows_by_visible_date(self):
         period_path = self.raw_dir / "income_vip" / "period=20200331.parquet"
@@ -902,6 +1212,47 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         summary = json.loads((self.root / "sentinel_summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["status"], "warning")
         self.assertEqual(summary["revision_events"], 1)
+        self.assertTrue(pd.read_parquet(path).equals(original))
+
+    def test_revision_history_sample_reports_numeric_deltas_without_overwriting_raw(self):
+        self._write_trade_cal("20200102")
+        path = self.raw_dir / "adj_factor" / "trade_date=20200102.parquet"
+        original = pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "adj_factor": 9.9}])
+        common.write_parquet(path, original, api_name="adj_factor", params={}, fields=list(original.columns), source_hash="old")
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            sample_per_year=0,
+            seed=None,
+            groups=["daily"],
+            daily_datasets=["adj_factor"],
+            event_datasets=None,
+            board_datasets=None,
+            include_bak_basic=False,
+            page_limit=10000,
+            events_output=str(self.root / "history_events.jsonl"),
+            output=str(self.root / "history_summary.json"),
+            fail_on_error=False,
+            kpl_tag=[],
+            ths_limit_type=[],
+            ths_hot_market=[],
+            dc_hot_market=[],
+            dc_hot_type=[],
+            hot_is_new=[],
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+
+        with patch.object(audit, "load_token", return_value="token"), patch.object(audit, "TuShareClient", return_value=DailyMarketClient()):
+            self.assertEqual(audit.audit_revision_history_sample(args), 0)
+
+        summary = json.loads((self.root / "history_summary.json").read_text(encoding="utf-8"))
+        adj = next(item for item in summary["datasets"] if item["dataset"] == "adj_factor")
+        self.assertEqual(summary["status"], "warning")
+        self.assertEqual(adj["revision_partitions"], 1)
+        self.assertEqual(adj["changed_columns"], {"adj_factor": 1})
+        self.assertAlmostEqual(adj["numeric_deltas"]["adj_factor"]["max_abs_delta"], 8.9)
         self.assertTrue(pd.read_parquet(path).equals(original))
 
     def test_revision_comparison_flags_missing_and_duplicate_keys(self):
@@ -1011,6 +1362,26 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ledger = (self.root / "zero_ok_revision_events.jsonl").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(ledger), 1)
         self.assertEqual(json.loads(ledger[0])["removed_keys"], 1)
+
+    def test_revision_aware_writer_empty_guard_does_not_depend_on_ledger(self):
+        path = self.raw_dir / "limit_list_d" / "trade_date=20200102.parquet"
+        original = pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "limit": "U"}])
+        common.write_parquet(path, original, api_name="limit_list_d", params={}, fields=list(original.columns), source_hash="old")
+
+        did_write = common.write_parquet_revision_aware(
+            path,
+            pd.DataFrame(columns=list(original.columns)),
+            api_name="limit_list_d",
+            params={"trade_date": "20200102"},
+            fields=list(original.columns),
+            source_hash="empty",
+            key_columns=["trade_date", "ts_code", "limit"],
+            revision_ledger=None,
+            allow_empty_revision_overwrite=False,
+        )
+
+        self.assertFalse(did_write)
+        self.assertTrue(pd.read_parquet(path).equals(original))
 
     def test_required_event_flow_zero_rows_raise_instead_of_cron_ok(self):
         self._write_trade_cal("20200102")

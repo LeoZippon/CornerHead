@@ -33,6 +33,8 @@ class DailyPITFeatureBuilder:
     """
 
     KEY_COLUMNS = ["trade_date", "ts_code"]
+    LIMIT_LIST_D_FEATURE_COLUMNS = ["trade_date", "ts_code", "limit"]
+    LIMIT_LIST_D_QUARANTINED_COLUMNS = frozenset({"limit_amount"})
 
     def __init__(self, raw_dir: str | Path) -> None:
         self.raw_dir = Path(raw_dir)
@@ -118,11 +120,12 @@ class DailyPITFeatureBuilder:
 
         if config.include_limit_list and (self.raw_dir / "limit_list_d").exists():
             limit_start = max("20200102", load_start)
+            # limit_amount is retained in raw/audit only after historical source-rewrite probes.
             limit_list = self.store.read_trade_range(
                 "limit_list_d",
                 limit_start,
                 load_end,
-                columns=["trade_date", "ts_code", "limit"],
+                columns=self.LIMIT_LIST_D_FEATURE_COLUMNS,
             )
             limit_list = self._normalize_keys(limit_list, "limit_list_d", allow_empty=True)
             if not limit_list.empty:
@@ -133,7 +136,8 @@ class DailyPITFeatureBuilder:
         else:
             frame["limit"] = pd.NA
 
-        next_trade = {trade_dates[i]: trade_dates[i + 1] for i in range(len(trade_dates) - 1)}
+        calendar_trade_dates = self._calendar_trade_dates() or trade_dates
+        next_trade = {calendar_trade_dates[i]: calendar_trade_dates[i + 1] for i in range(len(calendar_trade_dates) - 1)}
         frame = frame[frame["trade_date"].isin(selected)].copy()
         frame["feature_date"] = frame["trade_date"]
         frame["source_trade_date"] = frame["trade_date"]
@@ -203,6 +207,27 @@ class DailyPITFeatureBuilder:
         dt = datetime.strptime(feature_date, "%Y%m%d").date()
         # The feature row includes daily_basic, so use the later daily_basic close-time contract.
         return self.contracts["daily_basic"].available_at(dt).isoformat()
+
+    def _calendar_trade_dates(self) -> list[str]:
+        calendar_dir = self.raw_dir / "trade_cal" / "exchange=SSE"
+        if not calendar_dir.exists():
+            return []
+        frames = []
+        for path in sorted(calendar_dir.glob("year=*.parquet")):
+            try:
+                frames.append(pd.read_parquet(path, columns=["cal_date", "is_open"]))
+            except Exception:
+                continue
+        if not frames:
+            return []
+        calendar = pd.concat(frames, ignore_index=True)
+        if calendar.empty or not {"cal_date", "is_open"}.issubset(calendar.columns):
+            return []
+        calendar = calendar[calendar["is_open"].astype(str) == "1"].copy()
+        if calendar.empty:
+            return []
+        dates = [yyyymmdd(value) for value in calendar["cal_date"].dropna()]
+        return sorted(set(dates))
 
     @classmethod
     def _normalize_keys(cls, frame: pd.DataFrame, dataset: str, allow_empty: bool = False) -> pd.DataFrame:

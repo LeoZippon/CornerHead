@@ -194,6 +194,56 @@ class DailyPITFeatureBuilderTest(unittest.TestCase):
             self.assertTrue((features["result_available_time"] == features["available_at"]).all())
             assert_no_feature_leakage(features)
 
+    def test_limit_list_d_limit_amount_is_quarantined_from_daily_alpha(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp)
+            dates = pd.date_range("2020-01-01", periods=6, freq="B").strftime("%Y%m%d").tolist()
+            self._write_p1_fixture(raw, dates)
+            pd.DataFrame(
+                [
+                    {
+                        "trade_date": dates[2],
+                        "ts_code": "000001.SZ",
+                        "limit": "U",
+                        "limit_amount": 1_650_376_910,
+                    }
+                ]
+            ).to_parquet(raw / "limit_list_d" / f"trade_date={dates[2]}.parquet", index=False)
+
+            features = DailyPITFeatureBuilder(raw).build(
+                FeatureBuildConfig(start_date=dates[2], end_date=dates[3], lookback_days=0)
+            )
+
+            self.assertIn("limit", features.columns)
+            self.assertNotIn("limit_amount", features.columns)
+            self.assertNotIn("limit_list_d_limit_amount", features.columns)
+            row = features[(features["feature_date"] == dates[2]) & (features["ts_code"] == "000001.SZ")].iloc[0]
+            self.assertEqual(row["limit"], "U")
+
+    def test_last_daily_feature_uses_trade_cal_for_next_tradable_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp)
+            dates = ["20200601", "20200602", "20200603"]
+            self._write_p1_fixture(raw, dates)
+            calendar = raw / "trade_cal" / "exchange=SSE" / "year=2020.parquet"
+            calendar.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(
+                [
+                    {"cal_date": "20200601", "is_open": "1"},
+                    {"cal_date": "20200602", "is_open": "1"},
+                    {"cal_date": "20200603", "is_open": "1"},
+                    {"cal_date": "20200604", "is_open": "1"},
+                ]
+            ).to_parquet(calendar, index=False)
+
+            features = DailyPITFeatureBuilder(raw).build(
+                FeatureBuildConfig(start_date="20200603", end_date="20200603", lookback_days=2)
+            )
+
+            self.assertFalse(features.empty)
+            self.assertEqual(set(features["feature_date"]), {"20200603"})
+            self.assertEqual(set(features["tradable_date"]), {"20200604"})
+
     def test_return_features_use_published_pct_change_not_snapshot_adjustment(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp)

@@ -97,7 +97,7 @@ scripts -> 只做 CLI 参数和 pipeline 调度
 | `execution` | BrokerSimulator、Order、Fill、PortfolioState、Position |
 | `events` | deterministic event checkpoint 检测 |
 | `portfolio` | 目标权重和归一化工具 |
-| `evaluation` | 收益、回撤、Sharpe 等指标 |
+| `evaluation` | 收益、长/短拆分、回撤、Sharpe 等指标 |
 | `protocols` | FreezeSpec、development/held-out 边界、结果可见性 guard |
 | `schemas` | HorizonTrack、Protocol、TradeStrategyPolicy、HeuristicTemplate、ExperimentConfig |
 | `storage` | TrialLedger、ExperimentLedger、稳定 hash、UTC 时间 |
@@ -188,9 +188,10 @@ data/features/daily_alpha/feature_date=<YYYYMMDD>.parquet
 - `volatility_20d` 为 `ret_1d` 的 20 日滚动标准差。
 - `is_suspended` 来自 `suspend_d`。
 - 涨跌停价格来自 `stk_limit`。
+- `limit_list_d` 只允许 `limit` 进入 `daily_alpha`；`limit_amount` 因历史源端回写不稳定被隔离在 raw/audit 层，不作为特征字段。
 - 如果传入 `fundamental_events_dir`，按 `available_at <= feature available_at` 选择最新可见财务指标和分红事件，生成 `fund_*`、`dividend_*` 字段。
 - `feature_date = source_trade_date = trade_date`。
-- `tradable_date = 下一交易日`；没有下一交易日的末尾样本丢弃。
+- `tradable_date = 下一交易日`；优先用 SSE `trade_cal` 映射，因此最后一个已落库日线分区也可以映射到次日盘前交易日；缺少交易日历时才回退到 `daily` 分区序列，没有下一交易日的末尾样本丢弃。
 - `available_at` 和 `result_available_time` 使用日频合同的收盘后可见时间。
 - 分区写入采用临时文件替换，避免下游读取半成品。
 
@@ -415,6 +416,10 @@ Evaluation 工具：
 - `annualized_return`
 - `max_drawdown`
 - `sharpe_ratio`
+- `theoretical_short_return`
+- `long_short_return_breakdown`
+
+`theoretical_short_return` 按入场价、退出价、持有天数、现金担保比例和年化融券费率计算理论做空收益。默认假设是 100% 现金担保、18% 年化融券费率，其中 18% 来自中信证券[融资融券费用公示](https://pb.citics.com/trading/xxgs/fy/)的融券费率参考值。该函数只用于研究侧收益拆分，不表示券商实际可融券源、担保品折算、强平线或集中度规则已经可执行；中信证券[维持担保比例要求](https://pb.citics.com/trading/xxgs/wcdbbl/)的普通平仓线/安全线/提取线可作为未来风控参数参考，但当前没有接入执行模型。
 
 这些都是原语，不负责决定候选股票或实验目标。
 

@@ -39,6 +39,8 @@ def download_reference(args: argparse.Namespace) -> int:
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     refresh_datasets = set(getattr(args, "refresh_reference_datasets", None) or [])
+    revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
+    trade_cal_end_date = getattr(args, "trade_cal_end_date", None) or args.end_date
 
     def should_force(dataset: str) -> bool:
         return bool(args.force or dataset in refresh_datasets)
@@ -73,14 +75,38 @@ def download_reference(args: argparse.Namespace) -> int:
             required_nonempty=True,
         )
 
-    open_dates = download_trade_cal(client, raw_dir, args.start_date, args.end_date, should_force("trade_cal"))
+    open_dates = download_trade_cal(client, raw_dir, args.start_date, trade_cal_end_date, should_force("trade_cal"))
+    open_dates = [trade_date for trade_date in open_dates if trade_date <= args.end_date]
     if not args.skip_bak_basic:
-        download_bak_basic(client, raw_dir, open_dates, args.bak_start_date, should_force("bak_basic"))
+        download_bak_basic(
+            client,
+            raw_dir,
+            open_dates,
+            args.bak_start_date,
+            should_force("bak_basic"),
+            revision_ledger,
+            getattr(args, "allow_empty_revision_overwrite", False),
+        )
     download_namechange(client, raw_dir, should_force("namechange"))
     classify = download_index_classify(client, raw_dir, should_force("index_classify"))
     download_index_member_all(client, raw_dir, classify, should_force("index_member_all"))
     print(f"reference download finished under {raw_dir}")
     return 0
+
+def merge_trade_cal_partition(path: Path, refreshed: pd.DataFrame) -> pd.DataFrame:
+    if not path.exists():
+        return refreshed
+    existing = pd.read_parquet(path)
+    if existing.empty:
+        return refreshed
+    if refreshed.empty:
+        return existing
+    merged = pd.concat([existing, refreshed], ignore_index=True)
+    return (
+        merged.drop_duplicates(["exchange", "cal_date"], keep="last")
+        .sort_values(["exchange", "cal_date"], ascending=[True, False])
+        .reset_index(drop=True)
+    )
 
 def download_trade_cal(client: TuShareClient, raw_dir: Path, start_date: str, end_date: str, force: bool) -> list[str]:
     fields = "exchange,cal_date,is_open,pretrade_date"
@@ -91,28 +117,64 @@ def download_trade_cal(client: TuShareClient, raw_dir: Path, start_date: str, en
             params = {"exchange": exchange, "start_date": max(start_date, f"{year}0101"), "end_date": min(end_date, f"{year}1231")}
             if path.exists() and not force:
                 df = pd.read_parquet(path)
-                dates = df["cal_date"].astype(str) if "cal_date" in df.columns else pd.Series(dtype=str)
+                dates = df["cal_date"].map(normalize_date_key) if "cal_date" in df.columns else pd.Series(dtype=str)
+                dates = dates[dates != ""]
                 if not dates.empty and dates.min() <= params["start_date"] and dates.max() >= params["end_date"]:
                     if exchange == "SSE" and not df.empty:
-                        sse_open.update(df.loc[df["is_open"].astype(str) == "1", "cal_date"].astype(str).tolist())
+                        sse_open.update(
+                            date_key
+                            for date_key in df.loc[df["is_open"].astype(str) == "1", "cal_date"].map(normalize_date_key).tolist()
+                            if date_key
+                        )
                     continue
                 result = client.query("trade_cal", params, fields)
-                refreshed = frame(result)
-                df = pd.concat([df, refreshed], ignore_index=True) if not df.empty else refreshed
-                if not df.empty:
-                    df = df.drop_duplicates(["exchange", "cal_date"], keep="last").sort_values(["exchange", "cal_date"], ascending=[True, False]).reset_index(drop=True)
+                df = merge_trade_cal_partition(path, frame(result))
                 meta_params = dict(params)
                 meta_params["merge_existing"] = True
                 write_parquet(path, df, api_name="trade_cal", params=meta_params, fields=fields.split(","), source_hash=stable_hash(df.fillna("").astype(str).to_dict("records")))
             else:
                 result = client.query("trade_cal", params, fields)
-                df = frame(result)
-                write_parquet(path, df, api_name="trade_cal", params=params, fields=result.fields, source_hash=result.source_hash)
+                df = merge_trade_cal_partition(path, frame(result))
+                meta_params = dict(params)
+                if path.exists():
+                    meta_params["merge_existing"] = True
+                write_parquet(path, df, api_name="trade_cal", params=meta_params, fields=result.fields, source_hash=stable_hash(df.fillna("").astype(str).to_dict("records")))
             if exchange == "SSE" and not df.empty:
-                sse_open.update(df.loc[df["is_open"].astype(str) == "1", "cal_date"].astype(str).tolist())
+                sse_open.update(
+                    date_key
+                    for date_key in df.loc[df["is_open"].astype(str) == "1", "cal_date"].map(normalize_date_key).tolist()
+                    if date_key
+                )
     return sorted(sse_open)
 
-def download_bak_basic(client: TuShareClient, raw_dir: Path, trade_dates: list[str], start_date: str, force: bool) -> None:
+def sse_trade_cal_covers(raw_dir: Path, start_date: str, end_date: str) -> bool:
+    files = sorted((raw_dir / "trade_cal" / "exchange=SSE").glob("year=*.parquet"))
+    if not files:
+        return False
+    calendar = read_many(files, columns=["cal_date"])
+    if calendar.empty or "cal_date" not in calendar.columns:
+        return False
+    dates = calendar["cal_date"].dropna().map(normalize_date_key)
+    dates = dates[dates != ""]
+    return bool(not dates.empty and dates.min() <= start_date and dates.max() >= end_date)
+
+def ensure_trade_cal_coverage(client: TuShareClient, raw_dir: Path, start_date: str, end_date: str) -> None:
+    if parse_yyyymmdd(start_date) > parse_yyyymmdd(end_date):
+        return
+    if sse_trade_cal_covers(raw_dir, start_date, end_date):
+        return
+    print(f"refreshing trade_cal coverage for {start_date}-{end_date}")
+    download_trade_cal(client, raw_dir, start_date, end_date, force=False)
+
+def download_bak_basic(
+    client: TuShareClient,
+    raw_dir: Path,
+    trade_dates: list[str],
+    start_date: str,
+    force: bool,
+    revision_ledger: Path,
+    allow_empty_revision_overwrite: bool,
+) -> None:
     fields = "trade_date,ts_code,name,industry,area,pe,float_share,total_share,total_assets,liquid_assets,fixed_assets,reserved,reserved_pershare,eps,bvps,pb,list_date,undp,per_undp,rev_yoy,profit_yoy,gpr,npr,holder_num"
     dates = [d for d in trade_dates if d >= start_date]
     for index, trade_date in enumerate(dates, start=1):
@@ -121,7 +183,17 @@ def download_bak_basic(client: TuShareClient, raw_dir: Path, trade_dates: list[s
             continue
         params = {"trade_date": trade_date}
         result = client.query("bak_basic", params, fields)
-        write_parquet(path, frame(result), api_name="bak_basic", params=params, fields=result.fields, source_hash=result.source_hash)
+        write_parquet_revision_aware(
+            path,
+            frame(result),
+            api_name="bak_basic",
+            params=params,
+            fields=result.fields,
+            source_hash=result.source_hash,
+            key_columns=list(BAK_BASIC_SPEC.key_columns),
+            revision_ledger=revision_ledger,
+            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        )
         if index % 250 == 0:
             print(f"bak_basic {index}/{len(dates)}")
 
@@ -181,6 +253,7 @@ def download_daily(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
+    ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date)
     trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
     refresh_datasets = set(getattr(args, "refresh_daily_datasets", None) or [])
     revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
@@ -208,21 +281,78 @@ def download_daily(args: argparse.Namespace) -> int:
     print(f"daily market download finished under {raw_dir}")
     return 0
 
-def emit_trade_date_revision_alert(path: Path, old_df: pd.DataFrame, new_df: pd.DataFrame, spec: TradeDateDataset, trade_date: str, ledger_path: Path) -> dict[str, Any] | None:
-    event = build_revision_event(
-        dataset=spec.api_name,
-        partition=f"trade_date={trade_date}",
-        path=path,
-        old_df=old_df,
-        new_df=new_df,
-        key_columns=list(spec.key_columns),
-        source="force_refresh",
+def date_series_in_window(series: pd.Series, start_date: str, end_date: str) -> pd.Series:
+    keys = series.map(normalize_date_key)
+    return keys.between(start_date, end_date)
+
+def merge_existing_window_rows(
+    path: Path,
+    refreshed: pd.DataFrame,
+    *,
+    start_date: str,
+    end_date: str,
+    date_columns: list[str],
+    key_columns: list[str],
+) -> pd.DataFrame:
+    if not path.exists():
+        return refreshed
+    existing = pd.read_parquet(path)
+    if existing.empty:
+        return refreshed
+    date_column = next((column for column in date_columns if column and (column in existing.columns or column in refreshed.columns)), "")
+    if not date_column:
+        return refreshed
+    if date_column not in existing.columns:
+        existing[date_column] = ""
+    if date_column not in refreshed.columns:
+        refreshed[date_column] = ""
+    retained = existing[~date_series_in_window(existing[date_column], start_date, end_date)].copy()
+    merged = pd.concat([retained, refreshed], ignore_index=True)
+    if key_columns and set(key_columns).issubset(merged.columns):
+        merged = merged.drop_duplicates(key_columns, keep="last")
+    return merged.reset_index(drop=True)
+
+def write_window_merged_partition(
+    path: Path,
+    refreshed: pd.DataFrame,
+    *,
+    api_name: str,
+    params: dict[str, Any],
+    fields: list[str],
+    source_hash: str,
+    key_columns: list[str],
+    date_columns: list[str],
+    start_date: str,
+    end_date: str,
+    revision_ledger: Path | str | None,
+    allow_empty_revision_overwrite: bool,
+) -> int:
+    df = refreshed
+    meta_params = dict(params)
+    if path.exists() and (not refreshed.empty or allow_empty_revision_overwrite):
+        df = merge_existing_window_rows(
+            path,
+            refreshed,
+            start_date=start_date,
+            end_date=end_date,
+            date_columns=date_columns,
+            key_columns=key_columns,
+        )
+        meta_params["merge_existing_window"] = {"start_date": start_date, "end_date": end_date}
+        meta_params["source_response_hash"] = source_hash
+        source_hash = stable_hash(df.fillna("").astype(str).to_dict("records"))
+    written = write_parquet_revision_aware(
+        path,
+        df,
+        api_name=api_name,
+        params=meta_params,
+        fields=list(df.columns) if len(df.columns) else fields,
+        source_hash=source_hash,
+        key_columns=key_columns,
+        revision_ledger=revision_ledger,
+        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
     )
-    if not event:
-        return None
-    append_jsonl(ledger_path, event)
-    print("REVISION_ALERT " + json.dumps(event, ensure_ascii=False, sort_keys=True))
-    return event
+    return len(df) if written else 0
 
 def download_trade_date_dataset(
     client: TuShareClient,
@@ -258,18 +388,24 @@ def download_trade_date_dataset(
             zero_skipped += 1
             print(f"{spec.api_name} trade_date={trade_date} returned zero rows; skipped_write")
             continue
-        if path.exists():
-            old_df = pd.read_parquet(path)
-            emit_trade_date_revision_alert(path, old_df, df, spec, trade_date, revision_ledger)
-            if spec.zero_rows_ok and old_df.shape[0] > 0 and df.empty and not allow_empty_revision_overwrite:
-                zero_skipped += 1
-                print(f"{spec.api_name} trade_date={trade_date} returned zero rows for existing nonempty partition; skipped_empty_revision_overwrite")
-                continue
         meta_params = dict(params)
         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        write_parquet(path, df, api_name=spec.api_name, params=meta_params, fields=result.fields, source_hash=result.source_hash)
-        total_rows += len(df)
-        written += 1
+        did_write = write_parquet_revision_aware(
+            path,
+            df,
+            api_name=spec.api_name,
+            params=meta_params,
+            fields=result.fields,
+            source_hash=result.source_hash,
+            key_columns=list(spec.key_columns),
+            revision_ledger=revision_ledger,
+            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        )
+        if did_write:
+            total_rows += len(df)
+            written += 1
+        else:
+            zero_skipped += 1
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} zero_skipped={zero_skipped} rows_written={total_rows}")
@@ -279,30 +415,33 @@ def download_macro(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
+    revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
+    allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
+    retained_start_date = getattr(args, "macro_start_date", None) or args.start_date
     for dataset in selected_macro_datasets(args):
         spec = MACRO_SPECS[dataset]
         start_date = max(args.start_date, spec.start_date)
         if spec.strategy == "quarter_once":
-            download_macro_quarter_once(client, raw_dir, spec, start_date, args.end_date, args.force)
+            download_macro_quarter_once(client, raw_dir, spec, max(retained_start_date, spec.start_date), args.end_date, args.force, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "month_once":
-            download_macro_month_once(client, raw_dir, spec, start_date, args.end_date, args.force)
+            download_macro_month_once(client, raw_dir, spec, max(retained_start_date, spec.start_date), args.end_date, args.force, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "month_loop":
-            download_macro_month_loop(client, raw_dir, spec, start_date, args.end_date, args.force)
+            download_macro_month_loop(client, raw_dir, spec, start_date, args.end_date, args.force, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "date_year":
-            download_macro_date_year(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit))
+            download_macro_date_year(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "date_year_by_curr_type":
-            download_macro_date_year_by_curr_type(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), selected_libor_currencies(args))
+            download_macro_date_year_by_curr_type(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), selected_libor_currencies(args), revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "date_year_by_ts_code":
             codes = selected_index_codes(args) if dataset == "index_global" else selected_fx_codes(args)
-            download_macro_date_year_by_ts_code(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), codes)
+            download_macro_date_year_by_ts_code(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), codes, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "eco_cal_month":
-            download_macro_eco_cal_month(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), args)
+            download_macro_eco_cal_month(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), args, revision_ledger, allow_empty_revision_overwrite)
         else:
             raise RuntimeError(f"unsupported macro strategy {spec.strategy} for {dataset}")
     print(f"{args.tier} download finished under {raw_dir}")
     return 0
 
-def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool) -> None:
+def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     start_q = max(yyyymmdd_to_quarter(start_date), spec.start_quarter)
     end_q = yyyymmdd_to_quarter(end_date)
     path = raw_dir / spec.api_name / f"range={start_q}_{end_q}.parquet"
@@ -311,10 +450,10 @@ def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: Macr
         return
     params = {"start_q": start_q, "end_q": end_q}
     result = client.query(spec.api_name, params, spec.fields)
-    rows = write_macro_result(path, result, spec, {**params, **coverage_params})
+    rows = write_macro_result(path, result, spec, {**params, **coverage_params}, revision_ledger, allow_empty_revision_overwrite)
     print(f"{spec.api_name} quarters {start_q}-{end_q} rows={rows}")
 
-def download_macro_month_once(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool) -> None:
+def download_macro_month_once(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     start_m = max(yyyymmdd_to_month(start_date), spec.start_month)
     end_m = yyyymmdd_to_month(end_date)
     path = raw_dir / spec.api_name / f"range={start_m}_{end_m}.parquet"
@@ -323,10 +462,10 @@ def download_macro_month_once(client: TuShareClient, raw_dir: Path, spec: MacroD
         return
     params = {"start_m": start_m, "end_m": end_m}
     result = client.query(spec.api_name, params, spec.fields)
-    rows = write_macro_result(path, result, spec, {**params, **coverage_params})
+    rows = write_macro_result(path, result, spec, {**params, **coverage_params}, revision_ledger, allow_empty_revision_overwrite)
     print(f"{spec.api_name} months {start_m}-{end_m} rows={rows}")
 
-def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool) -> None:
+def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     windows = month_windows(start_date, end_date)
     end_month = end_date[:6]
     written = 0
@@ -341,13 +480,27 @@ def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: MacroD
         params = {"m": month}
         meta_params = {**params, **coverage_params} if coverage_params else params
         result = client.query(spec.api_name, params, spec.fields)
-        total_rows += write_macro_result(path, result, spec, meta_params)
+        df = augment_macro_frame(frame(result), spec)
+        total_rows += write_window_merged_partition(
+            path,
+            df,
+            api_name=spec.api_name,
+            params=meta_params,
+            fields=list(df.columns),
+            source_hash=result.source_hash,
+            key_columns=list(spec.key_columns),
+            date_columns=[spec.date_column, spec.time_column, "available_at"],
+            start_date=window_start,
+            end_date=window_end,
+            revision_ledger=revision_ledger,
+            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        )
         written += 1
         if index % 24 == 0:
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
 
-def download_macro_date_year(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, page_limit: int) -> None:
+def download_macro_date_year(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, page_limit: int, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     written = 0
     skipped = 0
     total_rows = 0
@@ -363,7 +516,21 @@ def download_macro_date_year(client: TuShareClient, raw_dir: Path, spec: MacroDa
         result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
         meta_params = dict(params)
         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        total_rows += write_macro_result(path, result, spec, meta_params)
+        df = augment_macro_frame(frame(result), spec)
+        total_rows += write_window_merged_partition(
+            path,
+            df,
+            api_name=spec.api_name,
+            params=meta_params,
+            fields=list(df.columns),
+            source_hash=result.source_hash,
+            key_columns=list(spec.key_columns),
+            date_columns=[spec.date_column, spec.time_column, "available_at"],
+            start_date=year_start,
+            end_date=year_end,
+            revision_ledger=revision_ledger,
+            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        )
         written += 1
     print(f"{spec.api_name} done years={int(end_date[:4]) - int(start_date[:4]) + 1} skipped={skipped} written={written} rows_written={total_rows}")
 
@@ -376,6 +543,8 @@ def download_macro_date_year_by_curr_type(
     force: bool,
     page_limit: int,
     currencies: list[str],
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     total_tasks = len(currencies) * (int(end_date[:4]) - int(start_date[:4]) + 1)
     written = 0
@@ -395,7 +564,21 @@ def download_macro_date_year_by_curr_type(
             result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
             meta_params = dict(params)
             meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            total_rows += write_macro_result(path, result, spec, meta_params)
+            df = augment_macro_frame(frame(result), spec)
+            total_rows += write_window_merged_partition(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=list(df.columns),
+                source_hash=result.source_hash,
+                key_columns=list(spec.key_columns),
+                date_columns=[spec.date_column, spec.time_column, "available_at"],
+                start_date=year_start,
+                end_date=year_end,
+                revision_ledger=revision_ledger,
+                allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+            )
             written += 1
             if task_index % 25 == 0:
                 print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
@@ -410,6 +593,8 @@ def download_macro_date_year_by_ts_code(
     force: bool,
     page_limit: int,
     codes: list[str],
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     total_tasks = len(codes) * (int(end_date[:4]) - int(start_date[:4]) + 1)
     written = 0
@@ -429,7 +614,21 @@ def download_macro_date_year_by_ts_code(
             result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
             meta_params = dict(params)
             meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            total_rows += write_macro_result(path, result, spec, meta_params)
+            df = augment_macro_frame(frame(result), spec)
+            total_rows += write_window_merged_partition(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=list(df.columns),
+                source_hash=result.source_hash,
+                key_columns=list(spec.key_columns),
+                date_columns=[spec.date_column, spec.time_column, "available_at"],
+                start_date=year_start,
+                end_date=year_end,
+                revision_ledger=revision_ledger,
+                allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+            )
             written += 1
             if task_index % 25 == 0:
                 print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
@@ -444,6 +643,8 @@ def download_macro_eco_cal_month(
     force: bool,
     page_limit: int,
     args: argparse.Namespace,
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     countries = selected_eco_filter_values(args, "eco_country")
     currencies = selected_eco_filter_values(args, "eco_currency")
@@ -482,7 +683,21 @@ def download_macro_eco_cal_month(
                         "month": month,
                         "pagination": {"page_limit": page_limit, "pages": pages},
                     })
-                    total_rows += write_macro_result(path, result, spec, meta_params)
+                    df = augment_macro_frame(frame(result), spec)
+                    total_rows += write_window_merged_partition(
+                        path,
+                        df,
+                        api_name=spec.api_name,
+                        params=meta_params,
+                        fields=list(df.columns),
+                        source_hash=result.source_hash,
+                        key_columns=list(spec.key_columns),
+                        date_columns=[spec.date_column, spec.time_column, "available_at"],
+                        start_date=start,
+                        end_date=end,
+                        revision_ledger=revision_ledger,
+                        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+                    )
                     written += 1
                     if task_index % 24 == 0:
                         print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
@@ -493,9 +708,12 @@ def download_event_flow(args: argparse.Namespace) -> int:
     raw_dir = repo_root / args.raw_dir
     datasets = selected_event_flow_download_datasets(args)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
+    revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
+    allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     trade_dates: list[str] = []
     trade_end_date = args.end_date
     if any(EVENT_FLOW_SPECS[name].strategy == "trade_date" for name in datasets):
+        ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date)
         latest_trade_calendar_date = latest_sse_calendar_date(raw_dir)
         trade_end_date = min(args.end_date, latest_trade_calendar_date)
         if trade_end_date < args.end_date:
@@ -506,23 +724,32 @@ def download_event_flow(args: argparse.Namespace) -> int:
         trade_dates = load_sse_open_dates(raw_dir, args.start_date, trade_end_date, allow_empty=True)
         if not trade_dates:
             print(f"event/flow trade-date datasets skipped: no SSE open dates for {args.start_date}-{trade_end_date}")
-    windows = month_windows(args.start_date, args.end_date)
-    days = date_range_days(args.start_date, args.end_date)
     required_zero_skipped: list[str] = []
     for dataset in datasets:
         spec = EVENT_FLOW_SPECS[dataset]
         start_date = max(args.start_date, spec.start_date)
         if spec.strategy == "trade_date":
             dates = [d for d in trade_dates if start_date <= d <= trade_end_date]
-            zero_skipped = download_event_trade_date_dataset(client, raw_dir, spec, dates, args.force, event_page_limit(spec, args.page_limit))
+            zero_skipped = download_event_trade_date_dataset(
+                client,
+                raw_dir,
+                spec,
+                dates,
+                args.force,
+                event_page_limit(spec, args.page_limit),
+                revision_ledger,
+                allow_empty_revision_overwrite,
+            )
             if zero_skipped and not spec.zero_rows_ok:
                 required_zero_skipped.append(f"{spec.api_name}:{zero_skipped}")
         elif spec.strategy == "range_month":
+            windows = month_windows(args.start_date, args.end_date)
             dataset_windows = [(s, e, m) for s, e, m in windows if e >= start_date]
-            download_event_range_month(client, raw_dir, spec, dataset_windows, args.force, event_page_limit(spec, args.page_limit))
+            download_event_range_month(client, raw_dir, spec, dataset_windows, args.force, event_page_limit(spec, args.page_limit), revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "day":
+            days = date_range_days(args.start_date, args.end_date)
             dataset_days = [day for day in days if day >= start_date]
-            download_event_day_dataset(client, raw_dir, spec, dataset_days, args.force)
+            download_event_day_dataset(client, raw_dir, spec, dataset_days, args.force, revision_ledger, allow_empty_revision_overwrite)
         else:
             raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {dataset}")
     if required_zero_skipped:
@@ -543,7 +770,16 @@ def selected_event_flow_download_datasets(args: argparse.Namespace) -> list[str]
         )
     return datasets
 
-def download_event_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec: EventDataset, trade_dates: list[str], force: bool, page_limit: int | None) -> int:
+def download_event_trade_date_dataset(
+    client: TuShareClient,
+    raw_dir: Path,
+    spec: EventDataset,
+    trade_dates: list[str],
+    force: bool,
+    page_limit: int | None,
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
+) -> int:
     page_limit = page_limit or spec.page_limit
     written = 0
     skipped = 0
@@ -568,16 +804,38 @@ def download_event_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec
             total_pages += pages
             print(f"{spec.api_name} trade_date={trade_date} returned zero rows; skipped_write")
             continue
-        write_parquet(path, df, api_name=spec.api_name, params=meta_params, fields=list(df.columns), source_hash=result.source_hash)
-        total_rows += len(df)
-        written += 1
+        did_write = write_parquet_revision_aware(
+            path,
+            df,
+            api_name=spec.api_name,
+            params=meta_params,
+            fields=list(df.columns),
+            source_hash=result.source_hash,
+            key_columns=list(spec.key_columns),
+            revision_ledger=revision_ledger,
+            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        )
+        if did_write:
+            total_rows += len(df)
+            written += 1
+        else:
+            zero_skipped += 1
         total_pages += pages
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} zero_skipped={zero_skipped} rows_written={total_rows} pages={total_pages}")
     return zero_skipped
 
-def download_event_range_month(client: TuShareClient, raw_dir: Path, spec: EventDataset, windows: list[tuple[str, str, str]], force: bool, page_limit: int) -> None:
+def download_event_range_month(
+    client: TuShareClient,
+    raw_dir: Path,
+    spec: EventDataset,
+    windows: list[tuple[str, str, str]],
+    force: bool,
+    page_limit: int,
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
+) -> None:
     written = 0
     skipped = 0
     total_rows = 0
@@ -592,14 +850,37 @@ def download_event_range_month(client: TuShareClient, raw_dir: Path, spec: Event
         meta_params = dict(params)
         meta_params["month"] = month
         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        total_rows += write_event_result(path, result, spec, meta_params)
-        written += 1
+        df = augment_event_frame(frame(result), spec)
+        rows = write_window_merged_partition(
+            path,
+            df,
+            api_name=spec.api_name,
+            params=meta_params,
+            fields=list(df.columns),
+            source_hash=result.source_hash,
+            key_columns=list(spec.key_columns),
+            date_columns=[spec.date_column, spec.fallback_date_column, "available_at"],
+            start_date=start_date,
+            end_date=end_date,
+            revision_ledger=revision_ledger,
+            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        )
+        total_rows += rows
+        written += 1 if rows or not (path.exists() and parquet_rows(path) > 0 and df.empty) else 0
         total_pages += pages
         if index % 24 == 0:
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
 
-def download_event_day_dataset(client: TuShareClient, raw_dir: Path, spec: EventDataset, days: list[str], force: bool) -> None:
+def download_event_day_dataset(
+    client: TuShareClient,
+    raw_dir: Path,
+    spec: EventDataset,
+    days: list[str],
+    force: bool,
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
+) -> None:
     written = 0
     skipped = 0
     total_rows = 0
@@ -612,8 +893,9 @@ def download_event_day_dataset(client: TuShareClient, raw_dir: Path, spec: Event
             continue
         params = {"start_date": day, "end_date": day}
         result = client.query(spec.api_name, params, spec.fields)
-        total_rows += write_event_result(path, result, spec, params)
-        written += 1
+        rows = write_event_result(path, result, spec, params, revision_ledger, allow_empty_revision_overwrite)
+        total_rows += rows
+        written += 1 if rows or not (path.exists() and parquet_rows(path) > 0 and frame(result).empty) else 0
         if index % 250 == 0:
             print(f"{spec.api_name} days {index}/{len(days)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done days={len(days)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -623,8 +905,11 @@ def download_board_trading(args: argparse.Namespace) -> int:
     raw_dir = repo_root / args.raw_dir
     datasets = selected_board_trading_datasets(args)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
+    revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
+    allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     trade_dates: list[str] = []
     if any(BOARD_TRADING_SPECS[name].strategy != "static_once" for name in datasets):
+        ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date)
         latest_trade_calendar_date = latest_sse_calendar_date(raw_dir)
         trade_end_date = min(args.end_date, latest_trade_calendar_date)
         if trade_end_date < args.end_date:
@@ -641,32 +926,32 @@ def download_board_trading(args: argparse.Namespace) -> int:
         dates = [trade_date for trade_date in trade_dates if start_date <= trade_date <= args.end_date]
         page_limit = board_page_limit(spec, args.page_limit)
         if spec.strategy == "static_once":
-            download_board_static_dataset(client, raw_dir, spec, args.force)
+            download_board_static_dataset(client, raw_dir, spec, args.force, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "trade_date":
-            download_board_trade_date_dataset(client, raw_dir, spec, dates, args.force, page_limit)
+            download_board_trade_date_dataset(client, raw_dir, spec, dates, args.force, page_limit, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "trade_date_by_tag":
-            download_board_kpl_list(client, raw_dir, spec, dates, args.force, page_limit, selected_board_kpl_tags(args))
+            download_board_kpl_list(client, raw_dir, spec, dates, args.force, page_limit, selected_board_kpl_tags(args), revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "trade_date_by_limit_type":
-            download_board_limit_list_ths(client, raw_dir, spec, dates, args.force, page_limit, selected_board_ths_limit_types(args))
+            download_board_limit_list_ths(client, raw_dir, spec, dates, args.force, page_limit, selected_board_ths_limit_types(args), revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "trade_date_by_market":
-            download_board_hot_by_market(client, raw_dir, spec, dates, args.force, page_limit, selected_board_ths_hot_markets(args), selected_board_hot_is_new(args))
+            download_board_hot_by_market(client, raw_dir, spec, dates, args.force, page_limit, selected_board_ths_hot_markets(args), selected_board_hot_is_new(args), revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "trade_date_by_market_hot_type":
-            download_board_dc_hot(client, raw_dir, spec, dates, args.force, page_limit, selected_board_dc_hot_markets(args), selected_board_dc_hot_types(args), selected_board_hot_is_new(args))
+            download_board_dc_hot(client, raw_dir, spec, dates, args.force, page_limit, selected_board_dc_hot_markets(args), selected_board_dc_hot_types(args), selected_board_hot_is_new(args), revision_ledger, allow_empty_revision_overwrite)
         else:
             raise RuntimeError(f"unsupported board-trading strategy {spec.strategy} for {dataset}")
     print(f"board-trading download finished under {raw_dir}")
     return 0
 
-def download_board_static_dataset(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, force: bool) -> None:
+def download_board_static_dataset(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     path = raw_dir / spec.api_name / f"{spec.api_name}.parquet"
     if path.exists() and not force:
         print(f"{spec.api_name} static skipped")
         return
     result = client.query(spec.api_name, {}, spec.fields)
-    rows = write_board_result(path, result, spec, {})
+    rows = write_board_result(path, result, spec, {}, revision_ledger, allow_empty_revision_overwrite)
     print(f"{spec.api_name} static rows={rows}")
 
-def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int) -> None:
+def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     written = 0
     skipped = 0
     total_rows = 0
@@ -680,14 +965,14 @@ def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec
         result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
         meta_params = dict(params)
         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        total_rows += write_board_result(path, result, spec, meta_params)
+        total_rows += write_board_result(path, result, spec, meta_params, revision_ledger, allow_empty_revision_overwrite)
         total_pages += pages
         written += 1
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
 
-def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int, tags: list[str]) -> None:
+def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int, tags: list[str], revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     total_tasks = len(trade_dates) * len(tags)
     task_index = 0
     written = 0
@@ -707,14 +992,14 @@ def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: BoardTra
             meta_params = dict(params)
             meta_params["tag_partition"] = tag_part
             meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            total_rows += write_board_result(path, result, spec, meta_params)
+            total_rows += write_board_result(path, result, spec, meta_params, revision_ledger, allow_empty_revision_overwrite)
             total_pages += pages
             written += 1
             if task_index % 250 == 0:
                 print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
 
-def download_board_limit_list_ths(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int, limit_types: list[str]) -> None:
+def download_board_limit_list_ths(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int, limit_types: list[str], revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     total_tasks = len(trade_dates) * len(limit_types)
     task_index = 0
     written = 0
@@ -734,7 +1019,7 @@ def download_board_limit_list_ths(client: TuShareClient, raw_dir: Path, spec: Bo
             meta_params = dict(params)
             meta_params["limit_type_partition"] = limit_type_part
             meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            total_rows += write_board_result(path, result, spec, meta_params)
+            total_rows += write_board_result(path, result, spec, meta_params, revision_ledger, allow_empty_revision_overwrite)
             total_pages += pages
             written += 1
             if task_index % 250 == 0:
@@ -750,6 +1035,8 @@ def download_board_hot_by_market(
     page_limit: int,
     markets: list[str],
     is_new_values: list[str],
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     total_tasks = len(trade_dates) * len(markets) * len(is_new_values)
     task_index = 0
@@ -771,7 +1058,7 @@ def download_board_hot_by_market(
                 meta_params = dict(params)
                 meta_params["market_partition"] = market_part
                 meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                total_rows += write_board_result(path, result, spec, meta_params)
+                total_rows += write_board_result(path, result, spec, meta_params, revision_ledger, allow_empty_revision_overwrite)
                 total_pages += pages
                 written += 1
                 if task_index % 250 == 0:
@@ -788,6 +1075,8 @@ def download_board_dc_hot(
     markets: list[str],
     hot_types: list[str],
     is_new_values: list[str],
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     total_tasks = len(trade_dates) * len(markets) * len(hot_types) * len(is_new_values)
     task_index = 0
@@ -812,14 +1101,23 @@ def download_board_dc_hot(
                     meta_params["market_partition"] = market_part
                     meta_params["hot_type_partition"] = hot_type_part
                     meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                    total_rows += write_board_result(path, result, spec, meta_params)
+                    total_rows += write_board_result(path, result, spec, meta_params, revision_ledger, allow_empty_revision_overwrite)
                     total_pages += pages
                     written += 1
                     if task_index % 250 == 0:
                         print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
 
-def query_share_float_to_path(client: TuShareClient, raw_dir: Path, path: Path, params: dict[str, Any], source: str, force: bool) -> dict[str, Any]:
+def query_share_float_to_path(
+    client: TuShareClient,
+    raw_dir: Path,
+    path: Path,
+    params: dict[str, Any],
+    source: str,
+    force: bool,
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
+) -> dict[str, Any]:
     if path.exists() and not force:
         rows = parquet_rows(path)
         return {"path": str(path), "rows": rows, "skipped": True, "source_cap_risk": rows >= SHARE_FLOAT_ROW_LIMIT}
@@ -827,8 +1125,20 @@ def query_share_float_to_path(client: TuShareClient, raw_dir: Path, path: Path, 
     meta_params = dict(params)
     meta_params["download_path"] = source
     meta_params["row_limit"] = SHARE_FLOAT_ROW_LIMIT
-    rows = write_event_result(path, result, EVENT_FLOW_SPECS["share_float"], meta_params)
-    return {"path": str(path), "rows": rows, "skipped": False, "source_cap_risk": rows >= SHARE_FLOAT_ROW_LIMIT}
+    df = augment_event_frame(frame(result), EVENT_FLOW_SPECS["share_float"])
+    did_write = write_parquet_revision_aware(
+        path,
+        df,
+        api_name="share_float",
+        params=meta_params,
+        fields=list(df.columns),
+        source_hash=result.source_hash,
+        key_columns=list(EVENT_FLOW_SPECS["share_float"].key_columns),
+        revision_ledger=revision_ledger,
+        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+    )
+    rows = len(df) if did_write else parquet_rows(path) if path.exists() else 0
+    return {"path": str(path), "rows": rows, "skipped": not did_write, "source_cap_risk": rows >= SHARE_FLOAT_ROW_LIMIT}
 
 def download_share_float_ann_dates(client: TuShareClient, raw_dir: Path, args: argparse.Namespace, report: dict[str, Any]) -> list[str]:
     days = date_range_days(args.ann_start_date, args.ann_end_date)
@@ -838,7 +1148,16 @@ def download_share_float_ann_dates(client: TuShareClient, raw_dir: Path, args: a
     total_rows = 0
     for index, day in enumerate(days, start=1):
         path = raw_dir / "share_float_ann_date" / f"ann_date={day}.parquet"
-        result = query_share_float_to_path(client, raw_dir, path, {"ann_date": day}, "ann_date", args.force)
+        result = query_share_float_to_path(
+            client,
+            raw_dir,
+            path,
+            {"ann_date": day},
+            "ann_date",
+            args.force,
+            getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            getattr(args, "allow_empty_revision_overwrite", False),
+        )
         written += 0 if result["skipped"] else 1
         skipped += 1 if result["skipped"] else 0
         total_rows += int(result["rows"])
@@ -867,6 +1186,8 @@ def download_share_float_ts_code_rescue_by_date(
     dataset_dir: str,
     source: str,
     force: bool,
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
 ) -> dict[str, Any]:
     written = 0
     skipped = 0
@@ -879,7 +1200,16 @@ def download_share_float_ts_code_rescue_by_date(
         for code in date_codes[day]:
             task_index += 1
             path = raw_dir / dataset_dir / f"{date_param}={day}" / f"ts_code={code}.parquet"
-            result = query_share_float_to_path(client, raw_dir, path, {date_param: day, "ts_code": code}, source, force)
+            result = query_share_float_to_path(
+                client,
+                raw_dir,
+                path,
+                {date_param: day, "ts_code": code},
+                source,
+                force,
+                revision_ledger,
+                allow_empty_revision_overwrite,
+            )
             written += 0 if result["skipped"] else 1
             skipped += 1 if result["skipped"] else 0
             total_rows += int(result["rows"])
@@ -1143,12 +1473,14 @@ def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dic
             f"{output} from {existing_rows} to {len(union)} rows using {len(files)} input files; "
             "check active/archive process roots or pass --allow-union-shrink for an intentional rebuild."
         )
-    write_parquet(
+    union_source_hash = stable_hash({"input_files": [str(path) for path, _ in files], "rows": len(union), "columns": list(union.columns)})
+    write_parquet_revision_aware(
         output,
         union,
-        api_name="share_float",
+        api_name="share_float_complete",
         params={
             "strategy": "ann_date_float_date_union",
+            "source_api": "share_float",
             "ann_start_date": args.ann_start_date,
             "ann_end_date": args.ann_end_date,
             "float_start_date": args.float_start_date,
@@ -1160,7 +1492,11 @@ def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dic
             "input_files": len(files),
         },
         fields=list(union.columns),
-        source_hash=stable_hash({"input_files": [str(path) for path, _ in files], "rows": len(union), "columns": list(union.columns)}),
+        source_hash=union_source_hash,
+        key_columns=key_columns,
+        revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+        source="share_float_union_rebuild",
+        allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
     )
     report["union"] = {
         "output": str(output),
@@ -1218,6 +1554,8 @@ def download_share_float_complete(args: argparse.Namespace) -> int:
             dataset_dir="share_float_ann_date_ts_code",
             source="ann_date_ts_code",
             force=args.force,
+            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
         )
     report["ann_date_ts_code_skipped_limit_days"] = skipped_ann_rescue
 
@@ -1230,6 +1568,8 @@ def download_share_float_complete(args: argparse.Namespace) -> int:
             dataset_dir="share_float_float_date_ts_code",
             source="float_date_ts_code",
             force=args.force,
+            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
         )
 
     if args.write_union:
@@ -1255,6 +1595,8 @@ def download_fundamental(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
+    revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
+    allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     datasets = selected_fundamental_datasets(args)
     stock_codes: list[str] = []
     if any(FUNDAMENTAL_SPECS[name].strategy == "ts_code" for name in datasets):
@@ -1279,10 +1621,10 @@ def download_fundamental(args: argparse.Namespace) -> int:
 
     for dataset in period_datasets:
         spec = FUNDAMENTAL_SPECS[dataset]
-        download_fundamental_period_dataset(client, raw_dir, spec, periods, args.force, args.page_limit, refresh_periods)
+        download_fundamental_period_dataset(client, raw_dir, spec, periods, args.force, args.page_limit, refresh_periods, revision_ledger, allow_empty_revision_overwrite)
     for dataset in ann_month_datasets:
         spec = FUNDAMENTAL_SPECS[dataset]
-        download_fundamental_ann_month_dataset(client, raw_dir, spec, windows, args.force, args.page_limit, refresh_months)
+        download_fundamental_ann_month_dataset(client, raw_dir, spec, windows, args.force, args.page_limit, refresh_months, revision_ledger, allow_empty_revision_overwrite)
 
     affected_days = int(getattr(args, "fundamental_refresh_event_days", 90) or 0)
     affected_start = format_yyyymmdd(parse_yyyymmdd(args.end_date) - timedelta(days=max(affected_days, 1) - 1))
@@ -1306,7 +1648,7 @@ def download_fundamental(args: argparse.Namespace) -> int:
             force_codes = set(affected_codes)
             if dataset == "dividend":
                 force_codes.update(dividend_probe_codes)
-        download_fundamental_ts_code_dataset(client, raw_dir, spec, stock_codes, args.force, args.page_limit, force_codes)
+        download_fundamental_ts_code_dataset(client, raw_dir, spec, stock_codes, args.force, args.page_limit, force_codes, revision_ledger, allow_empty_revision_overwrite)
     print(f"fundamental download finished under {raw_dir}")
     return 0
 
@@ -1409,7 +1751,7 @@ def probe_recent_dividend_codes(client: TuShareClient, end_date: str, days: int,
     codes: set[str] = set()
     for offset in range(days):
         key = format_yyyymmdd(start + timedelta(days=offset))
-        for param_name in ("ann_date", "imp_ann_date", "ex_date", "record_date", "pay_date"):
+        for param_name in ("ann_date", "imp_ann_date", "ex_date", "record_date"):
             result, _pages = query_paged(client, "dividend", {param_name: key}, "ts_code", page_limit)
             df = frame(result)
             if "ts_code" in df.columns:
@@ -1419,7 +1761,17 @@ def probe_recent_dividend_codes(client: TuShareClient, end_date: str, days: int,
     return codes
 
 
-def download_fundamental_period_dataset(client: TuShareClient, raw_dir: Path, spec: FundamentalDataset, periods: list[str], force: bool, page_limit: int, force_periods: set[str] | None = None) -> None:
+def download_fundamental_period_dataset(
+    client: TuShareClient,
+    raw_dir: Path,
+    spec: FundamentalDataset,
+    periods: list[str],
+    force: bool,
+    page_limit: int,
+    force_periods: set[str] | None = None,
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
+) -> None:
     force_periods = force_periods or set()
     written = 0
     skipped = 0
@@ -1434,14 +1786,35 @@ def download_fundamental_period_dataset(client: TuShareClient, raw_dir: Path, sp
         df = frame(result)
         meta_params = dict(params)
         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        write_parquet(path, df, api_name=spec.api_name, params=meta_params, fields=result.fields, source_hash=result.source_hash)
-        written += 1
-        total_rows += len(df)
+        did_write = write_parquet_revision_aware(
+            path,
+            df,
+            api_name=spec.api_name,
+            params=meta_params,
+            fields=result.fields,
+            source_hash=result.source_hash,
+            key_columns=list(spec.key_columns),
+            revision_ledger=revision_ledger,
+            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        )
+        if did_write:
+            written += 1
+            total_rows += len(df)
         if index % 16 == 0:
             print(f"{spec.api_name} periods {index}/{len(periods)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done periods={len(periods)} skipped={skipped} written={written} rows_written={total_rows}")
 
-def download_fundamental_ann_month_dataset(client: TuShareClient, raw_dir: Path, spec: FundamentalDataset, windows: list[tuple[str, str, str]], force: bool, page_limit: int, force_months: set[str] | None = None) -> None:
+def download_fundamental_ann_month_dataset(
+    client: TuShareClient,
+    raw_dir: Path,
+    spec: FundamentalDataset,
+    windows: list[tuple[str, str, str]],
+    force: bool,
+    page_limit: int,
+    force_months: set[str] | None = None,
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
+) -> None:
     force_months = force_months or set()
     written = 0
     skipped = 0
@@ -1457,14 +1830,35 @@ def download_fundamental_ann_month_dataset(client: TuShareClient, raw_dir: Path,
         meta_params = dict(params)
         meta_params["ann_month"] = ann_month
         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        write_parquet(path, df, api_name=spec.api_name, params=meta_params, fields=result.fields, source_hash=result.source_hash)
-        written += 1
-        total_rows += len(df)
+        did_write = write_parquet_revision_aware(
+            path,
+            df,
+            api_name=spec.api_name,
+            params=meta_params,
+            fields=result.fields,
+            source_hash=result.source_hash,
+            key_columns=list(spec.key_columns),
+            revision_ledger=revision_ledger,
+            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        )
+        if did_write:
+            written += 1
+            total_rows += len(df)
         if index % 24 == 0:
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
 
-def download_fundamental_ts_code_dataset(client: TuShareClient, raw_dir: Path, spec: FundamentalDataset, stock_codes: list[str], force: bool, page_limit: int, force_codes: set[str] | None = None) -> None:
+def download_fundamental_ts_code_dataset(
+    client: TuShareClient,
+    raw_dir: Path,
+    spec: FundamentalDataset,
+    stock_codes: list[str],
+    force: bool,
+    page_limit: int,
+    force_codes: set[str] | None = None,
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
+) -> None:
     force_codes = force_codes or set()
     written = 0
     skipped = 0
@@ -1481,9 +1875,20 @@ def download_fundamental_ts_code_dataset(client: TuShareClient, raw_dir: Path, s
         df = frame(result)
         meta_params = dict(params)
         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        write_parquet(path, df, api_name=spec.api_name, params=meta_params, fields=result.fields, source_hash=result.source_hash)
-        written += 1
-        total_rows += len(df)
+        did_write = write_parquet_revision_aware(
+            path,
+            df,
+            api_name=spec.api_name,
+            params=meta_params,
+            fields=result.fields,
+            source_hash=result.source_hash,
+            key_columns=list(spec.key_columns),
+            revision_ledger=revision_ledger,
+            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        )
+        if did_write:
+            written += 1
+            total_rows += len(df)
         if index % 500 == 0:
             print(f"{spec.api_name} codes {index}/{len(stock_codes)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done codes={len(stock_codes)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -1576,6 +1981,8 @@ def write_stk_mins_by_date(
     trade_date: str,
     source: str,
     params: dict[str, Any],
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     meta_params = dict(params)
     meta_params.update({
@@ -1592,7 +1999,17 @@ def write_stk_mins_by_date(
         "unique_codes": int(df["ts_code"].nunique()) if "ts_code" in df.columns else 0,
         "params": meta_params,
     })
-    write_parquet(path, df, api_name=STK_MINS_API_NAME, params=meta_params, fields=list(df.columns), source_hash=source_hash)
+    write_parquet_revision_aware(
+        path,
+        df,
+        api_name=STK_MINS_API_NAME,
+        params=meta_params,
+        fields=list(df.columns),
+        source_hash=source_hash,
+        key_columns=["trade_date", "ts_code", "trade_time"],
+        revision_ledger=revision_ledger,
+        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+    )
 
 def compact_intraday_by_date(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
@@ -1678,6 +2095,7 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = (repo_root / args.raw_dir).resolve()
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
+    ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date)
     trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
     page_limit = min(args.page_limit or STK_MINS_PAGE_LIMIT, STK_MINS_PAGE_LIMIT)
     written = 0
@@ -1769,7 +2187,15 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
             "pagination": {"page_limit": page_limit, "pages_total": int(sum(pages_by_code.values()))},
             "max_retries": args.max_retries,
         }
-        write_stk_mins_by_date(path, normalized, trade_date=trade_date, source="daily_incremental_update", params=params)
+        write_stk_mins_by_date(
+            path,
+            normalized,
+            trade_date=trade_date,
+            source="daily_incremental_update",
+            params=params,
+            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
+        )
         written += 1
         total_rows += len(normalized)
         print(f"{args.output_dataset} trade_date={trade_date} written rows={len(normalized)} missing_codes={len(pending)}")
@@ -1780,6 +2206,8 @@ def download_text(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
+    revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
+    allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     windows = month_windows(args.start_date, args.end_date)
     days = date_range_days(args.start_date, args.end_date)
     for dataset in selected_text_datasets(args):
@@ -1789,21 +2217,45 @@ def download_text(args: argparse.Namespace) -> int:
         dataset_days = [d for d in days if d >= start_date]
         page_limit = text_page_limit(spec, args.page_limit)
         if spec.strategy == "range_month":
-            download_text_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit)
+            download_text_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "time_range_month":
-            download_text_time_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, args.major_news_src)
+            download_text_time_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, args.major_news_src, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "news_src_month":
-            download_text_news_src_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, args.news_src)
+            download_text_news_src_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, args.news_src, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "news_src_day":
-            download_text_news_src_day(client, raw_dir, spec, dataset_days, args.force, page_limit, args.news_src)
+            download_text_news_src_day(client, raw_dir, spec, dataset_days, args.force, page_limit, args.news_src, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "day":
-            download_text_day(client, raw_dir, spec, dataset_days, args.force)
+            download_text_day(client, raw_dir, spec, dataset_days, args.force, revision_ledger, allow_empty_revision_overwrite)
         else:
             raise RuntimeError(f"unsupported text strategy {spec.strategy} for {dataset}")
     print(f"Text download finished under {raw_dir}")
     return 0
 
-def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: TextDataset, windows: list[tuple[str, str, str]], force: bool, page_limit: int) -> None:
+def write_text_result(
+    path: Path,
+    result: ApiResult,
+    spec: TextDataset,
+    params: dict[str, Any],
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
+) -> int:
+    df = augment_text_frame(frame(result), spec)
+    written = write_parquet_revision_aware(
+        path,
+        df,
+        api_name=spec.api_name,
+        params=params,
+        fields=list(df.columns),
+        source_hash=result.source_hash,
+        key_columns=list(spec.key_columns),
+        revision_ledger=revision_ledger,
+        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+    )
+    if not written:
+        return 0
+    return len(df)
+
+def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: TextDataset, windows: list[tuple[str, str, str]], force: bool, page_limit: int, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     written = 0
     skipped = 0
     total_rows = 0
@@ -1814,13 +2266,26 @@ def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: TextDa
             skipped += 1
             continue
         result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-        df = augment_text_frame(frame(result), spec)
         meta_params = dict(params)
         meta_params["month"] = month
         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        write_parquet(path, df, api_name=spec.api_name, params=meta_params, fields=list(df.columns), source_hash=result.source_hash)
+        df = augment_text_frame(frame(result), spec)
+        rows = write_window_merged_partition(
+            path,
+            df,
+            api_name=spec.api_name,
+            params=meta_params,
+            fields=list(df.columns),
+            source_hash=result.source_hash,
+            key_columns=list(spec.key_columns),
+            date_columns=[spec.time_column, spec.date_column, "available_at"],
+            start_date=start_date,
+            end_date=end_date,
+            revision_ledger=revision_ledger,
+            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        )
         written += 1
-        total_rows += len(df)
+        total_rows += rows
         if index % 24 == 0:
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -1833,6 +2298,8 @@ def download_text_time_range_month(
     force: bool,
     page_limit: int,
     sources: list[str],
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     source_values = sources or [""]
     for source in source_values:
@@ -1849,13 +2316,26 @@ def download_text_time_range_month(
                 skipped += 1
                 continue
             result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            df = augment_text_frame(frame(result), spec)
             meta_params = dict(params)
             meta_params["month"] = month
             meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            write_parquet(path, df, api_name=spec.api_name, params=meta_params, fields=list(df.columns), source_hash=result.source_hash)
+            df = augment_text_frame(frame(result), spec)
+            rows = write_window_merged_partition(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=list(df.columns),
+                source_hash=result.source_hash,
+                key_columns=list(spec.key_columns),
+                date_columns=[spec.time_column, spec.date_column, "available_at"],
+                start_date=start_date,
+                end_date=end_date,
+                revision_ledger=revision_ledger,
+                allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+            )
             written += 1
-            total_rows += len(df)
+            total_rows += rows
             if index % 24 == 0:
                 print(f"{spec.api_name}/{source_suffix} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
         print(f"{spec.api_name}/{source_suffix} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -1868,6 +2348,8 @@ def download_text_news_src_month(
     force: bool,
     page_limit: int,
     sources: list[str],
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     for source in selected_news_sources(sources):
         source_suffix = f"src={safe_partition_value(source)}"
@@ -1881,13 +2363,26 @@ def download_text_news_src_month(
                 skipped += 1
                 continue
             result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            df = augment_text_frame(frame(result), spec)
             meta_params = dict(params)
             meta_params["month"] = month
             meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            write_parquet(path, df, api_name=spec.api_name, params=meta_params, fields=list(df.columns), source_hash=result.source_hash)
+            df = augment_text_frame(frame(result), spec)
+            rows = write_window_merged_partition(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=list(df.columns),
+                source_hash=result.source_hash,
+                key_columns=list(spec.key_columns),
+                date_columns=[spec.time_column, spec.date_column, "available_at"],
+                start_date=start_date,
+                end_date=end_date,
+                revision_ledger=revision_ledger,
+                allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+            )
             written += 1
-            total_rows += len(df)
+            total_rows += rows
             if index % 24 == 0:
                 print(f"{spec.api_name}/{source_suffix} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
         print(f"{spec.api_name}/{source_suffix} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -1900,6 +2395,8 @@ def download_text_news_src_day(
     force: bool,
     page_limit: int,
     sources: list[str],
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     for source in selected_news_sources(sources):
         source_suffix = f"src={safe_partition_value(source)}"
@@ -1913,18 +2410,17 @@ def download_text_news_src_day(
                 skipped += 1
                 continue
             result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            df = augment_text_frame(frame(result), spec)
             meta_params = dict(params)
             meta_params["date"] = day
             meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            write_parquet(path, df, api_name=spec.api_name, params=meta_params, fields=list(df.columns), source_hash=result.source_hash)
+            rows = write_text_result(path, result, spec, meta_params, revision_ledger, allow_empty_revision_overwrite)
             written += 1
-            total_rows += len(df)
+            total_rows += rows
             if index % 250 == 0:
                 print(f"{spec.api_name}/{source_suffix} days {index}/{len(days)} skipped={skipped} written={written} rows_written={total_rows}")
         print(f"{spec.api_name}/{source_suffix} done days={len(days)} skipped={skipped} written={written} rows_written={total_rows}")
 
-def download_text_day(client: TuShareClient, raw_dir: Path, spec: TextDataset, days: list[str], force: bool) -> None:
+def download_text_day(client: TuShareClient, raw_dir: Path, spec: TextDataset, days: list[str], force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     written = 0
     skipped = 0
     total_rows = 0
@@ -1935,10 +2431,9 @@ def download_text_day(client: TuShareClient, raw_dir: Path, spec: TextDataset, d
             continue
         params = {"date": day}
         result = client.query(spec.api_name, params, spec.fields)
-        df = augment_text_frame(frame(result), spec)
-        write_parquet(path, df, api_name=spec.api_name, params=params, fields=list(df.columns), source_hash=result.source_hash)
+        rows = write_text_result(path, result, spec, params, revision_ledger, allow_empty_revision_overwrite)
         written += 1
-        total_rows += len(df)
+        total_rows += rows
         if index % 250 == 0:
             print(f"{spec.api_name} days {index}/{len(days)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done days={len(days)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -2081,6 +2576,8 @@ def update_share_float_complete_data(
             write_union=True,
             union_output=args.union_output,
             output=args.share_float_process_output,
+            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
         ),
@@ -2091,6 +2588,13 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
     start_date = args.start_date
     if parse_yyyymmdd(start_date) > parse_yyyymmdd(args.end_date):
         raise RuntimeError(f"start_date {start_date} is after end_date {args.end_date}")
+    macro_floor = getattr(args, "macro_start_date", None) or "20200101"
+    macro_start_date = min(start_date, macro_floor, key=parse_yyyymmdd)
+    refresh_open_window = bool(getattr(args, "refresh_open_window", False))
+    force_open_window = bool(args.force or refresh_open_window)
+    trade_cal_end_date = format_yyyymmdd(
+        parse_yyyymmdd(args.end_date) + timedelta(days=max(int(getattr(args, "trade_cal_lookahead_days", 0) or 0), 0))
+    )
     run_update_step(
         "reference",
         download_selected_tier,
@@ -2100,10 +2604,13 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             start_date=start_date,
             bak_start_date=args.bak_start_date or start_date,
             end_date=args.end_date,
+            trade_cal_end_date=trade_cal_end_date,
             datasets=None,
             force=args.force,
             page_limit=args.page_limit,
             refresh_reference_datasets=getattr(args, "refresh_reference_datasets", []),
+            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=getattr(args, "reference_min_interval_seconds", None) or args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
         ),
@@ -2130,37 +2637,19 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
         summary,
     )
     run_update_step(
-        "fundamental",
-        download_selected_tier,
-        ns_from(
-            args,
-            tier="fundamental",
-            start_date=start_date,
-            end_date=args.end_date,
-            datasets=args.fundamental_datasets,
-            fundamental_refresh_period_count=getattr(args, "fundamental_refresh_period_count", 6),
-            fundamental_refresh_ann_month_count=getattr(args, "fundamental_refresh_ann_month_count", 3),
-            fundamental_refresh_ts_code_datasets=getattr(args, "fundamental_refresh_ts_code_datasets", ["dividend", "fina_audit", "fina_mainbz_vip"]),
-            fundamental_refresh_event_days=getattr(args, "fundamental_refresh_event_days", 90),
-            fundamental_dividend_probe_days=getattr(args, "fundamental_dividend_probe_days", 90),
-            force=args.force,
-            page_limit=args.page_limit,
-            min_interval_seconds=args.min_interval_seconds,
-            timeout_seconds=args.timeout_seconds,
-        ),
-        summary,
-    )
-    run_update_step(
         "macro",
         download_selected_tier,
         ns_from(
             args,
             tier="macro",
             start_date=start_date,
+            macro_start_date=macro_start_date,
             end_date=args.end_date,
             datasets=args.macro_datasets,
-            force=args.force,
+            force=force_open_window,
             page_limit=args.page_limit,
+            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
         ),
@@ -2173,10 +2662,13 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             args,
             tier="global",
             start_date=start_date,
+            macro_start_date=macro_start_date,
             end_date=args.end_date,
             datasets=args.global_datasets,
-            force=args.force,
+            force=force_open_window,
             page_limit=args.page_limit,
+            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
         ),
@@ -2191,8 +2683,10 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             start_date=start_date,
             end_date=args.end_date,
             datasets=args.event_datasets,
-            force=args.force,
+            force=force_open_window,
             page_limit=args.page_limit,
+            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
         ),
@@ -2208,20 +2702,31 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
                 start_date=start_date,
                 end_date=args.end_date,
                 datasets=args.board_datasets,
-                force=args.force,
+                force=force_open_window,
                 page_limit=args.page_limit,
+                revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+                allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
                 min_interval_seconds=args.min_interval_seconds,
                 timeout_seconds=args.timeout_seconds,
             ),
             summary,
-        )
+    )
     if args.include_intraday:
+        intraday_start_date = start_date
+        intraday_force = args.force
+        intraday_lookback = int(getattr(args, "intraday_refresh_lookback_days", 0) or 0)
+        if refresh_open_window and intraday_lookback > 0:
+            intraday_start_date = max(
+                start_date,
+                format_yyyymmdd(parse_yyyymmdd(args.end_date) - timedelta(days=intraday_lookback - 1)),
+            )
+            intraday_force = True
         run_update_step(
             "intraday_by_date",
             update_intraday_by_date,
             ns_from(
                 args,
-                start_date=start_date,
+                start_date=intraday_start_date,
                 end_date=args.end_date,
                 output_dataset=args.output_dataset,
                 expected_codes_source=args.expected_codes_source,
@@ -2236,11 +2741,14 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
                 page_limit=args.page_limit,
                 min_interval_seconds=args.min_interval_seconds,
                 timeout_seconds=args.timeout_seconds,
+                force=intraday_force,
+                revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+                allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             ),
             summary,
         )
     if args.include_share_float_complete:
-        update_share_float_complete_data(args, summary, start_date=start_date, force=args.force)
+        update_share_float_complete_data(args, summary, start_date=start_date, force=force_open_window)
     run_update_step(
         "text_evidence",
         download_selected_tier,
@@ -2250,8 +2758,33 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             start_date=start_date,
             end_date=args.end_date,
             datasets=args.text_datasets,
+            force=force_open_window,
+            page_limit=args.page_limit,
+            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
+            min_interval_seconds=args.min_interval_seconds,
+            timeout_seconds=args.timeout_seconds,
+        ),
+        summary,
+    )
+    run_update_step(
+        "fundamental",
+        download_selected_tier,
+        ns_from(
+            args,
+            tier="fundamental",
+            start_date=start_date,
+            end_date=args.end_date,
+            datasets=args.fundamental_datasets,
+            fundamental_refresh_period_count=getattr(args, "fundamental_refresh_period_count", 6),
+            fundamental_refresh_ann_month_count=getattr(args, "fundamental_refresh_ann_month_count", 3),
+            fundamental_refresh_ts_code_datasets=getattr(args, "fundamental_refresh_ts_code_datasets", ["dividend", "fina_audit", "fina_mainbz_vip"]),
+            fundamental_refresh_event_days=getattr(args, "fundamental_refresh_event_days", 90),
+            fundamental_dividend_probe_days=getattr(args, "fundamental_dividend_probe_days", 90),
             force=args.force,
             page_limit=args.page_limit,
+            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
         ),
@@ -2276,6 +2809,7 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--start-date", default="20100101")
     parser.add_argument("--bak-start-date", default="20160101")
     parser.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))
+    parser.add_argument("--trade-cal-end-date", help="Optional reference-tier lookahead end date used only for trade_cal coverage.")
     parser.add_argument("--datasets", nargs="+")
     parser.add_argument("--include-limit-list", action="store_true")
     parser.add_argument("--refresh-daily-datasets", nargs="+", choices=core.DAILY_REQUIRED_DATASETS + core.DAILY_OPTIONAL_DATASETS, default=[])
@@ -2304,6 +2838,12 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))
     parser.add_argument("--start-date", required=True, help="Fill missing data from this date through --end-date across all retained data domains.")
     parser.add_argument("--bak-start-date", help="Optional bak_basic lower bound. Defaults to --start-date.")
+    parser.add_argument(
+        "--trade-cal-lookahead-days",
+        type=int,
+        default=7,
+        help="Extend reference trade_cal this many calendar days beyond --end-date so pre-open jobs and next-session feature mapping have calendar coverage.",
+    )
     parser.add_argument("--daily-datasets", nargs="+", choices=core.DAILY_REQUIRED_DATASETS + core.DAILY_OPTIONAL_DATASETS)
     parser.add_argument("--include-limit-list", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
@@ -2319,6 +2859,11 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         choices=core.REFERENCE_DATASETS,
         default=["stock_basic", "stock_company", "namechange", "index_classify", "index_member_all"],
         help="Reference datasets to force-refresh during daily update; heavier datasets should be explicit.",
+    )
+    parser.add_argument(
+        "--refresh-open-window",
+        action="store_true",
+        help="Force-refresh the rolling update window for macro/global/event/board/text/share_float tiers; intended for cron, not large manual history fills.",
     )
     parser.add_argument("--reference-min-interval-seconds", type=float, help="Optional lower call frequency for the reference refresh step.")
     parser.add_argument("--fundamental-datasets", nargs="+", choices=core.FUNDAMENTAL_DATASETS)
@@ -2355,6 +2900,11 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
     )
     parser.add_argument("--macro-datasets", nargs="+", choices=core.MACRO_DATASETS)
     parser.add_argument("--global-datasets", nargs="+", choices=core.MACRO_DATASETS)
+    parser.add_argument(
+        "--macro-start-date",
+        default="20200101",
+        help="Retained lower bound for macro/global range-style datasets during rolling updates; prevents short-window range files from replacing full-context coverage.",
+    )
     parser.add_argument("--event-datasets", nargs="+", choices=[dataset for dataset in core.EVENT_FLOW_DATASETS if dataset != "share_float"])
     parser.add_argument("--board-datasets", nargs="+", choices=core.BOARD_TRADING_DATASETS)
     parser.add_argument(
@@ -2378,6 +2928,7 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--allow-missing-codes", type=int, default=0)
     parser.add_argument("--existing-allow-missing-codes", type=int, default=50)
     parser.add_argument("--allow-validation-warnings", action="store_true")
+    parser.add_argument("--intraday-refresh-lookback-days", type=int, default=0, help="When --refresh-open-window is set, force-refresh only this trailing calendar-day window for by-date minute files.")
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--retry-delay-seconds", type=float, default=5.0)
     parser.add_argument(
@@ -2422,6 +2973,8 @@ def add_intraday_parsers(sub: argparse._SubParsersAction) -> None:
     update.add_argument("--max-retries", type=int, default=3)
     update.add_argument("--retry-delay-seconds", type=float, default=5.0)
     update.add_argument("--page-limit", type=int)
+    update.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
+    update.add_argument("--allow-empty-revision-overwrite", action="store_true")
     core.add_runtime_args(update, min_interval=0.22, timeout=120)
 
 def add_share_float_parser(sub: argparse._SubParsersAction) -> None:
@@ -2456,6 +3009,8 @@ def add_share_float_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--union-ann-end-date", help="Optional ann_date upper bound used only when rebuilding the union.")
     parser.add_argument("--union-float-start-date", help="Optional float_date lower bound used only when rebuilding the union.")
     parser.add_argument("--union-float-end-date", help="Optional float_date upper bound used only when rebuilding the union.")
+    parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
+    parser.add_argument("--allow-empty-revision-overwrite", action="store_true")
     core.add_runtime_args(parser, min_interval=0.22, timeout=90)
     parser.add_argument("--output", help="Optional process report path. No status file is written by default; event-flow audit checks the union artifact.")
 

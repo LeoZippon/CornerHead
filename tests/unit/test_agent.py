@@ -6,7 +6,14 @@ import unittest
 
 import pandas as pd
 
-from hl_trader.environment.evaluation import annualized_return, max_drawdown, sharpe_ratio
+from hl_trader.environment.evaluation import (
+    ShortSaleAssumptions,
+    annualized_return,
+    long_short_return_breakdown,
+    max_drawdown,
+    sharpe_ratio,
+    theoretical_short_return,
+)
 from hl_trader.agent import FormulaicScoreRule, score_cross_section
 from hl_trader.environment.portfolio import equal_weight_targets, normalize_targets
 
@@ -44,6 +51,13 @@ class AgentPortfolioMetricsTest(unittest.TestCase):
         self.assertLess(max_drawdown(equity), 0.0)
         self.assertGreater(annualized_return(equity, periods_per_year=4), 0.0)
         self.assertGreater(sharpe_ratio(equity.pct_change(), periods_per_year=4), 0.0)
+
+    def test_short_return_uses_cash_collateral_and_borrow_fee(self):
+        assumptions = ShortSaleAssumptions(cash_collateral_pct=1.0, annual_borrow_fee_bps=1800.0)
+        value = theoretical_short_return(10.0, 9.0, 10, assumptions)
+        self.assertAlmostEqual(value, 0.10 - 0.18 * 10 / 365)
+        split = long_short_return_breakdown(0.05, 0.08, long_capital=0.7, short_cash_collateral=0.3)
+        self.assertAlmostEqual(split.combined_return, 0.05 * 0.7 + 0.08 * 0.3)
 
 
 # Source: test_deepseek_client.py
@@ -495,6 +509,20 @@ class EvidenceEventsShadowTest(unittest.TestCase):
                 rationale="test",
                 action="buy",
             )
+        margin_short_decision = NLShadowDecision(
+            decision_id="d_short",
+            decision_date="20200131",
+            tradable_date="20200203",
+            ts_code="A",
+            prompt_hash="p",
+            response_hash="r",
+            rationale="shadow margin short sell note",
+            action="margin_short_sell",
+            confidence=0.6,
+        )
+        self.assertEqual(margin_short_decision.action, "margin_short_sell")
+        self.assertFalse(margin_short_decision.to_record()["can_affect_trading"])
+
         decision = NLShadowDecision(
             decision_id="d2",
             decision_date="20200131",
@@ -607,7 +635,7 @@ class LLMShadowAdvisorTest(unittest.TestCase):
         client = FakeClient(
             '{"pack_summary":"ok","decisions":['
             '{"ts_code":"000001.SZ","action":"hold","confidence":0.7,"rationale":"cheap","risk_flags":["none"]},'
-            '{"ts_code":"000002.SZ","action":"exit","confidence":0.4,"rationale":"expensive","risk_flags":["valuation"]}'
+            '{"ts_code":"000002.SZ","action":"margin_short_sell","confidence":0.4,"rationale":"bearish and borrow-aware review needed","risk_flags":["valuation"]}'
             '],"model_notes":"shadow"}'
         )
         result = LLMShadowAdvisor(client, provider_name="test-provider").advise(evidence_record(), checkpoints=[{"event_type": "large_price_move"}])
@@ -618,10 +646,14 @@ class LLMShadowAdvisorTest(unittest.TestCase):
         self.assertEqual(result.provider_metadata["usage"]["total_tokens"], 100)
         self.assertIn("JSON", client.messages[0].content)
         self.assertIn("shadow-only", client.messages[0].content)
+        self.assertIn("margin_short_sell", client.messages[0].content)
         self.assertIn("exactly one decision", client.messages[0].content)
         self.assertIn("event_checkpoints", client.messages[1].content)
         self.assertIn("JSON", client.messages[1].content)
         self.assertIn("cannot_affect_trading", client.messages[1].content)
+        by_code = {decision.ts_code: decision for decision in result.decisions}
+        self.assertEqual(by_code["000002.SZ"].action, "margin_short_sell")
+        self.assertFalse(by_code["000002.SZ"].to_record()["can_affect_trading"])
 
     def test_unknown_or_missing_codes_fail_fast(self):
         bad_client = FakeClient(

@@ -12,7 +12,7 @@ The output JSON schema is:
   "decisions": [
     {
       "ts_code": "stock code from the input ts_codes",
-      "action": "hold | enter | exit | trim | add | rebalance | human_review",
+      "action": "hold | enter | exit | trim | add | rebalance | margin_short_sell | human_review",
       "confidence": 0.0,
       "rationale": "brief point-in-time rationale based only on the supplied evidence",
       "risk_flags": ["short risk labels"]

@@ -24,6 +24,8 @@ class ExperimentRunResult:
     folds: int
     total_fills: int
     median_test_return: float
+    median_long_test_return: float
+    median_short_test_return: float
     positive_fold_rate: float
     worst_fold_return: float
 
@@ -38,6 +40,8 @@ class HeldoutRunResult:
     heldout_end: str
     parameters: FormulaicParameters
     test_return: float
+    long_test_return: float
+    short_test_return: float
     start_equity: float
     end_equity: float
     fills: int
@@ -118,6 +122,9 @@ class DailyFormulaicExperimentRunner:
                 start_equity=result.start_equity,
                 end_equity=result.end_equity,
                 fills=result.fills,
+                short_theoretical_return=result.short_theoretical_return,
+                short_cash_collateral=result.short_cash_collateral,
+                long_return=result.long_return,
             )
             results.append(result)
             self.ledger.append_event(
@@ -127,6 +134,8 @@ class DailyFormulaicExperimentRunner:
                 metrics={
                     "train_score": float(train_score),
                     "test_return": float(result.test_return),
+                    "long_test_return": float(result.test_long_return),
+                    "short_test_return": float(result.test_short_return),
                     "start_equity": float(result.start_equity),
                     "end_equity": float(result.end_equity),
                     "fills": int(result.fills),
@@ -139,6 +148,8 @@ class DailyFormulaicExperimentRunner:
                 "folds": summary.folds,
                 "total_fills": summary.total_fills,
                 "median_test_return": summary.median_test_return,
+                "median_long_test_return": summary.median_long_test_return,
+                "median_short_test_return": summary.median_short_test_return,
                 "positive_fold_rate": summary.positive_fold_rate,
                 "worst_fold_return": summary.worst_fold_return,
             },
@@ -159,6 +170,8 @@ class DailyFormulaicExperimentRunner:
 
     def _summarize(self, results: list[FoldRunResult]) -> ExperimentRunResult:
         returns = pd.Series([result.test_return for result in results], dtype="float64")
+        long_returns = pd.Series([result.test_long_return for result in results], dtype="float64")
+        short_returns = pd.Series([result.test_short_return for result in results], dtype="float64")
         return ExperimentRunResult(
             experiment_id=self.config.experiment_id,
             freeze_hash=self.freeze_spec.freeze_hash,
@@ -167,6 +180,8 @@ class DailyFormulaicExperimentRunner:
             folds=len(results),
             total_fills=sum(result.fills for result in results),
             median_test_return=float(returns.median()) if not returns.empty else 0.0,
+            median_long_test_return=float(long_returns.median()) if not long_returns.empty else 0.0,
+            median_short_test_return=float(short_returns.median()) if not short_returns.empty else 0.0,
             positive_fold_rate=float((returns > 0).mean()) if not returns.empty else 0.0,
             worst_fold_return=float(returns.min()) if not returns.empty else 0.0,
         )
@@ -255,6 +270,8 @@ class DailyFormulaicHeldoutRunner:
             heldout_end=self.config.protocol.end_date.isoformat(),
             parameters=self.frozen_parameters,
             test_return=float(result.test_return),
+            long_test_return=float(result.test_long_return),
+            short_test_return=float(result.test_short_return),
             start_equity=float(result.start_equity),
             end_equity=float(result.end_equity),
             fills=int(result.fills),
@@ -265,6 +282,8 @@ class DailyFormulaicHeldoutRunner:
             parameters=asdict(self.frozen_parameters),
             metrics={
                 "test_return": heldout.test_return,
+                "long_test_return": heldout.long_test_return,
+                "short_test_return": heldout.short_test_return,
                 "start_equity": heldout.start_equity,
                 "end_equity": heldout.end_equity,
                 "fills": heldout.fills,
