@@ -82,6 +82,7 @@ INTRADAY_DATASETS = ["stk_mins_1min"]
 EVENT_FLOW_DATASETS = [
     "margin",
     "margin_detail",
+    "margin_secs",
     "moneyflow",
     "stk_holdernumber",
     "stk_holdertrade",
@@ -293,6 +294,7 @@ INTEGRATED_DOC_REFS = {
     "monetary_policy": "https://tushare.pro/document/2?doc_id=465",
     "margin": "https://tushare.pro/document/2?doc_id=58",
     "margin_detail": "https://tushare.pro/document/2?doc_id=59",
+    "margin_secs": "https://tushare.pro/document/2?doc_id=326",
     "moneyflow": "https://tushare.pro/document/2?doc_id=170",
     "stk_holdernumber": "https://tushare.pro/document/2?doc_id=166",
     "stk_holdertrade": "https://tushare.pro/document/2?doc_id=175",
@@ -674,6 +676,15 @@ EVENT_FLOW_SPECS = {
         fields="trade_date,ts_code,name,rzye,rqye,rzmre,rqyl,rzche,rqchl,rqmcl,rzrqye",
         page_limit=6000,
         key_columns=("trade_date", "ts_code"),
+        date_column="trade_date",
+        zero_rows_ok=False,
+    ),
+    "margin_secs": EventDataset(
+        api_name="margin_secs",
+        strategy="trade_date",
+        fields="trade_date,ts_code,name,exchange",
+        page_limit=6000,
+        key_columns=("trade_date", "ts_code", "exchange"),
         date_column="trade_date",
         zero_rows_ok=False,
     ),
@@ -1171,6 +1182,81 @@ def build_revision_event(
     })
     return event
 
+def parquet_meta(path: Path) -> dict[str, Any]:
+    meta_path = path.with_suffix(path.suffix + ".meta.json")
+    if not meta_path.exists():
+        return {}
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def finalize_revision_event(
+    event: dict[str, Any],
+    *,
+    old_source_hash: str,
+    new_source_hash: str,
+    write_action: str,
+    allow_empty_revision_overwrite: bool,
+) -> dict[str, Any]:
+    event.update({
+        "old_source_hash": old_source_hash,
+        "new_source_hash": new_source_hash,
+        "write_action": write_action,
+        "allow_empty_revision_overwrite": bool(allow_empty_revision_overwrite),
+    })
+    event["event_id"] = stable_hash({
+        key: value
+        for key, value in event.items()
+        if key not in {"detected_at", "downstream_status"}
+    })
+    return event
+
+def write_parquet_revision_aware(
+    path: Path,
+    df: pd.DataFrame,
+    *,
+    api_name: str,
+    params: dict[str, Any],
+    fields: list[str],
+    source_hash: str,
+    key_columns: list[str],
+    revision_ledger: Path | str | None,
+    source: str = "force_refresh",
+    allow_empty_revision_overwrite: bool = False,
+) -> bool:
+    if path.exists():
+        old_df = pd.read_parquet(path)
+        old_meta = parquet_meta(path)
+        write_action = "overwrite"
+        if len(old_df) > 0 and df.empty and not allow_empty_revision_overwrite:
+            write_action = "skipped_empty_revision_overwrite"
+        if revision_ledger:
+            event = build_revision_event(
+                dataset=api_name,
+                partition=path.with_suffix("").name,
+                path=path,
+                old_df=old_df,
+                new_df=df,
+                key_columns=key_columns,
+                source=source,
+            )
+            if event:
+                event = finalize_revision_event(
+                    event,
+                    old_source_hash=str(old_meta.get("source_hash", "")),
+                    new_source_hash=source_hash,
+                    write_action=write_action,
+                    allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+                )
+                append_jsonl(Path(revision_ledger), event)
+                print("REVISION_ALERT " + json.dumps(event, ensure_ascii=False, sort_keys=True))
+        if write_action == "skipped_empty_revision_overwrite":
+            print(f"{api_name} {path} returned zero rows for existing nonempty partition; skipped_empty_revision_overwrite")
+            return False
+    write_parquet(path, df, api_name=api_name, params=params, fields=fields, source_hash=source_hash)
+    return True
+
 def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -1201,6 +1287,11 @@ def load_stock_codes(raw_dir: Path) -> list[str]:
     data = read_many(files, columns=["ts_code"])
     return sorted(data["ts_code"].dropna().astype(str).str.strip().unique().tolist())
 
+def normalize_date_key(value: object) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))[:8]
+    return digits if len(digits) == 8 else ""
+
+
 def load_sse_open_dates(raw_dir: Path, start_date: str, end_date: str, *, allow_empty: bool = False) -> list[str]:
     files = sorted((raw_dir / "trade_cal" / "exchange=SSE").glob("year=*.parquet"))
     if not files:
@@ -1208,7 +1299,10 @@ def load_sse_open_dates(raw_dir: Path, start_date: str, end_date: str, *, allow_
     calendar = read_many(files, columns=["cal_date", "is_open"])
     if calendar.empty:
         raise RuntimeError("SSE trade_cal is empty; run download --tier reference first")
-    calendar["cal_date"] = calendar["cal_date"].astype(str)
+    calendar["cal_date"] = calendar["cal_date"].map(normalize_date_key)
+    calendar = calendar[calendar["cal_date"] != ""].copy()
+    if calendar.empty:
+        raise RuntimeError("SSE trade_cal has no parseable cal_date values; refresh reference trade_cal first")
     available_min = str(calendar["cal_date"].min())
     available_max = str(calendar["cal_date"].max())
     if start_date < available_min or end_date > available_max:
@@ -1228,7 +1322,11 @@ def latest_sse_calendar_date(raw_dir: Path) -> str:
     calendar = read_many(files, columns=["cal_date"])
     if calendar.empty:
         raise RuntimeError("SSE trade_cal is empty; run download --tier reference first")
-    return str(calendar["cal_date"].dropna().astype(str).max())
+    dates = calendar["cal_date"].dropna().map(normalize_date_key)
+    dates = dates[dates != ""]
+    if dates.empty:
+        raise RuntimeError("SSE trade_cal has no parseable cal_date values; refresh reference trade_cal first")
+    return str(dates.max())
 
 def selected_daily_datasets(args: argparse.Namespace) -> list[str]:
     datasets = list(args.datasets or DAILY_REQUIRED_DATASETS)
@@ -1400,9 +1498,28 @@ def selected_eco_filter_values(args: argparse.Namespace, attr: str) -> list[str 
     values = [str(value).strip() for value in getattr(args, attr, None) or [] if str(value).strip()]
     return values or [None]
 
-def write_macro_result(path: Path, result: ApiResult, spec: MacroDataset, params: dict[str, Any]) -> int:
+def write_macro_result(
+    path: Path,
+    result: ApiResult,
+    spec: MacroDataset,
+    params: dict[str, Any],
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
+) -> int:
     df = augment_macro_frame(frame(result), spec)
-    write_parquet(path, df, api_name=spec.api_name, params=params, fields=list(df.columns), source_hash=result.source_hash)
+    written = write_parquet_revision_aware(
+        path,
+        df,
+        api_name=spec.api_name,
+        params=params,
+        fields=list(df.columns),
+        source_hash=result.source_hash,
+        key_columns=list(spec.key_columns),
+        revision_ledger=revision_ledger,
+        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+    )
+    if not written:
+        return 0
     return len(df)
 
 def selected_event_flow_datasets(args: argparse.Namespace) -> list[str]:
@@ -1463,6 +1580,8 @@ def event_available_at(value: str, api_name: str) -> tuple[str, str]:
     if api_name in {"margin", "margin_detail"}:
         next_day = parse_yyyymmdd(text) + timedelta(days=1)
         return local_time(format_yyyymmdd(next_day), "09:00:00"), "official_next_day_09_from:trade_date"
+    if api_name == "margin_secs":
+        return local_time(text, "09:00:00"), "official_preopen_09_from:trade_date"
     if api_name in {"moneyflow", "stk_holdertrade"}:
         return local_time(text, "19:00:00"), f"official_19_from:{'trade_date' if api_name == 'moneyflow' else 'ann_date'}"
     if api_name == "block_trade":
@@ -1493,9 +1612,28 @@ def augment_event_frame(df: pd.DataFrame, spec: EventDataset) -> pd.DataFrame:
         out.loc[mask, "available_at_rule"] = f"fallback_conservative_from:{spec.fallback_date_column}"
     return out
 
-def write_event_result(path: Path, result: ApiResult, spec: EventDataset, params: dict[str, Any]) -> int:
+def write_event_result(
+    path: Path,
+    result: ApiResult,
+    spec: EventDataset,
+    params: dict[str, Any],
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
+) -> int:
     df = augment_event_frame(frame(result), spec)
-    write_parquet(path, df, api_name=spec.api_name, params=params, fields=list(df.columns), source_hash=result.source_hash)
+    written = write_parquet_revision_aware(
+        path,
+        df,
+        api_name=spec.api_name,
+        params=params,
+        fields=list(df.columns),
+        source_hash=result.source_hash,
+        key_columns=list(spec.key_columns),
+        revision_ledger=revision_ledger,
+        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+    )
+    if not written:
+        return 0
     return len(df)
 
 def board_available_at(value: str, api_name: str, params: dict[str, Any] | None = None) -> tuple[str, str]:
@@ -1547,9 +1685,28 @@ def augment_board_frame(df: pd.DataFrame, spec: BoardTradingDataset, params: dic
         out["available_at_rule"] = "static_reference_no_pit_time"
     return out
 
-def write_board_result(path: Path, result: ApiResult, spec: BoardTradingDataset, params: dict[str, Any]) -> int:
+def write_board_result(
+    path: Path,
+    result: ApiResult,
+    spec: BoardTradingDataset,
+    params: dict[str, Any],
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
+) -> int:
     df = augment_board_frame(frame(result), spec, params)
-    write_parquet(path, df, api_name=spec.api_name, params=params, fields=list(df.columns), source_hash=result.source_hash)
+    written = write_parquet_revision_aware(
+        path,
+        df,
+        api_name=spec.api_name,
+        params=params,
+        fields=list(df.columns),
+        source_hash=result.source_hash,
+        key_columns=list(spec.key_columns),
+        revision_ledger=revision_ledger,
+        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+    )
+    if not written:
+        return 0
     return len(df)
 
 def selected_intraday_datasets(args: argparse.Namespace) -> list[str]:
