@@ -4377,3 +4377,536 @@ Results:
 - `git diff --check` passed.
 - A readonly TuShare probe for `limit_list_d` on `20250428` compared the current raw partition with a fresh API response without writing data. The comparator reported 101 old rows, 101 fresh rows, 25 changed keys, 0 added keys, 0 removed keys, and `changed_columns={"limit_amount": 25}`.
 - No data download or ledger rewrite was run; the new fields will appear on future revision events.
+
+## 2026-06-03 Agent Margin Short-Sell Shadow Action
+
+Task:
+- Let the Agent record a 融券卖出 style action while keeping the current LLM path shadow-only.
+
+Changes:
+- `src/hl_trader/agent/shadow/nl_shadow.py`
+  - Added `MARGIN_SHORT_SELL_ACTION = "margin_short_sell"`.
+  - Added `margin_short_sell` to `DEFAULT_NL_SHADOW_ACTIONS`.
+- `src/hl_trader/agent/shadow/prompts.py`
+  - Updated the JSON schema prompt action list to include `margin_short_sell`.
+- `docs/agent_design.md`
+  - Documented that `margin_short_sell` is a shadow research label, not a broker order.
+  - Recorded that real execution needs Environment/Pipeline constraints for borrow availability, collateral, borrow costs, liquidation risk, whitelist, and review.
+- `tests/unit/test_agent.py`
+  - Added coverage that `NLShadowDecision(action="margin_short_sell")` is valid and remains `can_affect_trading=False`.
+  - Added LLM advisor coverage that the default prompt/action set accepts `margin_short_sell`.
+
+Verification:
+
+```bash
+free -h
+nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader,nounits
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_agent -v
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src tests
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
+git diff --check
+```
+
+Results:
+- Resource checks were safe.
+- Agent unit tests passed: 34 OK.
+- Full unit discovery passed: 136 OK.
+- Compile passed.
+- `git diff --check` passed.
+- No broker execution or live trading behavior was changed.
+
+## 2026-06-03 Margin Short Data And Return Split
+
+Task:
+- Add the short-side data needed for future `margin_short_sell` research and split return reporting into long and theoretical short sleeves.
+
+Changes:
+- `src/hl_trader/data_sources/tushare/common.py`
+  - Added event-flow specs for `margin_secs`, `slb_sec`, and `slb_sec_detail`.
+  - Added TuShare doc references and conservative `available_at` rules.
+  - Added `EventDataset.end_date` so stopped `slb_*` interfaces do not create expected partitions after their valid history windows.
+- `src/hl_trader/data_sources/tushare/download.py`
+  - Event-flow download now respects per-dataset effective end dates.
+- `src/hl_trader/data_sources/tushare/audit.py`
+  - Added unit/PIT rules for the new datasets.
+  - Expected event paths now respect per-dataset effective end dates.
+- `configs/tushare_update_schedule.json` and `ops/cron/tushare_update.cron`
+  - Added same-day `margin_secs` pre-open refresh jobs at 09:03 and 09:13.
+  - Kept stopped `slb_*` interfaces out of daily rolling cron; they are initial/manual history backfill only.
+- `src/hl_trader/environment/evaluation/metrics.py`
+  - Added `ShortSaleAssumptions`, `theoretical_short_return`, and `long_short_return_breakdown`.
+  - Default theoretical short-side assumptions are 100% cash collateral and 18% annual borrow fee.
+- `src/hl_trader/pipelines/formulaic_wfo.py` and `src/hl_trader/pipelines/experiment.py`
+  - Added `test_long_return` and `test_short_return` reporting fields while keeping current execution long-only.
+- Living docs
+  - Updated data, agent, environment, and pipeline docs for short-side data, PIT/unit rules, stopped-source boundaries, pre-open cron, and theoretical short-return scope.
+
+Key commands:
+
+```bash
+free -h
+nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader,nounits
+PYTHONUNBUFFERED=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/download.py download --tier event_flow --start-date 20200601 --end-date 20200601 --datasets margin_secs slb_sec slb_sec_detail --force --min-interval-seconds 0.22 --timeout-seconds 120
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/audit.py event-flow --start-date 20200601 --end-date 20200601 --datasets margin_secs slb_sec slb_sec_detail --raw-dir data/raw --output /tmp/macroquant_event_flow_short_sources_smoke.json
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/download.py download --tier event_flow --start-date 20200101 --end-date 20260603 --datasets margin_secs slb_sec slb_sec_detail --min-interval-seconds 0.22 --timeout-seconds 120
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/audit.py event-flow --start-date 20200101 --end-date 20260602 --raw-dir data/raw
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
+git diff --check
+/home/lzp/miniconda3/envs/stock/bin/python ops/cron/install_tushare_cron.py
+```
+
+Results:
+- Resource checks were safe.
+- `margin_secs` full retained history: 1552 files, 5,510,538 rows, first `20200102`, last local trade_cal date `20260602`.
+- `slb_sec` stopped-source history: 1151 files, 2,137,157 rows, first `20200102`, valid through `20240930`.
+- `slb_sec_detail` stopped-source history: 1095 files, 1,030,564 rows, first `20200102`, valid through `20240710`.
+- Smoke audit for the three new datasets passed: status `ok`, 0 errors, 0 warnings.
+- Formal `event_flow_status.json` refresh passed with 0 errors and 5 known warnings from existing duplicate/sparse event keys and `share_float` source-cap risk; no warning came from the new short-side datasets.
+- Installed managed cron block; current crontab includes `cn_preopen_margin_secs_backfill_0903` and `cn_preopen_margin_secs_retry_0913`.
+- JSON config parse passed.
+- Targeted data-source, agent, and pipeline tests passed.
+- Full unit discovery passed: 138 OK.
+- `git diff --check` passed.
+- Generated `__pycache__` and `.pyc` files were removed after verification.
+
+## 2026-06-03 short-side data contract cleanup
+
+Task: remove stopped TuShare transfer-lending interfaces from the active data contract and clarify update rules in the living data documentation.
+
+Scope:
+- Removed `slb_sec` and `slb_sec_detail` from active `EVENT_FLOW_DATASETS`, integrated doc refs, event-flow specs, event availability rules, and event audit unit/PIT rules.
+- Removed the stopped-interface effective-end-date helper and the corresponding download/audit branching.
+- Removed `slb_sec` and `slb_sec_detail` entries from `configs/tushare_update_schedule.json`.
+- Removed unit assertions that expected stopped interfaces in the default event-flow selection.
+- Updated `docs/data_documentation.md`:
+  - `daily` is defined in `2.2.2` and only reused by 打板专题, not redefined in `2.6`.
+  - Added grouped update frequency and refresh-rule table.
+  - Documented `namechange` as announcement-driven and locally force-refreshed every evening with slower `0.50s` pacing.
+  - Kept short-side live data support limited to `margin_secs` exchange eligibility; broker-side borrow inventory, fees, collateral, and liquidation rules remain outside current TuShare raw data.
+- Updated `docs/agent_design.md` so `margin_short_sell` no longer references stopped TuShare transfer-lending sources.
+- Kept already-downloaded local `data/raw/slb_sec*` history untouched; physical deletion is reversible only from backups, so the active contract was cleaned first without destructive data removal.
+
+Key commands:
+
+```bash
+free -h
+nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader
+/home/lzp/miniconda3/envs/stock/bin/python -m json.tool configs/tushare_update_schedule.json >/tmp/macroquant_schedule_check.json
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/audit.py event-flow --start-date 20200101 --end-date 20260602
+rg -n "slb_sec|slb_sec_detail|event_effective_end_date" src configs tests docs/agent_design.md docs/data_documentation.md results/data_quality/event_flow_status.json
+git diff --check
+```
+
+Results:
+- Resource check was safe: about 450 GiB available RAM; GPUs 4-7 were effectively idle.
+- JSON config parse passed.
+- Targeted TuShare data-source tests passed: 41 tests OK.
+- Full unit discovery passed: 137 tests OK. The count is one lower than the previous 138 because the stopped-interface effective-end-date regression test was removed with the stopped data contract.
+- Formal event-flow audit refreshed `results/data_quality/event_flow_status.json`: status `warning`, 0 errors, 5 known warnings.
+- Active code/config/test/living-doc search found no `slb_sec`, `slb_sec_detail`, or `event_effective_end_date` references.
+- `git diff --check` passed.
+
+## 2026-06-04 TuShare open-window revision hardening
+
+Task: implement open-window force refresh with broad revision-ledger coverage and empty-response overwrite protection across the active TuShare data domains, then update cron and data documentation.
+
+Scope:
+- Added a generic `write_parquet_revision_aware()` path in `src/hl_trader/data_sources/tushare/common.py` with old/new parquet comparison, `REVISION_ALERT` JSONL append, old/new source hashes, write action, and default protection against overwriting an existing nonempty partition with an empty response.
+- Wired revision-aware writes into `bak_basic`, fundamental period/month/ts_code refreshes, macro/global partitions, event/flow, board-trading, text evidence, intraday by-date writes, `share_float` raw/rescue partitions, and `share_float_complete` union rebuilds.
+- Preserved the `share_float_complete` union shrink guard and changed union ledger events to use `dataset=share_float_complete` with `source=share_float_union_rebuild`.
+- Added `--refresh-open-window` to the daily update entrypoint. In cron it force-refreshes only the rolling open window for macro/global/event/board/text/share_float while leaving large historical fills skip-existing by default.
+- Added `--intraday-refresh-lookback-days 1` so nightly open-window refreshes do not force-rewrite the full 30-day minute window.
+- Added active `margin_secs` support to event/flow specs and same-day PIT availability, and scheduled 09:03/09:13 pre-open forced raw refreshes. The 09:20 event-flow status refresh remains a full-window status through the previous day for T+1 `margin/margin_detail`; same-day `margin_secs` is protected by the raw pre-open refresh and later full audits.
+- Updated `configs/tushare_update_schedule.json`, `ops/cron/tushare_update.cron`, and `docs/data_documentation.md`.
+- Removed generated Python caches after tests.
+
+SubAgent audits:
+- GPT-5.5 xhigh SubAgent `Bernoulli` performed editable audit and fixed three small issues: empty overwrite protection no longer depends on a ledger path, `share_float_complete` union ledger classification is correct, and empty `share_float` refreshes preserve existing cap-risk row counts.
+- GPT-5.5 xhigh SubAgent `Hubble` performed final editable audit and found no blocking issues or further required changes. Both SubAgents were closed after completion.
+
+Key commands:
+
+```bash
+nvidia-smi
+free -h
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -c "import json; json.load(open('configs/tushare_update_schedule.json', encoding='utf-8'))"
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_evening_full --end-date 20260601 --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_margin_secs_backfill_0903 --end-date 20260601 --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_event_flow_audit_0920 --end-date 20260601 --dry-run
+git diff --check
+find . -type d -name __pycache__ -o -type d -name .pytest_cache -o -type f -name '*.pyc'
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python ops/cron/install_tushare_cron.py
+crontab -l | sed -n '/BEGIN MacroQuant TuShare update/,/END MacroQuant TuShare update/p'
+```
+
+Results:
+- Resource checks were safe for this CPU/light-I/O validation path: about 447 GiB available RAM; GPUs had external load but this task did not launch GPU workloads.
+- Schedule JSON parse passed.
+- Targeted TuShare data-source tests passed: 43 tests OK.
+- Full unit discovery passed: 139 tests OK.
+- `cn_evening_full` dry-run includes `--refresh-open-window`, `--intraday-refresh-lookback-days 1`, selected reference refreshes including `bak_basic`, daily revision-monitored datasets, and `margin_secs` in event/flow.
+- `cn_preopen_margin_secs_backfill_0903` dry-run targets same-day `margin_secs --force`.
+- `cn_preopen_event_flow_audit_0920` dry-run builds the full event-flow status command through the configured previous-day target in real cron use.
+- Installed managed cron block; crontab now includes 09:03/09:13 `margin_secs` jobs and the updated open-window comment.
+- `git diff --check` passed.
+- Cache scan is clean after cleanup.
+- No live TuShare API download or raw data mutation was run in this task.
+
+## 2026-06-04 TuShare historical revision sampling
+
+Task: because the daily revision sentinel found historical inconsistencies, add and run a broader source-vs-local historical sample to identify which interfaces are unstable, which are stable, and what values actually changed.
+
+Scope:
+- Added `scripts/tushare/audit.py revision-history-sample` / `audit_revision_history_sample()` as a non-mutating historical probe.
+- The command selects deterministic SSE trade dates by year (`--sample-per-year`) and checks active trade-date partitioned interfaces:
+  - daily research: `daily`, `adj_factor`, `daily_basic`, `stk_limit`, `suspend_d`, `limit_list_d`.
+  - reference trade-date table: `bak_basic`.
+  - event/flow trade-date tables: `margin`, `margin_detail`, `margin_secs`, `moneyflow`, `block_trade`.
+  - board-trading trade-date and parameterized trade-date partitions: `kpl_list`, `limit_step`, `limit_cpt_list`, `limit_list_ths`, `top_list`, `top_inst`, `hm_detail`, `ths_hot`, `dc_hot`.
+- The command writes process-only artifacts under `results/data_quality/process/`, does not overwrite raw, and does not append to the formal `revision_events.jsonl` ledger unless a separate workflow copies events.
+- Added reporting for revision partitions, stable partitions, structural duplicate-key issues, missing local partitions, required remote-zero responses, changed columns, numeric deltas, and numeric-to-blank / blank-to-numeric value transitions.
+- Updated `docs/data_documentation.md` to document `history_sample_probe` and the discovered historical `limit_list_d.limit_amount` risk.
+- Added unit coverage to confirm the historical sample detects numeric deltas without overwriting raw.
+
+Key commands:
+
+```bash
+free -h
+nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/audit.py revision-history-sample --start-date 20200101 --end-date 20260602 --sample-per-year 1 --seed 20260602_history_smoke --min-interval-seconds 0.25 --timeout-seconds 120 --output results/data_quality/process/revision_history_sample_smoke_status.json --events-output results/data_quality/process/revision_history_sample_smoke_events.jsonl
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/audit.py revision-history-sample --start-date 20200101 --end-date 20260602 --sample-per-year 3 --seed 20260602_history_v1 --min-interval-seconds 0.25 --timeout-seconds 120 --output results/data_quality/process/revision_history_sample_status.json --events-output results/data_quality/process/revision_history_sample_events.jsonl
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/audit.py revision-history-sample --start-date 20200101 --end-date 20260602 --sample-per-year 20 --seed 20260602_history_focus_v1 --groups daily --daily-datasets limit_list_d suspend_d --min-interval-seconds 0.25 --timeout-seconds 120 --output results/data_quality/process/revision_history_focus_limit_suspend_status.json --events-output results/data_quality/process/revision_history_focus_limit_suspend_events.jsonl
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/audit.py revision-history-sample --help
+git diff --check
+find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache \) -prune -exec rm -rf {} +
+find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+```
+
+Results:
+- Main sample window: `20200101-20260602`; 3 sampled SSE trade dates/year, 21 trade dates total.
+- Main sample checked 21 active trade-date interfaces. No API errors, no required remote-zero responses, and no local gaps with non-empty remote responses.
+- Stable in the main sample: `daily`, `adj_factor`, `daily_basic`, `stk_limit`, `bak_basic`, `margin`, `margin_detail`, `margin_secs`, `moneyflow`, `top_inst`, `kpl_list`, `limit_step`, `limit_cpt_list`, `limit_list_ths`, `hm_detail`, `ths_hot`, `dc_hot`.
+- Main substantive revisions:
+  - `limit_list_d`: 13/21 partitions revised, 157 changed business keys, all changes in `limit_amount`.
+  - `suspend_d`: 1/21 partitions revised; 20251127 gained `688766.SH` with `suspend_type=S`.
+- Main structural issues:
+  - `block_trade`: 6/21 partitions had duplicate business keys in both old and new data.
+  - `top_list`: 3/21 partitions had duplicate business keys in both old and new data.
+  - These were separated from source-value revisions.
+- Focus sample:
+  - `limit_list_d`: 86/140 partitions revised, 481 changed keys, all `limit_amount` numeric-to-blank. Mean old numeric absolute value 33,315,310,089.74; median 1,918,907,038; p95 146,601,240,000; max 1,332,256,113,900.
+  - `suspend_d`: 1/140 partitions revised; 20260116 removed `688005.SH` with `suspend_type=R`.
+- Generated human-readable analysis: `results/data_quality/process/revision_history_sample_analysis.md`.
+- Targeted TuShare tests passed: 44 tests OK.
+- Full unit discovery passed: 140 tests OK.
+- `git diff --check` passed.
+- Cache scan is clean after cleanup.
+
+## 2026-06-04 daily_alpha limit_amount quarantine
+
+Task: after historical revision sampling showed `limit_list_d.limit_amount` repeatedly changing from numeric local values to blank current TuShare values, exclude that field from the feature layer and record the risk contract.
+
+Scope:
+- Raw `limit_list_d` schema and TuShare download/audit behavior were not changed.
+- `DailyPITFeatureBuilder` now uses an explicit `limit_list_d` feature whitelist: `trade_date`, `ts_code`, and `limit`.
+- `limit_amount` is declared as a quarantined `limit_list_d` column for Environment feature construction.
+- Added a unit test proving that raw partitions containing `limit_amount` still do not emit `limit_amount` or `limit_list_d_limit_amount` in `daily_alpha`.
+- Updated `docs/data_documentation.md`, `docs/environment_design.md`, and `docs/pipeline_design.md` to state that `limit_amount` is retained for raw/audit only and excluded from `daily_alpha`.
+
+Key commands:
+
+```bash
+free -h
+nvidia-smi
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_environment -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit
+git diff --check
+find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache \) -prune -exec rm -rf {} +
+find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+```
+
+Results:
+- Environment unit tests passed: 26 tests OK.
+- Full unit discovery passed: 141 tests OK.
+- `git diff --check` passed.
+- Cache cleanup completed.
+- Other historical revision findings remain unchanged: sampled value-level revisions are concentrated in `limit_list_d.limit_amount`; `suspend_d` showed sparse added/removed keys; `block_trade` and `top_list` showed structural duplicate-key issues rather than source-value rewrites; the other sampled active trade-date interfaces were stable in the sample.
+
+## 2026-06-04 structural duplicate-key risk documentation
+
+Task: record the `block_trade`/`top_list` duplicate business-key finding in the durable data risk section.
+
+Scope:
+- Added a risk row to `docs/data_documentation.md` chapter 7 for structural duplicate business keys.
+- The documented contract is:
+  - raw keeps original duplicate rows;
+  - audit reports duplicate-key warnings;
+  - PIT feature/evidence layers must use a fuller event key, exact duplicate removal, or `trade_date+ts_code` aggregation before joining to daily samples.
+- No data or code path was changed.
+
+Validation:
+
+```bash
+git diff --check
+```
+
+Result:
+- `git diff --check` passed.
+
+## 2026-06-04 data documentation vs TuShare code audit
+
+Task: act as an editable audit SubAgent for the current TuShare data documentation and the data download/update/audit implementation.
+
+Scope reviewed:
+- `docs/data_documentation.md`
+- `configs/tushare_update_schedule.json`
+- `ops/cron/tushare_update.cron`
+- `src/hl_trader/data_sources/tushare/{common,download,audit,cron_update}.py`
+- `scripts/tushare/*.py`
+- `tests/unit/test_data_sources_tushare.py`
+
+Key findings:
+- The documented six semantic data domains match the current code and schedule. A set comparison between schedule interfaces and code dataset constants had no unexplained differences after accepted aliases: `share_float_complete`, `stk_mins_1min`, and the final `stk_mins_1min_by_date` layer.
+- `scripts/tushare/*.py` are thin wrappers and do not contain duplicate business logic; stable implementation is under `src/hl_trader/data_sources/tushare/`.
+- `cn_evening_full` dry-run matches the documented rolling 30-day update, selected reference/daily force refresh, open-window refresh, 1-day intraday force refresh, `share_float_complete`, and fundamental-at-end ordering.
+- `cn_nightly_full_audit` dry-run builds the six formal status commands, uses `--expected-codes-source minute` for the minute status, and offsets event/flow by one additional day for T+1 margin timing.
+- The previous code changes for `dividend` probe, trade-calendar lookahead, non-fail-fast full audit, same-day `margin_secs`, and daily-alpha next-trade-date mapping are reflected in code/tests.
+- Two documentation boundaries were too implicit:
+  - `cn_nightly_feature_build` is scheduled after raw audit but does not read the six raw status files as a gate.
+  - `cn_preopen_event_flow_audit_0920` refreshes previous-day `margin/margin_detail` status but does not include same-day `margin_secs`; same-day margin eligibility is currently guarded by the raw refresh job state and file existence.
+
+Edits made:
+- `docs/data_documentation.md`
+  - Updated整理日期.
+  - Clarified that `dividend/fina_audit/fina_mainbz_vip` are `ts_code` historical snapshots and that daily refresh targets recently affected symbols plus dividend date-probe candidates rather than full-market date slices.
+  - Clarified feature-build gating: only `audit-fundamental-events` gates `daily_alpha`; strict raw-status gating must be implemented by Pipeline/QMT if required.
+  - Clarified pre-open `margin_secs` boundary and added a timing/gating summary table.
+- Main-thread follow-up:
+  - Collapsed the long `3.5` cron bullet list and the separate timing/gating table into one task table.
+  - Corrected refresh flag wording: daily trade-date tables use `--refresh-daily-datasets`; macro/global, event/flow, board-trading, text evidence, and share-float process windows use `--refresh-open-window`.
+  - Re-ran schedule/code dataset set comparison, cron dry-runs, schedule JSON parse, `git diff --check`, and TuShare data-source unit tests after the table rewrite.
+
+Validation and commands:
+
+```bash
+pwd -P
+free -h
+nvidia-smi
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -c 'import json; from pathlib import Path; from hl_trader.data_sources.tushare import common as c; cfg=json.loads(Path("configs/tushare_update_schedule.json").read_text()); schedule={i["dataset"] for i in cfg["interfaces"]}; code=set(c.REFERENCE_DATASETS+c.DAILY_REQUIRED_DATASETS+c.DAILY_OPTIONAL_DATASETS+c.FUNDAMENTAL_DATASETS+[c.STK_MINS_DATASET,c.STK_MINS_BY_DATE_DATASET]+c.EVENT_FLOW_DATASETS+c.BOARD_TRADING_DATASETS+c.TEXT_DATASETS+c.MACRO_DATASETS); alias_ok={"share_float_complete","stk_mins_1min"}; print(json.dumps({"schedule_minus_code":sorted(schedule-code-alias_ok),"code_minus_schedule":sorted(code-schedule-{"share_float","stk_mins","stk_mins_1min_by_date"})},ensure_ascii=False,indent=2))'
+/home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_evening_full --end-date 20260603 --dry-run
+/home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_nightly_full_audit --end-date 20260604 --dry-run
+git diff --check
+PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/stock/bin/python -m json.tool configs/tushare_update_schedule.json
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare -v
+find src scripts tests -type d -name __pycache__ -prune -exec rm -rf {} +
+find src scripts tests -type d -name __pycache__ -o -type f \( -name '*.pyc' -o -name '*.pyo' \)
+```
+
+Results:
+- Interface set comparison: no unexplained schedule/code mismatch.
+- Cron dry-runs produced the expected command shapes.
+- `git diff --check` passed.
+- Schedule JSON parsed successfully.
+- TuShare data-source unit tests passed: 52 tests OK.
+- Generated Python caches were removed.
+- No live TuShare API download or raw-data mutation was run.
+- Main-thread follow-up validation also passed: no unexplained schedule/code dataset mismatch, cron dry-runs for `cn_evening_full` / `cn_nightly_full_audit` / same-day `margin_secs` matched the documented command shapes, `git diff --check` stayed clean, and the cache scan was empty.
+
+Remaining main-thread consideration:
+- If the production pipeline should fail closed, add an explicit pre-feature/Agent gate that reads the six raw status files and same-day `margin_secs` raw job state/file freshness before feature freeze or order decisions. The current cron schedule orders jobs sensibly, but feature build is not automatically blocked by raw status warnings/errors.
+
+## 2026-06-04 TuShare data-code editable audit
+
+Task: perform an editable audit of the TuShare data-related code for redundant/garbage logic, stale branches, and obvious data-update/audit errors.
+
+Scope:
+- Reviewed `src/hl_trader/data_sources/tushare/{common,download,audit,cron_update}.py`, `scripts/tushare/*.py`, `configs/tushare_update_schedule.json`, `ops/cron/*`, `tests/unit/test_data_sources_tushare.py`, and `docs/data_documentation.md`.
+- Focused on `trade_cal` lookahead, `dividend` probe, update order, audit `fail_fast=false`, revision ledger, empty-response protection, and cron command construction.
+
+Findings and changes:
+- `trade_cal` force refresh could shrink an existing yearly calendar partition if called with a narrow window. Added `merge_trade_cal_partition()` and made both normal coverage refresh and force refresh merge the refreshed rows into existing year partitions.
+- Daily trade-date datasets had a separate revision-alert path that lacked the full shared revision event fields. Replaced it with `write_parquet_revision_aware()` so daily rows share the same ledger contract as `bak_basic`, macro/global, event/flow, board, text, intraday, and share-float writes.
+- Rolling/open-window refreshes could shrink month/year aggregate partitions if a forced 30-day response overwrote a larger existing month/year file. Added `write_window_merged_partition()` so aggregate partitions replace rows inside the refreshed window while preserving same-partition rows outside the window; applied it to macro/global month/year partitions, event month partitions, and text month partitions.
+- Rolling `update` could pass the 30-day cron start date into macro/global range-style datasets, creating short `range=YYYYMM_YYYYMM.parquet` files and risking future full-window audit misses. Added `--macro-start-date` with default `20200101`; range-style macro/global datasets use that retained lower bound, while ordinary month/year/code partitions still use the rolling window plus safe window merge.
+- `scripts/tushare/*.py` are thin CLI wrappers and were not expanded or refactored. No large restructuring was done.
+- Updated `docs/data_documentation.md` to record merged `trade_cal` writes and retained macro/global range-window semantics.
+
+Validation commands:
+
+```bash
+pwd -P
+free -h
+nvidia-smi
+PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest -v
+PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_evening_full --end-date 20260603 --dry-run
+PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_nightly_full_audit --end-date 20260603 --dry-run
+PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src scripts tests
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit -v
+git diff --check
+find src scripts tests ops -type d -name '__pycache__' -prune -exec rm -rf {} +
+find src scripts tests ops -type d -name '__pycache__' -o -type f \( -name '*.pyc' -o -name '*.pyo' \)
+```
+
+Results:
+- Real path confirmed as `/Data/lzp/MacroQuant`.
+- Resource checks were safe for CPU tests; GPUs remained heavily occupied by unrelated jobs but no GPU workload was started.
+- Targeted TuShare guard tests passed: 49 OK.
+- Cron dry-runs for `cn_evening_full` and `cn_nightly_full_audit` built successfully.
+- TuShare data-source unit file passed: 52 OK.
+- Schedule JSON parse passed.
+- `compileall` passed.
+- Full unit discovery passed: 150 OK.
+- `git diff --check` passed.
+- Generated Python caches were removed and the final cache scan was empty.
+- No live TuShare download or raw-data mutation was run.
+
+## 2026-06-04 TuShare cron recovery hardening
+
+Task: implement the five follow-up fixes from the 20260603 update/audit review: repair the `dividend` crash, prevent fundamental refresh from blocking later daily domains, keep trade calendars current for pre-open and feature mapping, let full audit refresh every status domain even when one fails, and make `daily_alpha` use the official trading calendar for `tradable_date`.
+
+Scope:
+- Changed `probe_recent_dividend_codes()` to query only TuShare-supported dividend date params: `ann_date`, `imp_ann_date`, `ex_date`, and `record_date`. `pay_date` remains an event attribute, not a query param.
+- Added trade-calendar coverage helpers in `download.py`.
+  - `update` now refreshes `trade_cal` through `end_date + 7` by default.
+  - Direct date-driven paths for daily, event/flow, board-trading, and by-date minutes refresh missing local `trade_cal` coverage before loading SSE open dates.
+  - This specifically prevents same-day `margin_secs` pre-open refresh from skipping when local `trade_cal` only covers the previous trading day.
+- Reordered `update_all_dimensions()` so fundamental data runs after macro/global, event/flow, board-trading, intraday, `share_float_complete`, and text evidence.
+  - A future fundamental error still marks the job failed, but no longer prevents the operational daily domains from updating first.
+- Set `configs/tushare_update_schedule.json` `cn_nightly_full_audit.fail_fast=false`.
+  - The audit runner still returns non-zero if any audit command fails, but executes all six formal status commands before reporting the aggregate failure.
+- Changed `DailyPITFeatureBuilder` so `tradable_date` maps from SSE `trade_cal` when available, falling back to the `daily` partition sequence only if no calendar exists.
+  - This allows the latest completed daily partition to produce features for the next trading session even before that next session has a `daily` partition.
+- Updated `docs/data_documentation.md`, `docs/environment_design.md`, and `docs/pipeline_design.md` for the current contracts.
+- Added focused unit tests for:
+  - dividend probe params;
+  - same-day `margin_secs` trade-calendar refresh;
+  - non-fail-fast cron multi-command behavior;
+  - latest daily partition mapping to next `trade_cal` session.
+
+Validation and resource checks:
+
+```bash
+pwd -P
+free -h
+nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m json.tool configs/tushare_update_schedule.json >/dev/null
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest.test_dividend_probe_uses_only_supported_date_params tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest.test_event_flow_refreshes_trade_cal_before_same_day_margin_secs tests.unit.test_environment.DailyPITFeatureBuilderTest.test_last_daily_feature_uses_trade_cal_for_next_tradable_date -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare tests.unit.test_environment -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_evening_full --end-date 20260603 --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_nightly_full_audit --end-date 20260603 --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/cron_update.py --job cn_preopen_margin_secs_backfill_0903 --end-date 20260604 --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/tushare/download.py update --help
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src scripts tests
+git diff --check
+find src scripts tests -type d -name __pycache__ -print
+find src scripts tests -type f \( -name '*.pyc' -o -name '*.pyo' \) -print
+```
+
+Results:
+- Targeted new tests passed.
+- TuShare + Environment test subset passed: 73 tests OK.
+- Full unit discovery passed: 145 tests OK.
+- `compileall` passed.
+- `git diff --check` passed.
+- Cron dry-runs produced the expected evening update, full audit, and same-day `margin_secs` commands.
+- Generated Python caches were removed from `src/`, `scripts/`, and `tests/`.
+- No live TuShare download or raw-data mutation was run in this task.
+
+## 2026-06-04 data-code audit follow-up
+
+Task: open a SubAgent to audit data-related code for garbage, redundancy, logic errors, and possible small refactors; perform necessary main-thread fixes after review.
+
+SubAgent:
+- Spawned `Huygens` with editable audit scope covering `src/hl_trader/data_sources/tushare/`, `scripts/tushare/`, schedule config, cron ops, data-source tests, and `docs/data_documentation.md`.
+- The agent did not return a final report within the review window after two waits and was closed while still running.
+- No SubAgent edits were integrated.
+
+Main-thread finding:
+- `trade_cal` date handling used multiple local string-normalization patterns:
+  - `download.sse_trade_cal_covers()` stripped non-digits;
+  - `common.load_sse_open_dates()` and `common.latest_sse_calendar_date()` compared raw strings.
+- TuShare normally returns `YYYYMMDD`, so this was not an immediate production blocker, but it was a real maintainability and edge-format risk.
+
+Changes:
+- Added `normalize_date_key()` in `src/hl_trader/data_sources/tushare/common.py`.
+- Reused it in:
+  - `load_sse_open_dates()`;
+  - `latest_sse_calendar_date()`;
+  - `download_trade_cal()` existing-year coverage checks and SSE open-date collection;
+  - `sse_trade_cal_covers()`.
+- Added `test_trade_cal_helpers_normalize_date_strings()` to cover `YYYYMMDD`, `YYYY-MM-DD`, and `YYYY/MM/DD` calendar values.
+
+Validation and resource checks:
+
+```bash
+pwd -P
+free -h
+nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest.test_trade_cal_helpers_normalize_date_strings tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest.test_event_flow_refreshes_trade_cal_before_same_day_margin_secs -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_data_sources_tushare -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests/unit -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m compileall -q src scripts tests
+git diff --check
+find src scripts tests -type d -name __pycache__ -print
+find src scripts tests -type f \( -name '*.pyc' -o -name '*.pyo' \) -print
+```
+
+Results:
+- Targeted tests passed.
+- TuShare data-source test file passed: 48 tests OK.
+- Full unit discovery passed: 150 tests OK.
+- `compileall` passed.
+- `git diff --check` passed.
+- Generated Python caches were removed from `src/`, `scripts/`, and `tests/`.
+- No live TuShare download or raw-data mutation was run.
+
+## 2026-06-04 data update section simplification
+
+Task: remove duplicated 3.2.1/3.2.2 daily-update explanations from `docs/data_documentation.md`.
+
+Scope:
+- Removed the separate `3.2.1 更新频率与刷新规则速查` and `3.2.2 分层更新语义` subsections from the table of contents.
+- Replaced the long prose section with two tables under `3.2 日常增量更新`:
+  - global update semantics;
+  - per-domain refresh rules.
+- Kept the operational details for skip-existing, sidecar coverage, force refresh, empty-response protection, minute universe, cron windows, and per-domain refresh cadence.
+
+Validation:
+
+```bash
+git diff --check
+```
+
+Result:
+- `git diff --check` passed.
+
+## 2026-06-04 data documentation risk-section order
+
+Task: move the global data-risk summary before the official TuShare document index and confirm whether cross-interface stock-pool coverage differences are treated as audit errors.
+
+Scope:
+- Moved `全文数据风险与口径修正总结` to chapter 6.
+- Moved `官方文档索引` to chapter 7.
+- Updated the table of contents and the historical auction-risk internal link.
+- Reviewed `audit_daily_cross_coverage()` and `audit_stock_universe_semantics()`:
+  - `daily` vs `daily_basic` coverage differences are warning findings when either side has extra codes.
+  - `adj_factor` and `stk_limit` are warning only when `daily` has codes missing from those tables; extra `adj_factor`/`stk_limit` rows are documented as valid source-scope differences.
+  - `stock_company` vs `stock_basic` coverage is a semantic warning, and the living data doc states `stock_company` is not required to equal the full stock pool.
+  - These checks are designed to expose missing-data risk and source-scope differences, not to fail the audit as hard errors.
+
+Validation:
+
+```bash
+git diff --check
+```
+
+Result:
+- `git diff --check` passed.
