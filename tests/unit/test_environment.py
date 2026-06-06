@@ -194,7 +194,7 @@ class DailyPITFeatureBuilderTest(unittest.TestCase):
             self.assertTrue((features["result_available_time"] == features["available_at"]).all())
             assert_no_feature_leakage(features)
 
-    def test_limit_list_d_limit_amount_is_quarantined_from_daily_alpha(self):
+    def test_limit_list_d_raw_only_fields_are_quarantined_from_daily_alpha(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp)
             dates = pd.date_range("2020-01-01", periods=6, freq="B").strftime("%Y%m%d").tolist()
@@ -206,6 +206,12 @@ class DailyPITFeatureBuilderTest(unittest.TestCase):
                         "ts_code": "000001.SZ",
                         "limit": "U",
                         "limit_amount": 1_650_376_910,
+                        "fd_amount": 980_000_000,
+                        "first_time": "09:31:00",
+                        "last_time": "14:56:00",
+                        "open_times": 3,
+                        "strth": "strong",
+                        "limit_order": 12_300,
                     }
                 ]
             ).to_parquet(raw / "limit_list_d" / f"trade_date={dates[2]}.parquet", index=False)
@@ -215,8 +221,9 @@ class DailyPITFeatureBuilderTest(unittest.TestCase):
             )
 
             self.assertIn("limit", features.columns)
-            self.assertNotIn("limit_amount", features.columns)
-            self.assertNotIn("limit_list_d_limit_amount", features.columns)
+            for raw_only_column in DailyPITFeatureBuilder.LIMIT_LIST_D_RAW_ONLY_COLUMNS:
+                self.assertNotIn(raw_only_column, features.columns)
+                self.assertNotIn(f"limit_list_d_{raw_only_column}", features.columns)
             row = features[(features["feature_date"] == dates[2]) & (features["ts_code"] == "000001.SZ")].iloc[0]
             self.assertEqual(row["limit"], "U")
 
