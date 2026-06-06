@@ -1,6 +1,6 @@
 # QMT Documentation
 
-整理日期：2026-05-31
+整理日期：2026-06-07
 
 本文档记录 MacroQuant 项目接入阿里云 Windows + MiniQMT 的部署状态、当前日常流程和未来实盘上线门槛。当前阶段模型尚未训练完成，仓库也没有活动的 live 下单脚本，因此 QMT 侧只能作为已部署的执行环境保持 standby、只读检查和 dry-run 准备；不得启动自动实盘交易。研究侧 pipeline 边界见 `docs/pipeline_design.md`。
 
@@ -41,6 +41,17 @@
 - 远端 Windows：负责 QMT/MiniQMT 连接、账户/持仓/成交查询、订单执行、策略 state、pending 委托和 payload 归档。
 - 通信：本机通过 `scp` 上传 JSON payload，通过 `ssh` 调用远端 Python 执行器。
 - 状态：远端策略 state 是实盘对账的权威来源；本机实验 ledger 只能作为研究和审计记录，不能替代 broker 成交状态。
+
+常用词：
+
+| 词 | 在 QMT 流程中的含义 |
+|---|---|
+| PIT | 只使用决策时点已经可见的数据，避免未来信息进入订单。 |
+| WFO | Walk-Forward 训练和测试流程；只有冻结后的结果可以进入实盘候选。 |
+| LLM shadow | LLM 只做影子审计或建议，不直接改订单。 |
+| Ledger | 研究侧实验账本；不等于券商成交和持仓。 |
+| Payload | 本机生成并上传给远端执行器的订单 JSON。 |
+| Dry-run | 只检查解析、风控和预算，不向券商发真实委托。 |
 
 ## 3. 当前日常流程
 
@@ -177,8 +188,8 @@ setx CQ_MAX_PRINCIPAL "100000"
 {
   "schema_version": 1,
   "project_id": "macroquant",
-  "strategy_id": "macroquant_hl_daily_v1",
-  "payload_id": "macroquant_hl_daily_v1_20260601_rebalance",
+  "strategy_id": "macroquant_hl_daily_rebalance",
+  "payload_id": "macroquant_hl_daily_rebalance_20260601",
   "trade_date": "20260601",
   "decision_time": "2026-05-31T20:30:00+08:00",
   "action": "rebalance",

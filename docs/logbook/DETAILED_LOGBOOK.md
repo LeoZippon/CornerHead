@@ -4659,6 +4659,56 @@ git diff --check
 Result:
 - `git diff --check` passed.
 
+## 2026-06-04 HL orchestration and sandbox design documentation
+
+Task: update the living design documents with the agreed outer/inner Agent HL flow and Sandbox-internal API-driven LLM Agent model, without adding a new design document and without introducing version-numbered implementation names.
+
+Scope:
+- `docs/agent_design.md`
+- `docs/environment_design.md`
+- `docs/pipeline_design.md`
+- `LOGBOOK.md`
+
+Design recorded:
+- Restored the archive-level two-layer HL architecture:
+  - outer Agent learns and mutates abstract Heuristic Templates across folds/trials;
+  - inner Agent runs only inside train sandbox and instantiates candidate Heuristic Instances from a frozen Template;
+  - test sandbox executes frozen Instances and cannot change template, prompt, parameters, protocol, or trade policy.
+- Defined four template categories:
+  - Factor Heuristic Template;
+  - Natural Language Heuristic Template;
+  - Trade Decision Template;
+  - Trade Strategy Template.
+- Recorded Sandbox-internal API-driven LLM Agent boundary:
+  - sandbox can instantiate an LLM Agent;
+  - sandbox cannot use internet search or arbitrary HTTP;
+  - provider calls go through a controlled local LLM API Proxy;
+  - API keys stay outside sandbox;
+  - all prompts/responses are conversation-logged and hashable.
+- Added Environment-level contracts for:
+  - Data Gateway as the phase/fold/time permission layer;
+  - as-of snapshot physical data boundary;
+  - Sandbox Runner resource and filesystem boundary;
+  - train/test/held-out sandbox permission matrix;
+  - LLM API Proxy allowlist, logging, budget, cache and redaction rules.
+- Added Pipeline-level orchestration:
+  - docs/ledger/case context -> outer Agent -> templates -> folds -> train sandbox -> frozen Instance -> test sandbox -> metrics/cases -> Trial Ledger -> outer mutation.
+- Recorded initial implementation scope:
+  - first pass can omit short selling, T+0/inventory trading, event-driven re-decision, natural-language scoring in PnL, and dynamic inner-Agent parameter tuning;
+  - retain interfaces for those capabilities without naming them as versioned features.
+
+Validation:
+
+```bash
+pwd -P
+rg -n "^## |^### " docs/agent_design.md docs/environment_design.md docs/pipeline_design.md
+git diff --check
+```
+
+Result:
+- Documentation structure was inspected for duplicate top-level headings after edits.
+- No code, raw data, cron, or experiment artifact was changed.
+
 ## 2026-06-04 data documentation vs TuShare code audit
 
 Task: act as an editable audit SubAgent for the current TuShare data documentation and the data download/update/audit implementation.
@@ -4910,3 +4960,1355 @@ git diff --check
 
 Result:
 - `git diff --check` passed.
+
+## 2026-06-04 Agent/Environment/Pipeline document architecture audit
+
+Task: audit the three HL orchestration living docs for consistency, implementation-readiness, organization, and readability.
+
+Scope:
+- Reviewed `docs/agent_design.md`, `docs/environment_design.md`, and `docs/pipeline_design.md`.
+- Focused on outer/inner Agent roles, Sandbox-internal API-driven LLM Agent, Data Gateway, as-of snapshot, Sandbox Runner, LLM API Proxy, freeze points, and Trial Ledger boundaries.
+- No code, raw data, TuShare download, or live LLM API call was run.
+
+Findings:
+- The overall design is coherent: Agent owns Template/Instance semantics and LLM behavior, Environment owns data visibility and execution isolation, Pipeline owns fold orchestration, freeze, artifact verification, and ledger merge.
+- One wording risk could lead to a wrong implementation: Environment's permission table previously described train sandbox ability as "LLM changes template/parameters." This now says inner Agent generates candidate Instance/parameters/search plans; outer Template mutation remains outside test and happens through the outer Agent loop.
+- Another boundary needed clarification: sandbox writes only ledger fragments/artifacts, while Pipeline writes the authoritative Trial Ledger after artifact/manifest/exit-code checks.
+- Pipeline's Template section repeated Agent semantic details. It now focuses on schema, complexity, data boundary, action boundary, search boundary, and NL boundary checks.
+
+Documentation changes:
+- `docs/agent_design.md`: added a scope sentence for the HL Agent chapter and a Template/Instance boundary table; clarified that the inner Agent runs against a frozen Template and cannot mutate the outer Template.
+- `docs/environment_design.md`: added a scope sentence for Data Gateway/Sandbox, replaced ambiguous template-mutation wording in the sandbox permission matrix, and clarified ledger fragment versus authoritative ledger ownership.
+- `docs/pipeline_design.md`: added a scope sentence for HL orchestration and replaced the repeated template semantics table with Pipeline acceptance checks.
+- `LOGBOOK.md`: recorded the concise audit result.
+
+Validation:
+
+```bash
+nvidia-smi
+free -h
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|') and set(lines[i + 1].replace('|','').replace('-','').replace(':','').strip()) <= set():
+            expected = line.count('|')
+            j = i
+            while j < len(lines) and lines[j].startswith('|'):
+                if lines[j].count('|') != expected:
+                    problems.append((path.as_posix(), j + 1, expected, lines[j].count('|'), lines[j]))
+                j += 1
+            i = j
+        else:
+            i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md
+```
+
+Results:
+- GPU memory was already heavily used by unrelated processes; this was a docs-only audit and did not start GPU work.
+- System RAM was safe for a docs-only task.
+- Markdown table column check passed.
+- `git diff --check` passed for the three docs.
+
+## 2026-06-05 Environment documentation consolidation
+
+Task: merge overly granular `docs/environment_design.md` top-level chapters while keeping the same design content.
+
+Scope:
+- Consolidated the Environment living doc into six top-level chapters:
+  1. Boundary principles and code organization.
+  2. Configuration contract.
+  3. PIT data, features, and leakage.
+  4. WFO, execution, replay, and evaluation.
+  5. Data Gateway and Sandbox.
+  6. Pending environment boundaries.
+- Updated `docs/agent_design.md` and `docs/pipeline_design.md` references from the old Environment sandbox chapter to the new chapter 5.
+- No code, raw data, TuShare download, live LLM API call, or cron change was run.
+
+Validation:
+
+```bash
+nvidia-smi
+free -h
+rg -n '^(##|###) ' docs/environment_design.md
+rg -n '第 14 章|第 15 章|#14-|#15-' docs/agent_design.md docs/pipeline_design.md docs/environment_design.md
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Resource checks were safe for a docs-only validation; no GPU workload was started.
+- Environment heading scan shows the six intended top-level chapters.
+- Old Environment chapter 14/15 references are absent.
+- Markdown table column check passed.
+- `git diff --check` passed for the affected documentation and log files.
+
+## 2026-06-05 Agent/Pipeline documentation consolidation
+
+Task: apply the same chapter-consolidation pattern to `docs/agent_design.md` and `docs/pipeline_design.md`.
+
+Scope:
+- Consolidated `docs/agent_design.md` into five top-level sections:
+  1. Boundary principles and code organization.
+  2. HL Agent architecture and formulaic baseline.
+  3. Evidence, prompt, and response contract.
+  4. Shadow recorder, provider, and logs.
+  5. Trading-system isolation.
+- Consolidated `docs/pipeline_design.md` into six top-level sections:
+  1. Boundary principles, code organization, and CLI.
+  2. Feature Build and PIT entrypoints.
+  3. WFO, held-out, and replay execution.
+  4. LLM shadow, evidence, and provider calls.
+  5. Ledger, Freeze, and Fail-Fast.
+  6. HL two-layer Agent orchestration and extensions.
+- Updated cross-document references in Agent, Environment, and Pipeline docs to use the new chapter numbers.
+- No code, raw data, TuShare download, live LLM API call, or cron change was run.
+
+Validation:
+
+```bash
+nvidia-smi
+free -h
+rg -n '^(##|###) ' docs/agent_design.md docs/pipeline_design.md docs/environment_design.md
+rg -n '第 3 章|第 11 章|第 12 章|第 14 章|第 15 章' docs/agent_design.md docs/pipeline_design.md docs/environment_design.md
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Resource checks were safe for a docs-only validation; no GPU workload was started.
+- Heading scan confirmed Agent has 5 top-level chapters and Pipeline has 6 top-level chapters.
+- Stale cross-references to old Agent/Pipeline/Environment chapter numbers were absent after updates.
+- Markdown table column check passed.
+- `git diff --check` passed for the affected documentation and log files.
+
+## 2026-06-05 limit_list_d feature quarantine
+
+Task: explicitly isolate unstable or日终明细 fields from `limit_list_d` while keeping the stable daily limit-status label.
+
+Changes:
+- `src/hl_trader/environment/features/daily_pit.py` now names `LIMIT_LIST_D_RAW_ONLY_COLUMNS` for seal amount, seal timing, reopen-count, strength, and order fields.
+- `DailyPITFeatureBuilder` still reads only `trade_date/ts_code/limit` from `limit_list_d`; a defensive drop keeps any raw-only columns out of the merge if they appear.
+- `tests/unit/test_environment.py` now verifies `limit_amount/fd_amount/first_time/last_time/open_times/strth/limit_order` do not enter `daily_alpha`.
+- Updated Data, Environment, and Pipeline docs to state that current daily features admit only `limit_list_d.limit`; other `limit_list_d` fields remain raw/audit-only.
+
+Validation:
+
+```bash
+nvidia-smi
+free -h
+PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_environment.DailyPITFeatureBuilderTest
+git diff --check -- src/hl_trader/environment/features/daily_pit.py tests/unit/test_environment.py docs/environment_design.md docs/data_documentation.md docs/pipeline_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/environment_design.md'), Path('docs/data_documentation.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+nvidia-smi
+free -h
+```
+
+Results:
+- Resource checks were safe; no GPU workload was started.
+- `DailyPITFeatureBuilderTest` passed: 8 tests OK.
+- `git diff --check` passed for the changed code/docs/log files.
+- Markdown table column check passed for Data, Environment, and Pipeline docs.
+
+## 2026-06-05 dynamic feature-window design note
+
+Task: record the intended Agent/Pipeline/Environment boundary for historical rolling-window features before implementation.
+
+Decision:
+- Agent may propose historical windows as part of a Factor Template, such as 20/60/120-day momentum, liquidity, or volatility windows.
+- Pipeline must validate the proposed windows against an allowed set, maximum lookback, data availability, and freeze/hash rules.
+- Environment must be the only layer that reads raw data and constructs PIT-safe rolling features; Agent must not directly read raw data or change windows inside test/held-out.
+- Current implementation is not dynamic: `daily_alpha` still builds fixed `ret_5d/ret_20d/ret_60d/amount_ma20/volatility_20d`, and `lookback_days` is still a manual/cron CLI parameter with default 80.
+
+Documentation changes:
+- `docs/agent_design.md`: added the Agent-side proposal boundary.
+- `docs/environment_design.md`: recorded current fixed-window status and target dynamic-window design.
+- `docs/pipeline_design.md`: recorded future validation/freeze responsibility and current lack of automatic lookback inference.
+
+Validation:
+
+```bash
+nvidia-smi
+free -h
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Resource checks were safe for documentation-only work; no GPU workload was started.
+- Markdown table column check passed for Agent, Environment, and Pipeline docs.
+- `git diff --check` passed for the affected docs/logbooks.
+
+## 2026-06-05 universe selector design note
+
+Task: record the intended Agent/Pipeline/Environment boundary for universe selection before implementation.
+
+Decision:
+- Agent may propose universe preferences, such as exchange scope, ST exclusion, minimum listing days, and liquidity thresholds.
+- Pipeline must validate those rules, ensure they are PIT-computable, and include them in freeze/hash records.
+- Environment must be the only layer that turns the rules into a daily tradable universe using PIT data.
+- Agent must not bypass the universe selector by scanning all raw/full-market data directly.
+- Current implementation is not active: `ExperimentConfig.universe` is loaded as a configuration record but does not yet filter `daily_alpha` or backtest candidates.
+
+Documentation changes:
+- `docs/agent_design.md`: added the Agent-side universe proposal boundary.
+- `docs/environment_design.md`: recorded target universe selector responsibilities and current non-enforcement.
+- `docs/pipeline_design.md`: added the Pipeline validation/freeze boundary for universe rules.
+
+Validation:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Markdown table column check passed for Agent, Environment, and Pipeline docs.
+- `git diff --check` passed for the affected docs/logbooks.
+
+## 2026-06-05 Environment feature table documentation
+
+Task: make the `daily_alpha` feature-construction section easier to audit by listing current feature fields as a table.
+
+Changes:
+- `docs/environment_design.md` now separates feature construction into process rules and a `daily_alpha` field table.
+- The table records each feature group's source, calculation or meaning, unit/value convention, and PIT boundary.
+- The table explicitly documents `ret_1d`, trailing compound returns, rolling liquidity/volatility features, valuation/share fields, trading constraints, `limit_list_d.limit`, and optional `fund_*`/`dividend_*` fields.
+- No code, raw data, tests, live API calls, or cron jobs were changed.
+
+Validation:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+path = Path('docs/environment_design.md')
+lines = path.read_text(encoding='utf-8').splitlines()
+problems = []
+i = 0
+while i < len(lines):
+    line = lines[i]
+    if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+        marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+        if marker == '':
+            expected = line.count('|')
+            j = i
+            while j < len(lines) and lines[j].startswith('|'):
+                actual = lines[j].count('|')
+                if actual != expected:
+                    problems.append((j + 1, expected, actual, lines[j]))
+                j += 1
+            i = j
+            continue
+    i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('environment table column check ok')
+PY
+git diff --check -- docs/environment_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Environment Markdown table column check passed.
+- `git diff --check` passed for Environment documentation and logbooks.
+
+## 2026-06-05 history-window snapshot design note
+
+Task: update Agent, Environment, and Pipeline docs so the HL design is not limited to pre-computed single-date `daily_alpha` features.
+
+Decision:
+- Keep `daily_alpha/feature_date=<YYYYMMDD>.parquet` as a single-date cross-sectional feature layer for baseline, deterministic replay, quick evidence pack, and frozen execution.
+- Add a target `history_window` snapshot concept under Data Gateway/as-of snapshot for train sandbox research.
+- `history_window` should contain only data visible before `decision_time`, potentially including daily, minute, fundamental, event, macro, and text sequences.
+- Inner Agent may use Python tools in train sandbox to discover candidate windows, factors, and NL rules from this snapshot.
+- Agent must not read full `data/raw`; Pipeline freezes accepted definitions; Environment rebuilds PIT features for test/held-out execution.
+
+Documentation changes:
+- `docs/environment_design.md`: added single-date feature vs historical sequence boundary, `history_window` Data Gateway output, and snapshot directory/rule contract.
+- `docs/agent_design.md`: added train-sandbox historical sequence input boundary.
+- `docs/pipeline_design.md`: added Pipeline responsibility for building `history_window` snapshots and freezing resulting rules.
+- No code, tests, data, live API calls, or cron jobs were changed.
+
+Validation:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Markdown table column check passed for Agent, Environment, and Pipeline docs.
+- `git diff --check` passed for affected docs/logbooks.
+
+## 2026-06-05 history-window-only design correction
+
+Task: remove the single-date cross-sectional feature layer from the target HL architecture after design review.
+
+Decision:
+- Target design no longer keeps a pre-compressed single-date feature layer as a separate main data layer.
+- Data Gateway provides as-of `history_window`; train sandbox uses it for research and candidate discovery.
+- Pipeline freezes accepted feature specs, universe rules, action policy, and LLM settings.
+- Environment recomputes decision observation and order constraints from `history_window` for train/test/held-out/replay.
+- Existing fixed daily feature builder remains a transitional baseline in code, not the target design path.
+
+Documentation changes:
+- `docs/environment_design.md`: replaced the daily feature table with `history_window` input and decision observation rules; removed `features.parquet` from snapshot input layout.
+- `docs/agent_design.md`: changed the Agent boundary to use `history_window` and transitionary formulaic features instead of fixed daily features.
+- `docs/pipeline_design.md`: changed Section 2 to `History Window 与 PIT 入口`, removed `daily_alpha` command examples from target flow, and rewrote evidence flow as snapshot-based.
+- `docs/data_documentation.md`: changed remaining `daily_alpha` references to observation or transitional feature-build language.
+- No code, tests, data, live API calls, or cron jobs were changed.
+
+Validation:
+
+```bash
+rg -n "daily_alpha|feature_date=<|data/features/daily|features.parquet|factor_frame|Feature 到 Evidence|feature file|--features" docs/agent_design.md docs/environment_design.md docs/pipeline_design.md docs/data_documentation.md
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md'), Path('docs/data_documentation.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md docs/data_documentation.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Stale target-layer keyword scan returned no matches.
+- Markdown table column check passed for Agent, Environment, Pipeline, and Data docs.
+- `git diff --check` passed for affected docs/logbooks.
+
+## 2026-06-05 Environment universe selector doc placement
+
+Task: move universe selector details out of the static `ExperimentConfig` object table.
+
+Changes:
+- `docs/environment_design.md` Section 2.1 now lists only the four core static config objects.
+- `universe` loaded-config wording was removed from the static object table.
+- Universe selector execution rules live outside the static config table with other pending environment boundaries.
+- No code, tests, data, live API calls, or cron jobs were changed.
+
+Validation:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+path = Path('docs/environment_design.md')
+lines = path.read_text(encoding='utf-8').splitlines()
+problems = []
+i = 0
+while i < len(lines):
+    line = lines[i]
+    if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+        marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+        if marker == '':
+            expected = line.count('|')
+            j = i
+            while j < len(lines) and lines[j].startswith('|'):
+                actual = lines[j].count('|')
+                if actual != expected:
+                    problems.append((j + 1, expected, actual, lines[j]))
+                j += 1
+            i = j
+            continue
+    i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('environment table column check ok')
+PY
+git diff --check -- docs/environment_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Environment table column check passed.
+- `git diff --check` passed for Environment doc and logbooks.
+
+## 2026-06-05 Environment implementation boundary spec
+
+Task: expand the pending Environment boundary list into implementation details for review before coding.
+
+Changes:
+- Replaced `docs/environment_design.md` Section 6 with a concrete implementation/audit contract.
+- Added detailed subsections for universe selector, history-window observation, cross-domain selectors, intraday track PIT rules, benchmark/risk attribution, Data Gateway/as-of snapshot/Sandbox/LLM Proxy, and acceptance checks.
+- Clarified that Agent proposes rules and candidates, Pipeline validates/freezes, and Environment owns PIT visibility, observation construction, execution constraints, replay, evaluation, and ledger primitives.
+- Kept the target design history-window based; no single-date cross-sectional feature layer was reintroduced.
+- No code, data, live API calls, cron jobs, commits, or PR operations were run.
+
+Validation:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+path = Path('docs/environment_design.md')
+lines = path.read_text(encoding='utf-8').splitlines()
+problems = []
+i = 0
+while i < len(lines):
+    line = lines[i]
+    if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+        marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+        if marker == '':
+            expected = line.count('|')
+            j = i
+            while j < len(lines) and lines[j].startswith('|'):
+                actual = lines[j].count('|')
+                if actual != expected:
+                    problems.append((j + 1, expected, actual, lines[j]))
+                j += 1
+            i = j
+            continue
+    i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('environment table column check ok')
+PY
+git diff --check -- docs/environment_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Environment Markdown table column check passed.
+- `git diff --check` passed for `docs/environment_design.md`, `LOGBOOK.md`, and `docs/logbook/DETAILED_LOGBOOK.md`.
+- Keyword scan confirmed the target wording did not reintroduce `daily_alpha`.
+
+## 2026-06-05 Theory-complete HL design document pass
+
+Task: rewrite Agent, Environment, and Pipeline docs as theory-complete target design documents rather than current-code status documents.
+
+Changes:
+- `docs/environment_design.md`: removed the standalone pending-environment chapter and moved its content into the relevant body sections.
+- Environment PIT section now embeds data visibility, history-window observation, selector contracts, cross-domain selector families, universe selector, and intraday PIT track.
+- Environment execution/evaluation section now embeds long/short constraints, inventory-trade requirements, benchmark return, excess return, risk exposure, and attribution primitives.
+- Environment Data Gateway/Sandbox section now embeds component order, Tool Gateway, LLM API Proxy, and acceptance checks.
+- `docs/agent_design.md`: rewrote headings and wording around safety, double-layer Agent, Template/Instance, sandbox LLM, action proposals, provider logging, and trade-impact conditions as target architecture.
+- `docs/pipeline_design.md`: rewrote history-window construction, WFO, evidence, freeze/fail-fast, and double-layer Agent orchestration as the target flow; complex features are now represented as policy-gated capabilities rather than pending work.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Markdown table column check passed for Agent, Environment, and Pipeline docs.
+- `git diff --check` passed for the three design docs and logbooks.
+- Keyword scans found no remaining standalone pending/current-code status headings such as `待实现`, `尚未实现`, `当前代码`, `过渡 baseline`, `当前流程`, `初始落地`, or `后续扩展`.
+
+## 2026-06-05 Template config boundary cleanup
+
+Task: correct the design boundary between Environment configuration and Agent-generated Templates.
+
+Changes:
+- `docs/environment_design.md` Section 2.1 now treats `ExperimentConfig` as predefined experiment/permission constraints.
+- Replaced the singular `HeuristicTemplate` row with `TemplateSearchPolicy`, which constrains allowed template types, variable families, data domains, maximum lookback, complexity, and mutation limits.
+- Added text that concrete Templates are Agent outputs, not Environment config objects.
+- `docs/agent_design.md` Section 2.2 now states that four Template types are generated by the outer Agent under `TemplateSearchPolicy`.
+- `docs/pipeline_design.md` Section 6.2 now checks generated Templates against `TemplateSearchPolicy` before freeze.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Markdown table column check passed for Agent, Environment, and Pipeline docs.
+- `git diff --check` passed for the three design docs and logbooks.
+
+## 2026-06-05 Template governance boundary cleanup
+
+Task: move complexity and mutation limits out of the Environment contract.
+
+Changes:
+- `docs/environment_design.md` now uses `DataAccessPolicy` instead of `TemplateSearchPolicy` in `ExperimentConfig`.
+- `DataAccessPolicy` covers allowed data domains, maximum lookback, phase permissions, snapshot scope, and available-at policy.
+- `docs/agent_design.md` now defines `TemplateGovernancePolicy` for allowed template types, variable families, complexity limits, parameter/search budget, and mutation limits.
+- `docs/pipeline_design.md` Section 6.2 now checks generated Templates against both Agent `TemplateGovernancePolicy` and Environment `DataAccessPolicy`.
+- Confirmed no `TemplateSearchPolicy`, `complexity_limits`, `mutation_limits`, `allowed_template_types`, or `allowed_variable_families` references remain in the three living design docs.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Markdown table column check passed for Agent, Environment, and Pipeline docs.
+- `git diff --check` passed for the three design docs and logbooks.
+- Residual keyword scan found no `TemplateSearchPolicy`, `complexity_limits`, `mutation_limits`, `allowed_template_types`, or `allowed_variable_families` in the three living design docs.
+
+## 2026-06-05 Design-doc historical wording cleanup
+
+Task: remove historical or transition-oriented wording from living design docs.
+
+Changes:
+- `docs/environment_design.md` Section 3.3 now directly states the `history_window -> decision_observation` contract without contrasting it against a pre-compressed single-day feature layer.
+- `docs/pipeline_design.md` Section 2.2 now uses `构造流程` and removes the phrase that contrasted test/held-out replay with a pre-compressed daily cross-section layer.
+- `docs/data_documentation.md` cron table now describes the 03:35 task as constructing/auditing `fundamental_events` for the `history_window -> observation` contract, without mentioning transition code paths.
+- Removed a macro PIT sentence that framed precise publish timestamps as a later replacement; it now states the priority order directly.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+rg -n "目标主路径|预压缩|历史版本|当前 cron 仍|过渡|待替换|不作为目标|目标路径应|尚未实现|待实现|当前代码|baseline" docs/agent_design.md docs/environment_design.md docs/pipeline_design.md docs/data_documentation.md
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md'), Path('docs/data_documentation.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md docs/data_documentation.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Keyword scan found no `目标主路径`, `预压缩`, `历史版本`, `当前 cron 仍`, `过渡`, `待替换`, `不作为目标`, `目标路径应`, `尚未实现`, `待实现`, `当前代码`, or `baseline` in the four living docs.
+- Markdown table column check passed for Agent, Environment, Pipeline, and Data docs.
+- `git diff --check` passed for the four docs and logbooks.
+
+## 2026-06-05 Inner-vs-outer Agent boundary cleanup
+
+Task: correct wording that implied the inner Agent discovers windows, factors, natural-language rules, or strategy Templates.
+
+Changes:
+- `docs/agent_design.md`: inner Agent now instantiates candidate Instances, parameter values, feature specs, NL rubric, action policy, and train scores from frozen Template/search space; outer Agent owns candidate windows, variable families, natural-language rules, and strategy Templates.
+- `docs/environment_design.md`: train sandbox wording now says it executes outer Template-defined windows/specs/rubrics/policies and scores candidate Instances; Data Gateway `history_window` row now says train sandbox uses it for Template-bounded instantiation and scoring.
+- `docs/pipeline_design.md`: train sandbox flow now says inner Agent/Python tools instantiate and score candidate Instances inside the frozen Template search space; forbidden actions include adding windows, factor families, NL rules, or strategies outside the outer Template.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+rg -n "内层 Agent.*发现|内层 Agent.*挖掘|Train sandbox.*发现|train sandbox.*发现|挖掘候选窗口|发现候选窗口|自然语言规则候选|交易策略候选|特征探索|history-window analysis|feature analysis" docs/agent_design.md docs/environment_design.md docs/pipeline_design.md
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Residual keyword scan found no inner-Agent discovery wording such as `内层 Agent.*发现`, `内层 Agent.*挖掘`, `Train sandbox.*发现`, `挖掘候选窗口`, `自然语言规则候选`, `交易策略候选`, `特征探索`, `history-window analysis`, or `feature analysis`.
+- Markdown table column check passed for Agent, Environment, and Pipeline docs.
+- `git diff --check` passed for the three design docs and logbooks.
+
+## 2026-06-06 Selector wording cleanup
+
+Task: clarify that selector/PIT-reader gating applies to all data domains, not only financial, event, macro, and text data.
+
+Changes:
+- `docs/environment_design.md` Section 3.2 now states that all raw or PIT-ready data entering `history_window`, `decision_observation`, or evidence must pass through Environment PIT reader/selector.
+- Kept specific bullets for daily market data, minute data, and financial/event/macro/text data so each domain's visibility rule is explicit.
+- `docs/environment_design.md` Section 3.7 now says daily market state, minute, financial, event, macro, text, and universe data all enter observation through Environment PIT reader/selector.
+- Added a daily market selector row to Section 3.8 covering daily bars, adjustment factors, daily indicators, limits, suspensions, and whitelisted daily board-trading fields.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+path = Path('docs/environment_design.md')
+lines = path.read_text(encoding='utf-8').splitlines()
+problems = []
+i = 0
+while i < len(lines):
+    line = lines[i]
+    if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+        marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+        if marker == '':
+            expected = line.count('|')
+            j = i
+            while j < len(lines) and lines[j].startswith('|'):
+                actual = lines[j].count('|')
+                if actual != expected:
+                    problems.append((j + 1, expected, actual, lines[j]))
+                j += 1
+            i = j
+            continue
+    i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('environment table column check ok')
+PY
+git diff --check -- docs/environment_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Environment table column check passed.
+- `git diff --check` passed for `docs/environment_design.md`, `LOGBOOK.md`, and `docs/logbook/DETAILED_LOGBOOK.md`.
+
+## 2026-06-06 Data-visibility wording cleanup
+
+Task: refine Environment Section 3.2 wording so selector is not repeated inside the financial/event/macro/text bullet.
+
+Changes:
+- `docs/environment_design.md` keeps the global rule that all raw or PIT-ready data entering `history_window`, `decision_observation`, or evidence must pass through Environment PIT reader/selector.
+- The daily, minute, financial/event/macro/text bullets now focus on available-at timing and retained source/unit metadata.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+git diff --check -- docs/environment_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- `git diff --check` passed for `docs/environment_design.md`, `LOGBOOK.md`, and `docs/logbook/DETAILED_LOGBOOK.md`.
+
+## 2026-06-06 Agent output wording cleanup
+
+Task: clarify whether the Environment decision-observation rule refers to the outer Agent or inner Agent.
+
+Changes:
+- `docs/environment_design.md` Section 3.3 now states that the outer Agent outputs structured Template candidates, mutations, and experiment queues.
+- The same section states that the inner Agent outputs structured Instance candidates, parameter values, feature spec instances, NL rubric instances, action policy instances, and train scores.
+- The no-direct-write/no-direct-raw rule now explicitly applies to both outer and inner Agents.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+rg -n 'Agent 输出的是结构化候选定义' docs/agent_design.md docs/environment_design.md docs/pipeline_design.md
+rg -n '外层 Agent 输出结构化 Template|内层 Agent 输出结构化 Instance|外层和内层 Agent 都不能' docs/environment_design.md
+git diff --check -- docs/environment_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Exact old generic sentence scan returned no matches.
+- New explicit outer/inner Agent wording is present in `docs/environment_design.md`.
+- `git diff --check` passed for `docs/environment_design.md`, `LOGBOOK.md`, and `docs/logbook/DETAILED_LOGBOOK.md`.
+
+## 2026-06-06 History-window request boundary cleanup
+
+Task: split the ambiguous `history_window_request` generator from `Agent 或 Pipeline` into separate intent and executable request objects.
+
+Changes:
+- `docs/environment_design.md` now defines `history_window_intent` as an outer-Agent object containing desired domains, candidate windows, purpose, and Template linkage.
+- `history_window_request` is now a Pipeline object containing `decision_time`, `tradable_date`, fold, phase, universe, validated domains, max lookback, permission policy, and source-status requirements.
+- Added the rule that Data Gateway only accepts Pipeline-generated `history_window_request`, not raw Agent intent.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+path = Path('docs/environment_design.md')
+lines = path.read_text(encoding='utf-8').splitlines()
+problems = []
+i = 0
+while i < len(lines):
+    line = lines[i]
+    if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+        marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+        if marker == '':
+            expected = line.count('|')
+            j = i
+            while j < len(lines) and lines[j].startswith('|'):
+                actual = lines[j].count('|')
+                if actual != expected:
+                    problems.append((j + 1, expected, actual, lines[j]))
+                j += 1
+            i = j
+            continue
+    i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('environment table column check ok')
+PY
+git diff --check -- docs/environment_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Environment table column check passed.
+- `git diff --check` passed for `docs/environment_design.md`, `LOGBOOK.md`, and `docs/logbook/DETAILED_LOGBOOK.md`.
+
+## 2026-06-06 Feature-spec wording cleanup
+
+Task: clarify `feature_spec` ownership and the meaning of calculation operators.
+
+Changes:
+- `docs/environment_design.md` now says `feature_spec` is proposed by the outer Agent and frozen by Pipeline before train/test execution, not generated by an ambiguous `Train Pipeline freeze`.
+- The `feature_spec` row now uses `确定性计算算子`.
+- Added explanatory text that calculation operators are reproducible feature operations such as returns, means, volatility, quantiles/ranks, truncation, and normalization, not Agent-written Environment code.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+git diff --check -- docs/environment_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- `git diff --check` passed for `docs/environment_design.md`, `LOGBOOK.md`, and `docs/logbook/DETAILED_LOGBOOK.md`.
+
+## 2026-06-06 Feature-spec ownership cleanup
+
+Task: align feature ownership with the HL design: outer Agent discovers/sets factors; inner Agent only tunes inside the frozen spec.
+
+Changes:
+- `docs/environment_design.md` now defines `feature_spec` as an outer-Agent Factor Template proposal that Pipeline validates and freezes before train/test execution.
+- Environment text now says the inner Agent can only tune parameters, factor weights/thresholds, and train scores under the frozen `feature_spec`; it cannot add factor definitions.
+- `docs/agent_design.md` now describes Factor Heuristic Template as carrying factor definitions, input domains/columns, windows, deterministic operators, direction, filters, parameter space, and objective.
+- `docs/agent_design.md` now describes Heuristic Instance as concrete parameters, factor weights/thresholds, NL rubric parameters, action policy parameters, and train scores.
+- `docs/pipeline_design.md` train-sandbox flow now says the inner Agent instantiates candidate Instances and tunes parameters/weights under frozen Template and `feature_spec`.
+- `docs/pipeline_design.md` freeze ordering now says `feature_spec` is already frozen before train, while the post-train freeze records the selected Instance, parameters, weights/thresholds, universe rule, action policy, and prompt/model/settings.
+- Removed residual wording that could imply inner Agent generates `feature_spec` or that Pipeline waits until after train to freeze factor definitions.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+rg -n '生成候选 Instance、参数、feature spec|Pipeline 校验并 freeze 通过后的 feature spec|Train Pipeline freeze|Pipeline 在 train 结束|特征选择' docs/environment_design.md docs/agent_design.md docs/pipeline_design.md
+rg -n 'feature_spec 是外层 Agent|Pipeline 在 train 前校验并冻结外层 Agent|基于冻结 Template 和 `feature_spec`|外层 Agent 负责提出窗口需求和因子定义' docs/environment_design.md docs/agent_design.md docs/pipeline_design.md
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Stale ownership scan returned no residual wording that assigns `feature_spec` generation to train Pipeline or inner-Agent feature selection.
+- Expected ownership wording is present: outer Agent proposes `feature_spec` / factor definitions, Pipeline validates and freezes them, and inner Agent cannot add new factor definitions.
+- Markdown table column check passed for Agent, Environment, and Pipeline docs.
+- `git diff --check` passed for the three design docs and logbooks.
+
+## 2026-06-06 Multi-domain history-window clarification
+
+Task: clarify whether financial data, macro events, and other non-price data are also organized as time-window inputs.
+
+Changes:
+- `docs/environment_design.md` now explicitly states that `history_window` is not only a market-price sequence; it contains dense market series, stock-level sparse event streams, market-level macro/global context, and text evidence indexes.
+- `docs/pipeline_design.md` now says observation construction from `history_window` covers price/volume sequences, stock-level events, macro/global context, and text evidence.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/environment_design.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/environment_design.md docs/pipeline_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Markdown table column check passed for Environment and Pipeline docs.
+- `git diff --check` passed for the changed docs and logbooks.
+- Target wording scan found the new dense-series, sparse-event, macro/global, and text-evidence window definitions.
+
+## 2026-06-06 Text evidence and case-library boundary
+
+Task: separate the as-of text evidence library from the post-trial Case Library.
+
+Changes:
+- `docs/environment_design.md` now defines snapshot `text_evidence` as a local as-of text library containing only visible texts within the requested history window.
+- `docs/agent_design.md` now says LLM Agent can query that local library through whitelist keyword/BM25 tools, and every retrieved item must carry evidence/source hashes.
+- `docs/pipeline_design.md` now inserts the text retrieval step before EvidencePackBuilder and adds a Case Library schema for post-trial lessons.
+- Clarified that Case Library is for outer-Agent Template learning and is gated by `case_available_at <= outer_agent_decision_time`; it is not the raw text/evidence database for a decision date.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- Markdown table column check passed for Agent, Environment, and Pipeline docs.
+- `git diff --check` passed for the changed docs and logbooks.
+- Target wording scan found the as-of text library, whitelist keyword/BM25 retrieval, evidence ids, and Case Library time-boundary definitions.
+
+## 2026-06-07 Template handoff contract and case
+
+Task: define what Template objects move between outer Agent, Pipeline, Environment, inner Agent, and test sandbox, and provide a concrete example.
+
+Changes:
+- `docs/agent_design.md` now defines the handoff objects: `TemplateCandidateBundle`, `FrozenTemplateBundle`, `TemplateExecutionSpec`, `CandidateInstance`, and `FrozenInstance`.
+- `docs/environment_design.md` now states that Environment only executes Pipeline-frozen `template_execution_spec`, not raw Agent free text or unreviewed template candidates.
+- `docs/environment_design.md` and `docs/pipeline_design.md` now include `template_execution_spec_hash` in the freeze/audit chain.
+- `docs/pipeline_design.md` now documents the handoff flow and adds concrete example `T_MOM_EARN_NEG_001`, covering a momentum/liquidity/profitability/text-risk template, Pipeline selector conversion, inner-Agent parameter selection, and frozen test execution.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/agent_design.md'), Path('docs/environment_design.md'), Path('docs/pipeline_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/agent_design.md docs/environment_design.md docs/pipeline_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+rg -n 'TemplateCandidateBundle|TemplateExecutionSpec|FrozenTemplateBundle|CandidateInstance|FrozenInstance|T_MOM_EARN_NEG_001|template_execution_spec_hash' docs/agent_design.md docs/environment_design.md docs/pipeline_design.md
+```
+
+Results:
+- Markdown table column check passed for Agent, Environment, and Pipeline docs.
+- `git diff --check` passed for the changed docs and logbooks.
+- Target wording scan found all handoff objects, the concrete `T_MOM_EARN_NEG_001` case, and `template_execution_spec_hash`.
+
+## 2026-06-07 Environment documentation readability rewrite
+
+Task: reduce redundancy, repeated boundaries, and English-heavy terminology in `docs/environment_design.md`.
+
+SubAgent audit:
+- Started SubAgent `Newton` for read-only audit.
+- Main findings: Section 3.3 mixed history window, text evidence, Case Library, Agent permissions, and execution contracts; selector/universe sections repeated the same `available_at` rules; Data Gateway/Sandbox repeated logical visibility rules already stated earlier; execution/replay/evaluation sections were split into too many small sections; terminology density was too high.
+- SubAgent was closed after returning the audit.
+
+Changes:
+- Rewrote `docs/environment_design.md` into 6 top-level chapters: environment responsibilities, time wall and history window, selectors and universe, replay/execution/evaluation, Data Gateway/snapshot/sandbox, and acceptance checklist.
+- Reduced the document from 738 lines to 458 lines.
+- Kept code variable names such as `history_window`, `decision_observation`, `available_at`, `selector`, `FreezeSpec`, and `template_execution_spec_hash`, but made the surrounding prose mostly plain Chinese.
+- Removed repeated Agent/Pipeline handoff explanation from Environment and left only the execution boundary: Environment executes Pipeline-frozen contracts and fails fast on missing/unauthorized/unverifiable inputs.
+- Kept Data Gateway and Sandbox as chapter 5 so existing Agent/Pipeline cross-references remain valid.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+wc -l docs/environment_design.md
+rg -n '^#{1,4} ' docs/environment_design.md
+rg -n 'environment_design\\.md.*第|docs/environment_design.md` 第' docs/agent_design.md docs/pipeline_design.md docs/data_documentation.md docs/QMT_documentation.md AGENTS.md CLAUDE.md
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [Path('docs/environment_design.md')]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/environment_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+```
+
+Results:
+- `docs/environment_design.md` is now 458 lines.
+- Heading scan shows 6 top-level chapters with compact subsection structure.
+- Agent/Pipeline references to `docs/environment_design.md` chapter 5 remain valid because chapter 5 is still Data Gateway/snapshot/sandbox.
+- Markdown table column check passed.
+- `git diff --check` passed for `docs/environment_design.md`, `LOGBOOK.md`, and `docs/logbook/DETAILED_LOGBOOK.md`.
+
+## 2026-06-07 Data/Agent/Pipeline documentation readability rewrite
+
+Task: audit and reduce redundancy, repeated cross-layer explanations, and unexplained terminology in Data, Agent, and Pipeline living docs.
+
+SubAgent audits:
+- `Harvey` audited `docs/data_documentation.md`; finding: content complete but mixed data dictionary, operation manual, audit implementation, and risk memo. Recommended terminology glossary, merge raw/PIT contracts, compress audit details into tables, and keep strict data contracts.
+- `Curie` audited `docs/agent_design.md`; finding: boundaries correct but repeated Agent role and Template/Instance constraints. Recommended moving handoff mechanics to Pipeline and keeping Agent semantics, Evidence/Case, LLM logging, and trading-impact boundaries.
+- `Beauvoir` audited `docs/pipeline_design.md`; finding: core boundaries correct but it read like a combined Agent/Environment/Pipeline document. Recommended preserving orchestration/freeze/ledger and shortening history window, evidence, event-action, and Template handoff details.
+- All three SubAgents were closed after returning read-only audits.
+
+Changes:
+- Rewrote `docs/data_documentation.md` from 762 to 484 lines.
+- Rewrote `docs/agent_design.md` from 502 to 313 lines.
+- Rewrote `docs/pipeline_design.md` from 752 to 346 lines.
+- Added short terminology sections where helpful, while keeping code variable names.
+- Preserved strict boundaries:
+  - Data owns raw downloads, units, updates, status, revision ledger, and raw PIT support.
+  - Agent owns Template/Instance semantics, Evidence/Case boundaries, LLM calls/logs, and trading proposal boundaries.
+  - Pipeline owns orchestration, history-window entrypoints, WFO/held-out, freeze, ledger, and Agent handoff flow.
+  - Environment owns time visibility, selectors, execution, replay, snapshots, and sandbox permissions.
+- No code, data, cron jobs, live API calls, commits, or PR operations were run.
+
+Validation:
+
+```bash
+wc -l docs/data_documentation.md docs/agent_design.md docs/pipeline_design.md docs/environment_design.md docs/QMT_documentation.md
+rg -n '^#{1,4} ' docs/data_documentation.md docs/agent_design.md docs/pipeline_design.md
+/home/lzp/miniconda3/envs/stock/bin/python - <<'PY'
+from pathlib import Path
+paths = [
+    Path('docs/data_documentation.md'),
+    Path('docs/agent_design.md'),
+    Path('docs/pipeline_design.md'),
+    Path('docs/environment_design.md'),
+    Path('docs/QMT_documentation.md'),
+]
+problems = []
+for path in paths:
+    lines = path.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith('|') and i + 1 < len(lines) and lines[i + 1].startswith('|'):
+            marker = lines[i + 1].replace('|', '').replace('-', '').replace(':', '').strip()
+            if marker == '':
+                expected = line.count('|')
+                j = i
+                while j < len(lines) and lines[j].startswith('|'):
+                    actual = lines[j].count('|')
+                    if actual != expected:
+                        problems.append((path.as_posix(), j + 1, expected, actual, lines[j]))
+                    j += 1
+                i = j
+                continue
+        i += 1
+if problems:
+    for item in problems:
+        print(item)
+    raise SystemExit(1)
+print('markdown table column check ok')
+PY
+git diff --check -- docs/data_documentation.md docs/agent_design.md docs/pipeline_design.md docs/environment_design.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md
+rg -n 'docs/(data_documentation|agent_design|environment_design|pipeline_design)\\.md` 第|docs/(data_documentation|agent_design|environment_design|pipeline_design)\\.md.*第' docs/*.md AGENTS.md CLAUDE.md
+```
+
+Results:
+- Final global documentation audit SubAgent `Euclid` found no blocking issue and was closed.
+- Applied its QMT follow-up: refreshed整理日期, added a compact glossary for PIT/WFO/LLM shadow/ledger/payload/dry-run, and replaced the versioned sample strategy id with a semantic id.
+- Final validation passed: five-doc table column check, `git diff --check`, stale QMT keyword scan, and resource checks.

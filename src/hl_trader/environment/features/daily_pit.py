@@ -34,7 +34,15 @@ class DailyPITFeatureBuilder:
 
     KEY_COLUMNS = ["trade_date", "ts_code"]
     LIMIT_LIST_D_FEATURE_COLUMNS = ["trade_date", "ts_code", "limit"]
-    LIMIT_LIST_D_QUARANTINED_COLUMNS = frozenset({"limit_amount"})
+    LIMIT_LIST_D_RAW_ONLY_COLUMNS = frozenset({
+        "limit_amount",
+        "fd_amount",
+        "first_time",
+        "last_time",
+        "open_times",
+        "strth",
+        "limit_order",
+    })
 
     def __init__(self, raw_dir: str | Path) -> None:
         self.raw_dir = Path(raw_dir)
@@ -120,7 +128,7 @@ class DailyPITFeatureBuilder:
 
         if config.include_limit_list and (self.raw_dir / "limit_list_d").exists():
             limit_start = max("20200102", load_start)
-            # limit_amount is retained in raw/audit only after historical source-rewrite probes.
+            # Only the stable daily limit status is admitted; seal amount/timing details stay raw/audit-only.
             limit_list = self.store.read_trade_range(
                 "limit_list_d",
                 limit_start,
@@ -128,6 +136,9 @@ class DailyPITFeatureBuilder:
                 columns=self.LIMIT_LIST_D_FEATURE_COLUMNS,
             )
             limit_list = self._normalize_keys(limit_list, "limit_list_d", allow_empty=True)
+            raw_only = self.LIMIT_LIST_D_RAW_ONLY_COLUMNS.intersection(limit_list.columns)
+            if raw_only:
+                limit_list = limit_list.drop(columns=sorted(raw_only))
             if not limit_list.empty:
                 limit_list = limit_list.drop_duplicates(self.KEY_COLUMNS, keep="last")
                 frame = frame.merge(limit_list, on=self.KEY_COLUMNS, how="left")
