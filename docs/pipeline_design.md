@@ -1,69 +1,73 @@
 # Pipeline Design
 
-整理日期：2026-06-03
+整理日期：2026-06-07
 
-本文档记录 MacroQuant 的运行编排层：CLI 如何调用 feature build、development WFO、held-out control、LLM shadow，以及 Pipeline 如何组合 Environment 和 Agent。Environment 原语见 `docs/environment_design.md`；Agent 决策逻辑见 `docs/agent_design.md`；数据下载和审计见 `docs/data_documentation.md`；QMT 执行端见 `docs/QMT_documentation.md`。
+本文档记录 Pipeline 层。Pipeline 只回答：按什么顺序调用 Data、Environment 和 Agent，何时冻结，写哪些账本，失败时如何停止。
+Agent 的产物语义见 `docs/agent_design.md`；Environment 的时间墙、撮合、快照和沙箱见 `docs/environment_design.md`；raw 数据和审计见 `docs/data_documentation.md`。
 
 ## 导航
 
-- [1. 边界原则](#1-边界原则)
-  - [1.1 职责范围](#11-职责范围)
-  - [1.2 导入方向](#12-导入方向)
-- [2. 代码组织](#2-代码组织)
-  - [2.1 文件职责](#21-文件职责)
-- [3. CLI 映射](#3-cli-映射)
-  - [3.1 子命令](#31-子命令)
-  - [3.2 CLI 规则](#32-cli-规则)
-- [4. Feature Build Pipeline](#4-feature-build-pipeline)
-  - [4.1 命令入口](#41-命令入口)
-  - [4.2 当前流程](#42-当前流程)
-  - [4.3 输出约束](#43-输出约束)
-- [5. Development WFO Pipeline](#5-development-wfo-pipeline)
-  - [5.1 命令入口与实现](#51-命令入口与实现)
-  - [5.2 运行流程](#52-运行流程)
-  - [5.3 训练阶段](#53-训练阶段)
-  - [5.4 测试、调仓与事件动作](#54-测试调仓与事件动作)
-- [6. Held-Out Control Pipeline](#6-held-out-control-pipeline)
-  - [6.1 命令入口](#61-命令入口)
-  - [6.2 规则](#62-规则)
-- [7. LLM Shadow Pipeline](#7-llm-shadow-pipeline)
-  - [7.1 构造 Evidence Pack](#71-构造-evidence-pack)
-  - [7.2 调用 Provider](#72-调用-provider)
-  - [7.3 Feature 到 Evidence 流程](#73-feature-到-evidence-流程)
-  - [7.4 Dry-run 与真实 Shadow](#74-dry-run-与真实-shadow)
-- [8. Ledger 和输出路径](#8-ledger-和输出路径)
-  - [8.1 本地输出](#81-本地输出)
-- [9. Freeze 和可复现](#9-freeze-和可复现)
-  - [9.1 Freeze 字段](#91-freeze-字段)
-- [10. Fail-Fast 规则](#10-fail-fast-规则)
-  - [10.1 失败条件](#101-失败条件)
-- [11. 后续 Pipeline 扩展](#11-后续-pipeline-扩展)
-  - [11.1 扩展方向](#111-扩展方向)
+- [1. Pipeline 层职责](#1-pipeline-层职责)
+  - [1.1 负责什么](#11-负责什么)
+  - [1.2 不负责什么](#12-不负责什么)
+  - [1.3 常用词](#13-常用词)
+  - [1.4 代码入口](#14-代码入口)
+- [2. 历史窗口入口](#2-历史窗口入口)
+  - [2.1 命令](#21-命令)
+  - [2.2 输入和输出](#22-输入和输出)
+- [3. WFO、测试和 held-out](#3-wfo测试和-held-out)
+  - [3.1 Development 流程](#31-development-流程)
+  - [3.2 测试和 held-out 规则](#32-测试和-held-out-规则)
+- [4. LLM Shadow 编排](#4-llm-shadow-编排)
+  - [4.1 构造证据包](#41-构造证据包)
+  - [4.2 调用 provider](#42-调用-provider)
+- [5. 冻结、账本和失败条件](#5-冻结账本和失败条件)
+  - [5.1 冻结内容](#51-冻结内容)
+  - [5.2 本地输出](#52-本地输出)
+  - [5.3 失败条件](#53-失败条件)
+- [6. 双层 Agent 交接](#6-双层-agent-交接)
+  - [6.1 交接流程](#61-交接流程)
+  - [6.2 简短案例](#62-简短案例)
+  - [6.3 能力开关](#63-能力开关)
+- [7. 验收清单](#7-验收清单)
 
-## 1. 边界原则
+## 1. Pipeline 层职责
 
-Pipeline 回答的是：“按照哪套冻结配置、输入、输出和审计规则，把 Environment 与 Agent 串起来运行一次实验或 shadow 流程。”
-
-### 1.1 职责范围
+### 1.1 负责什么
 
 Pipeline 负责：
 
-- 解析实验配置和运行参数。
-- 调用 Environment 构造 PIT feature。
-- 调用 Agent 生成候选股或 shadow decision。
-- 调用 Environment 回放、撮合、事件检查和 ledger。
-- 管理 development/held-out 边界。
-- 写入可审计 JSONL ledger。
-- 保证 shadow-only 与可交易执行边界不混淆。
+- 解析实验配置和命令行参数。
+- 调用 Environment 构造历史窗口、决策输入和只读快照。
+- 调用 Agent 生成模板、实例、候选股或 LLM shadow。
+- 编排训练、测试、held-out 和复盘。
+- 冻结模板、实例、prompt、模型、数据快照和代码 hash。
+- 写入 Trial Ledger、case、metrics 和 artifact hash。
+- 保证 held-out 不回流到 development。
+
+### 1.2 不负责什么
 
 Pipeline 不负责：
 
-- 不定义 raw 数据下载策略；那属于 `src/hl_trader/data_sources/tushare/` 的数据源实现、`scripts/tushare/` 命令入口和 `docs/data_documentation.md`。
-- 不直接实现 broker 约束；那属于 Environment。
-- 不直接实现 prompt/provider/response 合同；那属于 Agent。
-- 不绕过 PIT feature 或 evidence pack 读取 raw 数据。
+- 不下载 raw 数据。
+- 不实现 Agent 决策逻辑。
+- 不实现撮合、交易约束、PIT 可见性或沙箱隔离。
+- 不绕过 Environment 读取 `data/raw`。
 
-### 1.2 导入方向
+### 1.3 常用词
+
+| 词 | 含义 |
+|---|---|
+| PIT | 按决策时点过滤未来信息 |
+| WFO | 滚动训练和测试 |
+| held-out | 冻结方案后的最终留出验证 |
+| snapshot | 某个决策时点可见的数据包 |
+| ledger | 可审计流水账 |
+| Template | 外层 Agent 提出的策略模板 |
+| Instance | 内层 Agent 在训练窗口内调出的具体实例 |
+| shadow | 只记录、不影响交易的 LLM 判断 |
+
+### 1.4 代码入口
 
 导入方向：
 
@@ -74,337 +78,269 @@ environment -> 不依赖 agent
 agent -> 不拥有 broker state
 ```
 
-## 2. 代码组织
-
-### 2.1 文件职责
+主要文件：
 
 | 文件 | 职责 |
 |---|---|
-| `scripts/hl.py` | 单一 HL CLI 入口；只解析参数、调用 pipeline 或环境 feature builder |
-| `src/hl_trader/pipelines/experiment.py` | development WFO 和 held-out control runner |
-| `src/hl_trader/pipelines/formulaic_wfo.py` | 公式化 Agent + Environment 回放的 WFO 执行编排 |
-| `src/hl_trader/pipelines/llm_shadow.py` | evidence pack 构造、LLM shadow dry-run/真实调用编排 |
+| `scripts/hl.py` | 单一 HL CLI 入口 |
+| `src/hl_trader/pipelines/experiment.py` | development WFO 和 held-out runner |
+| `src/hl_trader/pipelines/formulaic_wfo.py` | 公式化控制组编排 |
+| `src/hl_trader/pipelines/llm_shadow.py` | Evidence Pack 和 LLM shadow 编排 |
 
-`build-features` 由 `scripts/hl.py` 调用 `DailyPITFeatureBuilder`，负责 raw 数据到 PIT feature 的构造。
+目标子命令：
 
-## 3. CLI 映射
-
-`scripts/hl.py` 当前提供六个子命令：
-
-### 3.1 子命令
-
-| CLI | 运行边界 | 当前写入 |
+| CLI | 作用 | 写入 |
 |---|---|---|
-| `build-features` | raw -> PIT feature | `data/features/<dataset>/feature_date=<YYYYMMDD>.parquet` |
-| `build-fundamental-events` | raw fundamental -> PIT event layer | `data/features/fundamental_events/<dataset>/available_month=<YYYYMM>.parquet` |
-| `audit-fundamental-events` | PIT event layer audit | `results/data_quality/fundamental_events_status.json` |
-| `run-development` | held-out 前 rolling WFO | experiment ledger |
-| `run-heldout` | 冻结参数 held-out control | held-out ledger |
-| `llm-shadow` | evidence pack -> shadow decision | evidence JSONL、shadow ledger |
+| `build-history-window` | 构造某个决策时点的历史窗口 | `data/asof_snapshots/<snapshot_id>/` |
+| `build-fundamental-events` | 财务 raw -> PIT 事件层 | `data/features/fundamental_events/` |
+| `audit-fundamental-events` | 审计财务事件层 | `results/data_quality/fundamental_events_status.json` |
+| `run-development` | held-out 前的滚动训练和测试 | development ledger |
+| `run-heldout` | 冻结方案的留出验证 | held-out ledger |
+| `llm-shadow` | Evidence Pack -> LLM shadow | evidence JSONL、shadow ledger |
 
-### 3.2 CLI 规则
+## 2. 历史窗口入口
 
-CLI 规则：
+### 2.1 命令
 
-- 所有命令通过 `PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py ...` 运行。
-- `--ledger-path` 可覆盖 YAML 默认 ledger，正式 smoke、development、held-out 不应混写到同一 JSONL。
-- CLI 捕获异常后输出 JSON error 并返回非 0。
-- CLI 输出使用 `to_jsonable` 序列化 dataclass、日期和 numpy/pandas 类型。
+```bash
+PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py build-history-window \
+  --config configs/experiments/<experiment>.yaml \
+  --fold-id <fold_id> \
+  --phase train \
+  --decision-time <YYYY-MM-DDTHH:MM:SS+08:00> \
+  --snapshot-root data/asof_snapshots/<snapshot_id>
+```
 
-## 4. Feature Build Pipeline
-
-### 4.1 命令入口
-
-入口：
+财务事件层入口：
 
 ```bash
 PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py build-fundamental-events \
   --raw-dir data/raw \
   --output-root data/features/fundamental_events \
   --start-date 20200101 \
-  --end-date 20251231
-
-PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py audit-fundamental-events \
-  --events-root data/features/fundamental_events \
-  --start-date 20200101 \
-  --end-date 20251231 \
-  --require-partitions
-
-PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py build-features \
-  --raw-dir data/raw \
-  --output-root data/features \
-  --dataset daily_alpha \
-  --fundamental-events-dir data/features/fundamental_events \
-  --start-date 20200102 \
-  --end-date 20251231
+  --end-date <YYYYMMDD>
 ```
 
-### 4.2 当前流程
+### 2.2 输入和输出
 
-当前流程：
+Pipeline 做的事：
 
-1. `build-fundamental-events` 可先从 raw 财务与基本面数据构造 `fundamental_events`，并用 `audit-fundamental-events` 检查事件层；自动化接入 `daily_alpha` 前使用 `--require-partitions` 作为门控。
-2. `scripts/hl.py` 解析 `FeatureBuildConfig`。
-3. 调用 `DailyPITFeatureBuilder(args.raw_dir)`。
-4. 从 raw 日频分区读取 `daily`、`daily_basic`、`stk_limit`、`suspend_d`、可选 `limit_list_d`；`limit_list_d` 当前只白名单接入 `limit`，不把不稳定的 `limit_amount` 写入 `daily_alpha`。
-5. 如果传入 `--fundamental-events-dir`，按 `available_at <= feature available_at` 接入最新可见财务指标和分红事件。
-6. 构造下一交易日可交易的 `daily_alpha`；`tradable_date` 优先由 SSE `trade_cal` 映射，不要求次日 `daily` 已经落库。夜间 cron 首次发现 `fundamental_events` 缺少分区时从研究起点初始化；已有分区后维护最近 120 天滚动窗口。
-7. 按 `feature_date` 分区写入 `data/features/<dataset>/`。
-8. 返回行数、分区数、首尾分区路径。
+1. 读取配置、fold、phase 和 `decision_time`。
+2. 接收外层 Agent 或配置提出的数据窗口需求。
+3. 把需求交给 Environment/Data Gateway。
+4. 校验输出存在、非空、带 manifest 和 hash。
+5. 把 snapshot 路径交给后续训练、测试或 LLM shadow。
 
-### 4.3 输出约束
+Pipeline 不直接 raw join。财务、宏观、事件、分钟和文本都必须通过 Environment/Data Gateway。
 
-输出约束：
+## 3. WFO、测试和 held-out
 
-- 输出是 feature layer，不是 raw layer。
-- 写入前不应绕过 Environment 的 PIT 构造和泄漏检查。
-- 后续财务、宏观、事件、分钟、文本接入时，应扩展 Environment selector，再由 Pipeline 调用。
+### 3.1 Development 流程
 
-## 5. Development WFO Pipeline
+Development 是 held-out 前的滚动研发流程：
 
-### 5.1 命令入口与实现
+```text
+配置
+  -> 生成 folds
+  -> 外层 Agent 生成 Template
+  -> 构造 train/test snapshot
+  -> 内层 Agent 在 train 内生成 Candidate Instance
+  -> Pipeline 选择并冻结 Instance
+  -> Test sandbox 执行冻结 Instance
+  -> 写 fills、metrics、case、ledger
+  -> 外层 Agent 读取 development case 后提出 mutation
+```
 
 入口：
 
 ```bash
 PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py run-development \
-  --config configs/experiments/pilot_2020_daily.yaml \
-  --features data/features/daily_alpha \
+  --config configs/experiments/<experiment>.yaml \
+  --snapshot-root data/asof_snapshots/<train_snapshot_id> \
   --ledger-path experiments/trial_ledger/<development_run_id>.jsonl
 ```
 
-实现：
+Pipeline 在训练阶段只负责调度和记录。参数搜索、回放评分和 LLM memo 必须在 train snapshot 内完成；测试结果不能回流训练调参。
 
-- `DailyFormulaicExperimentRunner`
-- `FormulaicWfoRunner`
-
-### 5.2 运行流程
-
-运行流程：
-
-1. 读取 `ExperimentConfig`。
-2. 根据配置生成 `FreezeSpec`。
-3. 生成 held-out 前的 development folds。
-4. 从 `template.parameter_space` 调用 Agent 的 `parameter_grid`。
-5. 写入 `experiment_start`。
-6. 对每个 fold：
-   - 写入 `fold_start`。
-   - `fit_parameters` 在训练窗口选择参数。
-   - `run_fold` 在测试窗口运行冻结参数回放。
-   - 写入 `fold_result`，指标包含 `test_return`、`long_test_return` 和 `short_test_return`。
-7. 汇总所有 fold，写入 `experiment_result`，同时保留 overall、long、short 三组收益统计。
-
-### 5.3 训练阶段
-
-训练阶段：
-
-- `assert_result_available` 要求训练特征有 `result_available_time`，且不晚于训练结束。
-- 调仓日期为每个月最后一个 `feature_date`。
-- 每组参数在连续月末决策点之间计算入选股票的实现收益均值。
-- 没有足够样本时得分为负无穷；全部无效时归零。
-
-### 5.4 测试、调仓与事件动作
+### 3.2 测试和 held-out 规则
 
 测试阶段：
 
-- 每日遍历测试窗口内 `feature_date`。
-- 非月末日只处理 event checkpoint。
-- 月末日执行常规 rebalance。
-- 事件动作和常规调仓共用每日换手预算。
-- 事件触发 `event_de_risk` 或 `exit` 的股票会从当日候选中排除。
+- 只执行冻结 Instance。
+- 可以调用 LLM 生成 memo 或 proposal，但不能改参数。
+- 事件动作和常规调仓都必须走冻结交易策略。
+- 回放、撮合、成本、涨跌停、T+1 和仓位约束由 Environment 执行。
+- Pipeline 只记录 order reason、fills、metrics 和 case。
 
-常规调仓：
+held-out 阶段：
 
-- Agent 输出候选股。
-- Environment portfolio 工具生成等权目标。
-- Pipeline 生成 `enter/add/trim/exit` order reason。
-- Environment BrokerSimulator 执行 T+1、lot、涨跌停、停牌、现金和成本约束。
-- 当前真实执行收益仍是 long-only，`test_return` 与 `long_test_return` 一致；`short_test_return` 只记录理论做空 sleeve，默认无短仓时为 0。
+- 只验证已经冻结的方案。
+- 不允许搜索参数。
+- 不允许修改 Template。
+- 不允许把 held-out 结果写回 development mutation。
+- 必须写独立 held-out ledger。
 
-事件动作：
+held-out 入口：
 
-- Environment `CheckpointDetector` 发现 checkpoint。
-- Pipeline 先写 `event_checkpoint`。
-- 若冻结 `TradeStrategyPolicy` 允许：
-  - 负向大幅价格变化触发 `event_de_risk` 或 `exit`。
-  - 跌停状态触发 `exit` 或 `event_de_risk`，但实际成交仍受跌停约束。
-- Pipeline 写 `event_action` 和 `fill`。
-- LLM shadow 不能触发这些动作。
+```bash
+PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py run-heldout \
+  --config configs/experiments/<experiment>.yaml \
+  --snapshot-root data/asof_snapshots/<heldout_snapshot_id> \
+  --ledger-path experiments/trial_ledger/<heldout_run_id>.jsonl
+```
 
-做空研究边界：
+## 4. LLM Shadow 编排
 
-- `margin_short_sell` 只来自 LLM shadow 或研究信号，不会自动生成融券订单。
-- 理论做空收益使用 Environment 的 `theoretical_short_return` 计算，默认 100% 现金担保和 18% 年化融券费率。
-- 现金担保会作为独立 short sleeve 统计；如果后续要模拟其占用做多资金，Pipeline 应显式降低 long sleeve 资金，而不是把短仓收益混入 long-only 实盘口径。
+### 4.1 构造证据包
 
-## 6. Held-Out Control Pipeline
+Pipeline 调用 Agent 的 EvidencePackBuilder，但不解释自然语言证据。
 
-### 6.1 命令入口
+流程：
+
+1. 读取 snapshot manifest、历史窗口、市场状态、交易约束和候选股票。
+2. 在 snapshot 内的文本库执行白名单检索。
+3. 生成 Evidence Pack。
+4. 校验 pack hash 和 PIT 字段。
+5. 写入 evidence JSONL。
 
 入口：
 
 ```bash
-PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py run-heldout \
-  --config configs/experiments/pilot_2020_daily.yaml \
-  --features data/features/daily_alpha \
-  --ledger-path experiments/trial_ledger/<heldout_run_id>.jsonl \
-  --top-n 80 \
-  --max-pe-ttm-quantile 0.2 \
-  --max-pb-quantile 0.2 \
-  --min-amount-quantile 0.2 \
-  --model-id formulaic_mode_control \
-  --treatment control_formulaic_mode
-```
-
-### 6.2 规则
-
-规则：
-
-- 必须配置 `heldout_start`。
-- 参数由命令行显式传入。
-- Held-out 内不拟合、不搜索、不写回参数。
-- fold 固定为：
-  - `train_start=protocol.start_date`
-  - `train_end=heldout_start-1`
-  - `test_start=heldout_start`
-  - `test_end=protocol.end_date`
-- 写入 `heldout_start` 和 `heldout_result`。
-- `treatment`、`model_id`、`prompt_id`、`data_contract_id` 进入 freeze context。
-
-Held-out 结果只能用于冻结方案验证，不应反向修改 development 搜索逻辑。
-
-## 7. LLM Shadow Pipeline
-
-### 7.1 构造 Evidence Pack
-
-入口：从 feature file 构造 evidence pack 并 dry-run。
-
-```bash
-PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py llm-shadow \
-  --feature-file data/features/daily_alpha/feature_date=<YYYYMMDD>.parquet \
-  --decision-date <YYYYMMDD> \
-  --tradable-date <YYYYMMDD> \
-  --ts-code <TS_CODE> \
+PYTHONUNBUFFERED=1 PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py llm-shadow \
+  --snapshot-root data/asof_snapshots/<snapshot_id> \
   --evidence-out data/evidence_packs/llm_shadow.jsonl \
-  --shadow-ledger experiments/trial_ledger/llm_shadow.jsonl \
   --dry-run
 ```
 
-### 7.2 调用 Provider
-
-入口：从已有 evidence pack 调用 provider。
-
-```bash
-PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py llm-shadow \
-  --provider deepseek \
-  --evidence-jsonl data/evidence_packs/llm_shadow.jsonl \
-  --shadow-ledger experiments/trial_ledger/llm_shadow.jsonl \
-  --max-packs 1
-```
-
-### 7.3 Feature 到 Evidence 流程
-
-Feature file -> evidence pack 流程：
-
-1. 读取 Parquet、CSV、JSON 或 JSONL。
-2. 校验必需 PIT 字段：
-   - `feature_date`
-   - `source_trade_date`
-   - `tradable_date`
-   - `available_at`
-   - `ts_code`
-3. 按 `decision_date`、`tradable_date`、`ts_code` 选择横截面行。
-4. 调用 Agent `EvidencePackBuilder`。
-5. 可选写入 `--evidence-out`。
-6. 调用 Environment `CheckpointDetector` 生成 shadow 上下文。
-
-默认纳入 payload 的特征列：
-
-- `pe_ttm`
-- `pb`
-- `pct_chg`
-- `amount`
-- `amount_ma20`
-- `ret_20d`
-
-### 7.4 Dry-run 与真实 Shadow
-
-Dry-run：
-
-- 不读取 provider API key。
-- 不调用网络。
-- 校验 pack hash、PIT 字段、checkpoint 和 ledger 写入链路。
-- 写入 `llm_shadow_dry_run`。
+### 4.2 调用 provider
 
 真实 provider shadow：
 
-- 当前 provider 只开放 `deepseek`。
 - API key 只从环境变量或 ignored `.env` 读取。
-- 调用 Agent `LLMShadowAdvisor`。
-- 写入每只股票的 `nl_shadow_decision`。
-- 写入每个 pack 的 `llm_shadow_pack`。
-- 所有记录保持 `can_affect_trading=False`。
+- 调用 Agent 的 LLM advisor。
+- 写 conversation log。
+- 写 shadow ledger。
+- 默认 `can_affect_trading=False`。
 
-## 8. Ledger 和输出路径
+Dry-run 不读取 API key、不调用网络，只校验证据、hash 和 ledger 链路。
 
-### 8.1 本地输出
+## 5. 冻结、账本和失败条件
 
-常用本地输出：
+### 5.1 冻结内容
 
-| 输出 | 路径 | 说明 |
+进入测试或 held-out 前，Pipeline 必须冻结：
+
+- `template_hash`
+- `template_execution_spec_hash`
+- `instance_hash`
+- 参数、权重和阈值 hash
+- `prompt_hash`
+- `llm_model_id`
+- `llm_settings_hash`
+- `trade_policy_hash`
+- `data_snapshot_id`
+- `code_commit`
+- `tool_gateway_policy_hash`
+
+任何冻结内容变化，都必须形成新的 trial。
+
+### 5.2 本地输出
+
+| 输出 | 默认路径 | 说明 |
 |---|---|---|
-| PIT feature | `data/features/daily_alpha/` | ignored，本地可读 |
-| Development ledger | `experiments/trial_ledger/<development_run_id>.jsonl` | ignored，实验审计 |
+| Development ledger | `experiments/trial_ledger/<run_id>.jsonl` | ignored，本地实验流水 |
 | Held-out ledger | `experiments/trial_ledger/<heldout_run_id>.jsonl` | ignored，冻结验证 |
-| Evidence pack | `data/evidence_packs/llm_shadow.jsonl` | ignored，LLM 输入证据 |
-| Shadow ledger | `experiments/trial_ledger/llm_shadow.jsonl` | ignored，LLM shadow 审计 |
+| Snapshot | `data/asof_snapshots/<snapshot_id>/` | ignored，只读输入 |
+| Evidence pack | `data/evidence_packs/*.jsonl` | ignored，LLM 输入证据 |
+| Conversation log | `logs/llm_conversations/*.jsonl` | ignored，真实 LLM 调用记录 |
 
-正式运行应使用不同 ledger path，避免 smoke、development、held-out 和 shadow 混写。
+Trial Ledger 至少记录：
 
-## 9. Freeze 和可复现
+- `template_created`
+- `fold_train_start`
+- `candidate_instance`
+- `instance_frozen`
+- `fold_test_result`
+- `post_review`
 
-### 9.1 Freeze 字段
+Case Library 只接收已完成 trial 的复盘结果，并必须带 `case_available_at`。
 
-Pipeline 必须保留：
+### 5.3 失败条件
 
-- `FreezeSpec`
-- `freeze_hash`
-- track/template/protocol/trade_policy 内容 hash
-- `model_id`
-- `prompt_id`
-- `data_contract_id`
-- phase：development 或 heldout
-- fold_id、parameters、metrics、payload
-- TrialLedger `record_hash`
+以下情况必须失败，不允许静默降级：
 
-Development runner 每个 fold 前会重新生成 freeze spec 并检查配置未漂移。
+- 输入 snapshot、history window、observation 或 evidence 缺失。
+- 缺少 PIT 字段或 hash。
+- test/held-out 试图调参。
+- held-out 结果回流 development。
+- LLM response 不符合 schema。
+- 真实 provider 调用无法写 conversation log。
+- Evidence Pack hash 被篡改。
+- sandbox 产物缺失或写到禁止路径。
 
-## 10. Fail-Fast 规则
+## 6. 双层 Agent 交接
 
-### 10.1 失败条件
+### 6.1 交接流程
 
-Pipeline 应失败而不是静默 fallback：
+| 步骤 | 交接 | Pipeline 责任 | 产物 |
+|---|---|---|---|
+| 1 | 外层 Agent -> Pipeline：Template 候选 | 校验 schema、复杂度、数据域、窗口、股票池、动作和证据规则 | accepted 或 rejected Template |
+| 2 | Pipeline -> Environment：执行合同 | 把 Agent intent 转成结构化 `history_window_request`、`feature_spec`、选择器规则和交易规则 | snapshot、history window、constraints、manifest |
+| 3 | Pipeline -> 内层 Agent：冻结 Template | 只暴露 train snapshot、冻结 Template、工具白名单和参数空间 | Candidate Instance |
+| 4 | 内层 Agent -> Pipeline：候选实例 | 校验未越界、未读 test/held-out、artifact hash 可复核 | selected 或 rejected Instance |
+| 5 | Pipeline -> Test sandbox：冻结实例 | 冻结参数、prompt、模型、工具策略、snapshot 和代码 hash | replay、LLM memo、fills、metrics、case |
 
-- feature 文件不存在或空目录。
-- feature 缺少 PIT 字段。
-- 训练窗口缺少 `result_available_time`。
-- held-out runner 未配置 `heldout_start`。
-- held-out 缺少显式冻结参数。
-- LLM evidence hash 被篡改。
-- provider 返回非 JSON object。
-- LLM response 缺失、重复或额外输出股票。
-- action 不可交易时不能被转为订单。
+### 6.2 简短案例
 
-## 11. 后续 Pipeline 扩展
+案例：`T_MOM_EARN_NEG_001`
 
-### 11.1 扩展方向
+外层 Agent 提出：
 
-建议新增 pipeline 时保持同一边界：
+- 中期动量：60 日收益。
+- 流动性：20 日成交额均值。
+- 财务改善：最近可见财报的盈利改善。
+- 负面文本规避：过去 30 天公告/新闻/研报中检索监管、问询、亏损、减持、诉讼等关键词。
+- 月频调仓，允许 `hold/enter/trim/exit/rebalance/event_de_risk`。
 
-- `feature_build.py`：多数据域 PIT feature/evidence 构造。
-- `training.py`：模型训练、cache、scaler、checkpoint 管理。
-- `evaluation.py`：benchmark、超额收益、行业暴露、风险归因。
-- `agent_assisted_wfo.py`：LLM-assisted held-out 对照，但默认仍 shadow-only。
-- `live_payload.py`：只在模型/策略/风控全部冻结后生成 QMT payload。
+Pipeline 转成执行合同：
 
-任何可能产生真实订单的 pipeline 必须先在 `docs/QMT_documentation.md` 补全上线门槛、人工确认、风控、对账和 kill-switch。
+- 请求 `daily/fundamentals/events/text_evidence` 历史窗口。
+- 冻结 `ret_60d`、`amount_mean_20d`、`latest_profitability_change` 三类计算规则。
+- 冻结文本检索规则和 action policy。
+- 要求所有输入满足 `available_at <= decision_time`。
+
+内层 Agent 只能在训练窗口内选择：
+
+- `top_n`。
+- 三类因子的权重。
+- 负面文本惩罚系数。
+- 动作策略参数。
+
+测试期只执行冻结后的 Instance。若测试日出现负面文本 evidence，LLM 只能输出 memo 或 `event_de_risk` proposal；是否减仓由冻结 action policy、换手预算和 Environment 交易约束决定。
+
+### 6.3 能力开关
+
+| 能力 | 开关 | 需要补齐 |
+|---|---|---|
+| 动态历史窗口 | `enable_dynamic_windows` | 窗口 schema、预算、泄漏测试 |
+| 内层 Agent 调参 | `enable_inner_agent_search` | Candidate Instance schema、seed、预算、optimizer |
+| 自然语言打分 | `enable_nl_score` | Evidence Pack、response schema、score merge policy |
+| 事件临时决策 | `enable_event_redesign` | event checkpoint policy、临时决策预算 |
+| 做 T/库存交易 | `enable_inventory_trade` | 分钟 selector、可卖库存、日内撮合 |
+| 融券做空研究 | `enable_short_sleeve` | 券源、费率、担保品、强平线；缺失时只做理论收益 |
+
+未打开的能力只能保留接口和日志字段，不能在测试期隐式生效。
+
+## 7. 验收清单
+
+Pipeline 改动至少检查：
+
+- 只编排，不实现 Agent 决策或 Environment 撮合。
+- 所有数据都经 Environment/Data Gateway。
+- 外层 Agent 的 Template 进入训练前已校验并冻结。
+- 内层 Agent 只在 train 内调参数、权重和阈值。
+- Test/held-out 只执行冻结 Instance。
+- LLM shadow 默认不影响交易。
+- 所有关键输入、输出、hash、metrics 和 case 写入 ledger。
+- held-out 结果不能回流 development。
+- conversation log、snapshot manifest、Trial Ledger 和 artifacts 能互相追溯。

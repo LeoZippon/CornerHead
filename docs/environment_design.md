@@ -1,465 +1,458 @@
 # Environment Design
 
-整理日期：2026-06-03
+整理日期：2026-06-07
 
-本文档记录 MacroQuant 的量化环境层：PIT 数据可见性、市场状态、回放、撮合、交易约束、事件检查、WFO fold、配置合同和可审计 ledger 原语。Agent 决策逻辑见 `docs/agent_design.md`；Pipeline 编排流程见 `docs/pipeline_design.md`；数据下载和 raw 审计见 `docs/data_documentation.md`。
+本文档记录 MacroQuant 的环境层。环境层只回答三件事：
+
+- 在某个决策时点，哪些数据已经可见。
+- 在某个交易日，哪些股票可以交易，订单如何成交。
+- 一次实验如何留下可复现、可审计的输入和结果。
+
+Agent 如何生成模板见 `docs/agent_design.md`；Pipeline 如何编排训练、测试和日志见 `docs/pipeline_design.md`；数据下载、单位和 raw 审计见 `docs/data_documentation.md`。
 
 ## 导航
 
-- [1. 边界原则](#1-边界原则)
-  - [1.1 职责范围](#11-职责范围)
-  - [1.2 导入方向](#12-导入方向)
-- [2. 代码组织](#2-代码组织)
-  - [2.1 子模块职责](#21-子模块职责)
-- [3. 配置合同](#3-配置合同)
-  - [3.1 ExperimentConfig 对象](#31-experimentconfig-对象)
-  - [3.2 核心校验](#32-核心校验)
-- [4. PIT 数据读取](#4-pit-数据读取)
-  - [4.1 数据合同与读取器](#41-数据合同与读取器)
-  - [4.2 当前日频可见性](#42-当前日频可见性)
-- [5. PIT 特征构造](#5-pit-特征构造)
-  - [5.1 日频特征构造](#51-日频特征构造)
-  - [5.2 财务事件 PIT 层](#52-财务事件-pit-层)
-  - [5.3 竞价分钟条校正](#53-竞价分钟条校正)
-- [6. 泄漏检查](#6-泄漏检查)
-  - [6.1 日频泄漏规则](#61-日频泄漏规则)
-- [7. 跨域 PIT Selector](#7-跨域-pit-selector)
-  - [7.1 Selector 规则](#71-selector-规则)
-  - [7.2 当前扩展边界](#72-当前扩展边界)
-- [8. WFO Fold](#8-wfo-fold)
-  - [8.1 Fold 生成规则](#81-fold-生成规则)
-  - [8.2 Pilot 配置示例](#82-pilot-配置示例)
-- [9. 执行环境](#9-执行环境)
-  - [9.1 Broker 对象](#91-broker-对象)
-  - [9.2 交易约束](#92-交易约束)
-- [10. 回放环境](#10-回放环境)
-  - [10.1 Replay 骨架](#101-replay-骨架)
-  - [10.2 当前使用边界](#102-当前使用边界)
-- [11. 事件检查](#11-事件检查)
-  - [11.1 Checkpoint 定义](#111-checkpoint-定义)
-  - [11.2 交易转换边界](#112-交易转换边界)
-- [12. Portfolio 和 Evaluation](#12-portfolio-和-evaluation)
-  - [12.1 Portfolio 工具](#121-portfolio-工具)
-  - [12.2 Evaluation 工具](#122-evaluation-工具)
-- [13. Protocol 和 Ledger](#13-protocol-和-ledger)
-  - [13.1 FreezeSpec](#131-freezespec)
-  - [13.2 Ledger](#132-ledger)
-- [14. 待实现环境边界](#14-待实现环境边界)
+- [1. 环境层职责](#1-环境层职责)
+  - [1.1 负责什么](#11-负责什么)
+  - [1.2 不负责什么](#12-不负责什么)
+  - [1.3 代码位置](#13-代码位置)
+- [2. 时间墙与历史窗口](#2-时间墙与历史窗口)
+  - [2.1 基本规则](#21-基本规则)
+  - [2.2 历史窗口](#22-历史窗口)
+  - [2.3 决策输入](#23-决策输入)
+  - [2.4 特殊数据规则](#24-特殊数据规则)
+- [3. 数据选择器与股票池](#3-数据选择器与股票池)
+  - [3.1 通用规则](#31-通用规则)
+  - [3.2 数据选择器](#32-数据选择器)
+  - [3.3 股票池](#33-股票池)
+  - [3.4 日内数据](#34-日内数据)
+- [4. 回放、撮合与评估](#4-回放撮合与评估)
+  - [4.1 训练和测试窗口](#41-训练和测试窗口)
+  - [4.2 撮合和交易约束](#42-撮合和交易约束)
+  - [4.3 事件检查](#43-事件检查)
+  - [4.4 评估与账本](#44-评估与账本)
+- [5. 数据网关、快照与沙箱](#5-数据网关快照与沙箱)
+  - [5.1 数据网关](#51-数据网关)
+  - [5.2 只读快照](#52-只读快照)
+  - [5.3 沙箱权限](#53-沙箱权限)
+  - [5.4 LLM API 代理](#54-llm-api-代理)
+- [6. 验收清单](#6-验收清单)
 
-## 1. 边界原则
+## 1. 环境层职责
 
-Environment 回答的是：“在某个决策时点，市场环境能给决策者看到什么、能成交什么、如何记录状态。”
+### 1.1 负责什么
 
-### 1.1 职责范围
+环境层负责：
 
-Environment 负责：
+- 按 `decision_time` 判断数据是否已经可见。
+- 从 raw 或中间层数据构造历史窗口（`history_window`）。
+- 从历史窗口构造决策输入（`decision_observation`）。
+- 生成每日可交易股票池、交易约束和事件检查结果。
+- 执行确定性的回放、撮合、成本、成交和收益统计。
+- 生成只读快照，限制沙箱能读什么、能写什么。
+- 记录可复现所需的来源、时间、代码和 hash。
 
-- 从 raw 数据读取和构造 PIT feature。
-- 检查 feature 是否存在时间泄漏。
-- 提供交易日、rolling fold、held-out 边界和结果可见性 guard。
-- 提供回放、BrokerSimulator、订单、成交、组合状态和交易约束。
-- 提供 deterministic event checkpoint。
-- 提供 portfolio target、evaluation metric、TrialLedger 和 ExperimentLedger 原语。
+### 1.2 不负责什么
 
-Environment 不负责：
+环境层不负责：
 
-- 不选择股票、不学习参数、不决定 action。
-- 不调用 LLM，不构造 prompt，不解释自然语言。
-- 不直接运行 development/held-out/LLM shadow pipeline。
-- 不读取 Agent 输出作为订单；订单只能由 pipeline 在冻结策略下交给执行环境。
+- 不选择股票。
+- 不学习参数。
+- 不生成 Agent 模板。
+- 不解释自然语言。
+- 不构造 LLM prompt。
+- 不保存 provider API key。
+- 不直接写真实订单。
 
-### 1.2 导入方向
+外层 Agent 负责提出模板；Pipeline 负责校验和冻结模板；环境层只执行 Pipeline 冻结后的结构化合同。环境层不能根据 Agent 的自由文本自行补规则。
 
-导入方向固定：
+### 1.3 代码位置
+
+环境层代码在 `src/hl_trader/environment/`。
+
+| 子模块 | 职责 |
+|---|---|
+| `data` | 数据合同、日期解析、可见性读取 |
+| `features` | 特征和历史窗口构造 |
+| `wfo` | 训练/测试窗口切分 |
+| `execution` | 订单、成交、现金和持仓 |
+| `backtest` | 回放流程 |
+| `events` | 事件检查 |
+| `portfolio` | 目标权重工具 |
+| `evaluation` | 收益、回撤、风险和归因 |
+| `protocols` | 冻结合同和结果可见性检查 |
+| `storage` | 实验账本和稳定 hash |
+| `gateway` | 数据网关和快照清单 |
+| `sandbox` | 沙箱启动、资源限制和产物校验 |
+
+导入方向必须保持：
 
 ```text
+scripts -> pipelines
+pipelines -> environment + agent
 environment -> 不依赖 agent
-agent -> 可以消费 environment 产出的 PIT feature、checkpoint、ledger 基础能力
-pipelines -> 可以同时组合 environment 和 agent
-scripts -> 只做 CLI 参数和 pipeline 调度
+agent -> 可以消费 environment 输出
 ```
 
 `tests/unit/test_protocol_architecture.py` 会阻止 `environment` 反向 import `agent`。
 
-## 2. 代码组织
+## 2. 时间墙与历史窗口
 
-环境层代码集中在 `src/hl_trader/environment/`。
+### 2.1 基本规则
 
-### 2.1 子模块职责
+环境层的核心规则是：
 
-| 子模块 | 职责 |
-|---|---|
-| `data` | TuShare 数据合同、PIT 分区读取、日期解析 |
-| `features` | 日频 PIT 特征构造、历史竞价分钟条校正 |
-| `leakage` | 特征层时间泄漏检查 |
-| `wfo` | rolling fold 生成 |
-| `backtest` | 日频 replay 骨架 |
-| `execution` | BrokerSimulator、Order、Fill、PortfolioState、Position |
-| `events` | deterministic event checkpoint 检测 |
-| `portfolio` | 目标权重和归一化工具 |
-| `evaluation` | 收益、长/短拆分、回撤、Sharpe 等指标 |
-| `protocols` | FreezeSpec、development/held-out 边界、结果可见性 guard |
-| `schemas` | HorizonTrack、Protocol、TradeStrategyPolicy、HeuristicTemplate、ExperimentConfig |
-| `storage` | TrialLedger、ExperimentLedger、稳定 hash、UTC 时间 |
+```text
+available_at <= decision_time
+```
 
-## 3. 配置合同
+含义是：任何数据进入决策前，都必须证明在本次决策时点已经可见。
 
-示例配置：`configs/experiments/pilot_2020_daily.yaml`。
+具体规则：
 
-### 3.1 ExperimentConfig 对象
+- 日线、每日指标、涨跌停和停复牌数据，按接口发布时间或盘后/次日盘前规则可见。
+- 分钟数据按 bar close 时间可见。
+- 财务、事件、宏观和文本数据按公告、发布、报告、采集或保守推断时间可见。
+- 除权日、解禁日、事件发生日只能作为事件属性，不能替代公告或发布时间。
+- 无法解析发布时间的数据，要么按保守规则延后可见，要么从本次输入中排除。
+- 所有输出必须保留来源路径、来源 hash、单位和可见时间规则。
 
-`ExperimentConfig` 包含 5 个核心对象：
+### 2.2 历史窗口
 
-| 对象 | 关键字段 | 用途 |
+历史窗口（`history_window`）是某个决策时点以前可见的一段数据，不只是行情序列。
+
+| 子集 | 包含内容 | 用途 |
 |---|---|---|
-| `HorizonTrack` | `target_holding_months`、`train_length_months`、`test_length_months`、`step_months` | 研究周期和 rolling fold 步长 |
-| `Protocol` | `start_date`、`end_date`、`heldout_start`、`decision_anchor`、`rebalance_frequency`、`nl_weight`、`cost_model` | 实验时间、held-out 边界、调仓频率、成本 |
-| `TradeStrategyPolicy` | `data_granularity`、`settlement_mode`、`max_daily_turnover_pct`、`event_de_risk_pct`、`event_exit_loss_pct`、`allowed_actions` | 可交易动作和执行约束 |
-| `HeuristicTemplate` | `strategy_family`、`variable_families`、`parameter_space`、`objective` | Agent 参数搜索空间的配置记录 |
-| `universe` | 交易所、ST、上市天数、流动性阈值等 | 当前为配置记录，后续接入 universe selector |
+| `daily` | 日线、每日指标、涨跌停、停复牌 | 价量、估值、交易约束 |
+| `intraday_1min` | 1 分钟线和竞价分钟条 | 日内结构、做 T、打板研究 |
+| `fundamentals` | 财报、财务指标、分红、业绩预告/快报、审计意见 | 财务版本和基本面变化 |
+| `events` | 资金流、两融、股东、回购、解禁、大宗交易、龙虎榜 | 事件触发和风险控制 |
+| `macro` | 宏观、政策、利率、全球事件、指数、外汇 | 市场状态和仓位约束 |
+| `text_evidence` | 公告、新闻、研报、政策文本的可见索引 | 关键词检索和 LLM 证据 |
 
-### 3.2 核心校验
+文本在快照中是本地 as-of 文本库。它只包含窗口内已经可见的文本索引、摘要或可审计引用。关键词检索、BM25、证据包和 prompt 细节属于 Agent/Pipeline 文档；环境层只负责时间过滤和来源追溯。
 
-核心校验：
+Case Library 不是历史窗口的一部分。它是实验或实盘后的复盘经验库，由 Agent/Pipeline 管理；环境层只在需要时校验 `case_available_at <= outer_agent_decision_time`。
 
-- `target_holding_months`、训练长度、测试长度和 step 必须为正。
-- 训练长度至少覆盖一个目标持有周期。
-- `heldout_start` 必须在 protocol 时间范围内。
-- Development 阶段 `nl_weight` 必须为 `0.0`。
-- 当前初始实验配置从 2020 年以后开始；更早窗口需要先扩展和审计特征合同。
-- `TradeStrategyPolicy.allowed_actions` 不能为空。
+### 2.3 决策输入
 
-## 4. PIT 数据读取
+决策输入（`decision_observation`）由环境层从历史窗口中计算出来。它必须来自 Pipeline 冻结后的执行合同，不能来自 Agent 自由文本。
 
-### 4.1 数据合同与读取器
+| 对象 | 生成方 | 内容 |
+|---|---|---|
+| `history_window_request` | Pipeline | 决策时间、交易日、阶段、股票池、数据域、最大窗口、权限要求 |
+| `history_window` | 数据网关 | 已按时间过滤的数据窗口 |
+| `template_execution_spec` | Pipeline | 冻结后的执行合同，包括 `feature_spec`、股票池规则、选择器规则和交易动作规则 |
+| `decision_observation` | 环境层 | 根据冻结规则计算出的决策输入和交易约束 |
+| `observation_manifest` | 环境层 | 输入 hash、代码 hash、数据状态、单位和行数 |
 
-实现：
+环境层只执行 `template_execution_spec`。如果执行合同缺字段、引用未授权数据、包含未知算子，或无法证明数据已可见，必须直接失败。
 
-- `src/hl_trader/environment/data/contracts.py`
-- `src/hl_trader/environment/data/pit.py`
+### 2.4 特殊数据规则
 
-`DatasetContract` 定义数据项的可见性规则。`PITDataStore` 负责从 `data/raw/<dataset>/trade_date=<YYYYMMDD>.parquet` 读取分区，并提供基础可见性检查。
+财务事件：
 
-Data 文档只定义 raw 下载、单位、sidecar 和可见时间候选；Environment 才负责在 `decision_time` 下选择“此刻可见”的记录，并构造 feature、observation 或 event checkpoint。
+- 财务 raw 先构造成 `fundamental_events`。
+- 三大报表优先用 `f_ann_date`，没有时用 `ann_date`。
+- 财务指标用 `ann_date`。
+- 分红优先用 `imp_ann_date`，没有时用 `ann_date`。
+- 同一业务键的多版本记录可以保留，但进入决策前必须先过滤可见时间，再选择最新可见版本或保留多行事件。
 
-### 4.2 当前日频可见性
+开盘竞价校正：
 
-当前日频主路径默认遵循：
+- raw 分钟线不改写。
+- 如果用 09:30 分钟条近似 `stk_auction`，只在环境层生成校正后的 PIT 字段。
+- 深圳主板使用 0.76，创业板使用 0.58；沪市、北交所和收盘竞价保持 1.0。
+- 输出字段应带校正规则，便于复核。
 
-- `daily` 和 `daily_basic` 只能用于当日收盘后或下一交易日决策。
-- 分钟数据可见性应使用 bar close 时间。
-- 财务、事件、宏观、文本要先经过对应 selector，不能 raw join。
+日频特征：
 
-完整 raw 数据规则见 `docs/data_documentation.md`。
+- `feature_date` 是来源交易日。
+- `tradable_date` 是下一交易日。
+- `available_at` 必须晚于当日收盘，且早于下一交易日盘前决策时间。
+- 这些规则只适用于日频下一交易日决策；日内策略必须使用分钟级规则。
 
-## 5. PIT 特征构造
+## 3. 数据选择器与股票池
 
-### 5.1 日频特征构造
+### 3.1 通用规则
 
-入口由 Pipeline/CLI 调用，环境层实现为：
+数据选择器（`selector`）负责把 raw 或中间数据变成决策可用的数据。
 
-```text
-src/hl_trader/environment/features/daily_pit.py::DailyPITFeatureBuilder
-```
+通用规则：
 
-当前输入：
+- 输入只能来自已记录的数据边界。
+- 输出必须带 `decision_time`、`tradable_date`、`available_at`、单位、来源路径和来源 hash。
+- 先过滤 `available_at <= decision_time`，再做版本选择、聚合或排序。
+- 结构性重复业务键不能静默去重，必须扩展键、聚合或保留多行。
+- 不稳定字段默认留在 raw/audit 层，例如 `limit_list_d.limit_amount`。
+- 每个选择器都要有泄漏测试或 case study。
 
-- `daily`
-- `daily_basic`
-- `stk_limit`
-- `suspend_d`
-- 可选 `limit_list_d`
-- 可选 `fundamental_events`
+### 3.2 数据选择器
 
-当前输出：
+| 选择器 | 输入 | 输出 | 最低要求 |
+|---|---|---|---|
+| 日频市场 | 日线、每日指标、涨跌停、停复牌 | 市场状态、交易约束、窗口输入 | 股票覆盖、单位和可见时间可复核 |
+| 分钟 | 按日 1 分钟线和竞价分钟条 | 日内输入、撮合输入、事件触发输入 | 不提前读取未来分钟 |
+| 财务 | 报表、指标、预告、快报、分红、审计意见、主营业务 | 财务事件和聚合财务观察 | 多版本选择可复现 |
+| 事件/资金 | 两融、资金流、股东、回购、大宗交易、解禁、龙虎榜 | 事件序列、风险标签、交易约束 | 重复键处理明确 |
+| 宏观/全球 | 宏观、政策、利率、经济日历、指数、外汇 | 市场上下文 | 月度/季度发布滞后不能泄漏 |
+| 文本 | 公告、新闻、研报、政策法规、盈利预测 | 可检索文本索引 | 每条证据有 ID、时间和 hash |
 
-```text
-data/features/daily_alpha/feature_date=<YYYYMMDD>.parquet
-```
+### 3.3 股票池
 
-构造逻辑：
+股票池选择器是候选股票的硬边界。Agent 只能在它输出的股票中打分和选择。
 
-- 读取窗口向前扩展 `lookback_days`。
-- `daily`、`daily_basic`、`stk_limit` 的 `(trade_date, ts_code)` 必须唯一。
-- 数值字段显式转 numeric。
-- `ret_1d = pct_chg / 100`；缺少 `pct_chg` 时才用 close pct change。
-- `ret_5d`、`ret_20d`、`ret_60d` 为 trailing 复合收益。
-- `amount_ma20` 为 `daily.amount` 的 20 日滚动均值，单位仍为千元。
-- `volatility_20d` 为 `ret_1d` 的 20 日滚动标准差。
-- `is_suspended` 来自 `suspend_d`。
-- 涨跌停价格来自 `stk_limit`。
-- `limit_list_d` 只允许 `limit` 进入 `daily_alpha`；`limit_amount` 因历史源端回写不稳定被隔离在 raw/audit 层，不作为特征字段。
-- 如果传入 `fundamental_events_dir`，按 `available_at <= feature available_at` 选择最新可见财务指标和分红事件，生成 `fund_*`、`dividend_*` 字段。
-- `feature_date = source_trade_date = trade_date`。
-- `tradable_date = 下一交易日`；优先用 SSE `trade_cal` 映射，因此最后一个已落库日线分区也可以映射到次日盘前交易日；缺少交易日历时才回退到 `daily` 分区序列，没有下一交易日的末尾样本丢弃。
-- `available_at` 和 `result_available_time` 使用日频合同的收盘后可见时间。
-- 分区写入采用临时文件替换，避免下游读取半成品。
+输入：
 
-### 5.2 财务事件 PIT 层
+- 冻结后的股票池规则。
+- `stock_basic`、`stock_company`、`namechange`。
+- `trade_cal`、`suspend_d`、`stk_limit`。
+- 历史窗口内的流动性数据。
+- 行业、指数成分、黑名单或白名单。
 
-实现：
+规则：
 
-```text
-src/hl_trader/environment/features/fundamental_events.py
-```
+- 名称变更、ST 状态、行业和指数成分不能使用未来状态。
+- 退市、暂停上市、长期停牌和黑名单股票默认排除。
+- 流动性阈值只能从历史窗口中计算。
+- 停牌和涨跌停既可以作为股票池过滤，也可以作为交易约束，但必须写入冻结策略。
+- 空股票池、关键输入缺失或单位不明时，必须失败。
 
-`FundamentalEventsBuilder` 从 `data/raw` 的财务与基本面 raw 文件构造 PIT-ready 事件层：
+### 3.4 日内数据
 
-```text
-data/features/fundamental_events/<dataset>/available_month=<YYYYMM>.parquet
-```
+日内交易不能复用日频的可见性假设。
 
-构造规则：
+| 项目 | 规则 |
+|---|---|
+| 决策时间 | 每次日内决策必须显式传入 `decision_time` |
+| 可见分钟 | 只允许读取 `trade_time <= decision_time` 的分钟条 |
+| 日频数据 | 当日盘后才发布的数据不得在盘中使用 |
+| 做 T | 必须区分昨日可卖库存和当日买入不可卖库存 |
+| 融券做空 | 没有券商券源、费率和担保品数据时，只能作为理论收益参考 |
 
-- raw 层不改写：报表仍按 `period`，预告/快报按 `ann_month`，分红/审计意见/主营业务构成按 `ts_code` 快照。
-- 输出层统一带 `dataset`、`ts_code`、`available_at`、`available_at_rule`、`available_month`、`business_key`、`source_path`、`source_hash`。
-- 三大报表优先用 `f_ann_date`，否则用 `ann_date`；财务指标用 `ann_date`。
-- 业绩预告和业绩快报优先用 `first_ann_date`，否则用 `ann_date`。
-- 分红优先用 `imp_ann_date`，否则用 `ann_date`；如果二者均缺失，该行不进入 PIT 事件层，`ex_date/record_date/pay_date` 只作为已可见分红事件的未来属性。
-- 审计意见和主营业务构成缺少公告日时，可用同股票同报告期报表的最晚可见时间兜底。
-- 同一业务键多版本记录保留在事件层，具体 feature 或 evidence 选择时再按 `available_at <= decision_time` 取最新可见版本。
-- 写入 `available_month` 分区时，完整月份窗口使用 replace 语义以清理源端删除或改期后的旧事件；非完整月份窗口使用 merge 语义，避免短窗口构造误删同月其他事件。
+## 4. 回放、撮合与评估
 
-审计入口：
+### 4.1 训练和测试窗口
 
-```bash
-PYTHONPATH=src ~/miniconda3/bin/conda run -n stock python scripts/hl.py audit-fundamental-events \
-  --events-root data/features/fundamental_events \
-  --start-date 20200101 \
-  --end-date 20260531
-```
+环境层提供训练/测试窗口切分。
 
-审计检查分区存在、必需字段、`available_at` 可解析性、`available_month` 与文件分区一致性、审计窗口内外行、行内 `dataset` 与路径一致性、`available_at_rule` allowlist、`source_path/source_hash/source_row_id` 来源可追溯性、重复 `dataset/business_key/available_at`。人工审计下空分区是 warning；cron 在接入 `daily_alpha` 前会额外传 `--require-partitions`，目标窗口没有任何 PIT 事件行时直接 error 并停止后续 feature build。该审计针对 PIT-ready 事件层，不替代 raw 层 `base_research_status.json`。
-
-### 5.3 竞价分钟条校正
-
-实现：
-
-```text
-src/hl_trader/environment/features/auction.py
-```
-
-历史分钟线 raw 文件不改写。若历史回放需要用 `stk_mins_1min_by_date` 的 `09:30` 分钟条近似实盘 `stk_auction`，先调用 `apply_open_auction_correction`，生成 `vol_pit`、`amount_pit`、`auction_market_bucket` 和校正规则字段，再用这些 PIT 列构造开盘竞价换手、量比、竞价额等特征。
-
-当前规则：
-
-- 只作用于 `09:30` 分钟条。
-- `00*.SZ` 使用 `0.76`，`30*.SZ` 使用 `0.58`。
-- 沪市、北交所、其他代码和 `15:00` 收盘竞价保持 `1.0`。
-- raw `vol/amount` 保持 TuShare 原值；修正值仅用于需要与实盘 `stk_auction` 对齐的历史特征。
-- 当前交叉检验发现：深圳 `00*.SZ` 的 09:30 分钟条相对 `stk_auction` 中位约 `1.32`，深圳 `30*.SZ` 中位约 `1.72`，修正后中位回到约 `1.0`；沪市和北交所约 `1.0`，无需修正。
-- 全天分钟线汇总与 `daily` 的单位换算正常：`sum(stk_mins.vol) / daily.vol` 约 `100`，`sum(stk_mins.amount) / daily.amount` 约 `1000`，分别对应“股 vs 手”和“元 vs 千元”。
-- 系数需要通过 `scripts/tushare/audit.py auction-alignment` 定期复核；若后续接入逐笔或盘口数据，应重新标定或放弃固定系数。
-
-## 6. 泄漏检查
-
-### 6.1 日频泄漏规则
-
-实现：
-
-```text
-src/hl_trader/environment/leakage/checks.py
-```
-
-通用检查：
-
-- 必需字段：`feature_date`、`tradable_date`、`available_at`、`ts_code`。
-- `(feature_date, ts_code)` 必须唯一。
-- `tradable_date` 必须严格晚于 `feature_date`。
-- `available_at` 必须不早于 `feature_date 15:00 Asia/Shanghai`。
-- `available_at` 必须早于 `tradable_date 09:25 Asia/Shanghai`。
-- 如果存在 `source_trade_date`，必须满足 `source_trade_date <= feature_date`。
-
-这些规则只证明当前日频下一交易日决策无泄漏；日内策略必须用分钟级 `available_at <= decision_time` 重新定义。
-
-## 7. 跨域 PIT Selector
-
-后续将财务、事件、宏观、文本和分钟数据接入 observation 时，统一放在 Environment selector，而不是在 Agent 或 Pipeline 中 raw join。
-
-### 7.1 Selector 规则
-
-Selector 规则：
-
-- 输入只能来自 `data/raw` 的保留边界和 `docs/data_documentation.md` 定义的 raw PIT 数据合同。
-- 输出必须带 `feature_date` 或 `decision_time`、`available_at`、`source_*` 时间字段、单位信息和源数据 hash。
-- 同一业务键多版本数据必须先过滤 `available_at <= decision_time`，再选择最新可见版本。
-- 事件生效日只能作为未来属性暴露，不能作为该事件的可见时间。
-- 文本进入 Agent 前必须先通过 Environment 的时间过滤，再由 Agent evidence pack 生成 `evidence_id` 和 prompt payload。
-- 每个 selector 都必须有泄漏测试或审计 case study，证明未来日期不会提前进入 observation。
-
-### 7.2 当前扩展边界
-
-当前扩展边界：
-
-- 财务 selector：使用 `fundamental_events` 的 `available_at`，按 `ts_code + business_key` 或具体特征业务键选择最新可见版本。
-- 事件 selector：分红、解禁、回购、股东事件用公告日期控制可见性，事件生效日只作为未来事件字段。
-- 资金 selector：资金流、两融和大宗交易使用审计中的盘后或下一日可见规则。
-- 宏观 selector：先使用 raw 保守可见时间，后续优先用 `cn_schedule.publish_date` 或更精确发布时间修正。
-- 分钟 selector：使用分钟 bar close 时间，日内策略必须以 `available_at <= decision_time` 过滤。
-- 文本 selector：只输出时间过滤后的候选 evidence 元数据，正文截断、hash 复核和 prompt 合同属于 Agent。
-
-## 8. WFO Fold
-
-### 8.1 Fold 生成规则
-
-实现：
+实现位置：
 
 ```text
 src/hl_trader/environment/wfo/splitter.py
 ```
 
-`generate_rolling_folds` 只负责生成 fold，不拟合、不调仓、不评估。
-
 规则：
 
-- 从 `protocol.start_date` 开始。
-- 训练窗口长度为 `track.train_length_months`。
-- 测试窗口长度为 `track.test_length_months`。
-- 每次向前移动 `track.step_months`。
-- `development_folds` 会在 `heldout_start` 前截断。
+- 训练长度、测试长度和步长由实验配置决定。
+- 每个窗口向前滚动。
+- `heldout_start` 之后的数据只能由 held-out 流程使用。
+- 测试和 held-out 只能执行冻结后的实例，不能调参或修改规则。
 
-### 8.2 Pilot 配置示例
+### 4.2 撮合和交易约束
 
-以当前 pilot 配置为例：
-
-- 训练 36 个月。
-- 测试 6 个月。
-- 每 3 个月滚动一次。
-- `heldout_start=2025-01-01`，所以 2025 年以后只允许由 held-out pipeline 评估。
-
-## 9. 执行环境
-
-### 9.1 Broker 对象
-
-实现：
+撮合和持仓实现位置：
 
 ```text
-src/hl_trader/environment/execution/broker.py
+src/hl_trader/environment/execution/
+src/hl_trader/environment/backtest/
 ```
 
 核心对象：
 
-- `Order`：交易日期、代码、方向、股数、reason。
-- `Fill`：成交记录。
-- `Position`：持仓股数和可用股数。
+- `Order`：订单。
+- `Fill`：成交。
+- `PositionLot`：持仓批次。
 - `PortfolioState`：现金和持仓。
 - `BrokerSimulator`：撮合和约束检查。
 
-### 9.2 交易约束
+交易规则：
 
-交易约束：
-
-- 当前只支持 long-only 股票订单。
-- A 股 lot 为 100 股。
-- T+1 下，买入当日不可卖出；每日开始前调用 `settle_t_plus_1`。
+- A 股最小交易单位为 100 股。
+- T+1 下，买入当日不可卖出。
 - 停牌股票不成交。
-- 买入达到涨停约束时阻断。
-- 卖出达到跌停约束时阻断。
-- 买入需要现金覆盖名义金额和买入成本。
+- 涨停价不能买入，跌停价不能卖出。
+- 买入需要现金覆盖名义金额和成本。
 - 卖出不能超过可用股数。
 - 成本模型包含佣金、印花税和滑点，单位为 bps。
+- 做多和理论做空收益分别统计。
+- 融券做空缺少券商侧数据时，只能作为理论 short sleeve。
 
-## 10. 回放环境
+### 4.3 事件检查
 
-### 10.1 Replay 骨架
+事件检查只负责发现事件，不直接改变订单。
 
-实现：
-
-```text
-src/hl_trader/environment/backtest/daily_replay.py
-```
-
-`DailyReplayEngine` 是日频 replay 骨架，负责：
-
-- 按日期顺序执行决策函数生成的订单。
-- 调用 BrokerSimulator 撮合。
-- 记录成交、现金、持仓和权益事件。
-- 要求 replay 日期单调递增。
-
-### 10.2 当前使用边界
-
-当前完整 development/held-out 流程不直接使用该骨架，而是在 `pipelines/formulaic_wfo.py` 中围绕 PIT 横截面实现了更具体的日频回放。
-
-## 11. 事件检查
-
-### 11.1 Checkpoint 定义
-
-实现：
+实现位置：
 
 ```text
 src/hl_trader/environment/events/checkpoints.py
 ```
 
-当前 deterministic checkpoint：
+当前事件：
 
-- `large_price_move`：`abs(pct_chg) >= 9.5`，`pct_chg` 使用 TuShare 百分比口径。
-- `large_amount_spike`：`amount / amount_ma20 >= 3.0`，金额沿用日线千元口径。
-- `price_limit_status`：来自 `limit_status` 或 `limit`。
+- `large_price_move`：大幅涨跌。
+- `large_amount_spike`：成交额显著放大。
+- `price_limit_status`：涨跌停状态。
 
-### 11.2 交易转换边界
+是否把事件转成 `event_de_risk` 或 `exit`，由 Pipeline 在冻结交易策略下决定。LLM shadow 不能直接触发交易。
 
-Environment 只检测 checkpoint。是否把 checkpoint 转为 `event_de_risk` 或 `exit`，由 Pipeline 在冻结 `TradeStrategyPolicy` 下执行；LLM shadow 不得触发交易。
+### 4.4 评估与账本
 
-## 12. Portfolio 和 Evaluation
+评估工具：
 
-### 12.1 Portfolio 工具
+- 年化收益。
+- 最大回撤。
+- Sharpe。
+- 基准收益。
+- 超额收益。
+- 风险暴露。
+- 收益归因。
+- 做多/理论做空收益拆分。
 
-Portfolio 工具：
+这些工具不负责选择股票或实验目标。基准、行业分类、风险模型和归因口径必须进入冻结合同，测试期不能临时改变。
 
-- `equal_weight_targets(selected, max_names=...)`
-- `normalize_targets(targets, max_weight=...)`
+账本规则：
 
-### 12.2 Evaluation 工具
+- `TrialLedger` 和 `ExperimentLedger` 使用 JSONL。
+- 每条记录带稳定 `record_hash`。
+- 读取时复核 hash，被手工篡改应失败。
+- 账本记录实验事实，不替代真实 broker 成交状态。
 
-Evaluation 工具：
-
-- `annualized_return`
-- `max_drawdown`
-- `sharpe_ratio`
-- `theoretical_short_return`
-- `long_short_return_breakdown`
-
-`theoretical_short_return` 按入场价、退出价、持有天数、现金担保比例和年化融券费率计算理论做空收益。默认假设是 100% 现金担保、18% 年化融券费率，其中 18% 来自中信证券[融资融券费用公示](https://pb.citics.com/trading/xxgs/fy/)的融券费率参考值。该函数只用于研究侧收益拆分，不表示券商实际可融券源、担保品折算、强平线或集中度规则已经可执行；中信证券[维持担保比例要求](https://pb.citics.com/trading/xxgs/wcdbbl/)的普通平仓线/安全线/提取线可作为未来风控参数参考，但当前没有接入执行模型。
-
-这些都是原语，不负责决定候选股票或实验目标。
-
-## 13. Protocol 和 Ledger
-
-### 13.1 FreezeSpec
-
-`FreezeSpec` 覆盖：
+冻结合同（`FreezeSpec`）至少记录：
 
 - `experiment_id`
 - `track_id`
 - `template_id`
+- `template_execution_spec_hash`
 - `protocol_id`
 - `trade_policy_id`
-- track/template/protocol/trade_policy 内容 hash
-- `horizon_months`
-- `model_id`
-- `prompt_id`
-- `data_contract_id`
+- 模板、协议、交易策略内容 hash
+- 模型、prompt、数据合同和代码 hash
 
-`assert_result_available` 用于确认训练窗口内的 `result_available_time` 不晚于训练结束。
+## 5. 数据网关、快照与沙箱
 
-### 13.2 Ledger
+### 5.1 数据网关
 
-`TrialLedger`：
+数据网关（Data Gateway）是时间和权限边界，不是普通文件路径暴露。
 
-- JSONL append-only。
-- 每条记录写入 `record_hash`。
-- 读取时复核 hash，被手工篡改应失败。
+输入必须包含：
 
-`ExperimentLedger`：
+- `decision_time`
+- `tradable_date`
+- `fold_id`
+- `phase`
+- `template_id` 或 `instance_id`
+- 数据版本和状态文件 ID
 
-- 在每条实验事件上注入 freeze context。
-- 保留 phase、fold_id、parameters、metrics、payload。
-- 不替代真实 broker 成交状态。
+允许输出：
 
-## 14. 待实现环境边界
+| 输出 | 用途 |
+|---|---|
+| `market_state` | 指数、流动性、波动和涨跌停结构 |
+| `history_window` | 决策前可见的数据窗口 |
+| `decision_observation` | 本次决策输入 |
+| `text_candidates` | 已按时间过滤的文本候选 |
+| `event_checkpoints` | 事件检查结果 |
+| `position_state` | 持仓、现金、可用库存和成本 |
+| `constraints` | 停牌、涨跌停、T+1、换手和融资融券资格 |
 
-- `universe` 配置尚未系统性接入股票池 selector。
-- 财务 raw 已下载并审计，`fundamental_events` 已可构造并可选进入 `daily_alpha`。
-- 宏观、全球、文本和分钟数据尚未进入默认公式化特征。
-- 日内交易 track 需要单独使用分钟级 `available_at <= decision_time` 的 PIT 过滤规则。
-- Benchmark、行业中性、风险暴露和超额收益归因需要补充环境/评估原语。
+禁止输出：
+
+```text
+data/raw 全量路径
+held-out 结果
+test fold 结果给 train phase
+未通过 available_at 过滤的文本
+任意 SQL shell
+任意 Python 对主机文件系统的访问
+```
+
+### 5.2 只读快照
+
+只读快照（as-of snapshot）是给沙箱的物理输入边界。
+
+推荐结构：
+
+```text
+data/asof_snapshots/<snapshot_id>/
+  manifest.json
+  history_window/
+    daily.parquet
+    intraday_1min.parquet
+    fundamentals.parquet
+    events.parquet
+    macro.parquet
+    text_evidence.jsonl
+  market_state.parquet
+  positions.parquet
+  constraints.parquet
+  artifacts/
+```
+
+`manifest.json` 必须记录：
+
+- `snapshot_id`
+- `decision_time` 和 `tradable_date`
+- `fold_id` 和 `phase`
+- 允许的数据项。
+- 来源 hash。
+- 可见时间规则。
+- 代码提交。
+- 数据质量状态 ID。
+
+构造规则：
+
+- 快照不仅按日期过滤，还必须按 `available_at <= decision_time` 过滤。
+- TuShare 可能回写历史数据，所以快照必须记录来源 hash 和 revision ledger 状态。
+- 沙箱只能以 read-only 方式挂载快照。
+
+### 5.3 沙箱权限
+
+沙箱用于隔离 Agent 生成的分析代码、LLM 推理和实验产物。
+
+| 能力 | Train | Test | Held-out |
+|---|---|---|---|
+| 读取 train snapshot | 是 | 否 | 否 |
+| 读取 test snapshot | 否 | 是 | 否 |
+| 读取 held-out snapshot | 否 | 否 | 是 |
+| 生成候选实例和参数 | 是 | 否 | 否 |
+| 参数搜索 | 是 | 否 | 否 |
+| LLM memo | 是 | 是，使用冻结 prompt/model/settings | 是，使用冻结 prompt/model/settings |
+| 回放 | 是，用于训练评分 | 是，用于测试结果 | 是，用于冻结验证 |
+| 真实订单 | 否 | 否 | 否 |
+| 写 artifacts | 是 | 是 | 是 |
+
+沙箱规则：
+
+- 只读挂载快照。
+- 只写本次 artifact 目录。
+- 默认无网络。
+- 如需 LLM，只能访问本地 API 代理。
+- API key 不进入沙箱。
+- 不能改主仓库。
+- 主环境读取 artifact 前必须校验 exit code、hash、manifest 和禁止路径扫描。
+
+### 5.4 LLM API 代理
+
+沙箱内可以实例化 API 驱动的 LLM Agent，但只能通过受控代理调用 provider。
+
+代理负责：
+
+- 在宿主侧保存 API key。
+- 限定 provider、model 和 endpoint。
+- 记录 request、response、usage、错误和 hash。
+- 控制 token 和调用预算。
+- 按 prompt/evidence/schema hash 做可选缓存。
+- 脱敏 Authorization、header 和 key。
+- 不提供互联网搜索。
+
+## 6. 验收清单
+
+每完成一个环境边界，至少检查：
+
+- 文档：本文件与 Agent/Pipeline/Data 文档边界一致。
+- 单元测试：覆盖时间墙、选择器输出、缺失值、重复键、单位和沙箱权限拒绝。
+- Case study：至少 3 个股票/日期样例，验证股票池、历史窗口、选择器和决策输入。
+- 可复现性：输出包含数据状态、来源 hash、代码提交、执行合同 hash 和工具调用 hash。
+- 泄漏审计：未来财报、未来新闻、未来分钟条、未来 benchmark 成分不可见。
+- 运行审计：Trial Ledger、conversation log、sandbox artifact 和 evaluation report 能互相追溯。
