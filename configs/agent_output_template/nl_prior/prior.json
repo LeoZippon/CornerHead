@@ -1,0 +1,23 @@
+{
+  "artifact_type": "nl_prior",
+  "rules": [],
+  "rule_schema": {
+    "required_fields": [
+      "prior_id",
+      "status",
+      "scope",
+      "text",
+      "evidence_required",
+      "effect",
+      "created_fold",
+      "last_modified_fold",
+      "tags"
+    ],
+    "status_values": ["active", "disabled", "draft"],
+    "notes": [
+      "规则必须可以跨 Fold 迁移。",
+      "规则不得写入未来结果、held-out 结果或具体股票结论。",
+      "规则只能使用 decision_time 前可见的证据。"
+    ]
+  }
+}

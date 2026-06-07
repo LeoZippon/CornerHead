@@ -1,0 +1,26 @@
+{
+  "artifact_type": "factor_registry",
+  "factors": [],
+  "factor_schema": {
+    "required_fields": [
+      "factor_id",
+      "status",
+      "function",
+      "description",
+      "inputs",
+      "lookback_days",
+      "output_column",
+      "direction",
+      "created_fold",
+      "last_modified_fold",
+      "tags"
+    ],
+    "status_values": ["active", "disabled", "draft"],
+    "direction_values": ["positive", "negative", "neutral", "nonlinear"],
+    "notes": [
+      "factor_id 必须稳定、唯一，并使用小写字母、数字和下划线。",
+      "active 因子必须能从 main.py 中找到对应 function。",
+      "新增、删除和修改的 factor_id 只能从该登记表中统计。"
+    ]
+  }
+}
