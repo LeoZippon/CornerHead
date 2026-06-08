@@ -7358,3 +7358,19 @@ Changes:
 
 Validation:
 - Log reference search, `git diff --check`, and resource checks were run after the edit; see final assistant response.
+
+## 2026-06-08 Rolling validation/test boundary clarification
+
+Task: clarify that the previous Fold's test calendar quarter can become the next Fold's validation interval.
+
+Decision:
+- The same calendar period may be re-used as validation in a later Fold.
+- The later Fold must re-run `backtest_tool` and generate current validation results.
+- Previous Fold test artifacts, test ledgers, review text, tool/LLM calls, and messages remain forbidden prompt or strategy-artifact inputs.
+
+Changes:
+- Updated `docs/agent_design.md` time-wall and forbidden-behavior sections.
+- Aligned Agent wording with the existing Pipeline rolling-window note.
+
+Validation:
+- Boundary wording search, `git diff --check`, and resource checks were run after the edit; see final assistant response.
