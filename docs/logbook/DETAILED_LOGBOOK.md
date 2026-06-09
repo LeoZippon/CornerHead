@@ -6498,7 +6498,7 @@ Design changes:
 - Rewrote `docs/agent_design.md`.
   - Each Fold starts a new Agent conversation.
   - Fold-to-Fold sharing is limited to strategy artifacts: factor code and global experience.
-  - Previous Fold messages, tool logs, text subtask logs, test results, and long reviews cannot enter the next Fold prompt or strategy artifact.
+  - Previous Fold messages, tool logs, text subtask logs and `results/test_*` outputs cannot enter the next Fold prompt or strategy artifact.
   - Agent can write Python factor code inside Sandbox and call controlled tools.
   - Modification budgets are machine-auditable with fields such as `max_modified_functions_per_fold`, `max_diff_lines_per_fold`, and `max_experience_changes_per_fold`.
   - Epoch regularization can only delete, merge, and abstract rules; it cannot read Fold test results or held-out.
@@ -6605,7 +6605,7 @@ Example:
   - Test: 2021Q2.
 
 Boundary:
-- The same natural quarter may later become a validation replay window in a future Fold, but prior test ledgers, summaries, and reviews from that quarter must not be passed into Agent prompts or strategy artifacts.
+- The same natural quarter may later become a validation replay window in a future Fold, but prior `results/test_*` directories, logs and Agent messages from that quarter must not be passed into Agent prompts or strategy artifacts.
 - The 9-month rule is a maximum visible window. Agent code may use shorter slices inside the prepared data.
 
 Changes:
@@ -7280,11 +7280,11 @@ Decision:
 - Do not place mutable runtime artifact directories at the repository root.
 
 Changes:
-- Added `configs/agent_output_template/factor/main.py` with a schema-valid `generate_orders(context)` entrypoint and output validation helper.
-- Added `configs/agent_output_template/factor/factors.json` as the empty initial factor registry.
-- Added `configs/agent_output_template/nl_prior/prior.md` with human-readable natural-language prior rules and constraints.
-- Added `configs/agent_output_template/nl_prior/prior.json` with the initial structured prior state and required fields.
-- Updated Agent, Environment, and Pipeline docs to name `main.py`, `factors.json`, `prior.md`, and `prior.json` as the formal files initialized in `agent_output/`.
+- Current seed set is `factor/README.md`, `factor/main.py`, `factor/factors.json`, `nl_prior/README.md`, and `nl_prior/prior.json`.
+- `factor/main.py` provides a schema-valid `generate_orders(context)` entrypoint and output validation helper.
+- `factor/factors.json` is the empty initial factor registry.
+- `nl_prior/prior.json` is the only formal natural-language investment prior state.
+- Agent, Environment, and Pipeline docs name `main.py`, `factors.json`, and `prior.json` as formal mutable files initialized in `agent_output/`; `README.md` files are read-only instructions.
 
 Validation:
 - Python compile, JSON parsing, documentation reference scan, `git diff --check`, and resource checks were run after the edit; see final assistant response.
@@ -7366,11 +7366,1353 @@ Task: clarify that the previous Fold's test calendar quarter can become the next
 Decision:
 - The same calendar period may be re-used as validation in a later Fold.
 - The later Fold must re-run `backtest_tool` and generate current validation results.
-- Previous Fold test artifacts, test ledgers, review text, tool/LLM calls, and messages remain forbidden prompt or strategy-artifact inputs.
+- Previous Fold `results/test_*` directories, `logs/` records and messages remain saved experiment records, but are not copied into the next Sandbox, prompt or strategy artifact.
 
 Changes:
-- Updated `docs/agent_design.md` time-wall and forbidden-behavior sections.
-- Aligned Agent wording with the existing Pipeline rolling-window note.
+- Updated `docs/agent_design.md` time-wall, strategy-artifact handoff and forbidden-behavior sections with direct file-level wording.
+- Updated `docs/pipeline_design.md` rolling handoff wording to use `results/test_*`, `logs/`, `results/valid_*` and Agent-message boundaries.
+- Clarified that a fresh replay may produce the same numbers when strategy, data, config and seed are identical; the rule is about data flow isolation, not changing the result.
 
 Validation:
 - Boundary wording search, `git diff --check`, and resource checks were run after the edit; see final assistant response.
+
+## 2026-06-08 Strategy artifact ownership cleanup
+
+Task: keep Agent docs focused on Agent-visible behavior and move host persistence details to Pipeline docs.
+
+Decision:
+- Agent docs should describe only the Sandbox-visible `agent_output/factor/` and `agent_output/nl_prior/` contract.
+- Host paths, `strategy_artifact_id`, manifest fields, frozen state and cross-Fold copy rules are Pipeline responsibilities.
+
+Changes:
+- Removed the `experiments/<experiment_id>/strategy_artifacts/...` tree and manifest JSON example from `docs/agent_design.md`.
+- Added `docs/pipeline_design.md` section 7.3 as the strategy-artifact manifest contract.
+- Kept the data-flow rule that only frozen `factor/` and `nl_prior/` copy into the next Sandbox; prior `results/test_*`, `logs/` and messages do not.
+
+Validation:
+- Ownership wording search, `git diff --check`, and resource checks were run after the edit; see final assistant response.
+
+## 2026-06-08 Agent output README split
+
+Task: separate read-only instructions from Agent-editable strategy outputs.
+
+Decision:
+- `prior.json` is the only formal natural-language investment logic artifact.
+- Human-readable explanations should be generated from `prior.json` when needed, not maintained as a second strategy artifact.
+- `factor/README.md` and `nl_prior/README.md` are read-only instruction files in the Sandbox.
+
+Changes:
+- Added `configs/agent_output_template/factor/README.md`.
+- Added `configs/agent_output_template/nl_prior/README.md`.
+- Removed `configs/agent_output_template/nl_prior/prior.md` from the current strategy-artifact contract.
+- Updated Agent, Environment and Pipeline docs so the Step order is: explore/debug in `workspace/`, prepare final draft, write `factor/` and `nl_prior/`, run modification check, then run `backtest_tool`.
+
+Validation:
+- Template JSON parsing, README/prior wording search, `git diff --check`, and resource checks were run after the edit; see final assistant response.
+
+## 2026-06-08 Agent output JSON simplification
+
+Task: make Agent-editable JSON files easier to modify and avoid mixing schema descriptions into formal strategy artifacts.
+
+Decision:
+- `factors.json` and `prior.json` should contain formal artifact data only.
+- Field descriptions, allowed values and filled examples belong in read-only README files.
+- Each JSON template keeps one blank row with all required keys so Agent can fill or copy it.
+
+Changes:
+- Removed embedded `factor_schema` from `configs/agent_output_template/factor/factors.json`.
+- Removed embedded `rule_schema` from `configs/agent_output_template/nl_prior/prior.json`.
+- Added field tables and filled examples to `factor/README.md` and `nl_prior/README.md`.
+- Updated Agent and Environment docs to explain blank template rows: fully blank rows are treated as empty; partially filled incomplete rows must fail formal backtest.
+
+Validation:
+- JSON parsing, template reference search, `git diff --check`, and resource checks were run after the edit; see final assistant response.
+
+## 2026-06-08 Baseline NL scoring prompt
+
+Task: provide a runnable baseline for `backtest_tool` natural-language scoring.
+
+Decision:
+- Keep the default natural-language analysis prompt and scoring table in read-only `nl_prior/README.md`.
+- `backtest_tool` should concatenate the fixed prompt contract, active `prior.json` rules, candidate data and as-of evidence.
+- LLM output must be strict JSON and parsed as JSON; string search is not acceptable for score extraction.
+- The baseline final score is `0.7 * factor_score_norm + 0.3 * nl_score`.
+
+Changes:
+- Added prompt templates, keyword-search workflow, local retrieval input/output examples, scoring table, strict JSON output schema and baseline score fusion rule to `configs/agent_output_template/nl_prior/README.md`.
+- Updated Agent docs so natural-language analysis runs inside `backtest_tool`: generate `search_requests`, run local as-of text retrieval, optionally run one supplement retrieval round, then emit `nl_score`, `confidence`, `risk_tags`, `applied_prior_ids` and `evidence_ids` through JSON parsing.
+- Updated Environment docs so `backtest_tool` performs keyword JSON parsing, local retrieval, final score JSON parsing, score-component recording and malformed-output failure handling unless run config explicitly defines another audited handling rule.
+- Updated Pipeline docs so `nl_output/search_requests.jsonl`, `nl_output/evidence.jsonl` and `nl_output/scores.jsonl` are the structured natural-language output sources.
+
+Validation:
+- JSON parsing, prompt/scoring reference search, `git diff --check`, and resource checks were run after the edit; see final assistant response.
+
+## 2026-06-08 PIT company context for natural-language scoring
+
+Task: ensure LLM natural-language analysis knows what each candidate company does without leaking current or future company descriptions.
+
+Decision:
+- `backtest_tool` should build a PIT-safe `company_context` for each candidate before keyword generation.
+- Historical WFO must not directly inject `stock_company.introduction` because it is a current company-introduction field without a reliable historical visible timestamp.
+- `company_context` should prefer historical names, stock basics, industry membership, `fina_mainbz_vip` business segments and as-of text evidence. Missing context should lower confidence and broaden retrieval rather than letting the LLM guess.
+
+Changes:
+- Added `company_context` construction and prompt injection to `configs/agent_output_template/nl_prior/README.md`.
+- Updated Agent docs so formal natural-language scoring includes company identity and business context before search.
+- Updated Environment docs so `backtest_tool` writes `nl_output/company_context.jsonl` and uses it in keyword generation and final scoring.
+- Updated Pipeline docs so `nl_output/company_context.jsonl` is part of each formal `backtest_tool` result.
+- Updated Data docs to mark `stock_company.introduction` as a historical Prompt leakage risk unless an explicit visible time is assigned.
+
+Validation:
+- Ran JSON parsing for the editable templates, `company_context` reference search, `git diff --check`, and resource checks after the edit.
+
+## 2026-06-08 Agent Step/test boundary
+
+Task: remove ambiguity in Agent section 3.2 about whether Step output means running test mode.
+
+Decision:
+- A Step only runs `backtest_tool` validation mode and reads `results/valid_<idx>/`.
+- Agent can summarize the Step and recommend acceptance, but cannot submit or run Fold test results.
+- If Pipeline accepts a Step as the Fold strategy artifact, Pipeline freezes `agent_output/factor/` and `agent_output/nl_prior/`, then Runner/root calls `backtest_tool` test mode against the root-only test snapshot and ends the Fold.
+
+Changes:
+- Updated `docs/agent_design.md` section 3.2 to replace “提交 Step 输出” with a Step summary and explicit no-test-mode boundary.
+- Updated `docs/pipeline_design.md` Step execution wording to say Agent calls validation mode.
+
+Validation:
+- Ran wording search for validation/test-mode boundaries, `git diff --check`, and resource checks after the edit.
+
+## 2026-06-08 Step finish tool
+
+Task: clarify how Agent actively ends a Step.
+
+Decision:
+- Agent ends a Step by calling no-argument `finish_step_tool`.
+- The Tool writes `results/step_finish.json`, stops the current Step and locks writes.
+- Pipeline then checks modification constraints, validation result consistency and whether to accept, reject, continue, or freeze.
+- `backtest_tool` test mode remains Runner/root-only after Fold strategy freeze.
+
+Changes:
+- Updated `docs/agent_design.md` section 3.2 and 7.1 with no-argument `finish_step_tool` behavior and output fields.
+- Updated `docs/pipeline_design.md` section 3.2 with Runner/Pipeline handling after `finish_step_tool`.
+- Updated `docs/environment_design.md` Tool table to add `finish_step_tool`, state Agent can request only validation-mode backtests, and require test-mode requests to be rejected.
+
+Validation:
+- Ran wording search for `finish_step_tool` and test-mode boundaries, `git diff --check`, and resource checks after the edit.
+
+## 2026-06-08 Strategy artifact and Environment readability simplification
+
+Task: reduce schema clutter and make Environment/Agent artifact contracts easier to read.
+
+Decision:
+- `finish_step_tool` takes no Agent input; it is a direct Step-ending control interface.
+- `factors.json` should only register active strategy factors, not workflow metadata.
+- `prior.json` should only register reusable natural-language rules, not Fold history or reports.
+- Environment docs should describe Tool purpose and outputs once, then delegate examples to the README templates.
+
+Changes:
+- Changed `configs/agent_output_template/factor/factors.json` to `{"factors": []}`.
+- Changed `configs/agent_output_template/nl_prior/prior.json` to `{"rules": []}`.
+- Rewrote `factor/README.md` with minimal factor fields: `id`, `enabled`, `function`, `description`, `lookback_days`, `direction`.
+- Rewrote `nl_prior/README.md` into five readable parts: Agent writes rules, `backtest_tool` uses rules, company context, Prompt template, default score fusion.
+- Updated Agent, Environment and Pipeline docs for the simplified JSON fields and no-argument `finish_step_tool`.
+- Compressed Environment `modification_check_tool` output from a long JSON example into a short result table.
+
+Validation:
+- Ran JSON parsing, old-field wording search, `git diff --check`, and resource checks after the edit.
+
+## 2026-06-08 Factor/NL score boundary
+
+Task: clarify whether `factor/main.py` returns final orders or just candidate stocks and factor scores.
+
+Decision:
+- `agent_output/factor/main.py::generate_orders(context)` should return the candidate pool and factor-only score.
+- `backtest_tool` owns natural-language scoring, score fusion, target-weight generation, order-plan validation and replay.
+- `target_weight` and `action` may appear as optional hints, but they are not the formal final order plan.
+
+Changes:
+- Updated `configs/agent_output_template/factor/main.py` required columns to `ts_code`, `factor_score`, `reason`, and `source_artifacts`.
+- Updated `configs/agent_output_template/factor/README.md` with the candidate-pool output contract.
+- Updated `configs/agent_output_template/nl_prior/README.md`, Agent docs and Environment docs so the default fusion uses the factor-output score.
+- Updated Environment docs so final `target_weight` and `final_score` are generated by `backtest_tool`, not by Agent factor code.
+
+Validation:
+- Ran Python compile, JSON parsing, wording search, `git diff --check`, resource checks, and removed the generated `__pycache__` after the edit.
+
+## 2026-06-08 Environment/Agent/Pipeline boundary cleanup
+
+Task: reduce duplicated and misplaced logic across Environment, Agent and Pipeline docs after the backtest-owned natural-language scoring redesign.
+
+SubAgent audit:
+- Opened read-only SubAgent `Mencius`.
+- It found that `docs/agent_design.md` described too much `backtest_tool` internals and Pipeline gating, while `docs/environment_design.md` chapter 4 mixed Tool summary, modification checks, Python execution, natural-language scoring and order validation.
+- It recommended keeping Agent focused on visible inputs, writable outputs and Step behavior; Environment focused on Sandbox, Tool contracts, backtest/Broker/LLM internals; Pipeline focused on Step/Fold/Epoch orchestration, freezing and ledger records.
+
+Changes:
+- Rewrote `docs/environment_design.md` chapter 4 into four contracts: Agent-visible Tool list, `modification_check_tool`, `generate_orders(context)` and `backtest_tool`.
+- Moved natural-language scoring internals into `docs/environment_design.md` chapter 6, including `company_context`, search request flow, JSON score parsing, LLM Proxy and conversation log boundaries.
+- Compressed `docs/agent_design.md` chapters 4-5 so Agent only maintains `prior.json`, reads validation `nl_output/`, calls `modification_check_tool`, and keeps formal strategy changes within the allowed boundary.
+- Shortened `docs/pipeline_design.md` Step text so Pipeline schedules Environment checks and backtests instead of re-explaining diff and natural-language parsing implementation.
+- Synchronized template wording in `configs/agent_output_template/factor/README.md` from natural-language analysis to natural-language scoring.
+
+Validation:
+- Ran wording searches for removed Agent internals and stale Tool names.
+- Ran Python compile for `configs/agent_output_template/factor/main.py`.
+- Parsed `configs/agent_output_template/factor/factors.json` and `configs/agent_output_template/nl_prior/prior.json`.
+- Ran `git diff --check`.
+- Removed generated `configs/agent_output_template/factor/__pycache__`.
+
+## 2026-06-08 Environment Tool chapter layout correction
+
+Task: correct the Environment chapter layout so chapter 4 remains a Tool chapter rather than a mix of Tool and standalone strategy-contract sections.
+
+Decision:
+- `generate_orders(context)` is not a separate top-level Environment chapter concept; it is the input sub-contract used by `backtest_tool`.
+- Natural-language scoring is also a `backtest_tool` internal flow, so its detailed steps belong in chapter 4 under `backtest_tool`.
+- Chapter 6 should only describe LLM API access and conversation-log boundaries.
+
+Changes:
+- Changed `docs/environment_design.md` chapter 4 to list Tool contracts and put strategy main-function details under `backtest_tool`.
+- Moved company context, search request generation, evidence retrieval, JSON score parsing and `nl_output/` files into the `backtest_tool` section.
+- Renamed chapter 6 from text/LLM coverage to LLM API and log boundaries, leaving provider access and conversation-log rules there.
+
+Validation:
+- Checked Environment headings and stale-section searches after the edit.
+
+## 2026-06-08 Backtest Tool preflight simplification
+
+Task: simplify the `backtest_tool` and strategy-function contract for the current fixed-horizon validation flow.
+
+Decision:
+- `backtest_tool` consumes an already prepared PIT snapshot and does not construct PIT data or perform raw data filtering.
+- Validation dates, buy date, sell date, costs and sizing belong to Pipeline/run manifest, not to Agent and not to `generate_orders(context)`.
+- `generate_orders()` takes no arguments; it reads fixed Sandbox paths such as `/mnt/snapshot/` and `/mnt/artifacts/agent_output/nl_prior/`.
+- Snapshot metadata remains in `/mnt/snapshot/manifest.json` and is checked by `backtest_tool`.
+- Strategy output only contains the candidate pool and factor score; optional order hint columns are removed from the current contract.
+- Formal `backtest_tool` must be preceded by `modification_check_tool`.
+- `finish_step_tool` must run a lightweight `backtest_tool` contract check without LLM scoring, replay or simulated fills before ending the Step.
+
+Changes:
+- Updated `docs/environment_design.md`, `docs/agent_design.md`, `docs/pipeline_design.md`, and `configs/agent_output_template/factor/README.md`.
+- Updated `configs/agent_output_template/factor/main.py` to a no-argument entrypoint and removed optional order-output columns.
+
+Validation:
+- Ran Python compile, JSON parsing, wording search, `git diff --check`, and removed the generated `__pycache__`.
+
+## 2026-06-08 Valid/test snapshot binding clarification
+
+Task: clarify how `backtest_tool` distinguishes valid and test after `generate_orders()` became a no-argument function.
+
+Decision:
+- `generate_orders()` is phase-agnostic and always reads `/mnt/snapshot`.
+- `backtest_tool` mode is selected by run manifest and Runner execution context, not by strategy function arguments.
+- In validation, `/mnt/snapshot` is the validation snapshot and results under `results/valid_<idx>/` are readable to Agent.
+- In test and held-out, Agent is stopped; Runner/root binds the frozen test or held-out snapshot as the replay process `/mnt/snapshot`, writes `results/test_<idx>/` or `results/heldout_<idx>/`, and does not feed results back to Agent.
+
+Changes:
+- Updated `docs/environment_design.md` section 2.4, 3.1 and 4.3.
+- Updated `docs/pipeline_design.md` section 4.3.
+
+Validation:
+- Follow-up validation should check stale `/mnt/test_snapshot` wording, `generate_orders(context)` wording, Python compile and `git diff --check`.
+
+## 2026-06-08 Backtest mode switching simplification
+
+Task: make the actual valid/test mode switch explicit without introducing a separate named spec object.
+
+Decision:
+- Pipeline gives Runner simple call parameters before each formal `backtest_tool` call: `mode`, `snapshot_path`, and `result_name`.
+- `mode` has only two values: `valid` and `frozen_eval`.
+- `test` and `heldout` share `frozen_eval`; they differ only by snapshot, output directory name and ledger label.
+- Runner binds the chosen snapshot as `/mnt/snapshot` for that run, and `backtest_tool` verifies `/mnt/snapshot/manifest.json` against the Pipeline-recorded snapshot ID/hash.
+- `valid` may run in the Agent-active validation Sandbox; `frozen_eval` runs after Agent stops, usually in a new short-lived replay container with the same path layout.
+
+Changes:
+- Updated `docs/environment_design.md` section 4.3 with the two-mode Runner binding flow.
+- Updated `docs/pipeline_design.md` section 3.2 and 4.3 with simple Runner call parameters and the shared `frozen_eval` path for test/heldout.
+
+Validation:
+- Follow-up validation should run stale wording searches and `git diff --check`.
+
+## 2026-06-08 Single-container snapshot slots and NL toggle
+
+Task: align the design with a single Docker Sandbox that contains train, valid and test snapshot slots, while keeping test data unreadable to the Agent user.
+
+Decision:
+- A Fold Sandbox may mount three read-only snapshot slots: `/mnt/snapshots/train`, `/mnt/snapshots/valid` and `/mnt/snapshots/test`.
+- `/mnt/snapshot` is a Runner-managed current-view alias used by `generate_orders()`.
+- Agent can inspect train/valid data and validation results, but cannot read `/mnt/snapshots/test`.
+- Held-out does not need a separate Sandbox path; Pipeline places the held-out evaluation data in the `test` slot and records a held-out ledger label.
+- Validation can use `nl=off`, `nl=sample` or `nl=on` to control API cost. Test and held-out force factor and natural-language scoring on.
+
+Changes:
+- Updated `docs/environment_design.md` snapshot layout, Sandbox permissions and `backtest_tool` mode/switch wording.
+- Updated `docs/agent_design.md` Sandbox example, Agent operation steps and prohibited test-data access wording.
+- Updated `docs/pipeline_design.md` orchestration wording from per-call `snapshot_path` binding to `snapshot_stage` selection inside mounted snapshot slots.
+- Updated `configs/agent_output_template/factor/README.md` and `main.py` wording to describe `/mnt/snapshot` as the Runner-managed current view.
+
+Validation:
+- Run stale wording search, template compile, JSON parse and `git diff --check` after this edit.
+
+## 2026-06-08 Validation replay visibility correction
+
+Task: decide whether `/mnt/snapshots/valid` should be readable by the Agent user.
+
+Decision:
+- `/mnt/snapshot` is the Agent-visible decision input view and contains only data available before the decision time.
+- `/mnt/snapshots/valid` is validation replay data, not Agent input, so it must be unreadable to the Agent user.
+- `/mnt/snapshots/test` remains unreadable to the Agent user.
+- `backtest_tool` reads valid/test replay data internally after calling the strategy function on `/mnt/snapshot`.
+- Agent can read `results/valid_<idx>/` after validation, but cannot browse the validation replay raw files.
+
+Changes:
+- Updated `docs/environment_design.md` to split decision input from replay data.
+- Updated `docs/agent_design.md` so Agent can read current decision input and train data, but not valid/test replay data.
+- Updated `docs/pipeline_design.md` to use `replay_stage` instead of `snapshot_stage`.
+
+Validation:
+- Run wording search, Python/JSON checks and `git diff --check` after this edit.
+
+## 2026-06-08 Validation replay as readable development set
+
+Task: revise the validation boundary so Agent can inspect validation replay data and make targeted Step changes.
+
+Decision:
+- `/mnt/snapshots/valid` is a read-only development/validation replay directory visible to the Agent user.
+- Agent may inspect validation prices, returns, fills, rejected orders and failure cases to improve the next Step.
+- Formal `generate_orders()` still must use `/mnt/snapshot` as its runtime input and must not read `/mnt/snapshots/valid` or `/mnt/snapshots/test`.
+- `modification_check_tool` and `backtest_tool` should reject obvious direct references to replay directories in formal strategy code.
+- `/mnt/snapshots/test` remains hidden from Agent and is reused for test and held-out replay under Pipeline control.
+
+Changes:
+- Updated `docs/environment_design.md`, `docs/agent_design.md` and `docs/pipeline_design.md`.
+- Left the single-container train/valid/test layout intact.
+
+Validation:
+- Run stale wording search, template compile, JSON parse and `git diff --check` after this edit.
+
+## 2026-06-08 Root-managed snapshot symlink
+
+Task: record how Runner switches the current `/mnt/snapshot` view inside the Sandbox.
+
+Decision:
+- `/mnt/snapshot` may be implemented as a root-owned symlink.
+- Runner/root may switch it with `ln -sfn <decision_input_view> /mnt/snapshot` before formal `backtest_tool` execution.
+- Agent user must not own, delete or overwrite `/mnt/snapshot`.
+- If `valid` or `test` directories contain full replay data, Runner must not point formal `generate_orders()` directly at those replay directories; it should point to the prepared decision-time visible input view.
+
+Changes:
+- Updated `docs/environment_design.md` section 2.4 and Runner execution steps.
+- Updated `docs/pipeline_design.md` Runner call-parameter explanation.
+
+Validation:
+- Run wording search and `git diff --check` after this edit.
+
+## 2026-06-08 Fold data mount example
+
+Task: record how a single Sandbox can mount a full Fold's train/valid/test data while keeping the formal strategy input PIT-safe.
+
+Decision:
+- A Sandbox can mount all data needed for the Fold if the data is split by use: `train`, `valid`, `test`, and separate decision input views.
+- Example split:
+  - `train`: 2020-01 to 2021-09.
+  - `valid`: 2021-10 to 2021-12.
+  - `test`: 2022-01 to 2022-03.
+  - `valid_decision_input`: 2020-01 to 2021-09.
+  - `test_decision_input`: 2020-04 to 2021-12.
+- Runner/root switches `/mnt/snapshot` to the decision input view before validation or test replay.
+- `backtest_tool` reads the corresponding replay directory separately.
+
+Changes:
+- Added the concrete mount/view example to `docs/environment_design.md`.
+- Added the shorter orchestration version to `docs/pipeline_design.md`.
+
+Validation:
+- Run stale wording search and `git diff --check` after this edit.
+
+## 2026-06-08 Constraints generation contract
+
+Task: answer how the Environment 2.2 `constraints.parquet` window is generated.
+
+Decision:
+- `constraints.parquet` is synthesized by Environment and is not an independent downloaded table.
+- Agent-visible `/mnt/snapshot/constraints.parquet` contains only decision-time-visible next-trade constraints.
+- Replay execution constraints under `/mnt/snapshots/valid` and `/mnt/snapshots/test` contain buy/sell/holding-day execution truth and are used by `backtest_tool` and the simulated Broker.
+- Main inputs are `trade_cal`, stock/universe metadata, `suspend_d`, `stk_limit` or previous-close limit-price derivation, daily/minute liquidity data, and simulated Broker account/position state.
+
+Changes:
+- Updated `docs/environment_design.md` section 2.2 with source tables and generation rules.
+- Updated `docs/environment_design.md` section 5.4 to state that Broker checks use replay execution constraints.
+
+Validation:
+- Run `git diff --check` after this edit.
+
+## 2026-06-08 Constraints documentation trim
+
+Task: reduce detail in Environment 2.2 while keeping the generation idea visible.
+
+Decision:
+- Removed the detailed constraints generation subsection from the living Environment doc.
+- Added a `生成方式` column to the main 2.2 visible-window table.
+- `constraints` is now described there as an Environment-synthesized domain from calendar, universe, suspension, limit-price, liquidity and Broker state.
+
+Validation:
+- Run `git diff --check` after this edit.
+
+## 2026-06-08 Environment domain assembly table
+
+Task: keep the visible-window table compact and move data-domain generation notes into a separate table.
+
+Decision:
+- Removed the `生成方式` column from the main Environment 2.2 visible-window table.
+- Added a separate `数据域拼接方式` table with sources, join/filter rules and output boundaries.
+- Kept constraints at the same abstraction level as other domains, without a detailed rule subsection.
+
+Validation:
+- Run `git diff --check` after this edit.
+
+## 2026-06-08 Fold deadline 30 minutes
+
+Task: change the default per-Fold runtime limit from 20 minutes to 30 minutes.
+
+Decision:
+- Each Fold defaults to 30 minutes.
+- Step still has no separate timer and shares the Fold deadline.
+- The finalization prompt threshold remains T-5 minutes.
+
+Changes:
+- Updated `docs/agent_design.md`.
+- Updated `docs/environment_design.md`.
+- Updated `docs/pipeline_design.md`, including the example `max_fold_minutes` and `fold_deadline_at`.
+
+Validation:
+- Run deadline wording search and `git diff --check` after this edit.
+
+## 2026-06-08 NL scoring parallel task boundary
+
+Task: clarify how `backtest_tool` runs and detects completion of LLM natural-language scoring.
+
+Decision:
+- `backtest_tool` starts independent per-stock scoring tasks, which may run in a bounded thread pool.
+- Each task owns one stock's candidate row, company context, enabled rules, evidence and conversation trace.
+- Each stock can run up to three retrieval rounds and may stop early once evidence is sufficient.
+- A task is complete only after validated JSON, configured skip/failure handling, timeout or hard failure.
+- `backtest_tool` waits for all candidate-stock tasks to reach a terminal state before score fusion; hard failures without explicit policy fail the formal backtest.
+
+Changes:
+- Updated `docs/environment_design.md` natural-language scoring flow and task terminal-state rules.
+- Updated `configs/agent_output_template/nl_prior/README.md` baseline prompt workflow and retrieval-round wording.
+
+Validation:
+- Run wording search and `git diff --check` after this edit.
+
+## 2026-06-08 LLM JSON extraction contract
+
+Task: record how `backtest_tool` extracts JSON from LLM API responses.
+
+Decision:
+- LLM never writes formal result files directly.
+- `backtest_tool` receives provider responses through LLM Proxy and extracts JSON in this order: tool/function call arguments, JSON mode or structured response content, then a single complete JSON object from plain text.
+- Plain text extraction may remove one json code fence, but must not search long explanations for score fields.
+- Extracted content must pass `json.loads` and schema checks before `backtest_tool` writes `nl_output/scores.jsonl`.
+
+Changes:
+- Updated `docs/environment_design.md`.
+- Updated `configs/agent_output_template/nl_prior/README.md`.
+
+Validation:
+- Run `git diff --check` after this edit.
+
+## 2026-06-08 NL prompt final-output wording
+
+Task: clarify whether natural-language scoring prompts can allow model reasoning.
+
+Decision:
+- The LLM may internally analyze `company_context`, evidence and enabled `prior.json` rules.
+- The final provider response consumed by `backtest_tool` must still be exactly one JSON object or structured JSON payload.
+- The prompt should not ask for a full reasoning trace. The formal `reason` field should be a short auditable basis tied to evidence.
+- `backtest_tool` JSON extraction and schema validation rules are unchanged.
+
+Changes:
+- Updated `configs/agent_output_template/nl_prior/README.md` fixed system constraints.
+- Updated the search-request prompt wording to say internal analysis is allowed, but final output must be JSON.
+
+Validation:
+- Run `git diff --check` after this edit.
+
+## 2026-06-08 Think-tag compatibility
+
+Task: document how the Environment handles provider responses with explicit reasoning text such as `<think>...</think>`.
+
+Decision:
+- Reasoning extraction belongs to LLM Proxy or the provider adapter, not to strategy code.
+- If the provider separates `reasoning_content` and final `content`, only final `content` is passed to JSON extraction; reasoning is kept in conversation logs.
+- If plain text contains a closed `<think>...</think>` block, the adapter may strip the closed block before JSON extraction and log the raw response.
+- Unclosed think blocks, remaining non-JSON explanation, multiple JSON objects or fields found only inside reasoning text are failures unless run config permits one fixed JSON repair call.
+- Formal scores, risk labels and evidence references must come from final JSON only.
+
+Changes:
+- Updated `docs/environment_design.md` near the `backtest_tool` natural-language JSON extraction contract.
+
+Validation:
+- Run `git diff --check` after this edit.
+
+## 2026-06-08 NL input de-anchoring
+
+Task: decide whether natural-language scoring prompts should receive JSON inputs and factor scores.
+
+Decision:
+- Structured JSON objects remain the preferred prompt input representation because they are easier to log, replay, validate and adapt across providers.
+- The LLM-facing candidate object is renamed to `candidate_identity` and must contain only `ts_code`.
+- `factor_score`, factor rank, factor reason, target weight, validation return, replay result and other stock conclusions must not be passed into natural-language scoring prompts.
+- `backtest_tool` combines `factor_outputs.factor_score` and `nl_score` only after the LLM score has been parsed and validated.
+
+Changes:
+- Updated `docs/environment_design.md` natural-language scoring contract and default score-fusion variable name.
+- Updated `configs/agent_output_template/nl_prior/README.md` prompt variables, example identity JSON, and score-fusion wording.
+
+Validation:
+- Run stale-name search and `git diff --check` after this edit.
+
+## 2026-06-08 NL identity minimization
+
+Task: decide whether `task_id` should be passed into natural-language scoring prompts.
+
+Decision:
+- LLM-visible `candidate_identity` should contain only `ts_code`.
+- `task_id`, call ID and thread ID remain internal `backtest_tool` logging and task-management fields.
+- Keeping task/call identifiers out of the prompt reduces irrelevant tokens and avoids leaking validation/result naming conventions into natural-language scoring.
+
+Changes:
+- Updated `docs/environment_design.md`.
+- Updated `configs/agent_output_template/nl_prior/README.md` example and forbidden-field wording.
+
+Validation:
+- Run `task_id` search and `git diff --check` after this edit.
+
+## 2026-06-08 Agent-readable output templates
+
+Task: make `factor/README.md` and `nl_prior/README.md` better suited for the Sandbox Agent.
+
+Decision:
+- Template READMEs should be Agent work instructions, not Environment implementation manuals.
+- `factor/README.md` should focus on `main.py`, `factors.json`, PIT-safe factor logic and candidate-pool output.
+- `nl_prior/README.md` should focus on writing reusable `prior.json` rules, rule quality, scoring meaning and the boundary that Agent does not write `nl_score`.
+- Detailed `backtest_tool`, LLM Proxy, provider adapter, JSON extraction, think-tag handling and parallel scoring internals stay in `docs/environment_design.md`.
+
+Changes:
+- Rewrote `configs/agent_output_template/factor/README.md`.
+- Rewrote `configs/agent_output_template/nl_prior/README.md`.
+- Updated `docs/environment_design.md` wording from `nl_prior/README.md` Prompt template to scoring instructions.
+
+Validation:
+- Run stale implementation-detail search, JSON/Python template checks and `git diff --check` after this edit.
+
+## 2026-06-09 Initial NL prior workflow
+
+Task: fix the `nl_prior/README.md` workflow because the first strategy artifact has no historical `nl_output/`.
+
+Decision:
+- Initial `prior.json` creation should use visible snapshot data: company context, announcements, news, research, policy text samples and general investment reasoning.
+- Validation `nl_output/` is available only after the first backtest run, so it should be used for later Step refinement, not required upfront.
+- The README should explicitly distinguish initial rule creation from later rule updates.
+
+Changes:
+- Updated `configs/agent_output_template/nl_prior/README.md` working-flow section.
+
+Validation:
+- Run `git diff --check` after this edit.
+
+## 2026-06-09 NL prior rule simplification
+
+Task: simplify `prior.json` rules and restore an Agent-readable NL analysis prompt outline.
+
+Decision:
+- Natural-language rules no longer need `enabled`; unused rules should be deleted.
+- `prior.json` rule schema is now `id`, `text`, `evidence`, and `effect`.
+- `nl_prior/README.md` should include a concise NL analysis flow and baseline Prompt outline so the Agent understands how rules are consumed.
+- Provider adapter details, JSON extraction internals and parallel task mechanics remain in `docs/environment_design.md`.
+
+Changes:
+- Updated `configs/agent_output_template/nl_prior/README.md`.
+- Updated `docs/environment_design.md` modification-check schema and natural-language scoring flow wording.
+
+Validation:
+- Run natural-language rule-schema search, JSON checks and `git diff --check` after this edit.
+
+## 2026-06-09 Factor registry simplification
+
+Task: remove `enabled` from the factor registry schema.
+
+Decision:
+- `factors.json` entries are active by definition.
+- Unused factors should be deleted from the registry instead of kept with an enabled/disabled flag.
+- `modification_check_tool` should validate registered factor entries with `id`, `function`, `description`, `lookback_days`, and `direction`.
+
+Changes:
+- Updated `configs/agent_output_template/factor/README.md`.
+- Updated `docs/environment_design.md` modification-check schema table.
+
+Validation:
+- Run current-doc factor-enabled search, JSON checks and `git diff --check` after this edit.
+
+## 2026-06-09 Living-doc navigation depth
+
+Task: unify navigation depth across Data, Agent, Environment and Pipeline design docs.
+
+Decision:
+- For these long design documents, navigation to numbered main chapters plus `###` second-level sections is more useful than chapter-only navigation.
+- This keeps audit and implementation review efficient without expanding to deeper headings.
+- Use the heading name `导航` consistently.
+
+Changes:
+- Updated `docs/agent_design.md` navigation.
+- Updated `docs/environment_design.md` navigation.
+- Updated `docs/pipeline_design.md` navigation.
+
+Validation:
+- Run heading/navigation search and `git diff --check` after this edit.
+
+## 2026-06-09 Snapshot input boundary
+
+Task: clarify whether Agent should see both `/mnt/snapshot` and `/mnt/snapshots/train`.
+
+Decision:
+- Agent should not have two equivalent current-input paths.
+- `/mnt/snapshot` is the single Agent-facing PIT input view and the only formal `generate_orders()` data entry.
+- `/mnt/snapshots/valid` remains Agent-readable for validation review.
+- `/mnt/snapshots/test` remains hidden from Agent.
+- `/mnt/snapshots/train` is removed from the Agent-facing design to avoid duplicated input semantics and hard-coded strategy paths.
+
+Changes:
+- Updated `docs/environment_design.md` snapshot layout, Sandbox permissions and Runner actions.
+- Updated `docs/agent_design.md` Sandbox example and strategy-code input rules.
+- Updated `docs/pipeline_design.md` Step orchestration and Fold example.
+
+Validation:
+- Run `/mnt/snapshots/train` residual search and `git diff --check` after this edit.
+
+## 2026-06-09 Sandbox snapshot role split
+
+Task: reconsider the snapshot boundary after deciding whether `/mnt/snapshot` should be Agent-facing.
+
+Decision:
+- Agent should read explicit stage slots: `/mnt/snapshots/train` for training/exploration and `/mnt/snapshots/valid` for validation review.
+- `/mnt/snapshot` should be reserved for `backtest_tool` formal execution and contract checks; it is the current decision input bound by Runner/root before calling `generate_orders()`.
+- Formal strategy code should not hard-code `/mnt/snapshots/train`, `/mnt/snapshots/valid` or `/mnt/snapshots/test`.
+- The template can support `MQ_SNAPSHOT_DIR=/mnt/snapshots/train` for Agent debugging, but formal `backtest_tool` must set or clear it so `/mnt/snapshot` is used.
+- This replaces the immediately previous Agent-facing `/mnt/snapshot`-only boundary because explicit train/valid slots are easier for Agent exploration and reduce ambiguity about formal execution.
+
+Changes:
+- Updated `docs/environment_design.md` snapshot layout, Sandbox permissions and Runner steps.
+- Updated `docs/agent_design.md` Sandbox example, code rules and forbidden behavior.
+- Updated `docs/pipeline_design.md` Step orchestration and Fold example.
+- Updated `configs/agent_output_template/factor/README.md`.
+- Updated `configs/agent_output_template/factor/main.py` to support `MQ_SNAPSHOT_DIR` for debugging.
+
+Validation:
+- Run path-boundary searches, template compile and `git diff --check` after this edit.
+
+## 2026-06-09 Agent document flow cleanup
+
+Task: improve `docs/agent_design.md` organization after review that the chapter order did not read naturally.
+
+Decision:
+- Organize the Agent document by lifecycle rather than by accumulated boundary rules.
+- Lead with three-layer responsibility and Epoch/Fold/Step flow.
+- Put Fold-to-Fold inheritance near the top because it defines what Agent state actually persists.
+- Keep Sandbox path roles in the working-area chapter and state `snapshots` versus `snapshot` usage explicitly.
+- Move Tool details after Step workflow and formal artifact contracts, because Tool semantics are implementation details supporting the flow.
+
+Changes:
+- Rewrote `docs/agent_design.md` section order to:
+  1. Agent in the system.
+  2. Agent workspace.
+  3. Step execution flow.
+  4. Formal strategy artifacts.
+  5. Tool semantics.
+  6. Modification constraints and regularization.
+  7. LLM calls and logging.
+  8. Prohibited behavior and acceptance checklist.
+- Added a compact path-role table in Agent docs for `snapshots` versus `snapshot`; detailed runtime switching remains documented in Environment docs.
+
+Validation:
+- Run heading search, snapshot keyword search and `git diff --check` after this edit.
+
+## 2026-06-09 Agent/Pipeline document boundary cleanup
+
+Task: correct Agent docs after review that chapter 1 still described mostly Pipeline responsibilities.
+
+Decision:
+- Agent docs should define the Agent work contract after Pipeline has already prepared a Sandbox.
+- Pipeline docs should be the authority for Step/Fold/Epoch scheduling, strategy artifact freezing, testing, held-out and ledgers.
+- Agent docs can refer to Step/Fold terms, but should not duplicate the orchestration flow as if Agent controls it.
+
+Changes:
+- Rewrote `docs/agent_design.md` chapter 1 as:
+  - Agent responsibilities.
+  - Non-Agent responsibilities and owning documents.
+  - Agent session/memory boundary.
+- Kept `docs/agent_design.md` focused on visible data, writable outputs, Step-internal work, formal artifact schemas, Tool use and Agent prohibitions.
+- Updated `docs/pipeline_design.md` introduction to state Pipeline ownership of orchestration, freezing, tests and ledgers.
+- Fixed the Pipeline Step input example from `max_fold_minutes=20` to `max_fold_minutes=30`.
+
+Validation:
+- Run Agent/Pipeline heading search, stale orchestration wording search and `git diff --check` after this edit.
+
+## 2026-06-09 Agent chapter style alignment
+
+Task: align Agent chapter 1 with the clearer Environment chapter 1 style.
+
+Decision:
+- Use one concise responsibilities chapter rather than splitting chapter 1 into multiple small subsections.
+- Keep Agent chapter 1 focused on what Agent owns, what it does not own, the session/memory boundary and the trustworthy-log boundary.
+- Leave orchestration and artifact-freezing details in Pipeline docs.
+
+Changes:
+- Renamed Agent chapter 1 from `Agent 合同` to `Agent 职责`.
+- Removed `1.1/1.2/1.3` subheadings from Agent chapter 1.
+- Added an Agent trustworthy-log boundary sentence mirroring Environment's log-boundary wording.
+
+Validation:
+- Run Agent heading search and `git diff --check` after this edit.
+
+## 2026-06-09 Environment non-responsibility table
+
+Task: align Environment chapter 1 `Environment 不负责` with Agent's responsibility-boundary table style.
+
+Decision:
+- Keep Environment's responsibilities as bullets.
+- Convert non-responsibilities into a table with owning document or hard boundary.
+- Make clear that Environment executes and records, while Agent owns strategy logic and Pipeline owns held-out boundaries.
+
+Changes:
+- Updated `docs/environment_design.md` chapter 1 table for non-responsibilities.
+
+Validation:
+- Run Environment section check and `git diff --check` after this edit.
+
+## 2026-06-09 Agent visible-domain alignment
+
+Task: fix mismatch where Environment documented `constraints` as a visible data domain but Agent docs did not mention it, and align visible-domain ordering.
+
+Decision:
+- Agent docs should list the same visible data domains as Environment docs in the same order.
+- `constraints` is Agent-visible context and a trusted execution input, but Agent does not synthesize it.
+- `backtest_tool` remains responsible for formal pre-check, fill/reject and replay enforcement.
+
+Changes:
+- Updated `docs/agent_design.md` section 2.1 default window table to order domains as `daily`, `intraday_1min`, `fundamentals`, `events`, `macro`, `text`, `constraints`.
+- Added a `constraints` row explaining tradability, suspension/limit, liquidity and Broker-state use.
+
+Validation:
+- Run visible-domain search and `git diff --check` after this edit.
+
+## 2026-06-09 Constraints visible-domain removal
+
+Task: remove `constraints` as a separate visible data domain after deciding trade executability should be handled by Broker/backtest execution rather than exposed as a dedicated Agent data domain.
+
+Decision:
+- Do not list `constraints` in Agent or Environment visible-data domain tables.
+- Do not include `constraints.parquet` in the snapshot example.
+- Keep Broker and `backtest_tool` responsible for final executability, fills and rejects.
+- Agent may infer suspension or trading risk from visible market data, but formal成交判断 remains in Environment execution.
+
+Changes:
+- Removed the `constraints` row from `docs/agent_design.md` visible data table.
+- Removed the `constraints` row from `docs/environment_design.md` visible window and assembly tables.
+- Removed `constraints.parquet` from the Environment snapshot example.
+
+Validation:
+- Run visible-domain search and `git diff --check` after this edit.
+
+## 2026-06-09 Pipeline Step input snapshot naming
+
+Task: clarify the Pipeline Step input table after review that `validation_snapshot` mixed together the validation replay slot and the formal decision-time PIT input view.
+
+Decision:
+- Split the Step input wording into `train_snapshot`, `validation_replay_snapshot`, and `decision_input_view`.
+- `train_snapshot` maps to `/mnt/snapshots/train` and is Agent-readable training/exploration data.
+- `validation_replay_snapshot` maps to `/mnt/snapshots/valid` and is Agent-readable validation replay/review data.
+- `decision_input_view` is the Runner/root-created PIT view bound to `/mnt/snapshot` before `backtest_tool` calls the formal strategy entry.
+
+Changes:
+- Updated `docs/pipeline_design.md` section 3.1.
+
+Validation:
+- Run `validation_snapshot` search and `git diff --check` after this edit.
+
+## 2026-06-09 Modification-check parent artifact
+
+Task: make the modification-check diff baseline robust so Agent cannot accidentally or intentionally lose the original parent strategy artifact.
+
+Decision:
+- Non-initial Steps must keep an Agent-readable but read-only parent artifact copy in the Sandbox, separate from Agent-writable `agent_output/`.
+- The parent copy path is documented as `/mnt/artifacts/parent_output/`, under the existing artifacts root.
+- `modification_check_tool` must validate the parent copy hash against run manifest before diffing.
+- The Tool compares that immutable parent copy with current `agent_output/factor/` and `agent_output/nl_prior/`; it must not infer the parent from Agent-controlled files.
+
+Changes:
+- Updated `docs/environment_design.md`.
+- Updated `docs/pipeline_design.md`.
+- Updated `docs/agent_design.md`.
+
+Validation:
+- Run parent-artifact wording search and `git diff --check` after this edit.
+
+## 2026-06-09 Fold deadline fallback
+
+Task: clarify what happens when a Fold times out without a valid strategy output.
+
+Decision:
+- Runner/Proxy may trigger one fixed finalization prompt before deadline.
+- After `fold_deadline_at`, Pipeline must stop new Shell, service and LLM calls; it must not keep appending prompts until a strategy passes.
+- If a valid Step already exists in the Fold, Pipeline uses the latest accepted Step artifact.
+- If no Step was accepted, Pipeline carries forward the parent strategy artifact unchanged and records `no_update_timeout`.
+- If this is the first initialization and no valid configured baseline artifact passes contract checks, the Fold / Epoch fails.
+
+Changes:
+- Updated `docs/pipeline_design.md`.
+- Updated `docs/environment_design.md`.
+- Updated `docs/agent_design.md`.
+
+Validation:
+- Run deadline wording search and `git diff --check` after this edit.
+
+## 2026-06-09 Pipeline modification-check step
+
+Task: add the newly defined `parent_output` baseline into the Pipeline Step execution flow.
+
+Decision:
+- Agent self-check and Pipeline pre-backtest check both call the same `modification_check_tool`.
+- The Tool has no business parameters and always compares `/mnt/artifacts/parent_output/` with `/mnt/artifacts/agent_output/`.
+- The Tool must validate parent hash against run manifest before computing the diff.
+- Pipeline reruns the Tool before formal `backtest_tool` to catch any changes after Agent self-check.
+
+Changes:
+- Updated `docs/pipeline_design.md` section 3.2 Step execution item 7.
+
+Validation:
+- Run targeted wording search and `git diff --check` after this edit.
+
+## 2026-06-09 Shell transcript wording
+
+Task: clarify what `sandbox_shell_tool transcript` means in the Step output section.
+
+Decision:
+- Replace the English `transcript` wording with `Shell 调用记录`.
+- The record path points to Environment-generated logs for Sandbox Shell/Python calls, including command, stdout/stderr, exit code, timestamps and related artifact paths.
+
+Changes:
+- Updated `docs/pipeline_design.md`.
+- Updated `docs/environment_design.md`.
+
+Validation:
+- Run transcript wording search and `git diff --check` after this edit.
+
+## 2026-06-09 Pipeline Step output simplification
+
+Task: reduce `docs/pipeline_design.md` section 3.3 because it mixed Pipeline ledger fields with Environment runtime output files.
+
+Decision:
+- Pipeline should not enumerate every Shell/LLM/backtest/natural-language output file in Step output.
+- Step output at Pipeline level is a `step_ledger` record with compact references and decision status.
+- Environment remains responsible for runtime files: `execution_calls.jsonl`, `llm_conversations.jsonl`, `strategy_artifact_diff.json`, `results/<phase>_<idx>/`, `nl_output/`, and manifests.
+
+Changes:
+- Rewrote `docs/pipeline_design.md` section 3.3 as a small table.
+- Tightened the `step_ledger` row in Pipeline section 7.1.
+
+Validation:
+- Run Step-output wording search and `git diff --check` after this edit.
+
+## 2026-06-09 Fold finish tool
+
+Task: correct the tool boundary after deciding that one Fold should use one Agent session/conversation, while Step is only an in-Fold validation iteration.
+
+Decision:
+- Replace `finish_step_tool` with `finish_fold_tool` in the living design docs.
+- `finish_fold_tool` is the no-argument Agent-facing signal that the current Fold should stop modifying.
+- Step does not end the Agent conversation; each validation run writes a Step ledger, and the same Agent can continue to the next Step.
+- Pipeline now describes Fold startup once, repeated Step iterations inside the same Agent session, and Fold ending through `finish_fold_tool`, Step limit, early stop, deadline, or timeout fallback.
+
+Changes:
+- Updated `docs/agent_design.md`.
+- Updated `docs/environment_design.md`.
+- Updated `docs/pipeline_design.md`.
+
+Validation:
+- Run `finish_step_tool` residual search in living docs and `git diff --check` after this edit.
+
+## 2026-06-09 SubAgent living-doc residual audit
+
+Task: run a read-only SubAgent audit of `docs/agent_design.md`, `docs/environment_design.md`, and `docs/pipeline_design.md` for old-design residue.
+
+SubAgent:
+- `Lovelace`
+
+Result:
+- No Blocking findings.
+- No High findings.
+- Medium: Pipeline 7.3 still said the next Fold copies frozen output only into `/mnt/artifacts/agent_output/`.
+- Low: Agent PIT wording was too broad for `/mnt/snapshots/valid`.
+- Low: Pipeline used `best-effort Step 输出` while `step_ledger.status` did not include `best_effort`.
+
+Changes:
+- Updated Pipeline 7.3 to copy frozen strategy into both `/mnt/artifacts/parent_output/` and `/mnt/artifacts/agent_output/`.
+- Clarified Agent visible-data wording: train and `/mnt/snapshot` are PIT decision inputs; `/mnt/snapshots/valid` is validation replay/review and cannot be read by formal `generate_orders()`.
+- Removed `best-effort` from Pipeline Step status wording and mapped timeout finalization to existing `rejected` / `timeout` / accepted Step semantics.
+
+Validation:
+- Run living-doc old-residue search and `git diff --check` after this edit.
+
+## 2026-06-09 Step/Fold ledger boundary cleanup
+
+Task: simplify Pipeline ledger fields and keep `finish_fold_tool` at Fold scope.
+
+Decision:
+- `step_ledger` should not include `finish_fold_tool`; Fold finishing is not a Step gate.
+- `step_ledger` should not enumerate `execution_calls` and `llm_conversations`; it records one `run_ref` pointing to Environment's run manifest.
+- `finish_fold_tool` belongs in Fold output / `fold_ledger`.
+
+Changes:
+- Replaced `gate_refs` with `modification_check_ref` in `docs/pipeline_design.md`.
+- Replaced `run_trace_refs` with `run_ref`.
+- Added `finish_fold_ref` and `fold_status` to Fold output example.
+- Updated Pipeline section 7.1 ledger descriptions.
+
+Validation:
+- Run ledger-field residual search and `git diff --check` after this edit.
+
+## 2026-06-09 Environment runtime artifact cleanup
+
+Task: simplify the Environment runtime output contract without updating Pipeline docs in this pass.
+
+Decision:
+- Agent itself writes only the controlled workspace and formal strategy output directories.
+- Environment runtime state should be centered on `run_manifest.json`.
+- Shell, Tool, backtest, Broker, Fold finish and real LLM provider calls should share one `agent_trace.jsonl` event stream.
+- Backtest result directories should keep only large result artifacts such as return details, order plan and natural-language scoring output.
+
+Changes:
+- Updated `docs/environment_design.md` artifact tree and subdirectory ownership table.
+- Replaced the standalone diff-file contract with `modification_check_tool` returning results to Agent, appending a trace event, and updating the latest-check summary in `run_manifest.json`.
+- Replaced standalone Fold-finish output with `finish_fold_tool` updating `run_manifest.json` and appending a trace event.
+- Removed the separate `summary.json`, `execution_calls.jsonl`, `llm_conversations.jsonl` and `strategy_artifact_diff.json` contracts from Environment docs.
+
+Validation:
+- Old-file-name residual search in `docs/environment_design.md` returned no matches.
+- `git diff --check` passed.
+- Resource checks after edit: system memory about 405 GiB available; GPU state unchanged from pre-check and no new workload was started.
+
+## 2026-06-09 Agent trace readability
+
+Task: clarify whether Agent can read `agent_trace.jsonl`.
+
+Decision:
+- Training/validation `agent_trace.jsonl` should be Agent-readable and read-only.
+- This lets Agent review its own Shell, Tool, validation backtest and natural-language scoring calls during the current Fold.
+- Test and held-out traces remain hidden from Agent.
+
+Changes:
+- Updated `docs/environment_design.md` artifact ownership table.
+- Added the training/validation read-only rule to the logging section.
+
+Validation:
+- Targeted search confirmed the training/validation read-only rule is present.
+- `git diff --check` passed.
+
+## 2026-06-09 NL trace/output boundary
+
+Task: clarify whether natural-language scoring belongs in `agent_trace.jsonl` or `nl_output/`.
+
+Decision:
+- Both are needed, but they record different things.
+- `agent_trace.jsonl` records the LLM/API call process for audit and future distillation: prompts/messages, raw provider response, parsing result, usage and errors.
+- `results/<phase>_<idx>/nl_output/` records the formal backtest product: per-stock score, risk tags, retrieval requests and evidence references.
+- Backtest and score fusion should consume `nl_output/`, not parse scores from `agent_trace.jsonl`.
+
+Changes:
+- Updated `docs/environment_design.md` natural-language scoring section.
+- Updated the LLM API logging boundary and runtime artifact table.
+
+Validation:
+- Targeted search confirmed the `agent_trace.jsonl` / `nl_output/` boundary is present.
+- `git diff --check` passed.
+
+## 2026-06-09 NL LLM log split
+
+Task: reduce `agent_trace.jsonl` size by moving batch natural-language scoring call details into the backtest result directory.
+
+Decision:
+- `agent_trace.jsonl` should stay a lightweight process index for Shell, Tool, Broker, backtest, Fold finish, Agent main LLM calls and natural-language scoring batch summaries.
+- Per-stock, multi-round natural-language scoring calls can be large and should live beside the formal scoring outputs.
+- Store those detailed calls in `results/<phase>_<idx>/nl_output/nl_llm_calls.jsonl`.
+- Agent can read training/validation `nl_output/` for review, while test/held-out `nl_output/` stays hidden.
+
+Changes:
+- Updated `docs/environment_design.md` natural-language scoring output table.
+- Updated LLM API logging boundary.
+- Updated runtime artifact and audit wording.
+
+Validation:
+- Targeted search confirmed `nl_llm_calls.jsonl` is documented and `agent_trace.jsonl` is described as a lightweight index.
+- `git diff --check` passed.
+- Resource checks after edit: system memory about 402 GiB available; GPU state unchanged from pre-check and no new workload was started.
+
+## 2026-06-09 Environment LLM/log chapter cleanup
+
+Task: make `docs/environment_design.md` chapter 6 and chapter 7 less repetitive and easier to read.
+
+Decision:
+- Chapter 6 should be only the LLM API boundary: call entry points, key/network/timeout safety, and where different LLM call details are written.
+- Chapter 7 should be only runtime logs and audit: runtime files, read permissions, and artifact checks.
+- Keep natural-language scoring LLM details under `nl_output/nl_llm_calls.jsonl`, with only batch summaries in `agent_trace.jsonl`.
+
+Changes:
+- Renamed chapter 6 to `LLM API 边界`.
+- Added chapter 6 subsections for call entry, safety/timeout, and call-detail destinations.
+- Renamed chapter 7 to `运行日志和审计`.
+- Added chapter 7 subsections for runtime files, read permissions, and audit checks.
+- Updated the navigation and Runner LLM logging row.
+
+Validation:
+- Heading/residual search confirmed the new chapter titles and `nl_llm_calls.jsonl` / `agent_trace.jsonl` boundary are present, with no `LLM API 和日志边界` or `Conversation Log` residual.
+- `git diff --check` passed.
+- Resource checks after edit: system memory about 404 GiB available; GPU state unchanged from pre-check and no new workload was started.
+
+## 2026-06-09 Factor entrypoint candidate contract
+
+Task: clarify whether the Agent returns full-market factor scores, pre-screened candidates, or final orders.
+
+Decision:
+- The formal factor entrypoint should be named `generate_candidates()`, not `generate_orders()`.
+- Agent owns factor calculation, ranking and pre-screening.
+- Agent returns a bounded candidate pool with `ts_code`, `factor_score`, `reason` and `source_artifacts`.
+- Environment validates schema, candidate count, duplicate/illegal symbols and path misuse, but does not truncate full-market output or substitute its own strategy screening.
+- `backtest_tool` runs natural-language scoring only on the candidate pool, then builds the final order plan.
+
+Changes:
+- Updated `docs/agent_design.md`.
+- Updated `docs/environment_design.md`.
+- Updated `docs/pipeline_design.md`.
+- Updated `configs/agent_output_template/factor/main.py`.
+- Updated `configs/agent_output_template/factor/README.md`.
+
+Validation:
+- Entrypoint residual search over Agent/Environment/Pipeline docs and factor template found no `generate_orders` residual.
+- Factor template source compiled with the stock Python environment without writing bytecode.
+- Generated `__pycache__` from the earlier compile check was removed.
+- `git diff --check` passed.
+- Resource checks after edit: system memory about 425 GiB available; GPU state unchanged from pre-check and no new workload was started.
+
+## 2026-06-09 Agent backtest NL modes
+
+Task: make `docs/agent_design.md` section 5.3 explicit about validation natural-language scoring modes.
+
+Decision:
+- Agent should know validation `backtest_tool` can be run with `nl_mode=off`, `sample`, or `on`.
+- `off` is for fast factor/link sanity checks.
+- `sample` is for cost-controlled natural-language spot checks.
+- `on` is the default formal validation state before ending a Fold.
+- Test and held-out keep natural-language scoring fixed on and are not Agent-selectable.
+
+Changes:
+- Added an `nl_mode` table to `docs/agent_design.md` section 5.3.
+
+Validation:
+- Targeted search confirmed `nl_mode=off|sample|on` is documented in Agent section 5.3.
+- `git diff --check` passed.
+- Resource checks after edit: system memory about 427 GiB available; GPU state unchanged from pre-check and no new workload was started.
+
+## 2026-06-09 Fold Step cap
+
+Task: update the default maximum Step count per Fold.
+
+Decision:
+- Each Fold should allow up to 10 Step iterations by default.
+- The Step cap is still subordinate to the Fold deadline, early-stop rules and `finish_fold_tool`.
+
+Changes:
+- Updated `docs/pipeline_design.md` Step definition.
+
+Validation:
+- Targeted Step-cap search confirmed the old `3-5` wording is gone and the default 10-Step cap is documented.
+- `git diff --check` passed.
+- Resource checks after edit: system memory about 427 GiB available; GPU state unchanged from pre-check and no new workload was started.
+
+## 2026-06-09 Step ledger simplification
+
+Task: remove the separate Step ledger file from the Pipeline design.
+
+Decision:
+- Environment's `run_manifest.json`, `agent_trace.jsonl` and `results/<phase>_<idx>/` already carry the runtime details.
+- Pipeline should not duplicate those details in a Step-level log file.
+- Step state should remain queryable as lightweight summaries embedded in `fold_ledger.steps[]`.
+- `fold_ledger` remains the Fold-level experiment index that points to Environment run artifacts and selected strategy artifacts.
+
+Changes:
+- Updated `docs/pipeline_design.md` Step summary section.
+- Removed `step_ledger` from the ledger-type table.
+- Removed `step_ledger.jsonl` from the suggested experiment path layout.
+- Updated Fold output example to include a `steps` array and selected Step.
+- Removed old references to `summary.json`, `strategy_artifact_diff.json`, `results/fold_finish.json`, and old execution/LLM conversation logs from the touched Pipeline sections.
+
+Validation:
+- Targeted ledger-residual search found no `step_ledger`, old summary/diff/fold-finish files, or old execution/LLM conversation log names in `docs/pipeline_design.md`.
+- `git diff --check` passed.
+- Resource checks after edit: system memory about 427 GiB available; GPU state unchanged from pre-check and no new workload was started.
+
+## 2026-06-09 Pipeline strategy handoff boundary
+
+Task: clarify whether Pipeline chooses final factors/prior or only accepts the Agent's final submission.
+
+Decision:
+- Agent owns the Fold's submitted `factor/` and `nl_prior`.
+- Pipeline may inject submission criteria into the Agent prompt and hard-validate the submitted artifact with validation results, risk constraints and modification checks.
+- Pipeline must not independently pick, merge or rewrite factors and natural-language prior rules.
+- If no valid Agent submission exists, Pipeline uses the documented fallback path: last accepted Step, parent artifact carry-forward, or initialization failure when no valid baseline exists.
+
+Changes:
+- Updated `docs/pipeline_design.md` Fold timeout, Fold finish and validation sections.
+- Updated `docs/agent_design.md` responsibilities and Step flow so Agent uses prompt-provided submission criteria before calling `finish_fold_tool`.
+- Removed the stale `results/fold_finish.json` path from the Agent `finish_fold_tool` example.
+
+Validation:
+- Targeted search confirmed the old wording around Pipeline choosing the final strategy artifact was removed from the active docs.
+- `git diff --check` passed.
+- Resource checks before edit: system memory about 427 GiB available; GPU state was unchanged from earlier checks and no heavy workload was started.
+
+## 2026-06-09 Agent-owned Fold early stop
+
+Task: remove Pipeline-side complex early-stop strategy selection.
+
+Decision:
+- Early stop is an Agent action: the Agent reads Prompt criteria and validation results, then calls `finish_fold_tool` when it thinks the current artifact is good enough.
+- Pipeline should not compute a complex validation score, compare same-Fold results across Epochs, or choose the best historical Step.
+- Pipeline may inject early-stop guidance into the Prompt and then perform only hard checks: modification constraints, formal artifact contract, order validity, validation result/risk constraints and fallback handling.
+
+Changes:
+- Rewrote `docs/pipeline_design.md` section 4.2 from a score-formula early-stop target into an Agent-owned early-stop contract.
+- Removed Pipeline wording around `validation_score`, `previous_epoch_same_fold`, `target_score` and automatic freezing of the current best strategy.
+- Updated `docs/agent_design.md` Step flow to say Agent may call `finish_fold_tool` when continued search is no longer worth the remaining Fold time.
+
+Validation:
+- Targeted search over Agent/Pipeline docs confirmed the old score-formula terms were removed.
+- `git diff --check` passed.
+- Resource checks before edit: system memory about 427 GiB available; GPU state was unchanged from earlier checks and no heavy workload was started.
+
+## 2026-06-09 Broker config ownership boundary
+
+Task: clarify that Pipeline does not own simulated Broker configuration.
+
+Decision:
+- Pipeline owns orchestration, artifact freezing and ledger references.
+- Environment owns replay/Broker profiles, including costs, fill rules, position limits and reject logic.
+- Pipeline should record Environment `run_manifest.json` and snapshot manifest references, rather than listing Broker configuration as a Pipeline-frozen object.
+- The separate freeze checklist in Pipeline section 4.3 was redundant with the numbered test flow, so the flow is now the single source for that section.
+
+Changes:
+- Updated `docs/pipeline_design.md` section 4.3 to remove the redundant freeze checklist and keep the numbered test flow.
+- Updated the test flow so Pipeline records strategy artifact IDs/hashes, validation/test result refs, Environment run manifest refs and snapshot manifest refs in the Fold ledger.
+- Updated `docs/environment_design.md` section 5.3 so Broker costs/fills/limits/reject rules are resolved by Environment replay/Broker profiles and written to `run_manifest.json`.
+
+Validation:
+- Targeted residual search found no active wording that Pipeline freezes Broker configuration.
+- `git diff --check` passed.
+- Resource checks before edit: system memory about 427 GiB available; GPU state was unchanged from earlier checks and no heavy workload was started.
+
+## 2026-06-09 Regularization Docker boundary
+
+Task: update Epoch post-regularization design to use a separate Docker with full non-held-out development history and mandatory modification checks.
+
+Decision:
+- Epoch regularization runs in a separate Docker, not inside any Fold Agent container.
+- It can read full development history, including Fold ledgers, run manifests, agent traces, validation/test summaries and non-held-out snapshots.
+- It cannot read held-out and cannot use formal `backtest_tool` loops to continue tuning on development history.
+- Its purpose is to delete, merge, shorten and abstract `factor/` and `nl_prior/`, not to discover a new high-return strategy from full history.
+- Regularized `factor/` and `nl_prior/` must pass the same deterministic `modification_check_tool` style gate before Pipeline freezes them as the next Epoch starting artifact.
+
+Changes:
+- Rewrote `docs/pipeline_design.md` section 5.2 around a regularization Docker and development-history boundary.
+- Updated Pipeline risk/checklist wording to forbid held-out access and development-history backtest tuning, rather than forbidding all Fold test summaries from regularization.
+- Updated `docs/environment_design.md` Tool table so Shell and modification check explicitly support regularization, while `backtest_tool` is not available as a regularization search loop.
+- Clarified that `modification_check_tool` in regularization decides whether the regularized artifact may freeze, not whether to enter another backtest search.
+
+Validation:
+- Targeted searches checked for old "regularization cannot read Fold test" wording and for the new regularization/modification-check boundary.
+- `git diff --check` passed.
+- Resource checks before edit: system memory about 404 GiB available; GPU state was unchanged from earlier checks and no heavy workload was started.
+
+## 2026-06-09 Regularization section cleanup
+
+Task: make Pipeline section 5.2 clearer and include every current-Epoch Fold `results/` as regularization input.
+
+Decision:
+- Regularization keeps the same 30-minute default time budget as a Fold.
+- It receives every current-Epoch Fold `results/` directory as development material, including validation/test replay outputs, order plans, rejects, return/drawdown details, `nl_output` and error cases.
+- Those results can support anti-overfitting review, but cannot become a new formal backtest tuning loop.
+- The section should read as purpose, inputs, allowed edits, forbidden actions, modification check and final contract check.
+
+Changes:
+- Rewrote `docs/pipeline_design.md` section 5.2 into shorter paragraphs and a table.
+- Added explicit current-Epoch `results/` input.
+- Added the 30-minute regularization deadline.
+- Kept mandatory `modification_check_tool` before freezing.
+
+Validation:
+- Targeted section read confirmed 5.2 now has a single input table and no repeated development/held-out wording.
+- `git diff --check` passed.
+- Resource checks before edit: system memory about 426 GiB available; GPU state was unchanged from earlier checks and no heavy workload was started.
+
+## 2026-06-09 Pipeline output path details
+
+Task: clarify whether Fold/Epoch ledgers should be separate and document what each Docker run writes locally.
+
+Decision:
+- Keep `fold_ledger.jsonl`, `epoch_ledger.jsonl` and `heldout_ledger.jsonl` as separate files because their append cadence and semantic granularity differ.
+- Connect them by IDs rather than merging all events into one large ledger.
+- Treat `strategy_artifacts/` as the only reusable strategy handoff store.
+- Treat `artifacts/<run_id>/` as the full runtime evidence store collected from Sandbox `/mnt/artifacts`.
+
+Changes:
+- Expanded `docs/pipeline_design.md` section 7.4.
+- Added a path-role table for `ledgers/`, `strategy_artifacts/`, `artifacts/` and `reports/`.
+- Added a Docker-run output table for Fold training/validation, frozen test replay, Epoch regularization and Held-out frozen evaluation.
+- Clarified that `workspace/`, historical `results/` and Agent conversations are audit evidence only and are not copied into the next Fold as strategy input.
+
+Validation:
+- Targeted read of Pipeline 7.4 confirmed the output paths and Docker-run products are documented.
+- `git diff --check` passed.
+- Resource checks before edit: system memory about 426 GiB available; GPU state was unchanged from earlier checks and no heavy workload was started.
+
+## 2026-06-09 Pipeline ledger simplification
+
+Task: simplify Pipeline chapter 7 and decide whether held-out needs its own ledger.
+
+Decision:
+- Held-out is a frozen Fold-style evaluation, so it should be recorded in `fold_ledger.jsonl` with `phase=heldout`.
+- Keep only `fold_ledger.jsonl` and `epoch_ledger.jsonl` as formal ledger files.
+- Reorder chapter 7 by how a reader looks for artifacts: host path, ledger files, Docker outputs, then strategy artifact/version records.
+- Keep Environment responsible for runtime file contents; Pipeline records paths, summaries and aggregate hashes.
+
+Changes:
+- Updated Pipeline TOC for chapter 7.
+- Rewrote chapter 7 into `7.1 宿主机路径`, `7.2 账本文件`, `7.3 Docker 结束产物`, and `7.4 策略产物和版本记录`.
+- Removed `heldout_ledger.jsonl` from active Pipeline design.
+- Preserved the per-Docker output table and made held-out write to `fold_ledger.jsonl` with `phase=heldout`.
+
+Validation:
+- Targeted residual search confirmed active Pipeline docs no longer reference `heldout_ledger`.
+- `git diff --check` passed.
+- Resource checks before edit: system memory about 377 GiB available; GPU state was unchanged from earlier checks and no heavy workload was started.
+
+## 2026-06-09 Per-run artifact collection wording
+
+Task: clarify when Sandbox `/mnt/artifacts` is collected to the host experiment directory.
+
+Decision:
+- Artifact collection happens after every Docker or frozen replay run.
+- Each run gets its own `experiments/<experiment_id>/artifacts/<run_id>/` directory.
+- A Fold can therefore have multiple artifact directories, such as train/valid and frozen-test runs.
+
+Changes:
+- Updated `docs/pipeline_design.md` section 7.1 to say each Docker or frozen replay run is collected immediately under a distinct `artifacts/<run_id>/`.
+- Updated `docs/environment_design.md` section 3.2 wording to match the per-run collection boundary.
+
+Validation:
+- Targeted search confirmed the misleading "all Docker runs finish" wording was removed.
+- `git diff --check` passed.
+- Resource checks before edit: system memory about 377 GiB available; GPU state was unchanged from earlier checks and no heavy workload was started.
+
+## 2026-06-09 Single experiment ledger
+
+Task: decide whether `epoch_ledger.jsonl` is necessary when Fold records already index the experiment.
+
+Decision:
+- `epoch_ledger.jsonl` is not necessary for the current design.
+- Use one formal ledger file: `ledgers/experiment_ledger.jsonl`.
+- Distinguish events with `record_type`, including `fold`, `fold_test`, `epoch_regularization`, and `heldout`.
+- Step summaries remain embedded in the `record_type=fold` record's `steps[]`.
+
+Changes:
+- Updated `docs/pipeline_design.md` handoff wording from `fold_ledger` to `experiment_ledger.jsonl`.
+- Removed `fold_ledger.jsonl` and `epoch_ledger.jsonl` from the active output path.
+- Updated Docker-output table so all run types append to `experiment_ledger.jsonl`.
+- Kept `strategy_artifacts/` and `artifacts/<run_id>/` unchanged.
+
+Validation:
+- Targeted residual search confirmed active Pipeline docs no longer define separate `fold_ledger.jsonl`, `epoch_ledger.jsonl`, or `heldout_ledger.jsonl` files.
+- `git diff --check` passed.
+- Resource checks before edit: system memory about 377 GiB available; GPU state was unchanged from earlier checks and no heavy workload was started.
+
+## 2026-06-09 Pipeline reports path removal
+
+Task: remove optional report output path from active Pipeline experiment layout.
+
+Decision:
+- Active experiment layout should only define required durable paths.
+- `reports/` is not needed in the current design; summaries can be generated later from `experiment_ledger.jsonl` and `artifacts/<run_id>/` if needed.
+
+Changes:
+- Removed `reports/` from `docs/pipeline_design.md` section 7.1 path tree.
+- Removed the `reports/` row from the path table.
+
+Validation:
+- Targeted residual search confirmed active Pipeline docs no longer mention `reports/`.
+- `git diff --check` passed.
+- Resource checks were not needed for this documentation-only edit beyond the current session checks; no workload was started.
+
+## 2026-06-09 Fold single-Docker output boundary
+
+Task: align Fold output accounting with the design that training/validation and frozen test run in the same Fold Docker.
+
+Decision:
+- A Fold uses one Docker run by default.
+- The same Fold run contains Agent training/validation, then Agent shutdown/write lock, then Runner/root frozen test.
+- The Fold record in `experiment_ledger.jsonl` should include both `results/valid_*` and `results/test_*`.
+- `record_type=fold_test` is unnecessary and was removed from the current design.
+
+Changes:
+- Updated `docs/pipeline_design.md` section 4.3 and chapter 7.
+- Merged the previous Fold training/validation and frozen-test rows into one `Fold Docker` row.
+- Updated `docs/environment_design.md` so `frozen_eval` runs in the same Fold Docker after Agent stop and write lock.
+
+Validation:
+- Targeted residual search confirmed active docs no longer mention `record_type=fold_test` or separate Fold frozen-test ledger output.
+- `git diff --check` passed.
+- No workload was started.
+
+## 2026-06-09 Strategy artifact vs run artifacts wording
+
+Task: clarify that historical results and Agent conversations are retained, but not stored in the strategy handoff package.
+
+Decision:
+- `strategy_artifacts/` should be the minimal reusable package passed between Folds/Epochs: `factor/`, `nl_prior/`, and `manifest.json`.
+- Historical `results/`, Agent conversations, Shell/Tool traces and debug materials remain useful and should be preserved under `artifacts/<run_id>/`.
+- Chapter 7 should not repeat the next-Fold copy procedure already described earlier in Pipeline docs.
+
+Changes:
+- Updated `docs/pipeline_design.md` section 7.4 wording.
+- Removed the repeated next-Fold copy sentence from that section.
+
+Validation:
+- Targeted search confirmed the old "do not save historical results or Agent conversations" wording was removed from active docs.
+- `git diff --check` passed.
+- No workload was started.
+
+## 2026-06-09 Run artifact wording precision
+
+Task: replace vague retained-artifact wording with concrete file names.
+
+Decision:
+- Use concrete retained artifact names in Pipeline chapter 7.
+- The retained run evidence is `results/`, `agent_trace.jsonl`, `run_manifest.json`, and optional `workspace/` debug materials.
+
+Changes:
+- Updated `docs/pipeline_design.md` section 7.4.
+
+Validation:
+- Targeted section read confirmed the wording now uses concrete file names.
+- `git diff --check` passed.
+- No workload was started.

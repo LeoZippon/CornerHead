@@ -120,6 +120,8 @@
 | 行业分类 | `index_classify` | `src=SW2021` | 申万行业层级 |
 | 行业成分 | `index_member_all` | 按一级行业 | 历史行业暴露 |
 
+`stock_company.introduction` 是当前公司简介类字段，缺少可直接用于历史回测的发布时间。历史自然语言分析不得把它直接注入 Prompt；公司业务上下文应优先由历史名称、行业成分、`fina_mainbz_vip` 主营业务构成和 as-of 文本库生成。实盘或 forward run 如需使用当前简介，应按下载时间标记 `available_at`。
+
 日频行情与交易约束：
 
 | 数据 | 接口 | 拉取方式 | 用途 |
@@ -447,6 +449,7 @@ crontab -l
 | `share_float_complete` 可能仍有触顶风险 | 解禁供给压力 | 专用入口补全并生成 union；exact-6000 标记 `source_cap_risk` |
 | 历史分钟线与日线股票池不完全一致 | 早期 NEEQ/BSE 迁移、停牌退市 | 正式分钟审计用本地分钟覆盖口径；daily 覆盖对比只做专项 |
 | 日频表覆盖口径不同 | `daily`、`daily_basic`、`stk_limit` 等 join | 特征层显式处理缺失，不默认全集一致 |
+| 当前公司简介缺少历史可见时间 | 历史文本 Prompt 可能泄露未来业务描述 | 历史回测不直接使用 `stock_company.introduction`；公司上下文由历史名称、行业、主营业务构成和 as-of 文本生成 |
 | TuShare 可能回写历史数据 | 近期和部分历史分区 | 定时任务强刷滚动窗口并写修正账本；旧非空、新空默认不覆盖 |
 | `limit_list_d.limit_amount` 历史不稳定 | 打板和涨停强度字段 | raw 保留，默认不进入冻结交易输入 |
 | 结构性重复业务键 | `block_trade`、`top_list` 等 | raw 保留，审计 warning；进入特征前必须扩展键、聚合或去重 |
