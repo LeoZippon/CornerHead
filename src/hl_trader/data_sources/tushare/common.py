@@ -16,8 +16,9 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 import pandas as pd
-import pyarrow.parquet as pq
 import requests
+
+from .io import append_jsonl, has_pagination_probe, parquet_meta, parquet_rows, read_many, write_parquet
 
 
 API_URL = "https://api.tushare.pro"
@@ -970,22 +971,6 @@ def query_paged(client: TuShareClient, api_name: str, params: dict[str, Any], fi
             raise RuntimeError(f"{api_name} pagination exceeded safety limit for params={params}")
     return ApiResult(result_fields, all_items, stable_hash({"fields": result_fields, "items": all_items})), pages
 
-def write_parquet(path: Path, df: pd.DataFrame, *, api_name: str, params: dict[str, Any], fields: list[str], source_hash: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    df.to_parquet(tmp, index=False)
-    os.replace(tmp, path)
-    meta = {
-        "api_name": api_name,
-        "params": params,
-        "fields": fields,
-        "row_count": int(len(df)),
-        "source_hash": source_hash,
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "format": "parquet",
-    }
-    path.with_suffix(path.suffix + ".meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-
 def canonical_revision_value(value: Any) -> str:
     if value is None:
         return ""
@@ -1182,15 +1167,6 @@ def build_revision_event(
     })
     return event
 
-def parquet_meta(path: Path) -> dict[str, Any]:
-    meta_path = path.with_suffix(path.suffix + ".meta.json")
-    if not meta_path.exists():
-        return {}
-    try:
-        return json.loads(meta_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
 def finalize_revision_event(
     event: dict[str, Any],
     *,
@@ -1256,29 +1232,6 @@ def write_parquet_revision_aware(
             return False
     write_parquet(path, df, api_name=api_name, params=params, fields=fields, source_hash=source_hash)
     return True
-
-def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-
-def read_many(files: list[Path], columns: list[str] | None = None) -> pd.DataFrame:
-    frames = [pd.read_parquet(path, columns=columns) for path in files]
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
-def parquet_rows(path: Path) -> int:
-    return pq.ParquetFile(path).metadata.num_rows
-
-def has_pagination_probe(path: Path) -> bool:
-    meta_path = path.with_suffix(path.suffix + ".meta.json")
-    if not meta_path.exists():
-        return False
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    pagination = (meta.get("params") or {}).get("pagination") or {}
-    return int(pagination.get("pages") or 0) > 1
 
 def load_stock_codes(raw_dir: Path) -> list[str]:
     files = sorted((raw_dir / "stock_basic").glob("list_status=*.parquet"))
@@ -1979,24 +1932,81 @@ def safe_partition_value(value: str) -> str:
     cleaned = re.sub(r"[^0-9A-Za-z_.-]+", "_", str(value).strip())
     return cleaned.strip("_") or stable_hash(value)[:12]
 
+# A source timestamp is a credible publication time only when it sits near the
+# announcement/report date. Backfilled history carries collection timestamps
+# (e.g. 2025 rec_time on 2020 announcements) that must not gate PIT visibility.
+TEXT_TIME_PLAUSIBLE_BEFORE_DAYS = 1.0
+TEXT_TIME_PLAUSIBLE_AFTER_DAYS = 3.0
+
 def augment_text_frame(df: pd.DataFrame, spec: TextDataset) -> pd.DataFrame:
     df = df.copy()
     if "available_at" not in df.columns:
         df["available_at"] = ""
         df["available_at_rule"] = "missing_source_time"
+    date_value = None
+    if spec.date_column and spec.date_column in df.columns:
+        date_value = df[spec.date_column].astype(str).str.strip()
+    implausible = pd.Series(False, index=df.index)
     if spec.time_column and spec.time_column in df.columns:
         source_time = df[spec.time_column].map(normalize_source_datetime)
         mask = source_time.ne("") & source_time.ne("nan") & source_time.ne("None")
+        if date_value is not None:
+            base = pd.to_datetime(date_value, format="%Y%m%d", errors="coerce")
+            parsed = pd.to_datetime(source_time.str.slice(0, 19), errors="coerce")
+            lag_days = (parsed - base).dt.total_seconds() / 86400.0
+            plausible = lag_days.between(-TEXT_TIME_PLAUSIBLE_BEFORE_DAYS, TEXT_TIME_PLAUSIBLE_AFTER_DAYS)
+            implausible = mask & base.notna() & ~plausible.fillna(False)
+            mask = mask & (base.isna() | plausible.fillna(False))
         df.loc[mask, "available_at"] = source_time[mask]
         df.loc[mask, "available_at_rule"] = f"source:{spec.time_column}"
-    if spec.date_column and spec.date_column in df.columns:
-        date_value = df[spec.date_column].astype(str).str.strip()
+        df.loc[implausible, "available_at"] = ""
+    if date_value is not None:
         mask = (df["available_at"].astype(str).str.strip() == "") & date_value.str.fullmatch(r"\d{8}", na=False)
         suffix = " 22:00:00+08:00" if spec.api_name == "report_rc" else " 23:59:59+08:00"
         fallback = date_value.str.slice(0, 4) + "-" + date_value.str.slice(4, 6) + "-" + date_value.str.slice(6, 8) + suffix
         df.loc[mask, "available_at"] = fallback[mask]
         df.loc[mask, "available_at_rule"] = f"conservative_from:{spec.date_column}"
+        df.loc[mask & implausible, "available_at_rule"] = (
+            f"conservative_from:{spec.date_column}:implausible_{spec.time_column}"
+        )
     return df
+
+def repair_text_available_at(raw_dir: str, datasets: list[str]) -> dict[str, Any]:
+    """Re-derive available_at for existing text partitions under the current rule.
+
+    Pure local rewrite of the two derived columns; source fields and sidecars
+    stay untouched.
+    """
+    stats: dict[str, Any] = {"datasets": {}, "files_rewritten": 0, "rows_changed": 0}
+    for dataset in datasets:
+        spec = TEXT_SPECS.get(dataset)
+        if spec is None:
+            raise RuntimeError(f"unknown text dataset: {dataset}")
+        dataset_dir = Path(raw_dir) / dataset
+        if not dataset_dir.exists():
+            raise RuntimeError(f"missing dataset directory: {dataset_dir}")
+        files = 0
+        changed_rows = 0
+        for path in sorted(dataset_dir.rglob("*.parquet")):
+            frame = pd.read_parquet(path)
+            if frame.empty:
+                continue
+            before = frame.get("available_at", pd.Series("", index=frame.index)).astype(str)
+            repaired = augment_text_frame(
+                frame.drop(columns=[c for c in ("available_at", "available_at_rule") if c in frame.columns]),
+                spec,
+            )
+            delta = int((repaired["available_at"].astype(str) != before).sum())
+            if delta:
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                repaired.to_parquet(tmp, index=False)
+                tmp.replace(path)
+                files += 1
+                changed_rows += delta
+        stats["datasets"][dataset] = {"files_rewritten": files, "rows_changed": changed_rows}
+        stats["files_rewritten"] += files
+        stats["rows_changed"] += changed_rows
+    return stats
 
 def add_raw_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--raw-dir", default="data/raw")

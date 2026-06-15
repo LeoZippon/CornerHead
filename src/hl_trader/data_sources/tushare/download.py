@@ -7,6 +7,10 @@ import argparse
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import pyarrow.parquet as pq
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -3014,6 +3018,14 @@ def add_share_float_parser(sub: argparse._SubParsersAction) -> None:
     core.add_runtime_args(parser, min_interval=0.22, timeout=90)
     parser.add_argument("--output", help="Optional process report path. No status file is written by default; event-flow audit checks the union artifact.")
 
+def add_repair_text_parser(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser(
+        "repair-text-available-at",
+        help="re-derive text available_at locally under the plausibility rule (no API calls)",
+    )
+    core.add_raw_arg(parser)
+    parser.add_argument("--datasets", nargs="+", default=["anns_d", "report_rc"], choices=sorted(core.TEXT_SPECS))
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -3021,6 +3033,7 @@ def parse_args() -> argparse.Namespace:
     add_update_parser(sub)
     add_intraday_parsers(sub)
     add_share_float_parser(sub)
+    add_repair_text_parser(sub)
     return parser.parse_args()
 
 def main() -> int:
@@ -3035,6 +3048,10 @@ def main() -> int:
         return update_intraday_by_date(args)
     if args.command == "download-share-float-complete":
         return download_share_float_complete(args)
+    if args.command == "repair-text-available-at":
+        stats = core.repair_text_available_at(args.raw_dir, list(args.datasets))
+        print(json.dumps({"status": "ok", **stats}, ensure_ascii=False, sort_keys=True))
+        return 0
     raise RuntimeError(f"unknown command {args.command}")
 
 if __name__ == "__main__":

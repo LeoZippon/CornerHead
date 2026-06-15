@@ -3,7 +3,7 @@
 本目录会复制到：
 
 ```text
-/mnt/artifacts/agent_output/nl_prior/
+/mnt/agent/agent_output/nl_prior/
 ```
 
 `README.md` 是只读说明文件。Agent 只修改：
@@ -47,7 +47,7 @@
 | `id` | 稳定唯一 ID，只用小写字母、数字和下划线 |
 | `text` | 一条可迁移投资逻辑 |
 | `evidence` | 规则需要的证据类型，例如 `announcement`、`news`、`research` |
-| `effect` | 规则触发后的影响，例如 `lower_score`、`raise_score`、`hard_exclude` |
+| `effect` | 规则触发后的影响，例如 `raise_score`、`lower_score`、`support_short`、`hard_exclude` |
 
 示例：
 
@@ -56,9 +56,9 @@
   "rules": [
     {
       "id": "risk_governance_disclosure",
-      "text": "近期存在监管问询、诉讼、重要股东减持或审计异常时，应降低自然语言分；证据明确严重时可剔除。",
+      "text": "近期存在监管问询、诉讼、重要股东减持或审计异常时，应降低自然语言分；如果经营和治理风险相互印证，可支持做空候选。",
       "evidence": ["announcement", "news"],
-      "effect": "lower_score_or_hard_exclude"
+      "effect": "lower_score_or_support_short"
     }
   ]
 }
@@ -71,6 +71,7 @@
 - “业绩改善如果伴随明显减持公告，应降低自然语言分。”
 - “重大订单或回购需要有公告或多来源文本支持，单一传闻不应显著加分。”
 - “监管问询、诉讼、处罚、审计异常在短窗口内应触发降权或剔除。”
+- “经营恶化、现金流承压和负面披露相互印证时，可以给出负分，支持做空候选。”
 
 不要写：
 
@@ -90,8 +91,8 @@
 大致流程：
 
 1. `backtest_tool` 读取候选股票代码、公司背景和 `prior.json` 规则。
-2. LLM 根据公司背景和规则生成文本检索方向。
-3. `backtest_tool` 在当前可见文本库中检索公告、新闻、研报和政策证据。
+2. LLM 根据公司背景和规则生成文本检索方向，优先组合公司名、证券代码、主营业务/行业词和事件词。
+3. `backtest_tool` 在当前可见文本库中检索公告、新闻、研报和政策证据；候选公司自身证据优先，泛化行业/宏观证据只能作背景补充。
 4. LLM 只基于检索到的 evidence 和规则输出自然语言分、置信度、风险标签和简短理由。
 5. `backtest_tool` 校验输出后，再把自然语言分和因子分合成；LLM 看不到因子分。
 
@@ -102,7 +103,8 @@
 只能使用 decision_time 前可见的 company_context、prior_rules 和 evidence。
 不得使用未来行情、未来公告、测试期结果、held-out 结果或当前常识中的未来事实。
 如果证据不足，输出中性分并降低 confidence。
-必须引用 evidence_ids；没有可用 evidence 时 evidence_ids 为空数组。
+非中性或引用证据的评分必须引用 applied_prior_ids；ID 必须来自 prior_rules。
+必须引用候选公司相关的 evidence_ids；没有可用候选公司证据时 evidence_ids 为空数组。
 可以在内部分析证据和规则，但最终响应只能输出一个 JSON object。
 reason 字段只写可审计的简短依据。
 
@@ -118,11 +120,8 @@ reason 字段只写可审计的简短依据。
 - nl_score
 - confidence
 - risk_tags
-- positive_points
-- negative_points
 - applied_prior_ids
 - evidence_ids
-- reason
 ```
 
 ## 评分含义
@@ -131,7 +130,7 @@ reason 字段只写可审计的简短依据。
 
 | 情况 | 分数范围 |
 |---|---|
-| 严重负面，例如处罚、重大诉讼、审计异常、造假或退市风险 | `[-1.00, -0.60]` |
+| 严重负面，例如处罚、重大诉讼、审计异常、造假或退市风险，可支持回避或做空 | `[-1.00, -0.60]` |
 | 中等负面，例如减持、问询、业绩承压、舆情负面 | `[-0.60, -0.20]` |
 | 中性或证据不足 | `[-0.10, 0.10]` |
 | 轻度正面，例如订单、回购、政策受益、业绩改善 | `[0.10, 0.40]` |

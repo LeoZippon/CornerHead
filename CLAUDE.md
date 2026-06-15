@@ -2,12 +2,20 @@
 
 ## Environment
 
-- Python Environment is 'stock' installed at `~/miniconda3/envs/stock`.
+- Python Environment is `quant` installed at `~/miniconda3/envs/quant` with Python 3.11.
 - Use that installation for environment activation and package management.
+- The previous `stock` environment may still exist for historical runs, but new local scripts, tests, cron jobs, and non-Docker tools should use `quant`.
+- Docker sandbox Python is independent from the local conda environment; rebuild `ops/docker/sandbox.Dockerfile` when sandbox dependencies change.
 - Prefer explicit environment setup over ad hoc local Python changes.
 - The real writable repository root on this machine is `/Data/lzp/MacroQuant`.
 - Paths under `/home/coder/projects/...` may be wrapper artifacts and should not be trusted for writes.
 - Before editing or running commands that write files, confirm the real path with `pwd -P` or `realpath`.
+
+## Repository Organization
+
+- Keep production implementation under `src/hl_trader/`; `scripts/` should contain thin command-line entrypoints only.
+- Group scripts by responsibility instead of leaving unrelated entrypoints at the top level: data operations in `scripts/data/`, experiment runs and reports in `scripts/experiments/`, and developer utilities in `scripts/dev/`.
+- Avoid adding new one-off top-level scripts. If a script grows substantial business logic, move the logic into `src/hl_trader/` and keep the script as a small wrapper.
 
 ## Git and GitHub
 
@@ -44,10 +52,10 @@
 
 - Treat the current design docs as the communication layer between audit, research decisions, and implementation.
 - Keep exactly five current living docs aligned by scope:
-  - `@docs/data_documentation.md`: data sources, downloads, audits, PIT rules, and unit rules.
-  - `@docs/agent_design.md`: evidence packs, LLM shadow, provider adapters, and Agent boundaries.
-  - `@docs/environment_design.md`: PIT features, Walk-Forward, replay, execution, and experiment ledgers.
-  - `@docs/pipeline_design.md`: feature build, development WFO, held-out, LLM shadow, and cross-layer orchestration.
+  - `@docs/data_documentation.md`: data sources, downloads, audits, PIT availability rules, unit rules, and known data risks.
+  - `@docs/agent_design.md`: Agent-visible inputs, writable strategy artifacts, prompt protocol, tool usage semantics, and forbidden behavior.
+  - `@docs/environment_design.md`: PIT snapshots, Sandbox/runtime paths, trusted tools, Broker/backtest/NL scoring, LLM API boundary, and run logs.
+  - `@docs/pipeline_design.md`: Fold/Epoch/Held-out orchestration, artifact handoff, freeze/fallback rules, ledgers, and reporting.
   - `@docs/QMT_documentation.md`: QMT deployment and live-operation workflow.
 - When a change materially affects one of these areas, update the relevant document in the same work item. Do not rely on code or logs alone to communicate a changed design, data contract, or operating procedure.
 - Keep these documents concise and current. They should describe the latest accepted state, not a chronology of earlier attempts, old names, or superseded workflows.

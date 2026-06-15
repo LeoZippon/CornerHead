@@ -90,7 +90,7 @@ def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
     return [
         [
             ctx.python,
-            "scripts/tushare/audit.py",
+            "scripts/data/tushare_audit.py",
             "base",
             "--start-date",
             ctx.start_date,
@@ -108,7 +108,7 @@ def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
         ],
         [
             ctx.python,
-            "scripts/tushare/audit.py",
+            "scripts/data/tushare_audit.py",
             "macro",
             "--start-date",
             ctx.start_date,
@@ -119,7 +119,7 @@ def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
         ],
         [
             ctx.python,
-            "scripts/tushare/audit.py",
+            "scripts/data/tushare_audit.py",
             "intraday-by-date",
             "--start-date",
             ctx.start_date,
@@ -134,7 +134,7 @@ def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
         ],
         [
             ctx.python,
-            "scripts/tushare/audit.py",
+            "scripts/data/tushare_audit.py",
             "event-flow",
             "--start-date",
             ctx.start_date,
@@ -145,7 +145,7 @@ def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
         ],
         [
             ctx.python,
-            "scripts/tushare/audit.py",
+            "scripts/data/tushare_audit.py",
             "board-trading",
             "--start-date",
             ctx.start_date,
@@ -156,7 +156,7 @@ def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
         ],
         [
             ctx.python,
-            "scripts/tushare/audit.py",
+            "scripts/data/tushare_audit.py",
             "base",
             "--include-text",
             "--start-date",
@@ -185,7 +185,7 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
     if operation == "update":
         command = [
             ctx.python,
-            "scripts/tushare/download.py",
+            "scripts/data/tushare_download.py",
             "update",
             "--start-date",
             ctx.start_date,
@@ -200,7 +200,7 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
     if operation == "download_event_flow":
         command = [
             ctx.python,
-            "scripts/tushare/download.py",
+            "scripts/data/tushare_download.py",
             "download",
             "--tier",
             "event_flow",
@@ -220,7 +220,7 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
             raise ValueError("download_tier job requires a tier")
         command = [
             ctx.python,
-            "scripts/tushare/download.py",
+            "scripts/data/tushare_download.py",
             "download",
             "--tier",
             tier,
@@ -237,7 +237,7 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
     if operation == "audit_event_flow":
         command = [
             ctx.python,
-            "scripts/tushare/audit.py",
+            "scripts/data/tushare_audit.py",
             "event-flow",
             "--start-date",
             ctx.start_date,
@@ -257,7 +257,7 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
         commands = [
             [
                 ctx.python,
-                "scripts/hl.py",
+                "scripts/data/build_features.py",
                 "build-fundamental-events",
                 "--raw-dir",
                 raw_dir,
@@ -270,7 +270,7 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
             ],
             [
                 ctx.python,
-                "scripts/hl.py",
+                "scripts/data/build_features.py",
                 "audit-fundamental-events",
                 "--events-root",
                 fundamental_root,
@@ -284,7 +284,7 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
             ],
             [
                 ctx.python,
-                "scripts/hl.py",
+                "scripts/data/build_features.py",
                 "build-features",
                 "--raw-dir",
                 raw_dir,
@@ -308,7 +308,7 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
         revision_config = ctx.config.get("revision_monitor", {})
         command = [
             ctx.python,
-            "scripts/tushare/audit.py",
+            "scripts/data/tushare_audit.py",
             "revision-sentinel",
             "--start-date",
             ctx.start_date,

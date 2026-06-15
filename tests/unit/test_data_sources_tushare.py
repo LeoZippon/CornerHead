@@ -636,14 +636,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertEqual(len(commands), 6)
         command_text = [" ".join(command) for command in commands]
-        self.assertIn("scripts/tushare/audit.py base", command_text[0])
+        self.assertIn("scripts/data/tushare_audit.py base", command_text[0])
         self.assertIn("--include-limit-list", command_text[0])
-        self.assertIn("scripts/tushare/audit.py macro", command_text[1])
-        self.assertIn("scripts/tushare/audit.py intraday-by-date", command_text[2])
+        self.assertIn("scripts/data/tushare_audit.py macro", command_text[1])
+        self.assertIn("scripts/data/tushare_audit.py intraday-by-date", command_text[2])
         self.assertIn("--expected-codes-source minute", command_text[2])
-        self.assertIn("scripts/tushare/audit.py event-flow", command_text[3])
+        self.assertIn("scripts/data/tushare_audit.py event-flow", command_text[3])
         self.assertIn("--end-date 20260531", command_text[3])
-        self.assertIn("scripts/tushare/audit.py board-trading", command_text[4])
+        self.assertIn("scripts/data/tushare_audit.py board-trading", command_text[4])
         self.assertIn("--include-text", command_text[5])
         self.assertTrue(all("--start-date 20200101" in text for text in command_text))
         self.assertTrue(all("--raw-dir raw" in text for text in command_text))
@@ -691,7 +691,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertEqual(len(commands), 1)
         text = " ".join(commands[0])
-        self.assertIn("scripts/tushare/download.py download --tier board_trading", text)
+        self.assertIn("scripts/data/tushare_download.py download --tier board_trading", text)
         self.assertIn("--start-date 20260601 --end-date 20260601", text)
         self.assertIn("--raw-dir raw", text)
         self.assertIn("--datasets kpl_list --force", text)
@@ -712,7 +712,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertEqual(len(commands), 1)
         text = " ".join(commands[0])
-        self.assertIn("scripts/tushare/audit.py revision-sentinel", text)
+        self.assertIn("scripts/data/tushare_audit.py revision-sentinel", text)
         self.assertIn("--start-date 20200101 --end-date 20260601", text)
         self.assertIn("--raw-dir raw", text)
         self.assertIn("--sample-size 12 --datasets adj_factor", text)
@@ -733,7 +733,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertEqual(len(commands), 1)
         text = " ".join(commands[0])
-        self.assertIn("scripts/tushare/audit.py event-flow", text)
+        self.assertIn("scripts/data/tushare_audit.py event-flow", text)
         self.assertIn("--start-date 20200101 --end-date 20260601", text)
         self.assertIn("--raw-dir raw", text)
 
@@ -757,12 +757,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         commands = cron_update.build_job_commands(ctx)
 
         self.assertEqual(len(commands), 3)
-        self.assertIn("scripts/hl.py build-fundamental-events", " ".join(commands[0]))
+        self.assertIn("scripts/data/build_features.py build-fundamental-events", " ".join(commands[0]))
         self.assertIn("--raw-dir raw --output-root features/fundamental_events", " ".join(commands[0]))
-        self.assertIn("scripts/hl.py audit-fundamental-events", " ".join(commands[1]))
+        self.assertIn("scripts/data/build_features.py audit-fundamental-events", " ".join(commands[1]))
         self.assertIn("--events-root features/fundamental_events", " ".join(commands[1]))
         self.assertIn("--require-partitions", " ".join(commands[1]))
-        self.assertIn("scripts/hl.py build-features", " ".join(commands[2]))
+        self.assertIn("scripts/data/build_features.py build-features", " ".join(commands[2]))
         self.assertIn("--dataset daily_alpha --fundamental-events-dir features/fundamental_events", " ".join(commands[2]))
 
     def test_cron_feature_pipeline_initializes_missing_event_layer_from_default_start(self):
@@ -1606,8 +1606,8 @@ def load_tushare_data_module():
         spec.loader.exec_module(module)
         return module
 
-    download = load("macroquant_tushare_download", script_root / "tushare" / "download.py")
-    audit = load("macroquant_tushare_audit", script_root / "tushare" / "audit.py")
+    download = load("macroquant_tushare_download", script_root / "data" / "tushare_download.py")
+    audit = load("macroquant_tushare_audit", script_root / "data" / "tushare_audit.py")
     return types.SimpleNamespace(
         compact_intraday_by_date=download.compact_intraday_by_date,
         audit_intraday_by_date=audit.audit_intraday_by_date,

@@ -8,6 +8,10 @@ import sys
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import pyarrow.parquet as pq
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))

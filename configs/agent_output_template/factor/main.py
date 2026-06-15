@@ -2,11 +2,11 @@
 
 The Environment copies this file to:
 
-    /mnt/artifacts/agent_output/factor/main.py
+    /mnt/agent/agent_output/factor/main.py
 
 Factor metadata must be registered in:
 
-    /mnt/artifacts/agent_output/factor/factors.json
+    /mnt/agent/agent_output/factor/factors.json
 
 `backtest_tool` is the only formal caller. It calls generate_candidates() inside the
 fixed Sandbox layout; the Agent must not hard-code dates, paths, or future data
@@ -22,7 +22,7 @@ import pandas as pd
 
 
 SNAPSHOT_DIR = Path(os.environ.get("MQ_SNAPSHOT_DIR", "/mnt/snapshot"))
-NL_PRIOR_DIR = Path("/mnt/artifacts/agent_output/nl_prior")
+NL_PRIOR_DIR = Path("/mnt/agent/agent_output/nl_prior")
 
 REQUIRED_OUTPUT_COLUMNS = (
     "ts_code",
@@ -38,17 +38,23 @@ def generate_candidates() -> pd.DataFrame:
     Fixed input paths:
     - /mnt/snapshot/: Runner-managed current read-only PIT data window.
       Agent debugging may set MQ_SNAPSHOT_DIR=/mnt/snapshots/train.
-    - /mnt/artifacts/agent_output/nl_prior/: current natural-language prior.
+    - /mnt/agent/agent_output/nl_prior/: current natural-language prior.
 
     Required output columns:
     - ts_code: stock code.
-    - factor_score: numeric score computed only from PIT-visible factor logic.
+    - factor_score: numeric directional score computed only from PIT-visible
+      factor logic. Positive means bullish/long preference; negative means
+      bearish, avoid, or short preference.
     - reason: short reason string.
     - source_artifacts: JSON-serializable list of data/rule identifiers.
 
-    The Agent is responsible for factor ranking and pre-screening. Return a
-    bounded candidate pool, not the full market. The runtime max candidate count
-    is provided by the run manifest; a practical default target is 30-100 names.
+    The Agent is responsible for PIT-visible factor scoring, ranking, and basic
+    filtering. backtest_tool combines factor and NL scores, then uses the
+    run-manifest final-score thresholds: >= +0.7 for long, <= -0.7 for short,
+    neutral otherwise, with at most 10 executable long+short names by default.
+    The Environment ranks long names by high score, ranks short names by
+    negative-score strength, and rolls unavailable short candidates down to the
+    next shortable candidate.
 
     The formal order plan is built by backtest_tool after NL scoring and
     trading-constraint checks.

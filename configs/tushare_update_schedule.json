@@ -3,7 +3,7 @@
   "source_verified_at": "2026-05-29",
   "timezone": "Asia/Shanghai",
   "repo_root": "/Data/lzp/MacroQuant",
-  "python": "/home/lzp/miniconda3/envs/stock/bin/python",
+  "python": "/home/lzp/miniconda3/envs/quant/bin/python",
   "default_start_date": "20200101",
   "default_raw_dir": "data/raw",
   "default_feature_root": "data/features",

@@ -8716,3 +8716,858 @@ Validation:
 - Targeted section read confirmed the wording now uses concrete file names.
 - `git diff --check` passed.
 - No workload was started.
+
+## 2026-06-09 Design document audit fixes
+
+Task: address concrete issues from a read-only audit of Data, Agent, Environment and Pipeline design documents.
+
+Changes:
+- Fixed Pipeline strategy artifact examples to use the quarterly Fold convention (`fold_2022Q1`, `strategy_epoch001_fold2022Q1`) and the initial template parent for the startup Fold.
+- Defined the natural-language score contract as `nl_score ∈ [-1, 1]` and `confidence ∈ [0, 1]`, with the default factor/NL blend using the same score scale.
+- Replaced a stale Data document reference to `decision_observation` and “特征单位统一” with the current Environment “单位合同”.
+- Clarified that `/mnt/snapshots/valid` stores validation replay data, while validation results live under `/mnt/artifacts/results/valid_<idx>/`.
+- Removed the duplicated numeric snapshot-switching example from Pipeline and kept Environment as the owner of `/mnt/snapshot` binding mechanics.
+- Clarified that Epoch regularization cannot call formal `backtest_tool` to create return backtests; it may only pass modification checks and a read-only contract check.
+- Made Environment the canonical source for default visible-window lengths and detailed natural-language scoring modes; Agent and Pipeline now reference that contract instead of copying the full values.
+- Documented the minute update/audit distinction: new trading days attempt the `daily` universe, while existing by-date minute files use the local minute coverage口径; strict daily coverage remains a专项排查.
+
+Validation:
+- Targeted grep checked removal of stale `decision_observation`, month-style strategy artifact examples, and duplicated Pipeline snapshot example.
+- Source grep confirmed TuShare intraday update/audit defaults already use `expected_codes_source=minute` for existing by-date validation paths.
+- `git diff --check` passed.
+- Documentation-only change; no data download, audit, training or inference workload was started.
+
+## 2026-06-10 Tool and auction boundary cleanup
+
+Task: finish the remaining documentation issues from the same design-doc audit: duplicated `backtest_tool` semantics and owner-less auction correction constants.
+
+Changes:
+- Updated `docs/agent_design.md` so Agent docs no longer list the authoritative `backtest_tool` internal execution order. Agent docs now state only what the Agent prepares, requests, and reads; Environment remains the owner of candidate validation, natural-language scoring, score synthesis, order generation, trading constraints, and Broker replay order.
+- Updated `docs/data_documentation.md` so the深圳 09:30 minute-vs-auction issue is recorded as a raw-data risk without hard-coding Environment-layer constants.
+- Updated `docs/environment_design.md` unit/口径 contract with the actual derived-field rule: when historical 09:30 minute bars are used as live `stk_auction` proxy features, Shenzhen `00*.SZ` uses multiplier `0.76`, Shenzhen `30*.SZ` uses `0.58`, and SH/BJ/other times keep `1.0`; raw data and 15:00 close auction are not rewritten.
+
+Validation:
+- Targeted section reads confirmed Agent docs point to Environment for the hard `backtest_tool` contract.
+- Targeted grep confirmed the auction multiplier constants only remain in Environment docs and code/audit references, not in Data's risk table.
+- `git diff --check` passed.
+- Documentation-only change; no workload was started.
+
+## 2026-06-10 Backtest defaults, Sharpe and convergence docs
+
+Task: add the requested default capital/cost assumptions, Sharpe evaluation metric and Pipeline convergence criterion at the design-document level only.
+
+Changes:
+- Documented the target default Broker profile in `docs/environment_design.md`: initial capital `1_000_000` CNY and commission `1.0 bps`.
+- Added Sharpe to Environment result statistics, Pipeline validation/early-stop language and Fold output examples, and Agent early-stop criteria.
+- Added a Pipeline convergence criterion: if recent Step modification deltas for `factor/` and `nl_prior/` shrink while validation return, Sharpe and risk constraints do not deteriorate materially, the Fold search can be considered converging.
+- Added Prompt priority guidance: first protect validation return, Sharpe and risk constraints; second, when performance is close or marginal gains are small, prefer the smaller and simpler factor/prior modification.
+- Added `modification_delta_summary` to Pipeline Step summaries so convergence can be derived from `modification_check_tool` diff outputs.
+- Reverted the initial code/test attempt after the user clarified this should be documentation-only.
+
+Validation:
+- Confirmed no code/test diff remains after reverting the initial implementation attempt.
+- `git diff --check` passed.
+- Targeted grep confirmed the documented default capital/commission, Sharpe references and Pipeline convergence guidance are present in the active docs.
+
+## 2026-06-10 Concentrated holding target
+
+Task: keep the final tradable portfolio concentrated without constraining Agent output count directly.
+
+Changes:
+- Updated `docs/agent_design.md` so `generate_candidates()` returns factor-scored candidates, not final orders; Agent output count is not the concentration control.
+- Updated `docs/environment_design.md` so `backtest_tool` applies `factor_score_threshold` from run manifest, then keeps the top `max_holdings` names by `factor_score`; default `max_holdings=10`.
+- Updated `docs/pipeline_design.md` so Pipeline writes `factor_score_threshold` and `max_holdings=10` into run manifest and validates that final holdings follow this rule.
+- Updated the factor template README and starter comment so future Agents understand that threshold filtering and top-10 selection happen inside `backtest_tool`.
+
+Validation:
+- Targeted grep confirmed active docs and factor template no longer contain the old `30-100` wording or Agent-output-count limit wording.
+- `git diff --check` passed.
+
+## 2026-06-10 Short-side mechanism design
+
+Task: add the requested securities-lending short mechanism at the design-document level while keeping the Agent free to learn bull/bear regime behavior through directional scores.
+
+Changes:
+- Updated `docs/environment_design.md` so `backtest_tool` combines factor and natural-language scores into `final_score`, then uses `final_score >= +0.7` for long orders and `final_score <= -0.7` for broker-constrained short orders. The default portfolio cap is now 10 total long+short names, ranked by absolute final score.
+- Added the 中信 short-side Broker profile boundary: 100% securities-lending margin ratio for ordinary investors, 120% for private securities funds, broker-provided per-security/per-contract borrow fee, PIT券源 quantity, maintenance collateral ratio risk lines, borrowing fee accrual and forced-cover accounting.
+- Updated Data docs to distinguish TuShare `margin_secs` exchange eligibility from actual 中信 account borrow inventory, fees and credit-risk parameters, which must come from local broker files with `available_at`.
+- Updated Agent docs and the factor/NL templates so `factor_score` is explicitly directional: positive is bullish/long preference, negative is bearish/avoid/short preference. The Agent does not output orders or check broker inventory.
+- Updated Pipeline docs so run manifests carry `long_score_threshold`, `short_score_threshold`, `max_total_holdings` and `short_mode`, while Environment resolves the default 中信 Broker profile and writes actual costs,券源、费率 and 风控 sources into `run_manifest.json`. Validation summaries record long/short return splits and short reject counts.
+
+Validation:
+- Targeted grep checked removal of the active `factor_score_threshold`/`max_holdings` wording from current docs/templates and confirmed the new long/short threshold language is present.
+- `git diff --check` passed.
+- `git diff -- src tests` was empty.
+- Documentation/template-only change; no runtime code, tests, data download, audit, training or inference workload was started.
+
+## 2026-06-10 Environment shell tool contract
+
+Task: add the missing detailed `sandbox_shell_tool` contract to Environment chapter 4.
+
+Changes:
+- Moved the detailed shell boundary from the Sandbox/Runner discussion into `docs/environment_design.md` chapter 4 as `4.2 sandbox_shell_tool`.
+- Kept chapter 3 as a short Runner/Sandbox summary and linked it to the chapter 4 contract.
+- Documented allowed shell uses, readable/writable paths, read-only files, invisible paths, no-network/non-root constraints, resource limits, command boundaries for `rg`/`sed`/`python`/`apply_patch`, and automatic `agent_trace.jsonl` logging.
+- Clarified that Shell outputs are observations only and cannot replace `modification_check_tool` or `backtest_tool`.
+
+Validation:
+- Checked Environment table of contents and section numbering.
+- `git diff --check` passed.
+- Documentation-only change; no runtime code, tests, data download, audit, training or inference workload was started.
+
+## 2026-06-10 Short inventory proxy mode
+
+Task: simplify the current short-side borrow-availability assumption so research can proceed before real CITIC inventory files are available.
+
+Changes:
+- Updated `docs/pipeline_design.md` so the current run manifest parameter is `short_inventory_mode=proxy_margin_secs`, not a real broker-inventory mode.
+- Updated `docs/environment_design.md` so default short availability uses decision-date `margin_secs` membership: in-list means borrowable for research, out-of-list means reject. Individual borrow quantity is not constrained yet; position sizing and holding caps constrain exposure.
+- Kept `broker_inventory` as the later live-approximation mode requiring real CITIC inventory, borrow quantity and per-security/per-contract fee files.
+- Updated `docs/data_documentation.md` to record that `margin_secs` is currently a research proxy, not a true CITIC account inventory.
+- Updated Agent/Pipeline wording so Agent does not reason about broker inventory and validation tracks `margin_secs` proxy rejections separately from true broker-inventory rejections.
+
+Validation:
+- Targeted grep checked current docs for `proxy_margin_secs`, `broker_inventory`, and old short-mode wording.
+- Documentation-only change; no runtime code, tests, data download, audit, training or inference workload was started.
+
+## 2026-06-10 Four living docs audit and presentation cleanup
+
+Task: audit `docs/data_documentation.md`, `docs/environment_design.md`, `docs/agent_design.md`, `docs/pipeline_design.md` for logical flaws, incorrect/ambiguous descriptions, redundancy and blurred boundaries; optimize presentation without changing meaning.
+
+Verification against implementation (all matched unless noted):
+- Cron job names/times vs `configs/tushare_update_schedule.json` and `ops/cron/install_tushare_cron.py` managed block (23:35 / 02:30 / 03:35 / 04:00 / 08:50 / 08:55 / 09:03 / 09:05 / 09:13 / 09:15 / 09:20).
+- Text page clamps (`anns_d=2000`, `major_news=400`, `npr=500`, `research_report=1000`, `report_rc=3000`, `news=1500`) and `STK_MINS_PAGE_LIMIT=8000` in `src/hl_trader/data_sources/tushare/common.py`.
+- Audit CLI subcommands (`base [--include-text]`, `macro`, `intraday-by-date`, `event-flow`, `board-trading`, `auction-alignment`, `revision-sentinel`).
+- Macro dataset list (`cn_m`, `sf_month`, `shibor_lpr`, `us_tycr/us_trycr/us_tbr/us_tltr`, etc.), `trade_cal_lookahead_days=7`, evening lookback 30 days, intraday refresh lookback 1 day, fundamental refresh 6 periods / 3 ann-months.
+- Auction correction factors 0.76/0.58 in `src/hl_trader/environment/features/auction.py`; revision ledger paths and `downstream_status=pending_review`; `MQ_SNAPSHOT_DIR` in `configs/agent_output_template/`.
+- moneyflow 19:00 / block_trade 21:00 / margin 09:00 / margin_secs pre-open visibility vs config interface metadata.
+
+Fixed inconsistencies:
+- data doc 3.3: pre-open retry jobs are `cn_preopen_margin_secs_retry_0913` and `cn_preopen_margin_retry_0915`, not `*_backfill_*`.
+- data doc 3.3/4.1: `results/data_quality/` also holds feature-layer `fundamental_events_status.json` (from `cn_nightly_feature_build`); documented it as outside the 6 raw-data status files, alongside the revision ledger.
+- pipeline 3.1: `/mnt/artifacts` tree showed `strategy_artifact_manifest.json`, absent from the authoritative Environment 3.2 layout; replaced with `run_manifest.json` + `agent_trace.jsonl`.
+- agent 2.1: formal `generate_candidates()` restriction now names all `/mnt/snapshots/` stage dirs, not only `valid`/`results`.
+
+Presentation-only edits (meaning preserved):
+- environment 4.4: removed in-place duplication of candidate-return/threshold statements already covered by the adjacent column table and the "默认交易阈值" table.
+- environment 2.2/2.4: removed repeated "Agent may use a shorter window" sentence and the fully redundant closing recap of the snapshot-slot walkthrough.
+- environment 4.1: phase column renamed to 训练/验证/正则化; environment 6.3: LLM call-detail table reworded to separate full-detail location vs `agent_trace.jsonl` content.
+- pipeline 3.2: dense pre-call preparation paragraph converted to a bullet list.
+
+Report-only findings (no edit):
+- Trade thresholds (+0.7/-0.7/max 10) restated in env 4.4/5.3/5.4, agent 4.1, pipeline 3.2/4.1; values are consistent today but drift-prone — Environment 5.3 profile should remain the single source when next touched.
+- Short-inventory mode semantics duplicated between data doc 2.5/6 and environment 5.3 (boundary blur; data doc should keep only the data-contract part).
+- `fundamental_events`/`daily_alpha` feature layer is built nightly but its contract appears in no living doc; environment doc only references `fundamental_events` indirectly.
+- Decision-time examples use 09:20 (environment 2.2) while data doc 5.2 and cron comments gate at 09:25; harmless for historical research but worth unifying later.
+- env 4.4 "复用当前产物对应的 modification_check_tool 结果" vs pipeline 3.2 "必须再次调度复查": consistent only if reuse is keyed to the current artifact hash; wording could be tightened later.
+
+Validation:
+- `git diff --check` passed; grep confirmed no `strategy_artifact_manifest` references remain in docs and threshold tables are intact.
+- Documentation-only change; no runtime code, tests, data download, audit, training or inference workload was started.
+
+## 2026-06-10 Docs-driven rebuild: Agent / Environment / Pipeline implementation
+
+Task: fix the five report-only documentation issues from the same-day audit, then re-implement the system strictly per docs/{data_documentation,environment_design,agent_design,pipeline_design}.md, removing code inconsistent with the documented architecture. Docs were frozen after the five fixes; no doc was modified during implementation.
+
+Doc fixes (before freeze):
+- Threshold/holding-cap numbers now live only in Environment 5.3 (agent 4.1, pipeline 3.2/4.1, env 4.4/5.2/5.4 reference it).
+- data doc 2.5 keeps only the margin_secs/broker-file data contract; short-mode execution semantics point to Environment 5.3.
+- New Environment 2.5 "PIT 特征层产物" documents fundamental_events + daily_alpha contracts (paths, available_at rules, pct_chg-not-adj_factor rule, limit_list_d quarantine, build/audit entrypoints).
+- Environment 2.2 example decision time unified to 09:25.
+- Environment 4.4 step 1 reuse of modification checks is now explicitly artifact-hash-keyed.
+
+Removed (superseded by current docs): src/hl_trader/agent/{formulaic.py,evidence/,shadow/,llm/}, environment/{backtest,evaluation,events,execution,leakage,portfolio,protocols,schemas,storage,wfo}/, pipelines/{experiment,formulaic_wfo,llm_shadow}.py (old), configs/experiments/pilot_2020_daily.yaml, legacy tests (test_agent, test_agent_shadow_pipeline, test_environment, test_pipeline, test_protocol_architecture). DeepSeek client tests and feature-layer tests were salvaged into tests/unit/test_llm_deepseek.py and test_features.py.
+
+Kept: data_sources/tushare (data layer), environment/data (PIT raw store), environment/features (cron-live feature layer), configs/agent_output_template, scripts/tushare/*; scripts/hl.py trimmed to build-features / build-fundamental-events / audit-fundamental-events.
+
+New implementation (src/hl_trader):
+- environment/artifacts.py: factor//nl_prior schemas, AST checks (generate_candidates presence, registered functions, stage-dir string scan excluding docstrings/comments), sha256 artifact hash (caches excluded), deterministic ModificationDelta + ModificationConstraints.
+- environment/runtime.py: SandboxPaths, RunManifest (atomic, latest-check summary, backtest summaries), AgentTraceWriter (shared ids, call_id/parent_call_id, secret redaction).
+- environment/snapshot.py: decision snapshots (daily/intraday_1min/fundamentals/events/macro/text_index+text_library/universe + manifest + aggregate hash; unit contract conversions recorded; SZ 09:30 auction correction; events/macro/text filtered on raw available_at, fail-fast when absent) and replay slots (normalized daily bars, not PIT-filtered).
+- environment/sandbox.py: SandboxSpec + docker run args rendering; LocalSandbox (layout, artifact install, ln -sfn-style snapshot binding, artifact collection).
+- environment/broker.py: CITIC default profile (1bp, 1e6, ±0.7, cap 10, proxy_margin_secs, 100%/120% margin, maintenance lines, assumed borrow fee flagged), SimBroker (get_account/get_positions/submit_order/cancel_order/query_orders, lot rounding, suspension/limit/T+1, margin occupancy, forced close, reject counters incl. margin_secs_not_shortable).
+- environment/backtest_engine.py: generate_candidates subprocess driver (MQ_SNAPSHOT_DIR pinned, PYTHONDONTWRITEBYTECODE), candidate validation, max-abs cross-section normalize, 0.7/0.3 composition, threshold/cap/hard_exclude order plan, plan validation, fixed-holding replay, 5.5 return statistics.
+- environment/nl/: strict extraction (tool-call args > JSON mode > single JSON object; one fence; closed-think stripped, unclosed-think fails), score schema validation (ranges, ts_code, evidence ids), engine with ≤3 retrieval rounds, early-final, one repair call, terminal states completed/skipped_by_config/failed_with_policy/timeout/failed, thread pool, prompts containing only ts_code+context+rules; context builder from universe + visible fina_mainbz_vip.
+- environment/llm/: DeepSeek client relocated (conversation JSONL logging intact), LLMProxy/DeepSeekProxy/ScriptedLLM.
+- environment/tools/: sandbox_shell (logged, phase-gated, test-dir guard), modification_check (parent-hash verification before diff), backtest (mode valid/frozen_eval; nl off/sample/on; snapshot-binding verification vs run manifest; nl_output files; manifest summary + trace events; frozen nl=on enforced; regularization runs blocked), finish_fold (check + light contract check, write lock).
+- agent/: prompts (protocol, wrap-up, anti-overfit, convergence) and AgentSessionRunner (one conversation per fold, JSON action protocol, llm_call full-detail trace events, deadline + finalize window, step counting, step cap).
+- pipelines/: folds (quarter math, 21-month windows, 09:25 decision times, heldout periods + overlap assertion), ledger (single experiment_ledger.jsonl, record_type fold/epoch_regularization/heldout, link-key validation), experiment (fold run with snapshot provisioning, manifest fields, accept/freeze/fallback incl. no_update_timeout and initial-failure, frozen test eval with hash invariance, artifact collection to experiments/<id>/artifacts/<run_id>/, strategy_artifacts manifests per 7.4, regularization gating, held-out frozen runs).
+- scripts/experiment.py: thin wiring entrypoint (docs define no CLI).
+
+Validation:
+- PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src compileall src scripts tests passed.
+- Full unit discovery: 134 tests OK (new: artifacts, broker/engine, NL scoring, snapshot builder on synthetic raw, tool flow incl. frozen-eval guards and NL-failure audit trail, scripted agent session, pipeline E2E incl. regularization accept/reject, fallback-to-parent, held-out, fold schedule windows, ledger validation, environment-not-importing-agent boundary).
+- CLI help checks for scripts/hl.py, scripts/experiment.py, scripts/tushare/download.py; cron dry-run cn_nightly_feature_build resolves the trimmed scripts/hl.py commands.
+- git diff --check passed; RAM ~438Gi available; no GPU workload.
+
+Not exercised in this session (reported as discrepancies for review): real Docker container runs and OS-level isolation, live-LLM agent sessions, full-scale 21-month snapshot builds on real raw data, real regularization LLM, corporate actions/stamp duty in short replay, per-step artifact snapshots for mid-fold rollback.
+
+## 2026-06-10 Implementation hardening, Docker driver, and on-machine evaluation
+
+Task: close the 26 review directives on the docs-driven rebuild, then update the living docs.
+
+Host facts verified first:
+- Docker 29.5.2 installed but `lzp` is not in the `docker` group and has no sudo: containers cannot run in this session. One-time admin fix: `sudo usermod -aG docker lzp`, re-login, then `docker build -t macroquant-sandbox:latest -f ops/docker/sandbox.Dockerfile ops/docker`; the gated `DockerSandboxE2ETest` then runs automatically.
+- CITIC maintenance lines fetched from https://pb.citics.com/trading/xxgs/wcdbbl/: 平仓 130% / 安全 140% / 提取 300% for the >200% base case; concentration-dependent variants below 200% exist and are not modeled.
+- Raw available_at conventions match data doc 5.2 exactly (margin next-day 09:00, margin_secs same-day 09:00, moneyflow 19:00, top_list 20:00, block_trade 21:00). `anns_d.rec_time` / `report_rc.create_time` are TuShare ingestion times for backfilled history (e.g. 2025), so those documents are invisible in historical windows under the strict wall — conservative, recorded as a data risk with a candidate ingestion fix.
+- `index_member_all` has `in_date`/`out_date` → as-of industry implemented.
+
+Code changes:
+- broker.py: profile v2 (min commission ¥5, sell-side stamp duty 10bps→5bps at 20230828 incl. short opening sales, slippage 5bps adverse on fills/closes, short_corporate_actions="disabled" flag, maintenance 1.30/1.40/3.00 with source URL); stamp duty tracked separately in stats.
+- backtest_engine.py: candidates truncated to Top-100 by abs(factor_score) before NL (recorded in summary); score-proportional weights (gross = n/max_total_holdings capped at 1.0, per-name cap 20%, no redistribution); nl=sample composes unsampled names with the mean sampled nl_score; generate_candidates now runs through an executor abstraction.
+- executor.py (new): LocalExecutor and DockerExecutor (docker exec --user agent, /mnt path mapping, /mnt/snapshot special case); sandbox.py: DockerSandbox lifecycle (detached container, root-bound container symlink, stop), SandboxSpec.from_host_fraction(0.10) reading nproc/MemTotal, filesystem permission enforcement (READMEs/parent_output 0444/0555, test slot 0700, lock/unlock agent_output), hardlinked replay-slot installs, resolved-absolute sandbox roots (fixes a relative-symlink bug found during the real-data run).
+- snapshot.py: per-dataset parquet text library shards (avoids millions of files; 21-month real text window = 721k docs), to_cn_timestamps() for naive/aware available_at mixes, as-of industry membership, replay slots now include events/text/minutes (configurable).
+- nl/engine.py: retrieval ranked by keyword match count then recency, 2000-char snippets from lazy per-dataset body shards.
+- llm: DeepSeek reasoning_content captured in _parse_response; proxy from_env(thinking_enabled=True) default; verified live that thinking+JSON mode coexist on deepseek-v4-flash (149-token smoke).
+- agent: protocol prompt now states Top-100/Top-10 rules and presents the workflow as a recommendation with Environment-enforced hard rules; deadline dispatch guard refuses new tool calls past the deadline (analysis: no preemptive kill needed — per-call timeouts bound the overrun to one call); regularization session mode (backtest/finish_fold rejected, done action) with REGULARIZATION_INSTRUCTION prompt.
+- pipelines: docker wiring in fold/regularization/heldout with try/finally container stop; development_history.json staged into the regularization workspace and listed in the manifest; agent_output locked before frozen eval; /experiments/ now gitignored; scripts/experiment.py gains --use-docker/--no-thinking and a real LLM regularizer.
+
+On-machine evaluation (real data):
+- Decision snapshot at 2021-10-08 09:25, full default config: 2.1G; daily 1,745,235 rows (max trade_date 20210930 — same day correctly invisible), events 8,688,422 (latest = margin_secs same-day 09:00), minutes 5,406,353 (5 days, corrected columns present), fundamentals 492,416, macro 7,535, text index 720,871, universe 4,380; hash verified.
+- Full fold_2022Q1 run (snapshots + replay slots incl. quarter minutes + live NL on valid and frozen test): 680 s end-to-end. Validation +5.68% (sharpe 2.23, maxDD 2.6%, 1 order of 4 candidates passed the ±0.7 gate; fees ¥25.62 incl. min-commission floor, stamp duty ¥156.57, turnover 0.2). Frozen test +5.47% (sharpe 1.49). fold_status=frozen, selected step_001, state_changed_during_test=false; artifacts collected (584K) under experiments/exp_eval_realdata_001.
+- Live LLM: 15 calls, 0 errors, all 8 NL tasks completed; 57,699 prompt + 5,782 completion tokens (4,811 reasoning) — negligible cost at v4-flash rates. Conversation JSONL audit logging active.
+- RAM stayed ≥391Gi available throughout; sandbox workdirs cleaned after collection (the agent_output write-lock blocking rm confirmed the fs enforcement).
+
+Living docs updated (env 3.1 Docker/permissions/resources, 4.4 truncation/weights/sample-average/retrieval, 5.3 cost rows + verified CITIC lines, 5.5/6.2 additions, 2.4 replay-slot and text-library formats; agent 3.2/4.1; pipeline 3.1 final-state-only retention and 5.2 regularization protocol; data doc rec_time risk row). Validation: 146 unit tests OK (1 docker-gated skip), compileall, CLI helps, git diff --check.
+
+## 2026-06-10 Rootless Docker enablement, text available_at repair, v4-pro default
+
+Task: enable rootless Docker and run the dockerized E2Es; fix anns_d/report_rc PIT visibility per official field semantics; full-body retrieval snippets; switch the default provider model to deepseek-v4-pro; final doc alignment.
+
+Rootless Docker:
+- `dockerd-rootless-setuptool.sh install --force` (rootful socket exists but is inaccessible to lzp); user systemd service started; CLI context "rootless"; cgroup v2/systemd driver.
+- Docker Hub unreachable from this host: pulled `python:3.10-slim` via `docker.m.daocloud.io`, retagged, and built `macroquant-sandbox:latest` with `--build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` (Dockerfile now takes the index as an ARG).
+- Rootless subuid mapping fix: container `agent` (uid 61000) maps to a subuid, so the agent-writable surface is world-writable on the host (`workspace/` 0777; `agent_output/` 0666/0777 on unlock) while READMEs stay 0444, `parent_output/` 0444/0555, and the test slot is 0700 from `prepare_layout` (re-applied on install). Read-only/invisibility guarantees are mount- and mode-based, unchanged.
+- Live verification: `DockerSandboxE2ETest` (agent-user exec, workspace write through the mount, `ls /mnt/snapshots/test` denied) and a new gated `DockerizedFoldE2ETest` (full pipeline fold with containerized `generate_candidates` via `docker exec --user agent`, `MQ_SNAPSHOT_DIR=/mnt/snapshot`, frozen fold, positive replays) both pass for real. Full suite: 153 tests OK, no skips.
+
+Text available_at fix (anns_d / report_rc):
+- Official semantics (interface metadata captured from the TuShare docs; the site is now a JS SPA): anns_d `rec_time` is the publication-time field; report_rc updates daily 19:00-22:00. Empirically, backfilled history carries collection timestamps: anns_d 2020-01 lags ann_date by ~2000 days for 100% of rows; even 2026-01 is only 50% within ±3 days; report_rc 2020-01 lags ~840 days.
+- Implemented in `augment_text_frame`: a date-anchored source timestamp is trusted only when `lag ∈ [-1, +3]` days; otherwise available_at falls back to `ann_date 23:59:59+08:00` (anns_d) / `report_date 22:00:00+08:00` (report_rc), rule `conservative_from:<date>:implausible_<time>`. Constants TEXT_TIME_PLAUSIBLE_BEFORE/AFTER_DAYS.
+- New local maintenance command `scripts/tushare/download.py repair-text-available-at` re-derives the two columns on existing partitions without API calls; run on anns_d+report_rc: 152 files rewritten, 6,534,489 rows changed.
+- Effect verified: the 2021-10-08 09:25 21-month window now sees anns_d 2,458,277 rows (max 2021-10-07 23:59:59) and report_rc 370,820 rows (max 2021-10-07 22:00) — previously 0; conservative, no future leakage.
+- Unit coverage in tests/unit/test_text_available_at.py (plausible kept, backfill fallback, evening-before allowed, missing-time fallback, report_rc 22:00 rule, idempotent repair).
+- Formal `text_evidence_status.json` full-scope refresh launched after the rewrite (a first targeted run had narrowed the scope; relaunched over all text datasets).
+
+Retrieval and model:
+- Snippets now return the full stored body by default (bodies capped at 4000 chars at snapshot build) — supersedes the 2000-char setting.
+- Default model: `deepseek-v4-pro` in DeepSeekProxy.from_env and scripts/experiment.py; live thinking+JSON smoke OK (126 tokens, reasoning separated).
+
+Docs: data doc 2.7 visibility table + plausibility paragraph + repair command, 5.2 text row, risk row updated to "fixed"; env doc 3.1 rootless note and 4.4 full-body snippet wording. Historical logbook references left as history.
+
+Validation: compileall, 153 unit tests OK (docker E2Es live), `git diff --check`, repair/audit CLI help checks; RAM stayed safe throughout.
+
+## 2026-06-10 Data-doc trims, prompt overhaul, visualization, full-epoch launch
+
+Items: remove rt_min and broker-lending content from the data doc; optimize all prompts and export for audit; run one full epoch per docs; add result visualization; standardize doc structure.
+
+- Data doc: dropped the 实盘/实时分钟 rt_min/rt_min_daily row (not in current scope) and all broker 券源/费率/信用风控 rows/paragraphs; `proxy_margin_secs` semantics restated as "decision-date margin_secs members are all treated as borrowable"; risk table condensed to one proxy-approximation row pointing at the future broker_inventory switch.
+- Prompts: full rewrite in structured Chinese with English JSON keys. Fold Agent protocol now separates 角色/动作协议/环境硬约束/候选池与下单规则/推荐工作流/风格要求 and states the Top-100 truncation + Top-10 selection and the 0.7/0.3 composition explicitly. NL scoring round prompt defines per-field semantics (nl_score sign/magnitude, confidence behavior under missing context, risk_tags incl. hard_exclude, evidence_ids anti-fabrication); final/repair prompts are strict-JSON collapses. Regularization prompt lists allowed/forbidden moves and the done-action contract. `scripts/export_prompts.py` renders everything (incl. fully built system prompts with sample fold context) to `configs/prompts/PROMPTS.md` for review; code remains the source of truth.
+- Visualization: `pipelines/reporting.py` reads experiment_ledger.jsonl and renders (1) per-fold dual-axis chart — validation return bars (left axis) vs frozen-test return line (right axis), held-out diamonds + shaded band, metrics table (valid/test return, Sharpe, maxDD, orders, short rejects) under the chart; (2) cumulative frozen-test equity with drawdown panel; (3) summary.json aggregates (mean/median/positive-rate/worst test return, fold status counts, held-out returns). CLI `scripts/report_experiment.py --experiment-id <id>`; unit-tested on a synthetic ledger.
+- Doc structure: data doc chapter 1 aligned with the other docs (intro + 相关边界 + 术语说明 + 导航 + "1. 数据层职责与数据域"), added a mermaid raw→audit/features→snapshot→agent data-flow diagram; pipeline main path converted to a mermaid Fold/Epoch/Held-out lifecycle diagram; nav anchors of all four docs validated programmatically.
+- Bug fixed en route: `_build_text` crashed on datasets without title/content/url columns (report_rc uses report_title/abstr) — only reachable after the rec_time repair made report_rc visible; per-dataset title/body column candidates with fail-fast when none exist; suite green.
+- Full-epoch evaluation launched: `exp_epoch_eval_001`, folds 2022Q1..2025Q4 + regularization + held-out 2026Q1, real AgentSessionRunner on deepseek-v4-pro (thinking on), dockerized sandbox (rootless), budgets max_fold_minutes=10/max_steps=3/max_llm_calls=30/max_candidates=20/per_call_timeout=240, lenient acceptance (min_return=-1, maxDD=1) so losing quarters fall back instead of aborting; all budgets recorded in run manifests. Long background run: log .runtime/eval/epoch_eval.log; report via scripts/report_experiment.py when finished.
+- Audit note: text_evidence_status refreshed at nightly-exact parameters after the text repair — text datasets show no errors; the remaining error is a pre-existing bak_basic "5 missing expected files" also present in last night's formal statuses, while a direct SSE-calendar recount finds 0 missing — audit expectation logic needs separate investigation.
+- Verification: compileall; 155 unit tests OK (docker E2Es live); git diff --check; prompts export + affected suites rerun.
+
+## 2026-06-11 Grep retrieval, Step artifact tree, exploration/convergence phases
+
+Items: grep tool integration for Agent and NL analysis; per-Step artifact snapshots organized as a cross-Fold tree; free-exploration prompt; removal of prev-epoch outperformance constraint; n-th-epoch convergence prompts; doc updates.
+
+- NL retrieval (src/hl_trader/environment/nl/engine.py): `TextRetriever.search(pattern, ...)` now uses grep semantics — case-insensitive regex over title+codes first, then full bodies via lazily loaded, lock-protected per-dataset shards when more hits are needed; ranking title-hit > body-only, recency second; `_safe_regex` falls back to literal on invalid patterns; `search_requests` accepts `{"pattern": ...}` with legacy `{"keywords": [...]}` mapped to an escaped alternation. Round prompt rewritten for grep usage. Tests: alternation, body-only grep, invalid-regex fallback, legacy mapping.
+- Step tree (src/hl_trader/environment/step_tree.py): nodes `{node_id, parent_node_id, fold_id, result_name, artifact_hash, metrics, complete_validation, created_at}` in `steps/tree.json` plus full `factor/`+`nl_prior/` snapshots per node; `record_step` appends with parent=current and moves the position; `position_for_hash` locates the parent-artifact node; `render_ascii` marks the current position. BacktestTool records on every successful valid backtest when `step_tree_enabled`; ExperimentPipeline copies the experiment-level tree into each fold sandbox (hardlinks), positions it at the parent node, and syncs back to `experiments/<id>/steps/` after the fold. Toggle: `ExperimentConfig.step_tree_enabled` (default True) -> run manifest. Agent visibility via a prompt section; the tree is read-only for the agent (host-owned files under rootless Docker). Tests: lineage/position/render/duplicate guard, tool-level recording on/off, cross-fold handoff in the pipeline E2E.
+- Phase prompts (src/hl_trader/agent/prompts.py): EXPLORATION_PHASE_PROMPT (hypothesis-driven exploration allowed even at lower returns; random no-hypothesis edits discouraged) and CONVERGENCE_PHASE_PROMPT (minimize modifications while holding returns; prefer validating the unchanged parent; no new factors/experience), selected by `build_system_prompt(phase=...)`; `ExperimentConfig.convergence_start_epoch` (default 3) drives `phase` in run manifests; AgentSessionRunner and scripts/experiment.py pass-through. Prompt also documents the steps tree when enabled.
+- Constraint check: grep confirmed no code compares a fold against its previous-epoch counterpart; pipeline 4.1 now states acceptance uses only current-fold hard rules and cross-epoch convergence is prompt-guided.
+- Docs: environment 3.2 (artifacts tree + ownership row + recording note), 4.4 (grep retrieval contract); agent 2.2 (steps tree visibility), chapter 3 (phase guidance); pipeline 3.1 (step_tree/phase inputs), 4.1 (no prev-epoch comparison), 5.3 (exploration->convergence schedule). configs/prompts/PROMPTS.md re-exported.
+- Validation: 164 unit tests OK (docker E2Es live), git diff --check. The running evaluation epoch (attempt 5, exp_epoch_eval_001) uses pre-feature code; the new features apply from the next launch.
+
+## 2026-06-12 Claude implementation audit follow-up: attribution, GPU allocation, and consistency
+
+Task: audit Claude's newly implemented Agent/Environment/Pipeline code against the latest docs, then finish the remaining requested items: optional Shapley factor contribution analysis, GPU allocation for ML/NN experiments, separate Agent/NL model routing, code simplicity, and doc/code consistency.
+
+Resource checks:
+- Before tests: `free -h` reported 503Gi RAM total and 269Gi available; `nvidia-smi` showed 8 NVIDIA L20 GPUs, with GPU 4 essentially idle (4MiB used, 45457MiB free).
+- After tests: RAM available was 279Gi; GPU 4 remained the freest L20.
+
+Audit findings acted on:
+- Step-tree node IDs were only `fold_id__result_name`, so repeated Epochs could collide on the same Fold/result name.
+- Docker GPU support only allocated one device with `gpu="auto"` and did not record the resolved GPU allocation in `run_manifest.json`.
+- Debug validations (`nl=off/sample`) could still pollute the Step tree and Step ledger even though only complete `nl=on` validations should count as formal Steps.
+- Factor attribution could be enabled while the strategy supplied no registered factor columns, producing an unhelpful attribution report.
+- Docker image used Python 3.10 while the project requires Python >=3.11, and dependency versions were unpinned.
+- The Agent-facing `factors.json` example in docs missed the required `rationale` field.
+- `scripts/export_prompts.py` required an external `PYTHONPATH`; it now prepends repo `src/` itself.
+
+Implementation details:
+- `src/hl_trader/environment/gpu.py`: added `select_gpus(count, require_name="L20")`, selecting matching GPUs by descending free memory. `select_gpu()` now delegates to it.
+- `src/hl_trader/environment/sandbox.py`: `SandboxSpec` now has `gpu_count` and `gpu_name_filter`; DockerSandbox accepts auto, fixed integer, or fixed list GPU requests; multi-GPU Docker args are rendered as `--gpus=device=<ids>`. Auto CPU fallback is only allowed when `nvidia-smi` is unavailable/no GPUs; insufficient requested L20 GPUs fails explicitly. `allocation_record()` records container, image, requested GPU mode, count, filter, and actual GPU indices.
+- `src/hl_trader/pipelines/experiment.py`: after Docker start, Pipeline writes `sandbox_runtime` to the run manifest. Fold acceptance, Step summaries and Step IDs now consider only complete validations. This keeps off/sample results in `results/` for debugging but prevents them from freezing artifacts or consuming formal Step lineage.
+- `src/hl_trader/environment/step_tree.py`: `record_step()` accepts `epoch_id` and optional file attachments. Node IDs include epoch when provided, and the tree can copy small per-Step attachments such as `factor_attribution.json`.
+- `src/hl_trader/environment/tools/backtest.py`: complete Shapley-enabled validation now requires at least one registered factor and at least one corresponding `factor_<id>` candidate column. Backtest still writes `results/<phase>_<idx>/factor_attribution.json`; complete validation Step nodes also keep a copy as an attachment. Shortable-code loading now uses the decision date instead of the first replay date.
+- `ops/docker/sandbox.Dockerfile`: moved to `python:3.11-slim`; pinned pandas/numpy/pyarrow/duckdb/scikit-learn/statsmodels/torch versions.
+- `docs/agent_design.md`, `docs/environment_design.md`, `docs/pipeline_design.md`, `configs/prompts/PROMPTS.md`: updated the factor rationale, attribution, multi-GPU and complete-Step contracts. Prompt snapshots were regenerated from code.
+- Tests updated for multi-Epoch Step-tree IDs, debug-vs-complete Step semantics, factor-attribution attachments and failure behavior, GPU selection, fixed GPU lists, and two-Epoch pipeline E2E collision protection.
+
+Validation commands:
+- `PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python scripts/export_prompts.py` initially failed because `hl_trader` was not importable without `PYTHONPATH`; after fixing the script, `/home/lzp/miniconda3/envs/stock/bin/python scripts/export_prompts.py` succeeded.
+- `PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m pytest ...` failed because the stock env has no pytest installed. No package installation was performed.
+- `PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_step_tree tests.unit.test_pipeline_e2e tests.unit.test_sandbox_isolation tests.unit.test_attribution` ran 41 tests OK.
+- `PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests -t . -p 'test_*.py'` ran 175 tests OK. A first discover attempt from `tests/unit` failed only because unittest loaded modules without package context and relative imports broke; rerun with `tests` as start directory and repo root as top-level succeeded.
+- `PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_sandbox_isolation` reran 12 tests OK after the GPU fallback tightening.
+- `git diff --check` completed with no whitespace errors.
+
+Notes:
+- Full Docker image rebuild and real container GPU runtime execution were not performed in this follow-up; tests cover argument generation/selection logic and existing Docker-gated tests remain available when the image is present.
+- The working tree still contains the larger Claude refactor and untracked `check.ipynb`; this session did not revert or stage unrelated changes.
+
+## 2026-06-12 Sandbox tooling and Step-tree hardening
+
+Task: supplement the remaining review fixes after the grep/Step-tree/convergence implementation, with `ripgrep` available to the Agent and an independent SubAgent audit after completion.
+
+Resource checks:
+- Before targeted tests: `free -h` reported 503Gi RAM total and 334Gi available; `nvidia-smi` showed GPU 3 as the freest L20 with 45457MiB free.
+- Before full tests: RAM available was 325Gi; GPU 3 remained the freest L20 with 45166MiB free.
+- After full tests and `git diff --check`: RAM available was 314Gi; GPU 3 had 45457MiB free.
+
+Implementation details:
+- `ops/docker/sandbox.Dockerfile`: installed `ripgrep` with `apt-get` before Python dependencies, so `rg` is available inside the Agent sandbox image.
+- `src/hl_trader/environment/tools/shell.py`: added a Step-tree write guard. Commands may read `/mnt/artifacts/steps` or the local mapped `steps/` path with tools such as `rg`/`cat`/`ls`, but write-like commands (`touch`, `rm`, `mv`, `cp`, `tee`, `dd`, redirection, Python, etc.) are rejected.
+- `src/hl_trader/environment/runtime.py` and `src/hl_trader/environment/sandbox.py`: added `steps` to the artifact top-level contract and create the directory during sandbox layout preparation.
+- `scripts/experiment.py`: exposed `--convergence-start-epoch` and `--disable-step-tree`, wiring them to `ExperimentConfig.convergence_start_epoch` and `ExperimentConfig.step_tree_enabled`.
+- `src/hl_trader/environment/tools/backtest.py`: each validation backtest summary now carries `modification_delta_summary`, derived from the latest matching modification check.
+- `src/hl_trader/pipelines/experiment.py`: Fold Step ledger entries now include the `modification_delta_summary` from the corresponding backtest summary.
+- `docs/environment_design.md`, `docs/agent_design.md`, and `docs/pipeline_design.md`: documented the sandbox `rg` dependency, Step-tree read-only boundary, Step-tree run artifact collection, and experiment CLI toggles.
+- Tests: added coverage for reading but not writing the Step tree through `sandbox_shell_tool`, and for `modification_delta_summary` appearing in the pipeline Step record.
+
+Validation commands:
+- `PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_pipeline_e2e tests.unit.test_step_tree tests.unit.test_nl_scoring` ran 45 tests OK.
+- `PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests -t . -p 'test_*.py'` ran 176 tests OK.
+- `git diff --check` completed with no whitespace errors.
+- Generated Python cache directories were removed after tests.
+
+Notes:
+- `rg` was already available on the host at `/usr/bin/rg`; only the Docker image needed explicit installation.
+- No Docker image rebuild or real container run was performed in this step.
+- The working tree still contains the broader Claude refactor and untracked `check.ipynb`; this step did not revert or stage unrelated changes.
+
+SubAgent audit follow-up:
+- A GPT-5.5 xhigh read-only audit found one blocking bug and two cleanup issues. The blocking bug was that `sandbox_shell_tool` only matched absolute Step-tree paths; because the shell cwd is `/mnt/artifacts`, commands such as `touch steps/agent_write` could write the Step tree in local mode.
+- Fix: `sandbox_shell_tool` now recognizes absolute and relative Step-tree references (`steps/...`, `./steps/...`, `cd steps`, `pushd steps`) and rejects write-like commands against them while still allowing read-only commands such as `rg`, `cat`, `ls` and `sed`.
+- Fix: Pipeline Step records no longer point `modification_check_ref` at `run_manifest.last_modification_check`, which only stores the latest check and can mislead multi-Step audits. The record now points to the embedded `modification_delta_summary` captured at the backtest time.
+- Fix: `docs/environment_design.md` now says Docker is recommended for formal experiments and enabled with `--use-docker`; this matches `ExperimentConfig.use_docker=False` and the CLI default.
+- Additional tests: relative Step-tree write attempts (`touch steps/...`, `touch ./steps/...`, redirection, `cd steps && touch ...`) are now covered; Pipeline E2E checks the embedded modification-check reference.
+- Re-validation after fixes: `PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_pipeline_e2e` ran 23 tests OK; full unittest discovery ran 176 tests OK; `git diff --check` passed; caches were cleaned again.
+
+## 2026-06-12 Sandbox writable-surface simplification and Docker-default alignment
+
+Task: simplify the Agent sandbox file layout after the Step-tree write-guard audit. The goal was to reduce redundant string-based protection, make formal Docker execution the default path, and make the file ownership boundary easier to understand and maintain.
+
+Resource checks:
+- Before final validation: `free -h` reported 503Gi RAM total and 407Gi available.
+- `nvidia-smi --query-gpu=index,name,memory.used,memory.free --format=csv,noheader,nounits` showed 8 NVIDIA L20 GPUs; GPU 3 was the freest with 43158MiB free.
+
+Implementation details:
+- `src/hl_trader/environment/runtime.py`: added a separate `SandboxPaths.agent` root. Agent-writable paths now live under `/mnt/agent`: `workspace/` for scratch work and `agent_output/` for formal strategy output. Trusted artifacts remain under `/mnt/artifacts`: `run_manifest.json`, `agent_trace.jsonl`, `parent_output/`, `results/`, `steps/`, and `logs/`.
+- `src/hl_trader/environment/sandbox.py`: Docker now mounts `/mnt/artifacts` read-only and `/mnt/agent` read-write. Local layout preparation mirrors that split, and artifact collection gathers both runtime roots back into the host run-artifact directory. This keeps the existing host artifact layout stable while separating write authority inside the sandbox.
+- `src/hl_trader/environment/executor.py`, `src/hl_trader/environment/tools/shell.py`, and `src/hl_trader/environment/backtest_engine.py`: default execution cwd moved to `/mnt/agent`; formal candidate execution runs from the Agent root.
+- `src/hl_trader/environment/tools/shell.py`: removed the redundant Step-tree-specific command parser. With `/mnt/artifacts` mounted read-only in formal Docker runs, Shell only keeps simple hard denials for the test snapshot and Docker socket. Local executor remains a development/test convenience, not the security boundary.
+- `ops/docker/sandbox.Dockerfile`: workdir changed to `/mnt/agent` and `/mnt/agent` is created in the image.
+- `src/hl_trader/pipelines/experiment.py` and `scripts/experiment.py`: formal experiments now default to Docker. The old positive `--use-docker` flag was replaced with `--local-dev`, which is explicitly for development/tests. `scripts/experiment.py` now prepends repo `src/` to `sys.path`, so direct stock-Python invocation works without an external `PYTHONPATH`.
+- Agent templates, prompts and living docs were updated to use `/mnt/agent/workspace` and `/mnt/agent/agent_output`; `/mnt/artifacts` is now described as trusted/read-only to Agent.
+
+Validation commands:
+- `/home/lzp/miniconda3/envs/stock/bin/python scripts/export_prompts.py` succeeded and regenerated `configs/prompts/PROMPTS.md`.
+- `PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_tools_flow tests.unit.test_pipeline_e2e tests.unit.test_step_tree` ran 40 tests OK.
+- `PYTHONPATH=src /home/lzp/miniconda3/envs/stock/bin/python -m unittest discover -s tests -t . -p 'test_*.py'` ran 177 tests OK.
+- `/home/lzp/miniconda3/envs/stock/bin/python scripts/experiment.py --help` succeeded and showed `--local-dev`.
+- `git diff --check` completed with no whitespace errors.
+- Generated cache directories (`__pycache__`, pytest/mypy/ruff caches if present) were removed after validation.
+
+Notes:
+- Historical logbook entries still mention older `/mnt/artifacts/workspace` or explicit `--use-docker` behavior; those are preserved as history. Current living docs, templates, prompts and code use the new `/mnt/agent` split.
+- The sandbox Docker image was not rebuilt in this step. Rebuild `macroquant-sandbox:latest` before the next real Dockerized experiment so the image workdir and installed tools match the updated Dockerfile.
+- The broader Claude refactor and untracked `check.ipynb` remain unstaged/uncommitted; this task did not revert unrelated work.
+
+## 2026-06-12 quant environment, script bootstrap, artifact hardening, and docs cleanup
+
+Task: follow up on the broader repo-structure audit. Create the new local Python environment, make the current docs/config point to it, simplify script import bootstrapping, split small common modules out of TuShare/Pipeline, harden formal strategy artifacts, and keep the living docs aligned.
+
+Resource checks:
+- `nvidia-smi` before validation showed all 8 NVIDIA L20 GPUs already in use; no real Fold/API run was launched in this step.
+- `free -h` before/after validation showed about 398-399Gi available RAM.
+
+Implementation details:
+- Created `~/miniconda3/envs/quant` with Python 3.11.15 and installed the project plus required scientific/ML packages.
+- Updated `AGENTS.md`, `CLAUDE.md`, `docs/data_documentation.md`, `ops/cron/tushare_update.cron`, and `configs/tushare_update_schedule.json` so new local scripts, cron jobs, tests and non-Docker tools use `/home/lzp/miniconda3/envs/quant/bin/python`.
+- Documented that Docker Sandbox Python is independent from the outer conda environment and is controlled by `ops/docker/sandbox.Dockerfile`.
+- Added `scripts/_bootstrap.py` and wired direct script entrypoints through it. The helper walks upward from the script path to find the real repo root, so both top-level scripts and nested `scripts/tushare/*` entrypoints work without external `PYTHONPATH`.
+- Split TuShare low-level IO helpers into `src/hl_trader/data_sources/tushare/io.py`; `download.py` and `audit.py` now explicitly import `pyarrow.parquet as pq` where direct schema inspection is used.
+- Split Pipeline config/record types and the default raw snapshot provider into `src/hl_trader/pipelines/config.py`, while preserving public imports from `hl_trader.pipelines`.
+- Added formal candidate-generation isolation in `src/hl_trader/environment/backtest_engine.py`: during `generate_candidates()`, existing `/mnt/snapshots/train|valid|test` stage directories are temporarily hidden from the non-root Agent user, leaving `/mnt/snapshot` as the formal decision-input view.
+- Hardened `src/hl_trader/environment/artifacts.py` so strategy artifacts reject symlinks and non-regular special files during hash/diff/load/copy checks.
+- Updated `docs/environment_design.md`, `docs/agent_design.md`, `docs/pipeline_design.md`, and `docs/data_documentation.md` for the current script structure, candidate isolation, artifact rules, and reduced repeated path descriptions.
+- Copied the long root logbook to `/Data/lzp/MacroQuant_archive/logbook/LOGBOOK_before_20260612_simplification.md` and replaced `LOGBOOK.md` with a concise current-state summary.
+
+Validation commands:
+- `/home/lzp/miniconda3/envs/quant/bin/python --version` -> Python 3.11.15.
+- `/home/lzp/miniconda3/envs/quant/bin/python -c "import hl_trader, pandas, pyarrow, torch, duckdb"` succeeded; torch version was `2.5.1+cu124`.
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/hl.py --help` succeeded.
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/experiment.py --help` succeeded and showed `--local-dev`.
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/report_experiment.py --help` succeeded.
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/tushare/download.py --help` succeeded.
+- `/home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py --dry-run` succeeded and rendered the managed block with `QUANT_PYTHON`.
+- First full unittest run exposed missing explicit `pq` imports in the TuShare split; after fixing, targeted TuShare regression tests passed.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py' -v` ran 179 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m compileall -q src scripts tests` passed.
+- `git diff --check` passed.
+- Generated `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `*.pyc`, and `*.pyo` under `src/`, `scripts/`, and `tests/` were removed after validation.
+
+Notes:
+- The cron template/config now point at `quant`, but the live crontab was not refreshed in this step pending the final audit.
+- No real LLM API or Fold smoke was launched because this step changed structure, environment, docs, and local isolation; the existing unit + Docker E2E coverage exercised the touched paths directly.
+- A GPT-5.5 xhigh SubAgent read-only audit was started after local validation to check docs/code consistency and remaining simplification opportunities.
+
+SubAgent audit follow-up:
+- The GPT-5.5 xhigh audit found a real high-severity isolation issue: Docker mounted the whole `snapshot_views` directory under `/mnt/runtime/snapshot_views`, so an Agent could inspect `test_decision_input` even though `/mnt/snapshots/test` was hidden.
+- Fix: Docker no longer mounts `snapshot_views`. `LocalSandbox.bind_snapshot_view()` now refreshes a host-side `runtime/current_snapshot/` mirror with hardlinks/copies from the selected decision view; Docker mounts only that mirror read-only as `/mnt/snapshot`. `DockerSandbox.bind_snapshot_view()` refreshes the mirror instead of creating an in-container symlink to `/mnt/runtime/snapshot_views`.
+- Added tests proving the mounted Docker command excludes `/mnt/runtime/snapshot_views`, the Agent can read `/mnt/snapshot/manifest.json`, and `ls /mnt/runtime/snapshot_views` fails inside the container.
+- The same audit found symlink validation ordering and structured-return issues in `modification_check_tool`. Fix: `load_strategy_artifact()` validates the whole artifact tree before reading required files; `ModificationCheckTool` returns `allowed_to_backtest=false` with `artifact_hash=null` for invalid artifacts instead of re-raising during hash calculation.
+- Low-risk cleanup: added explicit `pandas as pd` and `typing.Any` imports in TuShare `download.py`/`audit.py`; `.gitignore` now excludes `*.egg-info/` and local `check.ipynb`.
+- Docs were updated to remove the old `ln -sfn /mnt/runtime/snapshot_views/...` container model and describe the current snapshot mirror boundary.
+
+Re-validation after audit fixes:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_tools_flow tests.unit.test_artifacts -v` ran 37 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py' -v` ran 181 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m compileall -q src scripts tests` passed.
+- `git diff --check` passed.
+- Cache directories and bytecode were removed after validation.
+
+## 2026-06-12 exp_epoch_eval_001 report regeneration and result review
+
+Task: inspect the previous experiment process/results and add one return-line chart per Epoch, with Held-Out appended to the final Epoch chart.
+
+Resource checks:
+- Before report generation: `free -h` showed 503Gi RAM total and 374Gi available; `nvidia-smi` showed all 8 L20 GPUs already occupied by unrelated processes. No GPU workload was launched.
+- After report generation/tests: `free -h` still showed 374Gi available; GPU usage remained from unrelated processes.
+
+Implementation details:
+- Updated `src/hl_trader/pipelines/reporting.py` so `build_experiment_report()` writes `epoch_returns/<epoch_id>_returns.png` under the experiment report directory.
+- The final Epoch chart appends Held-Out point(s); non-final Epoch charts contain only their development folds.
+- Added `epoch_comparison_returns.png`, a professional Fold-aligned overview chart with one frozen-test return curve per Epoch, Held-Out appended to the final Epoch, and a metrics table containing Fold count, mean/median/cumulative return, positive rate, mean Sharpe, worst max drawdown, worst Fold, and Held-Out return.
+- Added a missing-value plotting guard so absent validation/test values render as NaN rather than being passed through as `None`.
+- Updated `tests/unit/test_reporting.py` to assert that per-Epoch charts and the cross-Epoch comparison chart are created and listed in the report summary.
+
+Commands:
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/report_experiment.py --experiment-id exp_epoch_eval_001`
+- `/home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_reporting -v`
+- `/home/lzp/miniconda3/envs/quant/bin/python -m compileall scripts/report_experiment.py src/hl_trader/pipelines/reporting.py tests/unit/test_reporting.py`
+- `git diff --check`
+
+Generated report artifacts:
+- `experiments/exp_epoch_eval_001/reports/fold_returns.png`
+- `experiments/exp_epoch_eval_001/reports/cumulative_test_return.png`
+- `experiments/exp_epoch_eval_001/reports/epoch_comparison_returns.png`
+- `experiments/exp_epoch_eval_001/reports/epoch_returns/epoch_001_returns.png`
+- `experiments/exp_epoch_eval_001/reports/summary.json`
+
+Experiment summary:
+- Ledger: 16 development Fold records, 1 Epoch regularization record, and 1 Held-Out record.
+- Recorded process window: 2026-06-11T11:15:07Z to 2026-06-12T00:10:36Z, about 12.9 hours by ledger timestamps. Runtime log ended with `EPOCH_RESULT {"final_strategy_artifact": "strategy_epoch_002_regularized", "heldout_runs": 1}` and `EPOCH_SECONDS 49296`.
+- Development frozen-test mean return: +5.37%; median: +3.12%; positive Fold rate: 81.25%; compounded development frozen-test return: +107.73%.
+- Development mean test Sharpe: 1.10; mean max drawdown: 7.43%.
+- Held-Out 2026Q1 return: -1.65%, Sharpe -0.96, max drawdown 3.61%.
+- Best development Fold: 2023Q4, +51.73% test return. Worst development Fold: 2025Q3, -14.38% test return, mainly from short-side loss.
+- Validation/test return correlation was about 0.20, so the one-Epoch validation signal is weak and should not yet be treated as stable generalization evidence.
+- Step process: 27 validation backtests; selected steps were `step_001` 6 times, `step_002` 8 times, `step_003` 2 times. One rejected Step was caused by a candidate outside the visible universe.
+
+Validation results:
+- Reporting unit tests ran 2 tests OK.
+- Targeted `compileall` passed.
+- `git diff --check` passed.
+- PNG pixel checks confirmed `epoch_comparison_returns.png` and `epoch_001_returns.png` are non-empty images.
+
+## 2026-06-12 script organization and final report-output cleanup
+
+Task: clean the script layout using a standard GitHub-style organization and keep only the requested experiment report images.
+
+External organization review:
+- `pandas-dev/pandas` keeps a top-level `scripts/` directory for thin maintenance checks and developer utilities.
+- `pytorch/pytorch` uses a larger `tools/` tree with subdirectories by responsibility.
+- `mlflow/mlflow` uses `dev/` for developer/build automation and groups related automation there.
+- `ray-project/ray` keeps small runtime script entrypoints close to the relevant package.
+- Conclusion for this repository: keep implementation in `src/hl_trader/`, keep `scripts/` as thin CLI wrappers, and group wrappers by responsibility rather than fully flattening them.
+
+Implementation details:
+- Reorganized script entrypoints:
+  - `scripts/data/build_features.py`
+  - `scripts/data/tushare_download.py`
+  - `scripts/data/tushare_audit.py`
+  - `scripts/data/tushare_cron_update.py`
+  - `scripts/experiments/run_experiment.py`
+  - `scripts/experiments/report_experiment.py`
+  - `scripts/dev/export_prompts.py`
+- Removed the old empty `scripts/tushare/` path and deleted the unused `scripts/data/tushare_common.py` wrapper.
+- Updated docs, cron template/config, tests, and dynamic TuShare script loader references to the new script paths.
+- Added repository-organization guidance to `AGENTS.md` and `CLAUDE.md`: scripts are grouped thin entrypoints; business logic belongs under `src/hl_trader/`.
+- Updated `src/hl_trader/pipelines/reporting.py` so report generation deletes legacy `fold_returns.png`, `cumulative_test_return.png`, and `summary.json`, then writes only:
+  - `experiments/exp_epoch_eval_001/reports/epoch_comparison_returns.png`
+  - `experiments/exp_epoch_eval_001/reports/epoch_returns/epoch_001_returns.png`
+
+Commands:
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_download.py --help`
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_audit.py --help`
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_cron_update.py --job cn_nightly_feature_build --end-date 20260603 --dry-run`
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/data/build_features.py --help`
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/run_experiment.py --help`
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/report_experiment.py --help`
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/report_experiment.py --experiment-id exp_epoch_eval_001`
+- `/home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_reporting tests.unit.test_data_sources_tushare -v` ran 54 tests OK.
+- `/home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py --dry-run` succeeded and rendered the new `scripts/data/tushare_cron_update.py` path.
+- `/home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py' -v` ran 181 tests OK.
+- `/home/lzp/miniconda3/envs/quant/bin/python -m compileall -q scripts src tests` passed.
+- `git diff --check` passed.
+- PNG pixel checks confirmed the two remaining report images are non-empty: `epoch_comparison_returns.png` at 2448x1504 and `epoch_001_returns.png` at 2448x1632.
+- Generated `__pycache__` and bytecode under `scripts/`, `src/`, and `tests/` were removed after validation.
+
+Current conclusion:
+- `scripts/` is no longer flat or TuShare-specific at the top level; it is grouped by data, experiment, and developer responsibilities.
+- `results/data_quality/` and `experiments/<experiment_id>/` remain separate by design: the former is current data-quality state, the latter is run-specific experiment output.
+
+## 2026-06-12 report layout follow-up
+
+Task: fix label/title overlap in the per-Epoch report chart and add compounded equity curves to the cross-Epoch comparison chart.
+
+Implementation details:
+- Updated `epoch_returns/<epoch_id>_returns.png` layout:
+  - increased figure height;
+  - replaced arrow annotations for best/worst Fold with a compact top-right note box;
+  - renamed the drawdown overlay to `Peak-to-current loss` to clarify that it means the current compounded equity is below its previous peak.
+- Updated `epoch_comparison_returns.png` layout:
+  - top panel now shows Fold return by Epoch;
+  - middle panel now shows each Epoch's compounded equity curve, with Held-Out appended to the final Epoch;
+  - bottom panel keeps the summary metrics table.
+- Follow-up fix: the summary table axis was accidentally attached to the middle grid slot, overlapping the compounded-equity panel. It now uses the bottom grid slot and a bounded table box.
+
+Commands:
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/report_experiment.py --experiment-id exp_epoch_eval_001`
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_reporting -v` ran 2 tests OK.
+- `/home/lzp/miniconda3/envs/quant/bin/python -m compileall -q src/hl_trader/pipelines/reporting.py tests/unit/test_reporting.py`
+- `git diff --check` passed.
+- PNG pixel checks confirmed non-empty images: `epoch_comparison_returns.png` at 2448x1920 and `epoch_001_returns.png` at 2448x1728.
+
+## 2026-06-12 held-out range and NL model default check
+
+Task: answer whether held-out can cover two quarters and set the default natural-language scoring model to DeepSeek V4 Flash.
+
+Findings:
+- `heldout_periods(first_quarter, last_quarter, trading_days)` already expands every quarter in the inclusive range, and `ExperimentPipeline.run_heldout()` runs one frozen evaluation per generated period.
+- Therefore a configuration such as `--heldout-first-quarter 2026Q1 --heldout-last-quarter 2026Q2` creates two held-out runs, as long as local `trade_cal` and snapshot source data cover both quarters.
+- DeepSeek official API docs list `deepseek-v4-flash` and `deepseek-v4-pro` as current API model names. The NL scoring default should use `deepseek-v4-flash`, while the main Agent default remains `deepseek-v4-pro`.
+
+Implementation:
+- Updated `scripts/experiments/run_experiment.py` with explicit `DEFAULT_AGENT_MODEL = "deepseek-v4-pro"` and `DEFAULT_NL_MODEL = "deepseek-v4-flash"`.
+- `--nl-model` now defaults to `deepseek-v4-flash`; if the user sets it equal to `--model`, the proxy is reused, otherwise the CLI creates an independent NL proxy.
+- Updated `docs/environment_design.md` and `docs/pipeline_design.md` to record the default model split.
+
+Validation:
+- `/home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/run_experiment.py --help` shows `--nl-model` defaults to `deepseek-v4-flash`.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e tests.unit.test_tools_flow tests.unit.test_llm_deepseek -v` ran 40 tests OK.
+- `/home/lzp/miniconda3/envs/quant/bin/python -m compileall -q scripts/experiments/run_experiment.py src/hl_trader/environment/llm src/hl_trader/environment/nl src/hl_trader/pipelines tests/unit/test_pipeline_e2e.py tests/unit/test_tools_flow.py tests/unit/test_llm_deepseek.py` passed.
+
+## 2026-06-12 real smoke experiment with Fold, regularization, and Held-Out
+
+Task: run a real experiment instead of relying only on unit tests: one regular Fold, one post-Epoch regularization Fold, and one Held-Out period.
+
+Resource checks:
+- Before launch: system memory about 396 GiB available; no MacroQuant Docker containers were running.
+- During snapshot/Agent runs: memory remained safe, with more than 370 GiB available after the heavy snapshot stage.
+- After completion: system memory about 408 GiB available. Local GPUs were mostly occupied by unrelated processes; this experiment did not require local GPU compute because LLM calls used the provider API.
+
+First attempted real run:
+- Experiment ID: `exp_real_smoke_20260612_180600`.
+- Command used the same 2022Q1 development Fold and 2022Q2 Held-Out shape with `--max-fold-minutes 60`.
+- Outcome: stopped manually after more than 60 minutes because `nl_mode=on` with the previous default 100 candidates kept running too long.
+- Useful artifacts:
+  - `.runtime/sandboxes/run_d1bab1ebd555/artifacts/agent_trace.jsonl`
+  - `.runtime/sandboxes/run_d1bab1ebd555/artifacts/results/valid_000/`
+  - `.runtime/sandboxes/run_d1bab1ebd555/artifacts/results/valid_001/`
+  - `.runtime/sandboxes/run_d1bab1ebd555/artifacts/results/valid_002/`
+  - `.runtime/sandboxes/run_d1bab1ebd555/artifacts/results/valid_003/`
+- Findings:
+  - The first Agent-generated factor emitted codes outside the visible universe; `backtest_tool` correctly rejected them.
+  - `backtest_tool` returned host paths that were awkward for the container Agent to read.
+  - `valid_001` with full NL scoring had 99 completed candidate tasks and 1 failure; the old strict failure policy blocked the formal backtest after substantial API work.
+  - A 100-stock NL candidate set is too large for a one-hour smoke Fold.
+
+Pre-rerun fixes made in the same work item:
+- Default `max_candidates` changed to 10 in experiment config and CLI.
+- CLI gained `--max-candidates` and `--nl-failure-policy`.
+- Default NL failure policy changed to `neutral_with_audit`.
+- `backtest_tool` now returns container-readable paths such as `/mnt/artifacts/results/...`, while retaining host paths for the outer pipeline.
+- Prompt/docs were updated to describe the top-10 candidate cap.
+- The strict NL-failure unit test now explicitly sets `nl_failure_policy="fail"` so strict mode remains covered.
+
+Successful real run:
+- Experiment ID: `exp_real_smoke_20260612_191433`.
+- Command:
+  `/home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/run_experiment.py --experiment-id exp_real_smoke_20260612_191433 --first-test-quarter 2022Q1 --last-test-quarter 2022Q1 --heldout-first-quarter 2022Q2 --heldout-last-quarter 2022Q2 --epochs 1 --max-fold-minutes 60 --max-candidates 10 --nl-failure-policy neutral_with_audit`
+- Exit status: 0.
+- Runtime log: `logs/experiments/exp_real_smoke_20260612_191433.log`.
+- Ledger: `experiments/exp_real_smoke_20260612_191433/ledgers/experiment_ledger.jsonl`.
+- Regular Fold runtime artifact: `experiments/exp_real_smoke_20260612_191433/artifacts/run_2e64f9b835fc/`.
+- Regularization runtime artifact: `experiments/exp_real_smoke_20260612_191433/artifacts/run_fcba06ac9cd1/`.
+- Held-Out runtime artifact: `experiments/exp_real_smoke_20260612_191433/artifacts/run_3dee7c6e695c/`.
+- Final strategy artifact: `strategy_epoch_002_regularized`.
+
+Key metrics:
+- `valid_000`, NL off: total return -6.18%, short-side return -5.49%, Sharpe -1.11, max drawdown 16.72%, 10 orders.
+- `valid_001`, NL off after Agent simplification to 20-day momentum: total return +9.25%, long-side return +9.25%, Sharpe 1.94, max drawdown 12.66%, 10 orders.
+- `valid_002`, NL on and used as final validation Step: total return +5.63%, long-side return +5.63%, Sharpe 2.16, max drawdown 7.44%, 3 orders. NL batch had 9 completed tasks and 1 neutral-with-audit failure.
+- Frozen Fold test `test_000`: total return -0.03%, long-side return -0.03%, Sharpe -0.13, max drawdown 7.97%, 1 order.
+- Held-Out `heldout_000` for 2022Q2: total return -0.81%, long-side return -0.81%, Sharpe -0.25, max drawdown 3.89%, 1 order.
+
+Call and tool traces:
+- Regular Fold trace `run_2e64f9b835fc`: 57 Agent LLM calls, 44 Shell calls, 7 Tool calls, 6 backtest events, 4 NL batch summaries.
+- Regularization trace `run_fcba06ac9cd1`: 15 LLM calls, 13 Shell calls, 2 Tool calls.
+- Frozen test NL output recorded 27 provider calls; final validation NL output recorded 27 provider calls; Held-Out NL output recorded 28 provider calls.
+
+Report generation:
+- Command: `/home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/report_experiment.py --experiment-id exp_real_smoke_20260612_191433`
+- Output:
+  - `experiments/exp_real_smoke_20260612_191433/reports/epoch_comparison_returns.png`
+  - `experiments/exp_real_smoke_20260612_191433/reports/epoch_returns/epoch_001_returns.png`
+- PNG checks confirmed valid non-empty images: 2080x1920 and 2080x1728.
+
+Validation:
+- `git diff --check` passed.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_nl_scoring tests.unit.test_pipeline_e2e tests.unit.test_reporting -v` ran 44 tests OK.
+
+Current conclusion:
+- The real end-to-end path now runs through a regular Agent Fold, a regularization Fold, and Held-Out evaluation with real PIT snapshots, Docker sandbox execution, provider-backed Agent calls, provider-backed NL scoring, step-tree artifacts, factor attribution, and reports.
+- The smoke experiment is not evidence of strategy quality: validation improved after Agent iteration, but frozen test and Held-Out were slightly negative. Its value is mainly operational: it verified the pipeline path and exposed realistic performance/UX constraints.
+- Follow-up candidates: reduce snapshot copy cost, make Fold deadline cancel or reject long-running tool calls more forcefully, and keep the 10-candidate cap for real smoke tests unless the Fold deadline is increased substantially.
+
+## 2026-06-12 final-Epoch regularization fix and real-trace audit
+
+Task: ensure the last Epoch does not run regularization, then audit the real experiment trace, Agent shutdown, and NL grep retrieval behavior.
+
+Implementation:
+- Updated `ExperimentPipeline.run()` so `run_regularization()` is called only when `epoch_index < config.epochs`.
+- Updated `docs/pipeline_design.md` to state that regularization is an inter-Epoch step; the final Epoch proceeds directly to Held-Out.
+- Updated `tests/unit/test_pipeline_e2e.py`:
+  - `test_single_epoch_skips_final_regularization_and_runs_heldout` proves a one-Epoch run does not call the regularizer and Held-Out uses the Fold artifact directly.
+  - `test_multi_epoch_regularizes_only_between_epochs` proves a two-Epoch run regularizes only after `epoch_001`, then Held-Out uses the final ordinary Fold artifact from `epoch_002`.
+
+Validation:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e -v` ran 11 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_nl_scoring tests.unit.test_pipeline_e2e tests.unit.test_reporting -v` ran 45 tests OK.
+- `git diff --check` passed.
+- Resource checks after validation remained safe: about 408 GiB RAM available; no MacroQuant Docker containers left running.
+
+Trace audit for `exp_real_smoke_20260612_191433`:
+- Regular Fold `run_2e64f9b835fc` trace counts: 57 Agent LLM calls, 44 Shell calls, 7 Tool calls, 6 backtest events, 4 NL batch summaries, 1 `finish_fold`, 1 `session_end`.
+- The Agent workflow was coherent:
+  - inspected `agent_output`, `steps/tree.json`, `train` snapshot, daily/fundamental/event/macro schemas, and factor templates;
+  - drafted a multi-factor strategy;
+  - hit a universe boundary rejection (`300114.SZ`) and fixed it by filtering against `universe.parquet`;
+  - ran a first valid backtest that lost money on short-side exposure;
+  - explored IC and margin/shortability data;
+  - simplified to a 20-day momentum factor after the earlier composite underperformed;
+  - hit a finite-score validation error, dropped NaN scores, and reran;
+  - achieved positive validation in `valid_001`;
+  - added a simple `nl_prior`, ran `nl_mode=on` validation in `valid_002`, inspected attribution/orders, then called `finish_fold`.
+- Pipeline behavior was normal:
+  - `finish_fold_tool` returned successfully;
+  - session ended;
+  - Pipeline froze the accepted `valid_002` artifact and ran frozen test `test_000`.
+- Regularization run `run_fcba06ac9cd1` did not run backtests, edited `prior.json`, passed `modification_check_tool`, and ended. Attempts to read host `/Data/...` paths returned `not found`, so no host data escape was observed.
+- Held-Out run `run_3dee7c6e695c` ran only a frozen evaluation and did not modify the strategy artifact.
+
+NL grep audit:
+- `valid_002`: 27 NL provider calls, 22 grep/regex search requests, 93 evidence rows, 10 scores; 9 completed, 1 `failed_with_policy` neutral score. Scores ranged from -0.30 to +0.35.
+- `test_000`: 27 NL provider calls, 22 search requests, 100 evidence rows, 10 completed scores. Scores ranged from -0.70 to +0.20.
+- `heldout_000`: 28 NL provider calls, 27 search requests, 121 evidence rows, 10 completed scores. Scores ranged from -0.45 to +0.35.
+- Requests used `pattern` regex form such as `公司名|证券代码` and `问询函|处罚|立案`, not only legacy keyword lists. Code path is `TextRetriever.search()`, which matches titles/codes first and then body text.
+- Environment return values were structurally reasonable: `search_requests.jsonl`, `evidence.jsonl`, `scores.jsonl`, `company_context.jsonl`, and `nl_llm_calls.jsonl` were all present; scores cited valid evidence IDs except one `valid_002` task, which was converted to neutral by `neutral_with_audit`.
+- Two quality issues remain:
+  - Generic risk patterns often retrieve non-candidate-company news; approximate generic-risk title rows were 40/93 in `valid_002`, 41/100 in `test_000`, and 51/121 in Held-Out.
+  - `applied_prior_ids` was empty in all audited NL scores, meaning the model used evidence but did not explicitly map conclusions back to `prior.json` rules. This is auditable but weakens prior-rule attribution.
+
+## 2026-06-12 meta-learning Fold and NL relevance hardening
+
+Task: replace the final-Epoch regularization skip with an Epoch-start meta-learning + optional regularization Fold, improve candidate-company relevance in NL retrieval, strengthen NL prompt/schema validation, and add a web-search tool for meta-learning.
+
+Resource checks:
+- Before implementation validation: about 403 GiB system RAM available; GPUs 4 and 6 were nearly free, other L20 GPUs were mostly occupied by unrelated jobs.
+- After validation: resource usage remained safe; no long-running MacroQuant job was left active.
+
+Implementation:
+- Added `src/hl_trader/environment/web_search.py` with a host-side Tavily provider and traceable `WebSearchTool`.
+- Stored `TAVILY_API_KEY` in local ignored `.env`; no key was written to Git-tracked files.
+- Added `web_search` action to `AgentSessionRunner`, available only in `mode="meta_learning"`.
+- Replaced the main Pipeline regularization schedule with Epoch-start meta-learning:
+  - each Epoch calls `run_meta_learning()` before ordinary Folds;
+  - meta-learning writes `workspace/taste.md`;
+  - Pipeline copies Taste to `experiments/<experiment_id>/meta_learning/<epoch_id>/taste.md`;
+  - Taste is injected as `taste_prompt` into all Fold Agent prompts for that Epoch;
+  - if a parent artifact exists and the meta-learning edits pass `modification_check_tool`, Pipeline freezes `strategy_<epoch_id>_meta_learning` as the Epoch starting artifact;
+  - otherwise Pipeline keeps the parent and still uses the generated Taste.
+- Updated ledger record type from the old regularization event to `meta_learning`; removed the old direct regularization session path so the current entry is `run_meta_learning()`.
+- Added a compact development-history package for meta-learning. It combines fold ledger records with selected `run_manifest.json` backtest summaries, so Taste generation can see validation/test return, Sharpe, drawdown, order count, candidate truncation, failure reasons, and complete-validation status without mounting full historical artifacts.
+- Strengthened NL scoring:
+  - `TextRetriever.search()` now ranks candidate-code/name hits above generic title/body hits and marks evidence as `candidate` or `background`.
+  - Only `candidate` evidence IDs are allowed in final score citations; background evidence can inform context but cannot become formal per-stock evidence.
+  - NL prompt now asks for company/code/business-context grep patterns first and treats generic searches as background.
+  - `validate_score_payload()` checks `applied_prior_ids` against visible `prior.json` rule IDs and requires a prior ID for non-neutral or evidence-backed scores.
+- Hardened Tavily error handling so HTTP and transport errors redact the configured key before returning an agent-visible observation.
+- Updated `scripts/experiments/run_experiment.py` with `--web-search-provider` and `--tavily-api-key-env`.
+- Updated living docs (`agent_design`, `environment_design`, `pipeline_design`), `configs/prompts/PROMPTS.md`, and `configs/agent_output_template/nl_prior/README.md`.
+
+Provider check:
+- Command: small Tavily query through `TavilySearchProvider.from_env()`.
+- Result: provider returned 2 results for a WFO/overfitting query, confirming the configured key and HTTP path work.
+
+SubAgent audit:
+- SubAgent found no Critical issues.
+- High issues fixed in this pass: other-company evidence can no longer be cited as candidate evidence; zero-diff meta-learning no longer freezes a duplicate artifact.
+- Medium issues fixed or scoped: meta-learning docs now describe compact history summaries instead of full artifact access; old regularization session mode was removed; Tavily error text redacts the configured key; `applied_prior_ids` is now required only for non-neutral/evidence-backed conclusions.
+
+Validation:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_nl_scoring tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e tests.unit.test_tools_flow tests.unit.test_reporting -v`
+- Result: 64 tests OK.
+- `git diff --check` passed.
+- `py_compile` passed for changed core modules and CLI.
+- Final resource check: about 404 GiB RAM available; local GPUs remained safe, with GPUs 4 and 6 nearly free and other GPUs occupied by unrelated processes.
+
+Current conclusion:
+- The previous final-Epoch skip logic is no longer the accepted design. The current design runs a meta-learning + optional regularization Fold before every Epoch.
+- Ordinary Fold Agents remain offline except for the main LLM provider; only meta-learning can use Tavily search.
+- The two real-trace NL audit issues have targeted fixes: candidate-related evidence is prioritized, and NL scores must map back to prior rules.
+
+## 2026-06-13 short candidate rollover in order planning
+
+Task: change the backtest order-plan logic so short candidates that are not currently shortable do not consume a holding slot. Instead, the Environment should skip them and roll down to the next shortable candidate.
+
+Implementation:
+- Updated `build_order_plan()` in `src/hl_trader/environment/backtest_engine.py`:
+  - long candidates are ranked by descending `final_score`;
+  - short candidates are ranked by negative-score strength;
+  - when a shortable universe is supplied, non-shortable short candidates are filtered before sizing;
+  - the final Top N is selected from executable candidates and sized by `abs(final_score)`.
+- Updated `BacktestTool` so default `proxy_margin_secs` loads decision-date `margin_secs` before order-plan construction and passes that set into `build_order_plan()`.
+- Kept `theoretical_short` unfiltered, and treated currently unsupported `broker_inventory` as no available short inventory until real inventory files are wired.
+- Added `short_unavailable_skipped_count` to backtest summaries for audit.
+- Updated Shapley factor-attribution replay to use the same order-plan shortability rule as the formal backtest.
+- Updated Agent prompt exports, factor template README/main.py comments, and living docs to describe the new side-aware selection rule.
+- Added unit coverage: `test_short_order_plan_rolls_down_to_next_shortable_candidate`.
+
+Validation:
+- Resource checks before/around validation: about 404 GiB RAM available; GPUs 4 and 6 nearly free, other GPUs occupied by unrelated processes.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine tests.unit.test_tools_flow tests.unit.test_pipeline_e2e -v` ran 42 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine tests.unit.test_tools_flow tests.unit.test_pipeline_e2e tests.unit.test_nl_scoring tests.unit.test_reporting -v` ran 64 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/backtest_engine.py src/hl_trader/environment/tools/backtest.py src/hl_trader/agent/prompts.py configs/agent_output_template/factor/main.py` passed.
+- `git diff --check` passed.
+
+Current conclusion:
+- Formal backtest order planning now rolls unavailable short candidates down to the next shortable candidate within the scored candidate pool.
+- Simulated Broker still keeps reject/fill accounting as a final safeguard for cash, suspension, limit, margin, fee, and future broker-inventory constraints.
+
+## 2026-06-13 CSI 300 benchmark in experiment reports
+
+Task: add the CSI 300 return curve to experiment report charts and expose active return against the benchmark.
+
+Resource checks:
+- Before validation: about 397 GiB system RAM available. GPUs were safe for this CPU-only reporting task; GPU 6 was nearly idle, several other L20 cards were occupied by unrelated processes.
+- After validation: resource usage remained safe; no long-running report job was left active.
+
+Implementation:
+- Updated `src/hl_trader/pipelines/reporting.py`:
+  - default benchmark is `000300.SH` labelled `CSI 300`;
+  - benchmark data is auto-loaded from `data/raw/index_daily/ts_code=000300.SH/`;
+  - each Fold/Held-Out period gets `benchmark_return` and `active_return`;
+  - benchmark period return uses the first replay trade day's open and the last replay trade day's close, matching the fixed holding-period replay convention;
+  - cross-Epoch and single-Epoch charts now include benchmark return/equity lines, active-return metrics, and relative equity versus benchmark.
+- Updated `scripts/experiments/report_experiment.py` with `--benchmark-code`, `--benchmark-raw-dir`, and `--no-benchmark`.
+- Updated `tests/unit/test_reporting.py` to cover benchmark loading and summary fields.
+- Updated `docs/pipeline_design.md` with the reporting contract and active-return definition.
+- Local ignored data was supplemented with TuShare `index_daily` for `000300.SH`: 1,560 rows covering `20200102` through `20260612`, written as yearly Parquet partitions under `data/raw/index_daily/ts_code=000300.SH/`.
+
+Report regeneration:
+- Command: `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/report_experiment.py --experiment-id exp_epoch_eval_001`
+- Output charts:
+  - `experiments/exp_epoch_eval_001/reports/epoch_comparison_returns.png`
+  - `experiments/exp_epoch_eval_001/reports/epoch_returns/epoch_001_returns.png`
+- Benchmark coverage: 17/17 report periods.
+- Development summary: mean strategy return +5.37%, mean CSI 300 return -0.66%, mean active return +6.03%, compound active return +103.82%.
+- Held-Out 2026Q1: strategy return -1.65%, CSI 300 return -4.54%, active return +2.89%.
+
+Validation:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_reporting -v` passed, 2 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/pipelines/reporting.py scripts/experiments/report_experiment.py tests/unit/test_reporting.py` passed.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_multi_epoch_runs_meta_learning_before_each_epoch -v` passed, 1 test OK.
+- `git diff --check` passed.
+- PNG integrity check with PIL confirmed both regenerated charts are readable and non-empty.
+
+Current conclusion:
+- Experiment visualizations now compare strategy returns to CSI 300 and explicitly report active return.
+- The benchmark layer is optional; reports still render with benchmark disabled or missing, but the summary records benchmark status for audit.
+
+## 2026-06-14 Semantic Scholar provider for meta-learning search
+
+Task: add Semantic Scholar Academic Graph API as an optional provider for the Epoch-start meta-learning `web_search` tool.
+
+Resource checks:
+- Before implementation: about 375 GiB system RAM available. GPUs were heavily occupied by unrelated Python jobs; this task used CPU/network only.
+- After validation: resources remained safe; no long-running MacroQuant job was left active.
+
+Implementation:
+- Added `SemanticScholarSearchProvider` to `src/hl_trader/environment/web_search.py`.
+  - Reads `SEMANTIC_SCHOLAR_API_KEY` from the host environment or ignored local `.env`.
+  - Uses Semantic Scholar Graph API paper search with `x-api-key` header.
+  - Returns unified `WebSearchResult` records containing title, URL, abstract snippet, year/date, venue, authors, citation count and influential citation count when available.
+  - Applies a small minimum interval between provider calls and redacts the configured key from provider error messages.
+- Updated `scripts/experiments/run_experiment.py`:
+  - `--web-search-provider` now accepts `tavily`, `semantic_scholar`, or `disabled`.
+  - Added `--semantic-scholar-api-key-env`, defaulting to `SEMANTIC_SCHOLAR_API_KEY`.
+- Updated meta-learning prompt text to clarify that `web_search` may be backed by general web search or Semantic Scholar academic paper search.
+- Updated `docs/environment_design.md`, `docs/pipeline_design.md`, and regenerated `configs/prompts/PROMPTS.md`.
+- Stored the provided Semantic Scholar key in the local ignored `.env`; no tracked file contains the key.
+
+Provider references:
+- Semantic Scholar official tutorial and API docs state that the Academic Graph API base URL is `https://api.semanticscholar.org/graph/v1`, paper search is under `/paper/search`, and API keys are sent in the case-sensitive `x-api-key` header. The tutorial also recommends key-backed users keep calls around 1 request per second.
+
+Live smoke:
+- Command: instantiate `SemanticScholarSearchProvider.from_env()` and query `walk forward optimization finance` with `max_results=2`.
+- Result: provider returned 2 paper records with Semantic Scholar URLs; no key was printed.
+
+Validation:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e -v` passed, 30 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/web_search.py scripts/experiments/run_experiment.py src/hl_trader/agent/prompts.py tests/unit/test_sandbox_isolation.py` passed.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/run_experiment.py --help` confirmed the new `semantic_scholar` provider option.
+- `git diff --check` passed.
+- Tracked diff scan for the Semantic Scholar key pattern returned no matches.
+
+Current conclusion:
+- Meta-learning can now use Semantic Scholar for academic/theory search without exposing the key to Sandbox Agents.
+- Ordinary Fold Agents and NL scoring remain offline except for their existing LLM provider calls.
+
+## 2026-06-15 PR validation for agent experiment branch
+
+Task: prepare the current Agent/Environment/Pipeline/Data update branch for GitHub PR submission.
+
+Resource checks:
+- Before validation: about 375 GiB RAM available. GPUs were heavily occupied by unrelated Python jobs; validation was CPU-focused.
+- After validation: about 373 GiB RAM available. No long-running MacroQuant validation job was left active.
+
+Validation:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py' -v`
+  - Result: 190 tests OK.
+  - Note: the direct command `python -m unittest discover tests/unit -v` is not package-aware for the current relative-import test layout and reports import errors for tests that use `from .fixtures_sandbox`; the correct full-suite entrypoint is `-s tests -t .`.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m compileall -q src scripts configs`
+  - Result: passed.
+- `git diff --check`
+  - Result: passed.
+- Removed ignored local Python caches after validation.
+
+Current conclusion:
+- The branch is ready for PR from a verification standpoint. The PR includes the broader single-Agent experiment runtime, Docker/Sandbox contracts, TuShare script organization, reporting visualization, short-side order rollover, Semantic Scholar meta-learning search provider, and synchronized living documentation/logbook updates.
