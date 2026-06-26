@@ -23,13 +23,13 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
-from hl_trader.agent import AgentSessionConfig, AgentSessionRunner, ContextCompactionConfig
-from hl_trader.environment.llm import DeepSeekProxy
-from hl_trader.environment.sandbox import SandboxSpec
-from hl_trader.environment.snapshot import SnapshotConfig
-from hl_trader.environment.tools import ToolContext
-from hl_trader.environment.web_search import SemanticScholarSearchProvider, TavilySearchProvider
-from hl_trader.pipelines import (
+from autotrade.agent import AgentSessionConfig, AgentSessionRunner, ContextCompactionConfig
+from autotrade.environment.llm import DeepSeekProxy
+from autotrade.environment.sandbox import SandboxSpec
+from autotrade.environment.snapshot import SnapshotConfig
+from autotrade.environment.tools import ToolContext
+from autotrade.environment.web_search import SemanticScholarSearchProvider, TavilySearchProvider
+from autotrade.pipelines import (
     AcceptanceRules,
     ExperimentConfig,
     ExperimentPipeline,
@@ -43,10 +43,10 @@ DEFAULT_NL_MODEL = "deepseek-v4-flash"
 DEFAULT_COMPACT_MODEL = "deepseek-v4-flash"
 DEFAULT_META_CREDENTIAL_ENVS = ("GITHUB_TOKEN", "HF_TOKEN")
 DEFAULT_META_PROXY_ALIASES = (
-    ("MQ_PROXY_HTTP", "HTTP_PROXY"),
-    ("MQ_PROXY_HTTPS", "HTTPS_PROXY"),
-    ("MQ_PROXY_ALL", "ALL_PROXY"),
-    ("MQ_PROXY_NO_PROXY", "NO_PROXY"),
+    ("AT_PROXY_HTTP", "HTTP_PROXY"),
+    ("AT_PROXY_HTTPS", "HTTPS_PROXY"),
+    ("AT_PROXY_ALL", "ALL_PROXY"),
+    ("AT_PROXY_NO_PROXY", "NO_PROXY"),
 )
 
 
@@ -318,7 +318,7 @@ def main() -> int:
         "--meta-learning-host-proxy",
         action="store_true",
         help=(
-            "Expose host proxy values as non-standard MQ_PROXY_* aliases and record the alias names "
+            "Expose host proxy values as non-standard AT_PROXY_* aliases and record the alias names "
             "in runtime_env.json. Direct internet remains the default behavior."
         ),
     )

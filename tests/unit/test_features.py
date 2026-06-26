@@ -8,14 +8,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from hl_trader.environment.data import PITDataStore, default_tushare_contracts
-from hl_trader.environment.features import (
+from autotrade.environment.data import PITDataStore, default_tushare_contracts
+from autotrade.environment.features import (
     FundamentalEventsBuilder,
     FundamentalEventsConfig,
     audit_fundamental_events,
     complete_months_for_date_window,
 )
-from hl_trader.environment.features.auction import apply_open_auction_correction, market_bucket
+from autotrade.environment.features.auction import apply_open_auction_correction, market_bucket
 
 
 class AuctionCorrectionTest(unittest.TestCase):

@@ -15,7 +15,7 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
-from hl_trader.pipelines.reporting import build_experiment_report
+from autotrade.pipelines.reporting import build_experiment_report
 
 
 def main() -> int:

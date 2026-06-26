@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from hl_trader.data_sources.tushare import audit, common, cron_update, download
+from autotrade.data_sources.tushare import audit, common, cron_update, download
 
 
 class EmptyMinuteClient:
@@ -1792,8 +1792,8 @@ def load_tushare_data_module():
         spec.loader.exec_module(module)
         return module
 
-    download = load("macroquant_tushare_download", script_root / "data" / "tushare_download.py")
-    audit = load("macroquant_tushare_audit", script_root / "data" / "tushare_audit.py")
+    download = load("autotrade_tushare_download", script_root / "data" / "tushare_download.py")
+    audit = load("autotrade_tushare_audit", script_root / "data" / "tushare_audit.py")
     return types.SimpleNamespace(
         compact_intraday_by_date=download.compact_intraday_by_date,
         audit_intraday_by_date=audit.audit_intraday_by_date,

@@ -1,3 +1,13 @@
+2026-06-26 Rename project hl_trader → autotrade (full runtime ABI)
+
+- 先把工作区累积的 decouple-broker 重构提交为基线 `c3f6a2c`（全量单测 290 通过），再开分支 `refactor/rename-autotrade` 做全量改名（AutoTrade 新功能线第一步）。
+- 包改名：`src/hl_trader/` → `src/autotrade/`（git rename 保留历史），全部 import 与 `pyproject.name` 改为 `autotrade`，editable 重装。
+- 运行时 ABI：沙箱模块 `mq_tools` → `at_tools`，环境变量 `MQ_*` → `AT_*`（`AT_SNAPSHOT_DIR`/`AT_NL_*`/`AT_PROXY_*` 等），Docker 镜像 tag `macroquant-sandbox` → `autotrade-sandbox`。
+- 品牌：代码 docstring、5 个 living docs、`configs/agent_output_template/*`、重生成的 `PROMPTS.md` 中 `MacroQuant`/`hl_trader` → `AutoTrade`/`autotrade`。
+- 刻意保留（操作面/历史）：live cron 块标记 `# BEGIN/END MacroQuant TuShare update`、`MACROQUANT_ROOT`、文件系统路径 `/Data/lzp/MacroQuant`、LOGBOOK/DETAILED_LOGBOOK 历史条目。
+- 待办：Docker 镜像需按新 tag 重建（`docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile ops/docker`），否则正式实验/元学习找不到镜像。
+- 验证：compileall OK；`import autotrade` OK、`import hl_trader` 已失效（预期）；全量单测 290 通过（skipped=2，Docker 门控）；tracked 文件除 logbook 历史外无旧 token；`PROMPTS.md` 仅含 `at_tools`/`AT_`。
+
 2026-06-25 run_027521b81c60 audit: Explore robustness, Taste period-agnostic, collect_artifacts scope
 
 - 据 run_027521b81c60（首轮元学习，meta_learning_done）trace 审计，修复用户报告的三类问题。

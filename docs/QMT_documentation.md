@@ -1,6 +1,6 @@
 # QMT 文档
 
-本文档记录 MacroQuant 项目接入阿里云 Windows + MiniQMT 的部署状态、当前日常流程和未来实盘上线门槛。当前阶段模型尚未训练完成，仓库也没有活动的 live 下单脚本，因此 QMT 侧只能作为已部署的执行环境保持 standby、只读检查和 dry-run 准备；不得启动自动实盘交易。
+本文档记录 AutoTrade 项目接入阿里云 Windows + MiniQMT 的部署状态、当前日常流程和未来实盘上线门槛。当前阶段模型尚未训练完成，仓库也没有活动的 live 下单脚本，因此 QMT 侧只能作为已部署的执行环境保持 standby、只读检查和 dry-run 准备；不得启动自动实盘交易。
 
 相关边界：
 
@@ -49,7 +49,7 @@
 
 - 远端阿里云 Windows 服务器和 QMT/MiniQMT 环境已部署，可作为未来交易执行端。
 - 本项目当前代码重点仍是数据、PIT snapshot、WFO/held-out、LLM shadow 和审计链路；尚未形成冻结可交易模型。
-- 当前仓库没有 `scripts/live/` 实盘调度入口，也没有已冻结的 MacroQuant 订单生成器。
+- 当前仓库没有 `scripts/live/` 实盘调度入口，也没有已冻结的 AutoTrade 订单生成器。
 - 任何 QMT 操作默认只读或 dry-run。真实委托必须等到模型、策略、订单合约、风控和对账流程全部冻结后，才允许人工双确认执行。
 
 ## 2. 目标架构
@@ -100,7 +100,7 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
 2. 运行冻结模型或冻结规则。
    - development 阶段结果不得直接下单。
    - held-out 通过后，必须记录模型版本、配置 hash、数据合同 hash、ledger hash。
-3. 生成 MacroQuant 订单 payload。
+3. 生成 AutoTrade 订单 payload。
    - 建议路径：`artifacts/live/orders/macroquant_<strategy_id>_<YYYYMMDD>_<action>.json`。
    - payload 必须包含策略 ID、交易日期、模型版本、输入数据 hash、订单列表和风险标签。
 4. 上传远端并先 dry-run。
@@ -186,7 +186,7 @@ setx CQ_MAX_PRINCIPAL "100000"
 
 ## 7. Payload 草案
 
-当前 payload schema 尚未冻结；以下只作为 MacroQuant 后续实现参考。真实接入前必须与远端 `qmt_executor.py` 实际代码核对。
+当前 payload schema 尚未冻结；以下只作为 AutoTrade 后续实现参考。真实接入前必须与远端 `qmt_executor.py` 实际代码核对。
 
 ### 7.1 Payload Schema
 

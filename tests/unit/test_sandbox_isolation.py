@@ -8,12 +8,12 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
-from hl_trader.agent import AgentSessionConfig, AgentSessionRunner
-from hl_trader.environment.executor import DockerExecutor, LocalExecutor, docker_available
-from hl_trader.environment.llm.proxy import ScriptedLLM, tool_call, tool_call_response
-from hl_trader.environment.runtime import SandboxPaths
-from hl_trader.environment.sandbox import DockerSandbox, LocalSandbox, SandboxSpec
-from hl_trader.environment.web_search import (
+from autotrade.agent import AgentSessionConfig, AgentSessionRunner
+from autotrade.environment.executor import DockerExecutor, LocalExecutor, docker_available
+from autotrade.environment.llm.proxy import ScriptedLLM, tool_call, tool_call_response
+from autotrade.environment.runtime import SandboxPaths
+from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, SandboxSpec
+from autotrade.environment.web_search import (
     SemanticScholarSearchProvider,
     TavilySearchProvider,
     WebSearchError,
@@ -55,7 +55,7 @@ class SandboxSpecTest(unittest.TestCase):
             SandboxSpec(gpu_count=0)
 
     def test_auto_gpu_resolves_top_free_l20_devices(self):
-        from hl_trader.environment.gpu import select_gpus
+        from autotrade.environment.gpu import select_gpus
 
         fake = [
             {"index": 0, "name": "NVIDIA L20", "memory_free_mib": 1000, "memory_total_mib": 46000},
@@ -63,7 +63,7 @@ class SandboxSpecTest(unittest.TestCase):
             {"index": 2, "name": "NVIDIA A100", "memory_free_mib": 20000, "memory_total_mib": 80000},
             {"index": 3, "name": "NVIDIA L20", "memory_free_mib": 5000, "memory_total_mib": 46000},
         ]
-        with patch("hl_trader.environment.gpu.list_gpus", return_value=fake):
+        with patch("autotrade.environment.gpu.list_gpus", return_value=fake):
             self.assertEqual(select_gpus(2), [1, 3])
             self.assertEqual(select_gpus(1, require_name=None), [2])
 
@@ -133,9 +133,9 @@ class SandboxSpecTest(unittest.TestCase):
                 gpu=None,
                 network="bridge",
                 env_aliases=(
-                    ("MQ_PROXY_HTTPS", "HTTPS_PROXY"),
-                    ("MQ_PROXY_ALL", "ALL_PROXY"),
-                    ("MQ_PROXY_MISSING", "MISSING_PROXY"),
+                    ("AT_PROXY_HTTPS", "HTTPS_PROXY"),
+                    ("AT_PROXY_ALL", "ALL_PROXY"),
+                    ("AT_PROXY_MISSING", "MISSING_PROXY"),
                 ),
                 add_host_gateway=True,
             )
@@ -156,22 +156,22 @@ class SandboxSpecTest(unittest.TestCase):
                     docker.start()
             command = run.call_args.args[0]
             run_env = run.call_args.kwargs["env"]
-            self.assertIn("MQ_PROXY_HTTPS", command)
-            self.assertIn("MQ_PROXY_ALL", command)
+            self.assertIn("AT_PROXY_HTTPS", command)
+            self.assertIn("AT_PROXY_ALL", command)
             self.assertNotIn("HTTPS_PROXY", command)
             self.assertNotIn("ALL_PROXY", command)
-            self.assertNotIn("MQ_PROXY_MISSING", command)
+            self.assertNotIn("AT_PROXY_MISSING", command)
             self.assertNotIn("127.0.0.1:7890", command)
             self.assertNotIn("localhost:1080", command)
-            self.assertEqual(run_env["MQ_PROXY_HTTPS"], "http://host.docker.internal:7890")
-            self.assertEqual(run_env["MQ_PROXY_ALL"], "socks5h://host.docker.internal:1080")
+            self.assertEqual(run_env["AT_PROXY_HTTPS"], "http://host.docker.internal:7890")
+            self.assertEqual(run_env["AT_PROXY_ALL"], "socks5h://host.docker.internal:1080")
             allocation = docker.allocation_record()
             self.assertEqual(
                 allocation["env_aliases"],
                 [
-                    {"container_env": "MQ_PROXY_HTTPS", "host_env": "HTTPS_PROXY"},
-                    {"container_env": "MQ_PROXY_ALL", "host_env": "ALL_PROXY"},
-                    {"container_env": "MQ_PROXY_MISSING", "host_env": "MISSING_PROXY"},
+                    {"container_env": "AT_PROXY_HTTPS", "host_env": "HTTPS_PROXY"},
+                    {"container_env": "AT_PROXY_ALL", "host_env": "ALL_PROXY"},
+                    {"container_env": "AT_PROXY_MISSING", "host_env": "MISSING_PROXY"},
                 ],
             )
 
@@ -509,7 +509,7 @@ class MetaLearningSessionTest(unittest.TestCase):
             self.assertIn("/mnt/artifacts/runtime_env.json", runner.system_prompt)
             self.assertIn("GITHUB_TOKEN", runner.system_prompt)
             self.assertIn("HF_TOKEN", runner.system_prompt)
-            self.assertIn("MQ_PROXY_*", runner.system_prompt)
+            self.assertIn("AT_PROXY_*", runner.system_prompt)
             self.assertNotIn("github_pat_", runner.system_prompt)
             self.assertNotIn("hf_", runner.system_prompt)
 

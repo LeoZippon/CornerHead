@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hl_trader.environment.artifacts import (
+from autotrade.environment.artifacts import (
     ArtifactError,
     ModificationConstraints,
     artifact_hash,

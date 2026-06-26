@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Thin CLI wrapper for scheduled MacroQuant TuShare updates."""
+"""Thin CLI wrapper for scheduled AutoTrade TuShare updates."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
-from hl_trader.data_sources.tushare.cron_update import *  # noqa: F401,F403
-from hl_trader.data_sources.tushare.cron_update import main
+from autotrade.data_sources.tushare.cron_update import *  # noqa: F401,F403
+from autotrade.data_sources.tushare.cron_update import main
 
 
 if __name__ == "__main__":

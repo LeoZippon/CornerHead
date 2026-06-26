@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from hl_trader.environment.snapshot import finalize_snapshot_dir
+from autotrade.environment.snapshot import finalize_snapshot_dir
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "configs" / "agent_output_template"
 TS_CODE = "000001.SZ"
@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 import pandas as pd
 
-SNAPSHOT_DIR = Path(os.environ.get("MQ_SNAPSHOT_DIR", "/mnt/snapshot"))
+SNAPSHOT_DIR = Path(os.environ.get("AT_SNAPSHOT_DIR", "/mnt/snapshot"))
 
 
 def buy_hold(ctx):

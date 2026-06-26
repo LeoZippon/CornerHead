@@ -3,10 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hl_trader.agent.prompts import build_experiment_facts, build_system_prompt
-from hl_trader.environment.artifacts import artifact_hash
-from hl_trader.environment.runtime import RunManifest
-from hl_trader.environment.step_tree import StepTree
+from autotrade.agent.prompts import build_experiment_facts, build_system_prompt
+from autotrade.environment.artifacts import artifact_hash
+from autotrade.environment.runtime import RunManifest
+from autotrade.environment.step_tree import StepTree
 
 from .test_artifacts import write_artifact
 

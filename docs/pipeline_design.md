@@ -365,7 +365,7 @@ experiments/<experiment_id>/strategy_artifacts/<epoch_id>/<strategy_artifact_id>
 - 元学习使用独立 run/session，不复用普通 Fold Agent 会话。
 - 实验级 `meta_learning_directive` 只进入元学习 Prompt，不直接进入普通 Fold Agent；元学习必须把它当作待检验假设，可采纳、细化、降级或拒绝，并在 Taste 中给出可执行方向。
 - `web_search` 只在元学习会话开放；普通 Fold Agent 不联网。元学习 action 使用 `engine` 选择本次配置的搜索引擎；`perspective` 只记录研究视角。
-- 元学习默认使用 Docker `bridge` 直连网络，并透传配置允许的环境变量名以支持 `git clone`、`hf download`、`pip`、`npm`。代理默认关闭；需要宿主 XRay/代理端口时，实验 CLI 显式开启 host proxy 选项，并在 `runtime_env.json` 的 `sandbox_spec.env_aliases` 中记录代理别名变量名。代理别名使用 `MQ_PROXY_*`，不会让工具默认走代理；Agent 只有在直连卡顿或失败时才临时映射为标准代理变量。该能力用于研究探索和依赖可行性验证，不改变普通 Fold/回测的默认离线可复现边界；secret 值不写入 manifest、账本或 prompt。
+- 元学习默认使用 Docker `bridge` 直连网络，并透传配置允许的环境变量名以支持 `git clone`、`hf download`、`pip`、`npm`。代理默认关闭；需要宿主 XRay/代理端口时，实验 CLI 显式开启 host proxy 选项，并在 `runtime_env.json` 的 `sandbox_spec.env_aliases` 中记录代理别名变量名。代理别名使用 `AT_PROXY_*`，不会让工具默认走代理；Agent 只有在直连卡顿或失败时才临时映射为标准代理变量。该能力用于研究探索和依赖可行性验证，不改变普通 Fold/回测的默认离线可复现边界；secret 值不写入 manifest、账本或 prompt。
 - 元学习 Prompt 要求 Agent 先读 `data_summary.json`，再用 shell 调 Python 对可见 snapshot 做只读详细检查和分析，至少理解本次数据 schema、日期覆盖、行数、关键空值和单位约束；大表优先用 DuckDB、Parquet metadata、按列读取或过滤读取。
 - 启用联网搜索时，元学习必须在结束前分别完成金融/量化/经济、其他自然科学/工程、哲学/方法论三类视角的非空成功检索，并把结论收敛到一个创新但可执行的简洁 Taste。若某个引擎限流、失败或返回空结果，Agent 应换引擎或重试同一视角。
 - Pipeline 只在真实 Runner summary 显示 `meta_learning_done` 且 `taste.md` 非空时采纳 Taste 或正则化改动；否则 fail-fast，不沿用旧 Taste 伪装本轮完成。

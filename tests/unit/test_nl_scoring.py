@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from hl_trader.environment.llm.proxy import (
+from autotrade.environment.llm.proxy import (
     LLMProxyError,
     ScriptedLLM,
     tool_call as make_tool_call,
     tool_call_response,
 )
-from hl_trader.environment.nl import (
+from autotrade.environment.nl import (
     ExtractionError,
     NLSubAgentConfig,
     NLSubAgentEngine,

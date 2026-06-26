@@ -1,5 +1,5 @@
-# MacroQuant Agent sandbox image (docs/environment_design.md 3.1/3.3).
-# Build: docker build -t macroquant-sandbox:latest -f ops/docker/sandbox.Dockerfile ops/docker
+# AutoTrade Agent sandbox image (docs/environment_design.md 3.1/3.3).
+# Build: docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile ops/docker
 # Behind restricted networks pre-pull the base via a registry mirror and pass
 # --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 FROM python:3.11-slim

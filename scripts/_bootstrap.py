@@ -17,6 +17,6 @@ def add_repo_src(file: str) -> Path:
 
 def _repo_root(path: Path) -> Path:
     for parent in (path.parent, *path.parents):
-        if (parent / "src" / "hl_trader").is_dir() and (parent / "pyproject.toml").is_file():
+        if (parent / "src" / "autotrade").is_dir() and (parent / "pyproject.toml").is_file():
             return parent
     raise RuntimeError(f"cannot locate repo root from {path}")

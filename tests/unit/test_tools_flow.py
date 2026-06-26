@@ -9,20 +9,20 @@ from pathlib import Path
 
 import pandas as pd
 
-from hl_trader.agent import AgentSessionConfig, AgentSessionRunner, ContextCompactionConfig, ContextCompactor
-from hl_trader.environment.artifacts import ModificationConstraints, artifact_hash
-from hl_trader.environment.broker import BrokerProfile
-from hl_trader.environment.llm.proxy import (
+from autotrade.agent import AgentSessionConfig, AgentSessionRunner, ContextCompactionConfig, ContextCompactor
+from autotrade.environment.artifacts import ModificationConstraints, artifact_hash
+from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.llm.proxy import (
     LLMProxyError,
     ProviderResponse,
     ScriptedLLM,
     tool_call,
     tool_call_response,
 )
-from hl_trader.environment.explore import ExploreSubAgentEngine
-from hl_trader.environment.runtime import AgentTraceWriter, RunManifest
-from hl_trader.environment.sandbox import LocalSandbox
-from hl_trader.environment.tools import (
+from autotrade.environment.explore import ExploreSubAgentEngine
+from autotrade.environment.runtime import AgentTraceWriter, RunManifest
+from autotrade.environment.sandbox import LocalSandbox
+from autotrade.environment.tools import (
     BacktestTool,
     FinishFoldTool,
     ModificationCheckTool,
@@ -59,7 +59,7 @@ def buy_hold(ctx):
 
 
 def run_strategy(context):
-    snapshot_dir = Path(str(context.get("snapshot_dir") or os.environ.get("MQ_SNAPSHOT_DIR")))
+    snapshot_dir = Path(str(context.get("snapshot_dir") or os.environ.get("AT_SNAPSHOT_DIR")))
     daily = pd.read_parquet(snapshot_dir / "daily.parquet")
     code = sorted(daily["ts_code"].astype(str).unique())[0]
     return {
@@ -85,7 +85,7 @@ def close_entry(ctx):
 
 
 def run_strategy(context):
-    snapshot_dir = Path(str(context.get("snapshot_dir") or os.environ.get("MQ_SNAPSHOT_DIR")))
+    snapshot_dir = Path(str(context.get("snapshot_dir") or os.environ.get("AT_SNAPSHOT_DIR")))
     daily = pd.read_parquet(snapshot_dir / "daily.parquet")
     code = sorted(daily["ts_code"].astype(str).unique())[0]
     return {
@@ -154,7 +154,7 @@ import pandas as pd
 
 
 def run_strategy(context):
-    snapshot_dir = Path(str(context.get("snapshot_dir") or os.environ.get("MQ_SNAPSHOT_DIR")))
+    snapshot_dir = Path(str(context.get("snapshot_dir") or os.environ.get("AT_SNAPSHOT_DIR")))
     daily = pd.read_parquet(snapshot_dir / "daily.parquet")
     code = sorted(daily["ts_code"].astype(str).unique())[0]
     return {
@@ -182,7 +182,7 @@ def inspect_ctx(ctx):
 '''
 
 POLICY_NL_TRADING = '''
-from mq_tools import nl
+from at_tools import nl
 
 
 def call_nl(ctx):
@@ -518,8 +518,8 @@ def noop(ctx):
 def run_strategy(context):
     if "workspace_dir" in context:
         raise RuntimeError("workspace_dir leaked through context")
-    if os.environ.get("MQ_WORKSPACE_DIR"):
-        raise RuntimeError("MQ_WORKSPACE_DIR leaked through environment")
+    if os.environ.get("AT_WORKSPACE_DIR"):
+        raise RuntimeError("AT_WORKSPACE_DIR leaked through environment")
     snapshot_dir = Path(str(context["snapshot_dir"]))
     daily = pd.read_parquet(snapshot_dir / "daily.parquet")
     code = sorted(daily["ts_code"].astype(str).unique())[0]
@@ -760,7 +760,7 @@ def run_strategy(context):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
             main = '''
-from mq_tools import nl
+from at_tools import nl
 
 
 def run_strategy(context):
@@ -784,7 +784,7 @@ def run_strategy(context):
             self.assertEqual(list(ctx.paths.results.iterdir()), [])
 
     def test_step_tree_records_validated_steps_when_enabled(self):
-        from hl_trader.environment.step_tree import StepTree
+        from autotrade.environment.step_tree import StepTree
 
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
@@ -1276,7 +1276,7 @@ class AgentSessionRunnerTest(unittest.TestCase):
             _, ctx = build_sandbox(Path(tmp))
             (ctx.paths.agent_output / "main.py").write_text(
                 '''
-from mq_tools import nl
+from at_tools import nl
 
 
 def run_strategy(context):

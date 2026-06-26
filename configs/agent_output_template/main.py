@@ -1,7 +1,7 @@
 """Formal strategy entrypoint.
 
 The Environment runs this file to obtain the candidate-to-strategy mapping
-(``trade_intents``), serves optional ``mq_tools.nl`` calls, and then replays
+(``trade_intents``), serves optional ``at_tools.nl`` calls, and then replays
 each mapped stock minute-by-minute by calling its ``trade_strategy`` function
 (defined in ``trading.py``) so it can drive the Broker primitives.
 

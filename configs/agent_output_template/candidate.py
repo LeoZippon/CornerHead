@@ -7,10 +7,10 @@ from pathlib import Path
 import pandas as pd
 
 try:
-    from mq_tools import nl
+    from at_tools import nl
 except Exception:  # pragma: no cover - only used outside formal execution
     def nl(ts_code: str, prompt: str = "", **kwargs) -> dict[str, object]:
-        return {"status": "error", "content": "", "error": "mq_tools.nl is unavailable outside formal execution"}
+        return {"status": "error", "content": "", "error": "at_tools.nl is unavailable outside formal execution"}
 
 
 def select_candidates(context: dict[str, object]) -> pd.DataFrame:

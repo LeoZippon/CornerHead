@@ -27,7 +27,7 @@ Strategies never write fills, cash, or positions directly.
   are read-only account snapshots.
 
 The replay ``ctx`` intentionally does not expose model directories, workspace,
-or NL tools. Use models and ``mq_tools.nl`` while building ``trade_intents`` in
+or NL tools. Use models and ``at_tools.nl`` while building ``trade_intents`` in
 the decision stage, then pass the resulting values through ``ctx.params``.
 ``amount`` is a share count (lot-aligned to 100); ``weight`` is a notional
 fraction of initial equity. Functions are pure trading logic with no network

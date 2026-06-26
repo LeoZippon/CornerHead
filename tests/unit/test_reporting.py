@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from hl_trader.pipelines.ledger import ExperimentLedger
-from hl_trader.pipelines.reporting import build_experiment_report
+from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.reporting import build_experiment_report
 
 
 PERIODS = {

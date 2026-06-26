@@ -21,7 +21,7 @@
 | Taste | Epoch 开始前元学习会话生成的探索偏好，会注入本 Epoch 的 Fold Agent Prompt |
 | 策略产物 | 跨 Fold 共享的 `output/` 正式策略产物目录，根目录固定入口为 `main.py` |
 | 模型参数产物 | 跨 Fold 共享的 `models/` 可继承模型产物目录，用于保存可复现模型参数和权重 |
-| NL Sub Agent 工具 | 决策代码可显式调用的 `mq_tools.nl(ts_code, prompt=...)` PIT 文本分析服务 |
+| NL Sub Agent 工具 | 决策代码可显式调用的 `at_tools.nl(ts_code, prompt=...)` PIT 文本分析服务 |
 | Held-out | 所有训练结束后才运行的冻结测试区间；Agent 不可读 |
 
 ## 导航
@@ -173,7 +173,7 @@ Epoch 前元学习会话拥有普通 Fold 没有的独立能力：
 
 - `web_search`：宿主暴露可用搜索引擎，元学习每次调用自行选择 `engine`，并用 `perspective` 标记研究视角。
 - Sandbox 联网：默认可用 Docker `bridge` 直连网络，可通过 `sandbox_shell_tool` 运行 `git`、`pip`、`npm`、`hf` 下载公开代码、资料或模型。元学习期只放在 `workspace` 的试装或缓存不会继承；需要后续 Fold 使用的新依赖应写入 `workspace/sandbox_environment.json`，由 Pipeline 构建派生 Sandbox 镜像。后续 Fold 还能使用冻结继承的 `output` 源码和 `models` 参数。
-- 代理：默认不启用，需实验配置显式开启 host proxy。开启后容器只获得 `MQ_PROXY_*` 非标准别名，Agent 平时仍直连；只有 GitHub/HuggingFace/PyPI/npm 访问卡顿或失败时，才在单条命令前临时映射为 `HTTPS_PROXY` / `ALL_PROXY`。
+- 代理：默认不启用，需实验配置显式开启 host proxy。开启后容器只获得 `AT_PROXY_*` 非标准别名，Agent 平时仍直连；只有 GitHub/HuggingFace/PyPI/npm 访问卡顿或失败时，才在单条命令前临时映射为 `HTTPS_PROXY` / `ALL_PROXY`。
 - 凭据：HuggingFace token、GitHub token 和代理变量只按环境变量名透传，明文不得进入 prompt、产物、日志或账本。
 
 启用联网搜索时，元学习在结束前必须分别完成金融/量化/经济、其他自然科学/工程、哲学/方法论三类视角的非空成功检索，写出非空 `taste.md`，并收敛为适配当前实验周期和交易频率的可执行探索方向。实验启动时可通过 `meta_learning_directive` 注入研究者希望探索的方向；元学习 Agent 需把它当作待检验假设，而不是已验证结论。Taste 会注入本 Epoch 之后所有 Fold，必须与具体时间窗口无关：不得写入季度/年份/Fold 标签或某个 Fold 的专属计划，也不得复述 valid/test/held-out 区间。`done` 只确认元学习会话完成且 Taste 非空；具体写作边界依赖 Prompt 自检和后续人工审计。
@@ -321,7 +321,7 @@ def example_swing_t(ctx):
 决策代码可显式调用：
 
 ```python
-from mq_tools import nl
+from at_tools import nl
 
 result = nl("000001.SZ", prompt="只依据可见公告和新闻评估治理风险")
 content = result.get("content", "")
@@ -405,7 +405,7 @@ Agent 判断是否结束 Fold 时，应同时看：
 - 所有正式 helper 都在 `output/` 树内，入口保持根目录 `output/main.py`。
 - 模型参数只放在 `models/`，且当前模型 hash 已通过最近一次修改检查。
 - 自定义 `trade_strategy` 函数可被 `trading.py` 或 `main.py` 解析。
-- NL 调用只在决策阶段通过 `mq_tools.nl()`。
+- NL 调用只在决策阶段通过 `at_tools.nl()`。
 - `modification_check_tool` 已通过。
 - 最近一次验证回测成功，当前 `output` hash 和 `models` hash 未变。
 - 没有缓存、日志、数据 dump、密钥、notebook 或隐藏文件/目录。

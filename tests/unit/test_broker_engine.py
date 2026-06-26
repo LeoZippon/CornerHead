@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from hl_trader.environment.backtest_engine import (
+from autotrade.environment.backtest_engine import (
     BacktestError,
     StrategyPolicyRunner,
     compute_return_stats,
@@ -15,9 +15,9 @@ from hl_trader.environment.backtest_engine import (
     strategy_function_names,
     validate_trade_intents,
 )
-from hl_trader.environment.broker import BrokerProfile, MarketData, SimBroker
-from hl_trader.environment.runtime import SandboxPaths
-from hl_trader.environment.tools.backtest import _profile_kwargs
+from autotrade.environment.broker import BrokerProfile, MarketData, SimBroker
+from autotrade.environment.runtime import SandboxPaths
+from autotrade.environment.tools.backtest import _profile_kwargs
 
 DECISION = "2022-01-04T09:25:00+08:00"
 

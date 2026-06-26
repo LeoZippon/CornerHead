@@ -19,7 +19,7 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
-from hl_trader.agent.prompts import (
+from autotrade.agent.prompts import (
     DEFAULT_ANTI_OVERFIT_PROMPT,
     DEFAULT_CONVERGENCE_PROMPT,
     PROTOCOL_INSTRUCTION,
@@ -28,7 +28,7 @@ from hl_trader.agent.prompts import (
     build_meta_learning_prompt,
     build_system_prompt,
 )
-from hl_trader.environment.nl.engine import FINAL_AFTER_TOOL_BUDGET, SUB_AGENT_SYSTEM_PROMPT
+from autotrade.environment.nl.engine import FINAL_AFTER_TOOL_BUDGET, SUB_AGENT_SYSTEM_PROMPT
 
 SAMPLE_FOLD = {
     "fold_id": "fold_2022Q1",
@@ -180,7 +180,7 @@ SAMPLE_META_MANIFEST = {
 }
 SAMPLE_META_FACTS = build_experiment_facts(
     manifest=SAMPLE_META_MANIFEST,
-    runtime_env={**SAMPLE_RUNTIME_ENV, "network": "bridge", "sandbox_spec": {"network": "bridge", "env_aliases": [{"container_env": "MQ_PROXY_HTTP", "host_env": "HTTP_PROXY"}]}},
+    runtime_env={**SAMPLE_RUNTIME_ENV, "network": "bridge", "sandbox_spec": {"network": "bridge", "env_aliases": [{"container_env": "AT_PROXY_HTTP", "host_env": "HTTP_PROXY"}]}},
     data_summary=SAMPLE_DATA_SUMMARY,
     max_llm_calls=80,
     context_compaction={"enabled": True, "token_threshold": 200000, "max_calls": 8},
@@ -246,8 +246,8 @@ def render() -> str:
         "",
         "由 `scripts/dev/export_prompts.py` 从代码渲染；代码是唯一事实来源：",
         "",
-        "- `src/hl_trader/agent/prompts.py`",
-        "- `src/hl_trader/environment/nl/engine.py`",
+        "- `src/autotrade/agent/prompts.py`",
+        "- `src/autotrade/environment/nl/engine.py`",
         "",
         "阅读说明：每个 Prompt 块都按模型实际接收的文本原样放入 `text` 代码块；为减少页面噪声，除第一节外默认折叠。NL Sub Agent 的用户消息为 JSON object：`{request: {ts_code, prompt, kwargs}, company_context}`；最终回答不限定格式，只有 `text_retrieve` 工具调用需要使用约定 JSON。",
         "",

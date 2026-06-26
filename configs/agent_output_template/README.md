@@ -36,7 +36,7 @@ Optional: `params` (a dict, or inline keyword columns), `start_date`/`end_date`
 }
 ```
 
-`mq_tools.nl(ts_code, prompt="...")` is available during the decision stage
+`at_tools.nl(ts_code, prompt="...")` is available during the decision stage
 inside `main.py`, `candidate.py`, or helper modules before `trade_intents` are
 returned. It starts a host-side NL Sub Agent with a point-in-time
 `text_retrieve` tool and returns a result dict. The final `content` is
@@ -45,7 +45,7 @@ field it needs and pass the result through `trade_intents.params`. Request,
 retrieval, evidence, result, and provider-call logs are written under the
 backtest result directory.
 
-`context["model_dir"]` and `MQ_MODEL_DIR` point to
+`context["model_dir"]` and `AT_MODEL_DIR` point to
 `/mnt/agent/models/`. Decision code can load frozen parameters from `models`,
 or train inside `main.py` from the current PIT snapshot. If the trained
 parameters should be inherited by later folds, write them to `models` and run

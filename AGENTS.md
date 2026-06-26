@@ -13,9 +13,9 @@
 
 ## Repository Organization
 
-- Keep production implementation under `src/hl_trader/`; `scripts/` should contain thin command-line entrypoints only.
+- Keep production implementation under `src/autotrade/`; `scripts/` should contain thin command-line entrypoints only.
 - Group scripts by responsibility instead of leaving unrelated entrypoints at the top level: data operations in `scripts/data/`, experiment runs and reports in `scripts/experiments/`, and developer utilities in `scripts/dev/`.
-- Avoid adding new one-off top-level scripts. If a script grows substantial business logic, move the logic into `src/hl_trader/` and keep the script as a small wrapper.
+- Avoid adding new one-off top-level scripts. If a script grows substantial business logic, move the logic into `src/autotrade/` and keep the script as a small wrapper.
 
 ## Git and GitHub
 

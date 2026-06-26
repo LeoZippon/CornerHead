@@ -1,1 +1,1 @@
-"""MacroQuant test package."""
+"""AutoTrade test package."""

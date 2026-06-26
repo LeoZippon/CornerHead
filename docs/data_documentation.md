@@ -361,7 +361,7 @@ crontab -l
 
 ### 3.5 代码入口
 
-TuShare 下载、更新和审计保留少量外层入口，业务实现集中在 `src/hl_trader/data_sources/tushare/`：
+TuShare 下载、更新和审计保留少量外层入口，业务实现集中在 `src/autotrade/data_sources/tushare/`：
 
 | 文件 | 责任 |
 |---|---|

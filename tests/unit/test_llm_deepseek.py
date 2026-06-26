@@ -1,4 +1,4 @@
-# DeepSeek provider client tests (relocated to hl_trader.environment.llm.deepseek).
+# DeepSeek provider client tests (relocated to autotrade.environment.llm.deepseek).
 # Source: test_deepseek_client.py
 from io import BytesIO
 import json
@@ -8,8 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from hl_trader.environment.llm.deepseek import ChatMessage, DeepSeekAPIError, DeepSeekClient, DeepSeekConfig, DeepSeekResponse, load_deepseek_api_key
-from hl_trader.environment.llm.proxy import DeepSeekProxy
+from autotrade.environment.llm.deepseek import ChatMessage, DeepSeekAPIError, DeepSeekClient, DeepSeekConfig, DeepSeekResponse, load_deepseek_api_key
+from autotrade.environment.llm.proxy import DeepSeekProxy
 
 
 def test_config(**kwargs):
@@ -80,7 +80,7 @@ class DeepSeekClientTest(unittest.TestCase):
                 model="deepseek-v4-pro",
                 thinking_enabled=True,
                 reasoning_effort="xhigh",
-                user_id="macroquant_user-1",
+                user_id="autotrade_user-1",
             )
         )
         payload = client._payload(
@@ -92,7 +92,7 @@ class DeepSeekClientTest(unittest.TestCase):
         )
         self.assertEqual(payload["thinking"], {"type": "enabled"})
         self.assertEqual(payload["reasoning_effort"], "xhigh")
-        self.assertEqual(payload["user_id"], "macroquant_user-1")
+        self.assertEqual(payload["user_id"], "autotrade_user-1")
 
     def test_proxy_defaults_thinking_reasoning_effort_to_max(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -122,7 +122,7 @@ class DeepSeekClientTest(unittest.TestCase):
             "choices": [{"message": {"content": "{\"action\":\"hold\"}"}}],
             "usage": {"total_tokens": 12},
         }
-        with patch("hl_trader.environment.llm.deepseek.urlopen", return_value=FakeHTTPResponse(payload)):
+        with patch("autotrade.environment.llm.deepseek.urlopen", return_value=FakeHTTPResponse(payload)):
             response = DeepSeekClient(test_config()).chat_json([
                 ChatMessage("system", "Return JSON only."),
                 ChatMessage("user", "json please"),
@@ -186,7 +186,7 @@ class DeepSeekClientTest(unittest.TestCase):
             {"role": "tool", "tool_call_id": "call_old", "content": "{}"},
         ]
 
-        with patch("hl_trader.environment.llm.deepseek.urlopen", return_value=FakeRawHTTPResponse(body)) as mocked_urlopen:
+        with patch("autotrade.environment.llm.deepseek.urlopen", return_value=FakeRawHTTPResponse(body)) as mocked_urlopen:
             response = client.chat_tools(messages, tools=tools)
 
         request = mocked_urlopen.call_args[0][0]
@@ -204,7 +204,7 @@ class DeepSeekClientTest(unittest.TestCase):
             "model": "deepseek-v4-flash",
             "choices": [{"message": {"content": "[1]"}}],
         }
-        with patch("hl_trader.environment.llm.deepseek.urlopen", return_value=FakeHTTPResponse(payload)):
+        with patch("autotrade.environment.llm.deepseek.urlopen", return_value=FakeHTTPResponse(payload)):
             with self.assertRaises(DeepSeekAPIError):
                 DeepSeekClient(test_config()).chat_json([
                     ChatMessage("system", "Return JSON only."),
@@ -218,7 +218,7 @@ class DeepSeekClientTest(unittest.TestCase):
     def test_http_429_is_retryable(self):
         error = HTTPError("https://api.deepseek.com/chat/completions", 429, "rate limited", {}, None)
         client = DeepSeekClient(test_config(max_retries=0))
-        with patch("hl_trader.environment.llm.deepseek.urlopen", side_effect=error):
+        with patch("autotrade.environment.llm.deepseek.urlopen", side_effect=error):
             with self.assertRaises(DeepSeekAPIError) as ctx:
                 client.chat_json([ChatMessage("user", "json please")])
         self.assertEqual(ctx.exception.status_code, 429)
@@ -230,7 +230,7 @@ class DeepSeekClientTest(unittest.TestCase):
                 body = json.dumps({"error": {"message": "temporary"}}).encode("utf-8")
                 error = HTTPError("https://api.deepseek.com/chat/completions", status_code, "temporary", {}, BytesIO(body))
                 client = DeepSeekClient(test_config(max_retries=0))
-                with patch("hl_trader.environment.llm.deepseek.urlopen", side_effect=error):
+                with patch("autotrade.environment.llm.deepseek.urlopen", side_effect=error):
                     with self.assertRaises(DeepSeekAPIError) as ctx:
                         client.chat_json([ChatMessage("user", "json please")])
                 self.assertEqual(ctx.exception.status_code, status_code)
@@ -245,7 +245,7 @@ class DeepSeekClientTest(unittest.TestCase):
             "choices": [{"message": {"content": "{\"action\":\"hold\"}"}}],
         })
         client = DeepSeekClient(test_config(max_retries=1, retry_backoff_seconds=0))
-        with patch("hl_trader.environment.llm.deepseek.urlopen", side_effect=[error, response]) as mocked_urlopen:
+        with patch("autotrade.environment.llm.deepseek.urlopen", side_effect=[error, response]) as mocked_urlopen:
             result = client.chat_json([ChatMessage("user", "json please")])
         self.assertEqual(result.json_content()["action"], "hold")
         self.assertEqual(mocked_urlopen.call_count, 2)
@@ -255,7 +255,7 @@ class DeepSeekClientTest(unittest.TestCase):
         body = json.dumps({"error": {"message": "bad key " + fake_secret}}).encode("utf-8")
         error = HTTPError("https://api.deepseek.com/chat/completions", 401, "auth", {}, BytesIO(body))
         client = DeepSeekClient(test_config(max_retries=0))
-        with patch("hl_trader.environment.llm.deepseek.urlopen", side_effect=error):
+        with patch("autotrade.environment.llm.deepseek.urlopen", side_effect=error):
             with self.assertRaises(DeepSeekAPIError) as ctx:
                 client.chat_json([ChatMessage("user", "json please")])
         self.assertIn("redacted", str(ctx.exception).lower())
@@ -271,7 +271,7 @@ class DeepSeekClientTest(unittest.TestCase):
         fake_secret = "sk-" + "testsecret123456"
         with tempfile.TemporaryDirectory() as tmpdir:
             client = DeepSeekClient(test_config(api_key=fake_secret, conversation_log_dir=tmpdir))
-            with patch("hl_trader.environment.llm.deepseek.urlopen", return_value=FakeHTTPResponse(payload)):
+            with patch("autotrade.environment.llm.deepseek.urlopen", return_value=FakeHTTPResponse(payload)):
                 client.chat_json([
                     ChatMessage("system", "Return JSON only."),
                     ChatMessage("user", "json please"),
@@ -296,7 +296,7 @@ class DeepSeekClientTest(unittest.TestCase):
         error = HTTPError("https://api.deepseek.com/chat/completions", 401, "auth", {}, BytesIO(body))
         with tempfile.TemporaryDirectory() as tmpdir:
             client = DeepSeekClient(test_config(api_key=fake_secret, max_retries=0, conversation_log_dir=tmpdir))
-            with patch("hl_trader.environment.llm.deepseek.urlopen", side_effect=error):
+            with patch("autotrade.environment.llm.deepseek.urlopen", side_effect=error):
                 with self.assertRaises(DeepSeekAPIError) as raised:
                     client.chat_json([ChatMessage("user", "json please")])
             files = list(Path(tmpdir).rglob("*.jsonl"))
@@ -324,7 +324,7 @@ class DeepSeekClientTest(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             client = DeepSeekClient(test_config(conversation_log_dir=tmpdir))
-            with patch("hl_trader.environment.llm.deepseek.urlopen", return_value=FakeHTTPResponse(payload)):
+            with patch("autotrade.environment.llm.deepseek.urlopen", return_value=FakeHTTPResponse(payload)):
                 client.chat_json([
                     ChatMessage("system", "Return JSON only."),
                     ChatMessage("user", "json please"),
@@ -349,7 +349,7 @@ class DeepSeekClientTest(unittest.TestCase):
             blocked = Path(tmpdir) / "blocked"
             blocked.write_text("not a directory", encoding="utf-8")
             client = DeepSeekClient(test_config(conversation_log_dir=blocked))
-            with patch("hl_trader.environment.llm.deepseek.urlopen") as mocked_urlopen:
+            with patch("autotrade.environment.llm.deepseek.urlopen") as mocked_urlopen:
                 with self.assertRaises(DeepSeekAPIError):
                     client.chat_json([
                         ChatMessage("system", "Return JSON only."),

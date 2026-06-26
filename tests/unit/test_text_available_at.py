@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from hl_trader.data_sources.tushare import common as core
+from autotrade.data_sources.tushare import common as core
 
 
 def anns_frame(rows):

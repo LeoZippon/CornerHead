@@ -8,24 +8,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from hl_trader.agent import AgentSessionConfig
-from hl_trader.environment.data_summary import write_agent_data_summary
-from hl_trader.environment.runtime import RunManifest
-from hl_trader.environment.snapshot import SnapshotConfig
-from hl_trader.environment.llm.proxy import ScriptedLLM
-from hl_trader.environment.tools import BacktestTool, FinishFoldTool, ModificationCheckTool, ToolContext, ToolError
-from hl_trader.pipelines import (
+from autotrade.agent import AgentSessionConfig
+from autotrade.environment.data_summary import write_agent_data_summary
+from autotrade.environment.runtime import RunManifest
+from autotrade.environment.snapshot import SnapshotConfig
+from autotrade.environment.llm.proxy import ScriptedLLM
+from autotrade.environment.tools import BacktestTool, FinishFoldTool, ModificationCheckTool, ToolContext, ToolError
+from autotrade.pipelines import (
     ExperimentConfig,
     ExperimentLedger,
     ExperimentPipeline,
     build_fold_schedule,
 )
-from hl_trader.pipelines.folds import period_bounds, quarter_bounds
+from autotrade.pipelines.folds import period_bounds, quarter_bounds
 from scripts.experiments.run_experiment import _session_config_summary
 
 from .fixtures_sandbox import TEMPLATE_DIR, TRADING_DAYS, FakeSnapshotProvider, write_strategy
 
-SRC_ENV_DIR = Path(__file__).resolve().parents[2] / "src" / "hl_trader" / "environment"
+SRC_ENV_DIR = Path(__file__).resolve().parents[2] / "src" / "autotrade" / "environment"
 
 
 class ScriptedFoldAgent:
@@ -512,7 +512,7 @@ class PipelineEndToEndTest(unittest.TestCase):
 
             # The step tree accumulated in fold 1 is handed to later folds and
             # the second fold starts positioned at the parent artifact's node.
-            from hl_trader.environment.step_tree import StepTree
+            from autotrade.environment.step_tree import StepTree
 
             experiment_tree = StepTree(config.experiment_dir / "steps")
             self.assertGreaterEqual(len(experiment_tree.nodes()), 1)
@@ -532,7 +532,7 @@ class PipelineEndToEndTest(unittest.TestCase):
             result = pipeline.run(TRADING_DAYS)
             self.assertEqual(result["heldout_runs"], 1)
 
-            from hl_trader.environment.step_tree import StepTree
+            from autotrade.environment.step_tree import StepTree
 
             nodes = StepTree(config.experiment_dir / "steps").nodes()
             self.assertEqual(len(nodes), 2)
@@ -688,7 +688,7 @@ class PipelineEndToEndTest(unittest.TestCase):
                 stdout="build ok",
                 stderr="",
             )
-            with patch("hl_trader.pipelines.experiment.subprocess.run", return_value=completed) as mocked_run:
+            with patch("autotrade.pipelines.experiment.subprocess.run", return_value=completed) as mocked_run:
                 result = pipeline._maybe_rebuild_sandbox_image(
                     request_path,
                     epoch_id="epoch_001",
@@ -697,10 +697,10 @@ class PipelineEndToEndTest(unittest.TestCase):
                 )
 
             self.assertEqual(result["status"], "ok")
-            self.assertTrue(str(pipeline._active_sandbox_spec.image).startswith("macroquant-sandbox:exp_e2e-epoch_001-"))
+            self.assertTrue(str(pipeline._active_sandbox_spec.image).startswith("autotrade-sandbox:exp_e2e-epoch_001-"))
             dockerfile = Path(str(result["dockerfile_ref"]))
             text = dockerfile.read_text(encoding="utf-8")
-            self.assertIn("FROM macroquant-sandbox:latest", text)
+            self.assertIn("FROM autotrade-sandbox:latest", text)
             self.assertIn("libgomp1", text)
             self.assertIn("lightgbm==4.5.0", text)
             self.assertIn("@scope/tool@1.2.3", text)
@@ -742,8 +742,8 @@ class PipelineEndToEndTest(unittest.TestCase):
 def _docker_with_image() -> bool:
     import subprocess
 
-    from hl_trader.environment.executor import docker_available
-    from hl_trader.environment.sandbox import SandboxSpec
+    from autotrade.environment.executor import docker_available
+    from autotrade.environment.sandbox import SandboxSpec
 
     if not docker_available():
         return False
@@ -769,7 +769,7 @@ class DockerizedFoldE2ETest(unittest.TestCase):
 
 class ArchitectureBoundaryTest(unittest.TestCase):
     def test_environment_does_not_import_agent(self):
-        pattern = re.compile(r"^\s*(from|import)\s+hl_trader\.agent\b", re.MULTILINE)
+        pattern = re.compile(r"^\s*(from|import)\s+autotrade\.agent\b", re.MULTILINE)
         offenders = [
             str(path)
             for path in SRC_ENV_DIR.rglob("*.py")

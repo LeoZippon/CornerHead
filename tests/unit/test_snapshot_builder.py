@@ -7,8 +7,8 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from hl_trader.environment.features.fundamental_events import read_fundamental_events
-from hl_trader.environment.snapshot import SnapshotBuilder, SnapshotConfig, load_snapshot_manifest, verify_snapshot_hash
+from autotrade.environment.features.fundamental_events import read_fundamental_events
+from autotrade.environment.snapshot import SnapshotBuilder, SnapshotConfig, load_snapshot_manifest, verify_snapshot_hash
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 DECISION = datetime(2021, 10, 8, 9, 25, tzinfo=CN_TZ)
