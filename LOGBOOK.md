@@ -1,3 +1,11 @@
+2026-06-26 PR2: unified per-minute main(ctx) execution model
+
+- 把"decide-once + 每股逐 bar `trade_strategy`"改为单一常驻 `main(ctx)` 引擎：Environment 每个回放分钟调用一次市场级 `main(ctx)`，Agent 用 `ts_code` 原语在任意分钟开/平仓；删除旧 `trade_intents` 一次性映射与第二个驱动。
+- 提交序列（分支 `feat/main-ctx-engine`，基于 rename 分支）：`df662c3` 引擎核心 `main_ctx_engine.py`+测试；`28ebb67` `backtest_tool` 接入（结果改 `detailed_return.json`+`orders.parquet`，artifact 入口改 `main(ctx)`，模板+fixtures+test 迁移）；`14170af` 删除旧引擎（`backtest_engine.py` 1568→639 行）并把 `test_broker_engine` 迁到 `run_main_ctx_replay`。
+- WS6 文档：Fold prompt（`prompts.py`/`PROMPTS.md`）、`agent_output_template/README`、`agent_design`/`environment_design`/`pipeline_design` 改为 `main(ctx)` 合约。
+- PIT：分钟级 PIT 由 `ctx` 每 tick 只给 ≤`cur_time` 的 bar；横截面筛选读 `ctx.snapshot_dir`（当前为 Fold 决策时点冻结快照）。滚动 per-day as-of（WS2 完整版）、盘前竞价（PR3）、NL 硬上限 + `backtest_tool` `replay_window`（PR4）尚未实现。
+- 验证：全量单测 282 通过（移除 5 个前提反转的旧测试）；`PROMPTS.md` 重生成 in sync；py_compile OK。
+
 2026-06-26 Rename project hl_trader → autotrade (full runtime ABI)
 
 - 先把工作区累积的 decouple-broker 重构提交为基线 `c3f6a2c`（全量单测 290 通过），再开分支 `refactor/rename-autotrade` 做全量改名（AutoTrade 新功能线第一步）。

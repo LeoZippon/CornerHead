@@ -69,22 +69,23 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - Shell guard 是轻量合同层，不是完整 Bash 解析器；明确越界、写只读根或普通 Fold 安装下载会被拒绝。工具失败时读取 `error_type`、`reason` 和 `retry_hint` 后修正命令。
 
 ## 正式产物格式（modification_check 按此校验）
-- `main.py`：必须定义唯一正式入口 `run_strategy(context) -> dict`。
-- `candidate.py`：推荐用于候选筛选，可读取 `/mnt/snapshot`，可在循环中调用 `from at_tools import nl` 后使用 `nl(code, prompt="...")`。
-- `trading.py`：推荐用于定义交易策略函数（`def 名字(ctx): ...`）和候选→策略映射；Agent 可修改或新增。
+- `main.py`：必须定义唯一正式入口 `main(ctx) -> None`，由 Environment 每个回放分钟调用一次。
+- `candidate.py`：推荐用于横截面筛选与开仓逻辑，可读取 `ctx.snapshot_dir`，可调用 `ctx.nl(code, prompt="...")`；由 `main` 在选定时点调用。
+- `trading.py`：推荐用于按 `ts_code` 管理持仓的交易/做T/平仓函数（`def 名字(ctx, ts_code): ...`）；由 `main` 每分钟调用。Agent 可修改或新增。
 - `nl_prompt.md`：可选，保存策略复用的 NL 提示片段；也可以直接在 `main.py` 或 `candidate.py` 中传入 prompt。
 - `models/`：可选，保存需要跨 Fold 继承的模型参数、权重或轻量元数据；可按模型/组件分子目录。每次回测重训的临时中间产物留在内存；需要复用或继承的参数写入 `models/`。依赖包不写入 `models/`，应通过 Sandbox 镜像安装。
 - 正式产物不得包含 `__pycache__`、`.pyc`、`.pyo`、临时数据文件、日志、数据 dump、notebook 或密钥；模型权重只能放在 `models/`，不能放进 `output/`。
 
-## 候选池、NL 和交易规则（写入回测流程，无法绕过）
-- 返回值：`run_strategy(context)` 最终返回 `trade_intents` 或 `trades`，把每只候选股票映射到一个交易策略函数。每行最少含 `code`/`ts_code` 和 `trade_strategy`（函数名）；可选 `params`（dict，或以同名列内联，如 `amount`/`price`/`percent`）、`start_date`/`end_date`（生效区间 YYYYMMDD）、`reason`、`source_artifacts`。每只股票只能映射一个策略。
-- 策略函数：没有内置策略名，`trade_strategy` 必须是 `trading.py`（或 `main.py`）中定义的 `def 策略名(ctx): ...`。Environment 按分钟回放，每个 due bar 用单个 `ctx` 调用该函数。
-- `ctx` 是纯交易回放上下文，只暴露：
-  - `ctx.broker`：`.money`/`.cash`、`.buy(amount=None, weight=None)`、`.sell(amount=None)`、`.short(...)`、`.cover(...)`、`.close()`、`.account`、`.positions`。
-  - `ctx.stock`：`.code`、`.price`、`.position`（有符号股数）、`.trades`（该股历史成交，每笔含 `.price`/`.side`/`.quantity`/`.date`）。
-  - 行情与参数：`ctx.cur_price`、`ctx.cur_time`（"HH:MM"）、`ctx.cur_date`、`ctx.bar`、`ctx.params`、`ctx.account`、`ctx.positions`。
-- 下单口径：`amount` 是股数（按 100 股，即 1 手，向下对齐），`weight` 是初始权益的名义比例。策略只表达意图，Broker 强制现金、做空保证金、T+1 可卖余额、手数、涨跌停、停牌和可融券。最大持仓数、单票权重上限和仓位集中度默认由你在候选筛选、股数/权重和交易策略中自行控制；回放末日强制清仓剩余持仓。
-- NL 工具：`at_tools.nl(ts_code, prompt=...)` 是决策阶段工具，只能在 `main.py` / `candidate.py` / helper 生成 `trade_intents` 前调用。它在宿主侧启动一个可调用 `text_retrieve` 的 Sub Agent，返回 result dict（含 `status`、`content`、`tool_calls`、`evidence`、`error`）；内容不限定格式，需要数值或标签时须在决策代码中自行解析并写入 `trade_intents.params`。逐分钟交易函数不提供 `ctx.nl`、`ctx.model_dir` 或 `ctx.workspace_dir`。
+## 交易规则（写入回测流程，无法绕过）
+- 入口：Environment 按回放分钟逐分钟调用一次 `main(ctx)`（一次覆盖全市场）。时序完全由你控制：每分钟管理已有持仓、在你选定的时点筛选并开新仓。无需返回 `trade_intents`，直接调用 `ctx.broker` 原语下单即可在任意分钟开/平仓。
+- `ctx`（市场级，每分钟重建）：
+  - `ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.account`、`ctx.positions`（只读快照）、`ctx.cash`。
+  - `ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`：只含当前分钟、PIT 可见的 bar（未来分钟不可见）。
+  - `ctx.broker`：`.buy/sell/short/cover/close(ts_code, amount=None, weight=None)`、`.money`/`.cash`、`.position(ts_code)`。
+  - `ctx.nl(ts_code, prompt=...)`、`ctx.snapshot_dir`（PIT 数据，用于筛选）、`ctx.model_dir`（模型参数）、`ctx.state_dir`（跨分钟暂存，如 holdings.json）、`ctx.params`。
+- 下单口径：`amount` 是股数（按 100 股，即 1 手，向下对齐），`weight` 是初始权益的名义比例。策略只表达意图，Broker 强制现金、做空保证金、T+1 可卖余额、手数、涨跌停、停牌和可融券。最大持仓数、单票权重上限和集中度默认由你控制；回放末日强制清仓剩余持仓。Broker 是持仓真相源，`ctx.state_dir` 只存你自己的规则/目标，不是持仓账本。
+- 成本与频率：`main(ctx)` 每分钟都会被调用，但筛选、模型推理和 `ctx.nl()` 等重操作应只在你选定的少数时点执行（如盘前或收盘前），不要每分钟跑，否则 API 成本和耗时会失控；模型应在首个分钟加载/缓存，不要每分钟重训。
+- NL 工具：`ctx.nl(ts_code, prompt=...)`（等价 `from at_tools import nl`）在宿主侧启动可调用 `text_retrieve` 的 Sub Agent，返回 result dict（含 `status`、`content`、`tool_calls`、`evidence`、`error`）；内容不限定格式，需要数值或标签时在 `main`/`candidate`/helper 中自行解析。
 - NL 风险：存在发布时间/入库时间、检索召回、模型常识、自由文本解析和前视泄露风险。使用 NL 时必须按 PIT evidence 降权或过滤证据不足的结论；不要把自由文本当作稳定结构，也不要让 NL 覆盖现金、可交易性、成本和回放约束。
 - 做空：可做空股票由 `/mnt/snapshot/events.parquet` 中 decision-date 的 `margin_secs` 集合决定。默认 `proxy_margin_secs` 只能做空这些股票；`broker_inventory` 在未接入真实券源文件时拒绝做空；`theoretical_short` 是显式研究模式。
 """
@@ -103,7 +104,7 @@ FOLD_ACTION_SECTION = """\
 | `glob` | pattern, root?, path?, head_limit?, offset? | 结构化只读列文件，不访问测试或隐藏路径 |
 | `explore` | task, max_rounds? | 委托只读数据探查 Sub Agent（更便宜模型）调查一个具体问题并返回简洁摘要，把大量 shell/grep 探查移出主上下文 |
 | `modification_check` | （无） | 主动检查正式产物改动是否在约束内；`backtest` 执行前也会自动复核 |
-| `backtest` | （无） | 验证回测；Environment 只运行当前 `output/main.py`，决策代码调用 `at_tools.nl()` 才会触发 NL 工具 |
+| `backtest` | （无） | 验证回测；Environment 逐分钟回放当前 `output/main.py` 的 `main(ctx)`，策略调用 `ctx.nl()` 才会触发 NL 工具 |
 | `finish_fold` | （无） | 结束本 Fold；调用前先按“提交合同”自检 |
 | `note` | text? | 记录推理，不执行任何操作 |
 
@@ -130,7 +131,7 @@ FOLD_ACTION_SECTION = """\
 FOLD_SUBMIT_CONTRACT = """\
 ## 提交合同（finish_fold 前自检）
 finish_fold 只表示你停止本 Fold 的修改，是否冻结仍由 Pipeline 复核。调用前确认：
-- `output/main.py` 存在，`run_strategy(context)` 能返回结构化 `trade_intents` 或 `trades`，所有正式 helper 都在 `output/` 树内。
+- `output/main.py` 存在并定义 `main(ctx)`，能驱动 `ctx.broker` 原语下单，所有正式 helper 都在 `output/` 树内。
 - 需要跨 Fold 继承的模型参数已写入 `models/`；只在本次回测使用的中间产物留在内存。
 - 最近一次 `modification_check` 已通过，且之后 `output`/`models` 未再改动。
 - 最近一次 `backtest`（valid）成功，且对应的就是当前 `output`/`models` hash。
@@ -550,7 +551,7 @@ def _artifact_contract_facts(
     return _compact_mapping(
         {
             "required_entry": "output/main.py",
-            "strategy_entry_function": "run_strategy",
+            "strategy_entry_function": "main",
             "model_artifacts_allowed": True,
             "workspace_frozen": False,
             "parent": _compact_mapping(parent),

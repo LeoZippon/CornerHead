@@ -243,10 +243,10 @@ Pipeline 不为 Step 单独维护账本文件。Shell、LLM、Broker、NL 和回
 
 完整验证定义：
 
-- `output/main.py` 成功执行。
-- `trade_intents` / `trades` 通过 schema、universe、方向、权重、日期和触发价校验。
+- `output/main.py` 的 `main(ctx)` 在整个回放区间逐分钟成功执行。
+- `main` 发出的 Broker 原语通过 universe、方向、股数/权重和可交易性校验。
 - Broker 完成日线或分钟线回放。
-- `detailed_return.json`、`trade_intents.parquet`、`strategy_metadata.json` 和必要 manifest 摘要写入。
+- `detailed_return.json`、`orders.parquet` 和必要 manifest 摘要写入。
 - Broker 可执行性、拒单和费用摘要可追溯。
 
 ### 4.3 收敛和早停

@@ -14,85 +14,64 @@ reproducible model parameters such as `.json`, `.joblib`, `.pkl`, `.npy`,
 `.npz`, `.pt`, `.pth`, `.onnx`, `.safetensors`, `.cbm`, `.ubj`, or `.model`
 files. Temporary training files stay in `/mnt/agent/workspace/`.
 
-Formal backtests execute:
+## `main(ctx)` is called every replay minute
+
+Formal backtests replay the region minute by minute and call:
 
 ```python
-def run_strategy(context: dict[str, object]) -> dict[str, object]:
+def main(ctx) -> None:
     ...
 ```
 
-The return value should include `trade_intents` or `trades`: a list or DataFrame
-that **maps each candidate stock to one trading-strategy function**. Required
-fields per row: `code`/`ts_code` and `trade_strategy` (the function name).
-Optional: `params` (a dict, or inline keyword columns), `start_date`/`end_date`
-(active window, `YYYYMMDD`), `reason`, and `source_artifacts`. Example row:
+once per minute, with a **market-level** `ctx`. `main` owns all timing: it
+manages open positions every minute and screens/opens new positions on the ticks
+it chooses. It drives the Broker primitives by `ts_code` through `ctx.broker`;
+there is no `trade_intents` mapping — positions can open or change at any minute.
 
 ```python
-{
-    "code": "600000.SH",
-    "trade_strategy": "example_swing_t",
-    "amount": 2000,
-    "percent": 0.03,
-}
+from candidate import screen_and_open
+from trading import manage_positions
+
+
+def main(ctx):
+    manage_positions(ctx)            # exits / 做T on every minute
+    if ctx.cur_time == "09:30":      # you control the cadence
+        screen_and_open(ctx)         # cross-sectional screening + new entries
 ```
 
-`at_tools.nl(ts_code, prompt="...")` is available during the decision stage
-inside `main.py`, `candidate.py`, or helper modules before `trade_intents` are
-returned. It starts a host-side NL Sub Agent with a point-in-time
-`text_retrieve` tool and returns a result dict. The final `content` is
-unconstrained; decision code should parse whatever score, label, or decision
-field it needs and pass the result through `trade_intents.params`. Request,
-retrieval, evidence, result, and provider-call logs are written under the
-backtest result directory.
+`ctx` exposes (rebuilt each minute):
 
-`context["model_dir"]` and `AT_MODEL_DIR` point to
-`/mnt/agent/models/`. Decision code can load frozen parameters from `models`,
-or train inside `main.py` from the current PIT snapshot. If the trained
-parameters should be inherited by later folds, write them to `models` and run
-`modification_check_tool` again after training/backtesting. If the model is
-intentionally retrained every backtest, keep transient intermediate files in
-memory so frozen evaluation remains deterministic.
-
-## Trading strategies are Agent-defined functions
-
-There are **no built-in strategy names**. Each `trade_strategy` must resolve to
-a function defined in `trading.py` (or `main.py`). The template's `example_*`
-functions are ordinary editable Agent code, not Environment-supported keywords.
-During minute-by-minute replay the Environment calls the matched function once
-per bar with a single `ctx` argument:
-
-```python
-def example_swing_t(ctx):
-    amount = ctx.params["amount"]
-    if ctx.cur_price is None or ctx.cur_time >= "14:57":
-        return
-    last_price = ctx.stock.trades[-1].price if ctx.stock.trades else ctx.cur_price
-    cash_needed = ctx.cur_price * amount
-    dip_triggered = ctx.cur_price < last_price * 0.95
-    rally_triggered = ctx.cur_price > last_price * 1.05
-    if ctx.broker.money >= cash_needed and dip_triggered:
-        ctx.broker.buy(amount)
-    elif ctx.stock.position > amount and rally_triggered:
-        ctx.broker.sell(amount)
-```
-
-`ctx` exposes:
-
-- `ctx.broker`: `.money`/`.cash`; `.buy(amount=None, weight=None)`,
-  `.sell(amount=None)`, `.short(amount=None, weight=None)`, `.cover(amount=None)`,
-  `.close()`; `.account`, `.positions`.
-- `ctx.stock`: `.code`, `.price`, `.position` (signed shares), and `.trades`.
-  Each trade in `.trades` exposes `.price`, `.side`, `.quantity`, and `.date`.
-- `ctx.cur_price`, `ctx.cur_time` (`"HH:MM"`), `ctx.cur_date` (`"YYYYMMDD"`),
-  `ctx.bar`, `ctx.params`, `ctx.account`, `ctx.positions`.
-
-`ctx` is a pure trading replay context. It does not expose `model_dir`,
-`workspace_dir`, or `nl`; use models and NL only while building
-`trade_intents`, then pass the decision through `params`.
+- `ctx.cur_date` (`"YYYYMMDD"`), `ctx.cur_time` (`"HH:MM"`).
+- `ctx.account`, `ctx.positions` (read-only snapshots), `ctx.cash`.
+- `ctx.price(ts_code)`, `ctx.bar(ts_code)`, `ctx.bars` — the current minute only
+  (future bars are not visible).
+- `ctx.broker`: `.buy/sell/short/cover/close(ts_code, amount=None, weight=None)`,
+  `.money`/`.cash`, `.position(ts_code)`.
+- `ctx.nl(ts_code, prompt="...")` — point-in-time NL Sub Agent (decision stage).
+- `ctx.snapshot_dir` (point-in-time data for screening), `ctx.model_dir`
+  (persisted parameters), `ctx.state_dir` (run-scoped scratch, e.g.
+  `holdings.json`), `ctx.params`.
 
 `amount` is a share count (lot-aligned to 100); `weight` is a notional fraction
 of initial equity. The Broker enforces cash, short margin, T+1 sellable balance,
-lot size, price limits, suspension, and shortability. Holdings count,
-single-name sizing, and concentration are strategy decisions by default; implement
-them in candidate selection, sizing, or trading functions when needed. The final
-replay date is reserved for mandatory liquidation of any remaining holdings.
+lot size, price limits, suspension, and shortability, and reserves the final
+replay date for mandatory liquidation. The Broker is the source of truth for
+positions; keep your own per-stock rules/targets in `ctx.state_dir`, not as a
+position ledger.
+
+## Cost discipline
+
+`main(ctx)` runs every minute, but heavy work — cross-sectional screening, model
+inference, and `ctx.nl()` — should run only on the few ticks you choose (e.g.
+pre-open or near close), never every minute, or API cost and wall-clock blow up.
+Load or cache model parameters from `ctx.model_dir` once; do not retrain every
+minute.
+
+`ctx.nl(ts_code, prompt="...")` (equivalently `from at_tools import nl`) starts a
+host-side NL Sub Agent with a point-in-time `text_retrieve` tool and returns a
+result dict. The final `content` is unconstrained; parse whatever score, label,
+or decision you need in `main`/`candidate`/helpers. Request, retrieval, evidence,
+result, and provider-call logs are written under the backtest result directory.
+NL carries publish/ingest-time, recall, model-prior, free-text-parsing, and
+look-ahead risks: down-weight or drop low-evidence conclusions, and never let NL
+override cash, tradability, cost, or replay constraints.
