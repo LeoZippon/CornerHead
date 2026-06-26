@@ -7,17 +7,17 @@ import pandas as pd
 
 from autotrade.environment.backtest_engine import (
     BacktestError,
-    StrategyPolicyRunner,
     compute_return_stats,
     hide_snapshot_slots_from_agent,
-    run_strategy_program,
-    run_trade_intent_replay,
-    strategy_function_names,
-    validate_trade_intents,
 )
 from autotrade.environment.broker import BrokerProfile, MarketData, SimBroker
+from autotrade.environment.main_ctx_engine import MainPolicyRunner, run_main_ctx_replay
 from autotrade.environment.runtime import SandboxPaths
 from autotrade.environment.tools.backtest import _profile_kwargs
+
+
+def _held(state, code):
+    return next((p for p in state["positions"] if str(p["ts_code"]) == code), None)
 
 DECISION = "2022-01-04T09:25:00+08:00"
 
@@ -48,20 +48,19 @@ MINUTE_REPLAY = pd.DataFrame(
 )
 
 
-class FakePolicy:
-    """Drives the replay engine without a sandbox: maps a strategy name to a
-    plain ``func(state) -> list[action]`` so we can exercise broker primitives."""
+class FakeMainPolicy:
+    """Drives the replay engine without a sandbox: a plain
+    ``func(state) -> list[action]`` stands in for main(ctx) so we can exercise
+    the Broker primitives directly."""
 
-    def __init__(self, funcs: dict[str, object]) -> None:
-        self.funcs = funcs
+    def __init__(self, fn) -> None:
+        self.fn = fn
 
-    def validate_functions(self, strategies: list[str]) -> None:
-        missing = [name for name in strategies if name not in self.funcs]
-        if missing:
-            raise BacktestError(f"missing strategy functions: {missing}")
+    def validate_main(self) -> None:
+        return None
 
-    def actions(self, *, strategy: str, state: dict[str, object]) -> list[dict[str, object]]:
-        return list(self.funcs[strategy](state) or [])
+    def step(self, state: dict[str, object]) -> list[dict[str, object]]:
+        return list(self.fn(state) or [])
 
 
 class BrokerPrimitiveTest(unittest.TestCase):
@@ -189,52 +188,17 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual(private_restored.effective_short_margin_ratio, 1.2)
 
 
-class TradeIntentValidationTest(unittest.TestCase):
-    UNIVERSE = {"000001.SZ", "000002.SZ"}
-
-    def validate(self, rows):
-        return validate_trade_intents(pd.DataFrame(rows), universe=self.UNIVERSE)
-
-    def test_maps_code_and_folds_inline_params(self):
-        frame = self.validate([{"code": "000001.SZ", "trade_strategy": "example_swing_t", "amount": 2000, "percent": 0.03}])
-        self.assertEqual(list(frame["ts_code"]), ["000001.SZ"])
-        self.assertEqual(frame.loc[0, "params"], {"amount": 2000, "percent": 0.03})
-        self.assertEqual(strategy_function_names(frame), ["example_swing_t"])
-
-    def test_nested_params_and_inline_merge(self):
-        frame = self.validate([{"ts_code": "000001.SZ", "trade_strategy": "example_swing_t", "amount": 100, "params": {"percent": 0.05}}])
-        self.assertEqual(frame.loc[0, "params"], {"amount": 100, "percent": 0.05})
-
-    def test_rejects_unknown_code_duplicates_and_bad_names(self):
-        with self.assertRaisesRegex(BacktestError, "outside the visible universe"):
-            self.validate([{"code": "999999.SZ", "trade_strategy": "example_swing_t"}])
-        with self.assertRaisesRegex(BacktestError, "one strategy"):
-            self.validate([{"code": "000001.SZ", "trade_strategy": "example_swing_t"}, {"code": "000001.SZ", "trade_strategy": "example_price_dip_buy"}])
-        with self.assertRaisesRegex(BacktestError, "invalid trade_strategy"):
-            self.validate([{"code": "000001.SZ", "trade_strategy": "9bad name"}])
-
-    def test_validates_dates(self):
-        with self.assertRaisesRegex(BacktestError, "YYYYMMDD"):
-            self.validate([{"code": "000001.SZ", "trade_strategy": "example_swing_t", "start_date": "2022-01-04"}])
-        with self.assertRaisesRegex(BacktestError, "start_date must be <= end_date"):
-            self.validate([{"code": "000001.SZ", "trade_strategy": "example_swing_t", "start_date": "20220301", "end_date": "20220101"}])
-
-
 class ReplayIntegrationTest(unittest.TestCase):
-    def intents(self, rows):
-        return validate_trade_intents(pd.DataFrame(rows), universe={"000001.SZ", "000002.SZ"})
-
-    def test_strategy_runs_each_bar_and_liquidates_at_exit(self):
+    def test_main_runs_each_bar_and_liquidates_at_exit(self):
         def buy_hold(state):
-            return [{"action": "buy", "weight": 0.1}] if not state["position"] else []
+            return [] if _held(state, "000001.SZ") else [{"action": "buy", "ts_code": "000001.SZ", "weight": 0.1}]
 
-        replay = run_trade_intent_replay(
-            self.intents([{"code": "000001.SZ", "trade_strategy": "buy_hold"}]),
+        replay = run_main_ctx_replay(
             REPLAY,
             BrokerProfile(),
             decision_time_iso=DECISION,
             shortable_codes=frozenset(),
-            strategy_policy=FakePolicy({"buy_hold": buy_hold}),
+            main_policy=FakeMainPolicy(buy_hold),
         )
         stats = compute_return_stats(replay)
         self.assertEqual(stats["replay_granularity"], "daily")
@@ -244,18 +208,17 @@ class ReplayIntegrationTest(unittest.TestCase):
 
     def test_minute_replay_uses_minute_bars(self):
         def close_entry(state):
-            if not state["position"] and state["cur_time"] >= "14:57":
-                return [{"action": "buy", "weight": 0.1}]
+            if not _held(state, "000001.SZ") and state["cur_time"] >= "14:57":
+                return [{"action": "buy", "ts_code": "000001.SZ", "weight": 0.1}]
             return []
 
-        replay = run_trade_intent_replay(
-            self.intents([{"code": "000001.SZ", "trade_strategy": "close_entry"}]),
+        replay = run_main_ctx_replay(
             REPLAY,
             BrokerProfile(),
             decision_time_iso=DECISION,
             shortable_codes=frozenset(),
             replay_intraday_1min=MINUTE_REPLAY,
-            strategy_policy=FakePolicy({"close_entry": close_entry}),
+            main_policy=FakeMainPolicy(close_entry),
         )
         self.assertEqual(replay.granularity, "minute")
         fill = [event for event in replay.broker.events if event["event_type"] == "order_filled"][0]
@@ -264,40 +227,41 @@ class ReplayIntegrationTest(unittest.TestCase):
 
     def test_swing_t_buys_dip_and_sells_rally_next_day(self):
         def swing(state):
-            trades = state["trades"]
-            last = trades[-1]["price"] if trades else state["cur_price"]
-            amount = 500
             if state["cur_time"] >= "14:57":
                 return []
-            if not state["position"]:
-                return [{"action": "buy", "amount": amount}]
-            if state["position"] >= amount and state["cur_price"] > last * 1.01:
-                return [{"action": "sell", "amount": amount}]
+            bar = next((b for b in state["bars"] if str(b["ts_code"]) == "000001.SZ"), None)
+            if bar is None or bar.get("close") is None:
+                return []
+            price = float(bar["close"])
+            pos = _held(state, "000001.SZ")
+            amount = 500
+            if pos is None:
+                return [{"action": "buy", "ts_code": "000001.SZ", "amount": amount}]
+            if int(pos["sellable_quantity"]) >= amount and price > float(pos["entry_price"]) * 1.01:
+                return [{"action": "sell", "ts_code": "000001.SZ", "amount": amount}]
             return []
 
-        replay = run_trade_intent_replay(
-            self.intents([{"code": "000001.SZ", "trade_strategy": "swing"}]),
+        replay = run_main_ctx_replay(
             REPLAY,
             BrokerProfile(),
             decision_time_iso=DECISION,
             shortable_codes=frozenset(),
             replay_intraday_1min=MINUTE_REPLAY,
-            strategy_policy=FakePolicy({"swing": swing}),
+            main_policy=FakeMainPolicy(swing),
         )
         reduced = [e for e in replay.broker.events if e["event_type"] in {"position_reduced", "position_closed"}]
         self.assertTrue(reduced)  # the swing sold on a later-day rally
 
     def test_unshortable_code_is_rejected_during_replay(self):
         def go_short(state):
-            return [{"action": "short", "weight": 0.1}] if not state["position"] else []
+            return [] if _held(state, "000002.SZ") else [{"action": "short", "ts_code": "000002.SZ", "weight": 0.1}]
 
-        replay = run_trade_intent_replay(
-            self.intents([{"code": "000002.SZ", "trade_strategy": "go_short"}]),
+        replay = run_main_ctx_replay(
             REPLAY,
             BrokerProfile(),
             decision_time_iso=DECISION,
             shortable_codes=frozenset(),
-            strategy_policy=FakePolicy({"go_short": go_short}),
+            main_policy=FakeMainPolicy(go_short),
         )
         self.assertTrue(any(o.reject_reason == "margin_secs_not_shortable" for o in replay.broker.orders))
 
@@ -321,25 +285,7 @@ class CandidateIsolationTest(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(paths.test.stat().st_mode), 0o755)
             self.assertEqual(stat.S_IMODE(paths.artifacts.stat().st_mode), 0o755)
 
-    def test_strategy_program_temp_rpc_files_are_cleaned_on_setup_error(self):
-        class FailingMapExecutor:
-            python = "python"
-
-            def map_path(self, _path):
-                raise RuntimeError("map failed")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            paths = SandboxPaths(Path(tmp) / "mnt")
-            paths.workspace.mkdir(parents=True)
-            paths.agent_output.mkdir(parents=True)
-
-            with self.assertRaisesRegex(RuntimeError, "map failed"):
-                run_strategy_program(FailingMapExecutor(), paths)
-
-            leftovers = list(paths.workspace.glob(".strategy_*")) + list(paths.workspace.glob(".nl_*"))
-            self.assertEqual(leftovers, [])
-
-    def test_strategy_policy_runner_temp_rpc_files_are_cleaned_on_enter_error(self):
+    def test_main_policy_runner_restores_slots_on_enter_error(self):
         class FailingPopenExecutor:
             python = "python"
 
@@ -356,7 +302,7 @@ class CandidateIsolationTest(unittest.TestCase):
             paths.artifacts.mkdir(parents=True)
             paths.artifacts.chmod(0o755)
 
-            runner = StrategyPolicyRunner(
+            runner = MainPolicyRunner(
                 FailingPopenExecutor(),
                 paths,
                 timeout_seconds=1.0,
@@ -366,8 +312,7 @@ class CandidateIsolationTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "popen failed"):
                 runner.__enter__()
 
-            leftovers = list(paths.workspace.glob(".policy_nl_*"))
-            self.assertEqual(leftovers, [])
+            # The hidden snapshot/artifact slots are restored even when startup fails.
             self.assertEqual(stat.S_IMODE(paths.artifacts.stat().st_mode), 0o755)
 
 
