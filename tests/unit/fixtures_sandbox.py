@@ -19,23 +19,21 @@ from pathlib import Path
 import pandas as pd
 
 SNAPSHOT_DIR = Path(os.environ.get("AT_SNAPSHOT_DIR", "/mnt/snapshot"))
+_CODE = None
 
 
-def buy_hold(ctx):
-    if ctx.stock.position == 0:
-        ctx.broker.buy(weight=0.1, reason="fixture_top")
+def _code():
+    global _CODE
+    if _CODE is None:
+        daily = pd.read_parquet(SNAPSHOT_DIR / "daily.parquet")
+        _CODE = sorted(daily["ts_code"].astype(str).unique())[0]
+    return _CODE
 
 
-def run_strategy(context):
-    daily = pd.read_parquet(SNAPSHOT_DIR / "daily.parquet")
-    code = sorted(daily["ts_code"].astype(str).unique())[0]
-    return {
-        "trade_intents": pd.DataFrame(
-            [{"code": code, "trade_strategy": "buy_hold", "reason": "fixture_top",
-              "source_artifacts": ["daily_window"]}]
-        ),
-        "metadata": {"fixture": "flat_agent_output"},
-    }
+def main(ctx):
+    code = _code()
+    if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+        ctx.broker.buy(code, weight=0.1, reason="fixture_top")
 '''
 
 # (trade_date, open, close) for the single fixture stock across all periods.

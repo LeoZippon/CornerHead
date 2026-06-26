@@ -53,23 +53,12 @@ from pathlib import Path
 import pandas as pd
 
 
-def buy_hold(ctx):
-    if ctx.stock.position == 0:
-        ctx.broker.buy(weight=0.1, reason="direct_long")
-
-
-def run_strategy(context):
-    snapshot_dir = Path(str(context.get("snapshot_dir") or os.environ.get("AT_SNAPSHOT_DIR")))
+def main(ctx):
+    snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
     daily = pd.read_parquet(snapshot_dir / "daily.parquet")
     code = sorted(daily["ts_code"].astype(str).unique())[0]
-    return {
-        "candidates": pd.DataFrame([{"ts_code": code, "reason": "fixture_top", "source_artifacts": ["daily_window"]}]),
-        "trade_intents": pd.DataFrame(
-            [{"code": code, "trade_strategy": "buy_hold", "reason": "direct_long",
-              "source_artifacts": ["daily_window"]}]
-        ),
-        "metadata": {"stage": "direct_trading"},
-    }
+    if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+        ctx.broker.buy(code, weight=0.1, reason="direct_long")
 '''
 
 MINUTE_STRATEGY_MAIN = '''
@@ -79,23 +68,12 @@ from pathlib import Path
 import pandas as pd
 
 
-def close_entry(ctx):
-    if ctx.stock.position == 0 and ctx.cur_time >= str(ctx.params.get("time", "14:57")):
-        ctx.broker.buy(weight=0.1, reason="minute_close_buy")
-
-
-def run_strategy(context):
-    snapshot_dir = Path(str(context.get("snapshot_dir") or os.environ.get("AT_SNAPSHOT_DIR")))
+def main(ctx):
+    snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
     daily = pd.read_parquet(snapshot_dir / "daily.parquet")
     code = sorted(daily["ts_code"].astype(str).unique())[0]
-    return {
-        "candidates": pd.DataFrame([{"ts_code": code, "reason": "fixture_top", "source_artifacts": ["daily_window"]}]),
-        "trade_intents": pd.DataFrame(
-            [{"code": code, "trade_strategy": "close_entry", "time": "14:57",
-              "reason": "minute_close_buy", "source_artifacts": ["minute_test"]}]
-        ),
-        "metadata": {"replay_granularity": context.get("replay_granularity")},
-    }
+    if ctx.cur_time >= "14:57" and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+        ctx.broker.buy(code, weight=0.1, reason="minute_close_buy")
 '''
 
 MODEL_ARTIFACT_STRATEGY_MAIN = '''
@@ -104,113 +82,75 @@ from pathlib import Path
 
 import pandas as pd
 
-
-def buy_with_model(ctx):
-    if ctx.stock.position == 0:
-        ctx.broker.buy(weight=0.1, reason="model_artifact_buy")
+_DONE = False
 
 
-def run_strategy(context):
-    model_dir = Path(str(context["model_dir"]))
-    model_dir.mkdir(parents=True, exist_ok=True)
-    (model_dir / "params.json").write_text(json.dumps({"threshold": 0.42}, sort_keys=True), encoding="utf-8")
-    snapshot_dir = Path(str(context["snapshot_dir"]))
+def main(ctx):
+    global _DONE
+    if not _DONE:
+        model_dir = Path(str(ctx.model_dir))
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "params.json").write_text(json.dumps({"threshold": 0.42}, sort_keys=True), encoding="utf-8")
+        _DONE = True
+    snapshot_dir = Path(str(ctx.snapshot_dir))
     daily = pd.read_parquet(snapshot_dir / "daily.parquet")
     code = sorted(daily["ts_code"].astype(str).unique())[0]
-    return {
-        "trade_intents": pd.DataFrame([{"code": code, "trade_strategy": "buy_with_model"}]),
-        "metadata": {"model_dir": str(model_dir)},
-    }
-'''
-
-MUTATING_MODEL_ARTIFACT_STRATEGY_MAIN = '''
-from pathlib import Path
-
-import pandas as pd
-
-
-def buy_with_model(ctx):
-    if ctx.stock.position == 0:
-        ctx.broker.buy(weight=0.1, reason="mutating_model_buy")
-
-
-def run_strategy(context):
-    model_dir = Path(str(context["model_dir"]))
-    model_dir.mkdir(parents=True, exist_ok=True)
-    path = model_dir / "counter.txt"
-    current = int(path.read_text(encoding="utf-8")) if path.exists() else 0
-    path.write_text(str(current + 1), encoding="utf-8")
-    snapshot_dir = Path(str(context["snapshot_dir"]))
-    daily = pd.read_parquet(snapshot_dir / "daily.parquet")
-    code = sorted(daily["ts_code"].astype(str).unique())[0]
-    return {"trade_intents": pd.DataFrame([{"code": code, "trade_strategy": "buy_with_model"}])}
+    if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+        ctx.broker.buy(code, weight=0.1, reason="model_artifact_buy")
 '''
 
 CUSTOM_POLICY_MAIN = '''
+from trading import buy_if_dip
+
+
+def main(ctx):
+    buy_if_dip(ctx)
+'''
+
+CUSTOM_POLICY_TRADING = '''
 import os
 from pathlib import Path
 
 import pandas as pd
 
 
-def run_strategy(context):
-    snapshot_dir = Path(str(context.get("snapshot_dir") or os.environ.get("AT_SNAPSHOT_DIR")))
+def buy_if_dip(ctx):
+    snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
     daily = pd.read_parquet(snapshot_dir / "daily.parquet")
     code = sorted(daily["ts_code"].astype(str).unique())[0]
-    return {
-        "trade_intents": pd.DataFrame(
-            [{"code": code, "trade_strategy": "buy_if_dip"}]
-        ),
-        "metadata": {"policy": "buy_if_dip"},
-    }
+    bar = ctx.bar(code) or {}
+    low = bar.get("low")
+    if low is not None and float(low) <= 9.95 and ctx.broker.position(code) == 0:
+        ctx.broker.buy(code, weight=0.1, reason="minute_dip")
 '''
 
-CUSTOM_POLICY_TRADING = '''
-def buy_if_dip(ctx):
-    low = (ctx.bar or {}).get("low")
-    if low is not None and float(low) <= 9.95 and ctx.stock.position == 0:
-        ctx.broker.buy(weight=0.1, reason="minute_dip")
-'''
-
-CTX_BOUNDARY_TRADING = '''
-def inspect_ctx(ctx):
-    forbidden = [name for name in ("model_dir", "workspace_dir", "nl") if hasattr(ctx, name)]
-    if forbidden:
-        raise RuntimeError("decision-only ctx fields exposed: " + ",".join(forbidden))
-    if ctx.stock.position == 0:
-        ctx.broker.buy(weight=0.1, reason="ctx_boundary")
-'''
-
-POLICY_NL_TRADING = '''
-from at_tools import nl
-
-
-def call_nl(ctx):
-    nl(ctx.stock.code, prompt="this should not run during replay")
+INTRA_MINUTE_MAIN = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.broker.position(code) == 0:
+        ctx.broker.buy(code, weight=0.1, reason="first_weight_buy")
+    if ctx.broker.position(code) == 0:
+        ctx.broker.buy(code, weight=0.1, reason="duplicate_weight_buy")
 '''
 
 NOISY_POLICY_MAIN = '''
 print("main import noise")
 
 
-def noisy_buy(ctx):
+def main(ctx):
     print("strategy call noise")
-    if ctx.stock.position == 0:
-        ctx.broker.buy(weight=0.1, reason="noisy_buy")
-
-
-def run_strategy(context):
-    print("entrypoint noise")
-    return {"trade_intents": [{"ts_code": "000001.SZ", "trade_strategy": "noisy_buy"}]}
+    code = "000001.SZ"
+    if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+        ctx.broker.buy(code, weight=0.1, reason="noisy_buy")
 '''
 
 BROKEN_STRATEGY_MAIN = '''
-def run_strategy(context):
+def main(ctx):
     raise RuntimeError("boom before result artifacts")
 '''
 
 BROKEN_SECRET_STRATEGY_MAIN = '''
-def run_strategy(context):
+def main(ctx):
     raise RuntimeError("decision failed Authorization: Bearer secret-token-abc")
 '''
 
@@ -219,13 +159,16 @@ def leak_secret(ctx):
     raise RuntimeError("provider failed Authorization: Bearer secret-token-abc")
 
 
-def run_strategy(context):
-    return {"trade_intents": [{"ts_code": "000001.SZ", "trade_strategy": "leak_secret"}]}
+def main(ctx):
+    leak_secret(ctx)
 '''
 
 POLICY_IMPORT_SECRET_MAIN = '''
-def run_strategy(context):
-    return {"trade_intents": [{"ts_code": "000001.SZ", "trade_strategy": "imported_strategy"}]}
+import trading  # noqa: F401
+
+
+def main(ctx):
+    return None
 '''
 
 POLICY_IMPORT_SECRET_TRADING = '''
@@ -236,45 +179,59 @@ POLICY_OUTPUT_WRITE_MAIN = '''
 from pathlib import Path
 
 
-def mutate_output(ctx):
+def main(ctx):
     Path("output/replay_mutation.txt").write_text("bad", encoding="utf-8")
-
-
-def run_strategy(context):
-    return {"trade_intents": [{"ts_code": "000001.SZ", "trade_strategy": "mutate_output"}]}
 '''
 
 POLICY_CREATE_SYMLINK_MAIN = '''
 from pathlib import Path
 
 
-def create_link(ctx):
+def main(ctx):
     Path("tmp_model_link").symlink_to("models", target_is_directory=True)
+'''
+
+ARTIFACT_READ_MAIN = '''
+from pathlib import Path
 
 
-def run_strategy(context):
-    return {"trade_intents": [{"ts_code": "000001.SZ", "trade_strategy": "create_link"}]}
+def main(ctx):
+    forbidden = Path(str(ctx.snapshot_dir)).parent / "artifacts" / "run_manifest.json"
+    open(forbidden, "r", encoding="utf-8").read()
+'''
+
+NL_CALL_MAIN = '''
+from at_tools import nl
+
+_DONE = False
+
+
+def main(ctx):
+    global _DONE
+    if _DONE:
+        return
+    _DONE = True
+    result = nl("000001.SZ", prompt="score this fixture")
+    content = result.get("content", "")
+    code = "000001.SZ"
+    weight = 0.1 if "positive" in content else 0.0
+    if weight and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+        ctx.broker.buy(code, weight=weight, reason="nl_buy")
 '''
 
 TEMPLATE_CANDIDATE_WITH_ROW = '''
+import os
 from pathlib import Path
 
 import pandas as pd
 
 
-def buy_hold(ctx):
-    if ctx.stock.position == 0:
-        ctx.broker.buy(weight=0.1, reason="template_candidate")
-
-
-def run_strategy(context):
-    snapshot_dir = Path(str(context["snapshot_dir"]))
+def main(ctx):
+    snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
     daily = pd.read_parquet(snapshot_dir / "daily.parquet")
     code = sorted(daily["ts_code"].astype(str).unique())[0]
-    return {"trade_intents": pd.DataFrame(
-        [{"code": code, "trade_strategy": "buy_hold", "reason": "template_candidate",
-          "source_artifacts": ["daily_window"]}]
-    ), "metadata": {"stage": "template_override"}}
+    if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+        ctx.broker.buy(code, weight=0.1, reason="template_candidate")
 '''
 
 
@@ -327,12 +284,10 @@ class ToolFlowTest(unittest.TestCase):
             summary = BacktestTool(ctx).run(mode="valid")
             self.assertEqual(summary["status"], "ok")
             self.assertTrue(summary["complete_validation"])
-            self.assertNotIn("modification_check_auto_run", summary)
             self.assertGreater(summary["total_return"], 0.0)
             result_dir = Path(summary["result_path"])
             self.assertTrue((result_dir / "detailed_return.json").exists())
-            self.assertTrue((result_dir / "trade_intents.parquet").exists())
-            self.assertTrue((result_dir / "strategy_metadata.json").exists())
+            self.assertTrue((result_dir / "orders.parquet").exists())
 
             finish = FinishFoldTool(ctx).run()
             self.assertEqual(finish["status"], "fold_finished")
@@ -343,7 +298,7 @@ class ToolFlowTest(unittest.TestCase):
             event_types = {event["event_type"] for event in ctx.trace.read_events()}
             self.assertLessEqual({"tool", "backtest", "finish_fold"}, event_types)
 
-    def test_backtest_runs_strategy_program_trade_intents(self):
+    def test_main_runs_and_records_orders(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
             (ctx.paths.agent_output / "main.py").write_text(CUSTOM_STRATEGY_MAIN, encoding="utf-8")
@@ -351,17 +306,15 @@ class ToolFlowTest(unittest.TestCase):
             summary = BacktestTool(ctx).run(mode="valid")
 
             self.assertEqual(summary["status"], "ok")
-            self.assertNotIn("modification_check_auto_run", summary)
-            self.assertEqual(summary["trade_strategies"], ["buy_hold"])
+            self.assertEqual(summary["order_count"], 1)
             result_dir = Path(summary["result_path"])
-            self.assertTrue((result_dir / "trade_intents.parquet").exists())
-            self.assertTrue((result_dir / "strategy_metadata.json").exists())
-            intents = pd.read_parquet(result_dir / "trade_intents.parquet")
-            self.assertEqual(intents.loc[0, "trade_strategy"], "buy_hold")
-            metadata = json.loads((result_dir / "strategy_metadata.json").read_text(encoding="utf-8"))
-            self.assertEqual(metadata["stage"], "direct_trading")
+            self.assertTrue((result_dir / "orders.parquet").exists())
+            orders = pd.read_parquet(result_dir / "orders.parquet")
+            self.assertEqual(orders.loc[0, "action"], "buy")
+            self.assertEqual(orders.loc[0, "status"], "filled")
+            self.assertEqual(orders.loc[0, "ts_code"], "000001.SZ")
 
-    def test_strategy_stdout_does_not_corrupt_policy_rpc(self):
+    def test_strategy_stdout_does_not_corrupt_rpc(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
             (ctx.paths.agent_output / "main.py").write_text(NOISY_POLICY_MAIN, encoding="utf-8")
@@ -369,10 +322,9 @@ class ToolFlowTest(unittest.TestCase):
             summary = BacktestTool(ctx).run(mode="valid")
 
             self.assertEqual(summary["status"], "ok")
-            self.assertEqual(summary["trade_strategies"], ["noisy_buy"])
             self.assertEqual(summary["order_count"], 1)
 
-    def test_policy_rpc_error_is_redacted(self):
+    def test_main_rpc_error_is_redacted(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
             (ctx.paths.agent_output / "main.py").write_text(POLICY_SECRET_ERROR_MAIN, encoding="utf-8")
@@ -382,7 +334,7 @@ class ToolFlowTest(unittest.TestCase):
 
             self.assertNotIn("secret-token-abc", str(raised.exception))
 
-    def test_policy_import_error_is_redacted(self):
+    def test_main_import_error_is_redacted(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
             (ctx.paths.agent_output / "main.py").write_text(POLICY_IMPORT_SECRET_MAIN, encoding="utf-8")
@@ -393,7 +345,7 @@ class ToolFlowTest(unittest.TestCase):
 
             self.assertNotIn("secret-token-abc", str(raised.exception))
 
-    def test_trade_policy_cannot_write_output_artifacts_during_replay(self):
+    def test_main_cannot_write_output_during_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
             (ctx.paths.agent_output / "main.py").write_text(POLICY_OUTPUT_WRITE_MAIN, encoding="utf-8")
@@ -404,31 +356,7 @@ class ToolFlowTest(unittest.TestCase):
             self.assertIn("write", str(raised.exception))
             self.assertFalse((ctx.paths.agent_output / "replay_mutation.txt").exists())
 
-    def test_trade_policy_cannot_read_model_artifacts_through_output_symlink(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            _, ctx = build_sandbox(Path(tmp))
-            (ctx.paths.model_artifacts / "secret.txt").write_text("model-secret", encoding="utf-8")
-            link = Path(tmp) / "model_link"
-            link.symlink_to(ctx.paths.model_artifacts, target_is_directory=True)
-            main = f'''
-from pathlib import Path
-
-
-def read_model_link(ctx):
-    (Path({str(link)!r}) / "secret.txt").read_text(encoding="utf-8")
-
-
-def run_strategy(context):
-    return {{"trade_intents": [{{"ts_code": "000001.SZ", "trade_strategy": "read_model_link"}}]}}
-'''
-            (ctx.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
-
-            with self.assertRaisesRegex(ToolError, "forbidden path") as raised:
-                BacktestTool(ctx).run(mode="valid")
-
-            self.assertNotIn("model-secret", str(raised.exception))
-
-    def test_trade_policy_cannot_create_links_during_replay(self):
+    def test_main_cannot_create_links_during_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
             (ctx.paths.agent_output / "main.py").write_text(POLICY_CREATE_SYMLINK_MAIN, encoding="utf-8")
@@ -438,7 +366,7 @@ def run_strategy(context):
 
             self.assertFalse((ctx.paths.agent / "tmp_model_link").exists())
 
-    def test_strategy_program_failure_stderr_is_redacted(self):
+    def test_main_failure_stderr_is_redacted(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
             (ctx.paths.agent_output / "main.py").write_text(BROKEN_SECRET_STRATEGY_MAIN, encoding="utf-8")
@@ -460,7 +388,7 @@ def run_strategy(context):
             errors = [item for item in ctx.manifest.get("backtest_summaries", []) if item.get("status") == "error"]
             self.assertEqual(len(errors), 1)
 
-    def test_custom_trade_intents_use_minute_replay_when_available(self):
+    def test_minute_replay_when_available(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
             pd.DataFrame(
@@ -490,54 +418,15 @@ def run_strategy(context):
             summary = BacktestTool(ctx).run(mode="valid")
 
             self.assertEqual(summary["status"], "ok")
-            self.assertEqual(summary["trade_strategies"], ["close_entry"])
             self.assertEqual(summary["replay_granularity"], "minute")
             result_dir = Path(summary["result_path"])
-            metadata = json.loads((result_dir / "strategy_metadata.json").read_text(encoding="utf-8"))
-            self.assertEqual(metadata["replay_granularity"], "minute")
             detailed = json.loads((result_dir / "detailed_return.json").read_text(encoding="utf-8"))
             self.assertEqual(detailed["replay_granularity"], "minute")
             fill = [event for event in detailed["broker_events"] if event["event_type"] == "order_filled"][0]
             self.assertEqual(fill["price_label"], "minute:14:57")
             self.assertAlmostEqual(fill["price"], BrokerProfile().slipped_price(10.25, is_buy=True))
 
-    def test_strategy_program_context_does_not_expose_workspace_dir(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            _, ctx = build_sandbox(Path(tmp))
-            main = '''
-import os
-from pathlib import Path
-
-import pandas as pd
-
-
-def noop(ctx):
-    return None
-
-
-def run_strategy(context):
-    if "workspace_dir" in context:
-        raise RuntimeError("workspace_dir leaked through context")
-    if os.environ.get("AT_WORKSPACE_DIR"):
-        raise RuntimeError("AT_WORKSPACE_DIR leaked through environment")
-    snapshot_dir = Path(str(context["snapshot_dir"]))
-    daily = pd.read_parquet(snapshot_dir / "daily.parquet")
-    code = sorted(daily["ts_code"].astype(str).unique())[0]
-    return {
-        "trade_intents": [{"code": code, "trade_strategy": "noop"}],
-        "metadata": {"context_keys": sorted(context.keys())},
-    }
-'''
-            (ctx.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
-
-            summary = BacktestTool(ctx).run(mode="valid")
-
-            result_dir = Path(summary["result_path"])
-            metadata = json.loads((result_dir / "strategy_metadata.json").read_text(encoding="utf-8"))
-            self.assertNotIn("workspace_dir", metadata["context_keys"])
-            self.assertIn("model_dir", metadata["context_keys"])
-
-    def test_strategy_program_can_persist_model_artifacts(self):
+    def test_main_persists_model_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
             (ctx.paths.agent_output / "main.py").write_text(MODEL_ARTIFACT_STRATEGY_MAIN, encoding="utf-8")
@@ -556,17 +445,6 @@ def run_strategy(context):
 
             finish = FinishFoldTool(ctx).run()
             self.assertEqual(finish["status"], "fold_finished")
-
-    def test_finish_fold_rejects_contract_check_model_mutation(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            _, ctx = build_sandbox(Path(tmp))
-            (ctx.paths.agent_output / "main.py").write_text(MUTATING_MODEL_ARTIFACT_STRATEGY_MAIN, encoding="utf-8")
-
-            BacktestTool(ctx).run(mode="valid")
-            ModificationCheckTool(ctx).run()
-
-            with self.assertRaisesRegex(ToolError, "contract check changed formal artifacts"):
-                FinishFoldTool(ctx).run()
 
     def test_custom_trading_function_runs_during_minute_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -599,43 +477,14 @@ def run_strategy(context):
             summary = BacktestTool(ctx).run(mode="valid")
 
             self.assertEqual(summary["status"], "ok")
-            self.assertEqual(summary["trade_strategies"], ["buy_if_dip"])
             self.assertEqual(summary["order_count"], 1)
             result_dir = Path(summary["result_path"])
             detailed = json.loads((result_dir / "detailed_return.json").read_text(encoding="utf-8"))
-            custom_events = [event for event in detailed["broker_events"] if event["event_type"] == "strategy_actions"]
+            custom_events = [event for event in detailed["broker_events"] if event["event_type"] == "main_actions"]
             self.assertEqual(len(custom_events), 1)
             fill = [event for event in detailed["broker_events"] if event["event_type"] == "order_filled"][0]
             self.assertEqual(fill["price_label"], "minute:09:31")
             self.assertAlmostEqual(fill["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
-
-    def test_trade_policy_ctx_excludes_decision_only_helpers(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            _, ctx = build_sandbox(Path(tmp))
-            main = '''
-def run_strategy(context):
-    return {"trade_intents": [{"ts_code": "000001.SZ", "trade_strategy": "inspect_ctx"}]}
-'''
-            (ctx.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
-            (ctx.paths.agent_output / "trading.py").write_text(CTX_BOUNDARY_TRADING, encoding="utf-8")
-
-            summary = BacktestTool(ctx).run(mode="valid")
-
-            self.assertEqual(summary["status"], "ok")
-            self.assertEqual(summary["trade_strategies"], ["inspect_ctx"])
-
-    def test_trade_policy_cannot_call_nl_during_replay(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            _, ctx = build_sandbox(Path(tmp))
-            main = '''
-def run_strategy(context):
-    return {"trade_intents": [{"ts_code": "000001.SZ", "trade_strategy": "call_nl"}]}
-'''
-            (ctx.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
-            (ctx.paths.agent_output / "trading.py").write_text(POLICY_NL_TRADING, encoding="utf-8")
-
-            with self.assertRaisesRegex(ToolError, "decision stage"):
-                BacktestTool(ctx).run(mode="valid")
 
     def test_empty_minute_replay_file_reports_daily_granularity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -650,13 +499,10 @@ def run_strategy(context):
 
             self.assertEqual(summary["status"], "ok")
             self.assertEqual(summary["replay_granularity"], "daily")
-            result_dir = Path(summary["result_path"])
-            metadata = json.loads((result_dir / "strategy_metadata.json").read_text(encoding="utf-8"))
-            self.assertEqual(metadata["replay_granularity"], "daily")
-            detailed = json.loads((result_dir / "detailed_return.json").read_text(encoding="utf-8"))
+            detailed = json.loads((Path(summary["result_path"]) / "detailed_return.json").read_text(encoding="utf-8"))
             self.assertEqual(detailed["replay_granularity"], "daily")
 
-    def test_default_template_strategy_can_be_overridden_with_direct_trades(self):
+    def test_template_strategy_can_be_overridden(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp), with_strategy=False)
             (ctx.paths.agent_output / "main.py").write_text(TEMPLATE_CANDIDATE_WITH_ROW, encoding="utf-8")
@@ -664,59 +510,29 @@ def run_strategy(context):
             summary = BacktestTool(ctx).run(mode="valid")
 
             self.assertEqual(summary["status"], "ok")
-            result_dir = Path(summary["result_path"])
-            metadata = json.loads((result_dir / "strategy_metadata.json").read_text(encoding="utf-8"))
-            self.assertEqual(metadata["stage"], "template_override")
-            intents = pd.read_parquet(result_dir / "trade_intents.parquet")
-            self.assertEqual(intents.loc[0, "trade_strategy"], "buy_hold")
+            self.assertEqual(summary["order_count"], 1)
 
-    def test_strategy_weight_order_updates_intra_bar_position_view(self):
+    def test_main_intra_minute_position_view(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
-            main = '''
-import pandas as pd
-
-
-def buy_once(ctx):
-    if ctx.stock.position == 0:
-        ctx.broker.buy(weight=0.1, reason="first_weight_buy")
-    if ctx.stock.position == 0:
-        ctx.broker.buy(weight=0.1, reason="duplicate_weight_buy")
-
-
-def run_strategy(context):
-    return pd.DataFrame([{"ts_code": "000001.SZ", "trade_strategy": "buy_once"}])
-'''
-            (ctx.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+            (ctx.paths.agent_output / "main.py").write_text(INTRA_MINUTE_MAIN, encoding="utf-8")
 
             summary = BacktestTool(ctx).run(mode="valid")
 
             self.assertEqual(summary["status"], "ok")
             detailed = json.loads((Path(summary["result_path"]) / "detailed_return.json").read_text(encoding="utf-8"))
-            actions = [
-                event
-                for event in detailed["broker_events"]
-                if event.get("event_type") == "strategy_actions" and event.get("trade_strategy") == "buy_once"
-            ]
+            actions = [event for event in detailed["broker_events"] if event.get("event_type") == "main_actions"]
             self.assertEqual(len(actions), 1)
-            self.assertEqual(actions[0]["actions"], [{"action": "buy", "weight": 0.1, "reason": "first_weight_buy"}])
+            self.assertEqual(
+                actions[0]["actions"],
+                [{"action": "buy", "ts_code": "000001.SZ", "weight": 0.1, "reason": "first_weight_buy"}],
+            )
             self.assertEqual(summary["order_count"], 1)
 
-    def test_strategy_program_cannot_read_artifacts_even_with_constructed_path(self):
+    def test_main_cannot_read_artifacts_even_with_constructed_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
-            main = f'''
-from pathlib import Path
-
-import pandas as pd
-
-
-def run_strategy(context):
-    forbidden = Path(str(context["snapshot_dir"])).parent / "artifacts" / "run_manifest.json"
-    open(forbidden, "r", encoding="utf-8").read()
-    return [{{"ts_code": "000001.SZ", "trade_strategy": "example_build_once"}}]
-'''
-            (ctx.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+            (ctx.paths.agent_output / "main.py").write_text(ARTIFACT_READ_MAIN, encoding="utf-8")
             with self.assertRaisesRegex(ToolError, "forbidden path"):
                 BacktestTool(ctx).run(mode="valid")
 
@@ -756,20 +572,10 @@ def run_strategy(context):
             with self.assertRaisesRegex(ToolError, "does not match the pipeline record"):
                 BacktestTool(ctx).run(mode="valid")
 
-    def test_strategy_nl_call_records_audit_files(self):
+    def test_main_nl_call_records_audit_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
-            main = '''
-from at_tools import nl
-
-
-def run_strategy(context):
-    result = nl("000001.SZ", prompt="score this fixture")
-    content = result.get("content", "")
-    weight = 0.1 if "positive" in content else 0.0
-    return {"trade_intents": [{"ts_code": "000001.SZ", "trade_strategy": "example_build_once", "weight": weight}], "metadata": {"nl_result": result}}
-'''
-            (ctx.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+            (ctx.paths.agent_output / "main.py").write_text(NL_CALL_MAIN, encoding="utf-8")
             ctx.proxy = ScriptedLLM([nl_subagent_response()])
             summary = BacktestTool(ctx).run(mode="valid")
             self.assertEqual(summary["status"], "ok")
@@ -1278,11 +1084,19 @@ class AgentSessionRunnerTest(unittest.TestCase):
                 '''
 from at_tools import nl
 
+_DONE = False
 
-def run_strategy(context):
+
+def main(ctx):
+    global _DONE
+    if _DONE:
+        return
+    _DONE = True
     result = nl("000001.SZ", prompt="fixture")
+    code = "000001.SZ"
     weight = 0.1 if "positive" in result.get("content", "") else 0.0
-    return {"trade_intents": [{"ts_code": "000001.SZ", "trade_strategy": "example_build_once", "weight": weight}]}
+    if weight and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+        ctx.broker.buy(code, weight=weight, reason="nl_buy")
 ''',
                 encoding="utf-8",
             )

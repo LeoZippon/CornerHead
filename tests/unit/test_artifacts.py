@@ -20,8 +20,8 @@ from autotrade.environment.artifacts import (
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "configs" / "agent_output_template"
 
 VALID_MAIN = """
-def run_strategy(context):
-    return {"trade_intents": [{"ts_code": "000001.SZ", "trade_strategy": "example_build_once"}]}
+def main(ctx):
+    return None
 """
 
 
@@ -51,12 +51,12 @@ class ArtifactContractTest(unittest.TestCase):
                 load_strategy_artifact(root)
 
         with tempfile.TemporaryDirectory() as tmp:
-            root = write_artifact(Path(tmp), main="def main(context):\n    return {'trade_intents': []}\n")
-            with self.assertRaisesRegex(ArtifactError, "run_strategy"):
+            root = write_artifact(Path(tmp), main="def run_strategy(context):\n    return {}\n")
+            with self.assertRaisesRegex(ArtifactError, "main"):
                 load_strategy_artifact(root)
 
         with tempfile.TemporaryDirectory() as tmp:
-            root = write_artifact(Path(tmp), main='def run_strategy(context):\n    return open("/mnt/artifacts/x").read()\n')
+            root = write_artifact(Path(tmp), main='def main(ctx):\n    return open("/mnt/artifacts/x").read()\n')
             with self.assertRaisesRegex(ArtifactError, "stage directories"):
                 load_strategy_artifact(root)
 
@@ -70,9 +70,9 @@ def helper():
     return None
 
 
-def run_strategy(context):
+def main(ctx):
     helper()
-    return {"trade_intents": []}
+    return None
 '''
         with tempfile.TemporaryDirectory() as tmp:
             root = write_artifact(Path(tmp), main=main)

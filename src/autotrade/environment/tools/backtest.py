@@ -1,8 +1,9 @@
-"""backtest_tool: formal execution of ``output/main.py``.
+"""backtest_tool: formal replay of the Agent's ``output/main.py``.
 
-The tool no longer owns factor/NL composition. Agent code returns trade
-instructions; the Environment validates the output, serves optional ``nl()``
-calls, and replays the resulting strategies through the Broker.
+The Agent owns all trading logic. The Environment replays the region minute by
+minute, calling ``main(ctx)`` each minute (serving optional ``nl()`` calls), and
+the Broker applies every market constraint and records fills. The tool writes the
+return statistics, the order log, and the NL audit trail.
 """
 
 from __future__ import annotations
@@ -21,16 +22,9 @@ from autotrade.environment.artifacts import (
     load_strategy_artifact,
     model_artifact_hash,
 )
-from autotrade.environment.backtest_engine import (
-    BacktestError,
-    StrategyPolicyRunner,
-    compute_return_stats,
-    run_strategy_program,
-    run_trade_intent_replay,
-    strategy_function_names,
-    validate_trade_intents,
-)
+from autotrade.environment.backtest_engine import BacktestError, compute_return_stats
 from autotrade.environment.broker import BrokerProfile, load_shortable_codes
+from autotrade.environment.main_ctx_engine import MainPolicyRunner, run_main_ctx_replay
 from autotrade.environment.nl.context import build_company_contexts
 from autotrade.environment.nl.engine import NLSubAgentConfig, NLSubAgentEngine, TextRetriever
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
@@ -49,9 +43,9 @@ class BacktestTool:
         action="backtest",
         tool_name=name,
         description=(
-            "Run the formal validation backtest by executing output/main.py. The Runner supplies "
-            "validation mode; the tool auto-verifies the latest modification check when needed "
-            "and writes a new results/valid_<idx>/ artifact."
+            "Run the formal validation backtest by replaying output/main.py minute by minute. The "
+            "Runner supplies validation mode; the tool auto-verifies the latest modification check "
+            "when needed and writes a new results/valid_<idx>/ artifact."
         ),
         read_only=False,
         destructive=False,
@@ -79,44 +73,26 @@ class BacktestTool:
             raise ToolError(str(exc)) from exc
 
     def contract_check(self) -> dict[str, object]:
-        """finish_fold's light check: artifact load, main.py schema, no results."""
+        """finish_fold's light check: artifact loads and main(ctx) is defined."""
         artifact = load_strategy_artifact(self.ctx.paths.agent_output)
-        snapshot_dir = self._resolved_snapshot()
         decision_time = str(self.ctx.manifest.require("valid_decision_time"))
         replay_minutes = _read_replay_minutes(self.ctx.paths.valid)
         replay_granularity = "minute" if replay_minutes is not None else "daily"
-        program = run_strategy_program(
+        with MainPolicyRunner(
             self.ctx.executor,
             self.ctx.paths,
             timeout_seconds=float(self.ctx.manifest.get("per_call_timeout_seconds", 300)),
             decision_time=decision_time,
             replay_granularity=replay_granularity,
-            nl_service=_NeutralNLService(self.ctx.paths.logs / "contract_nl_tool"),
-        )
-        universe = self._universe(snapshot_dir)
-        intents = validate_trade_intents(
-            program.trade_intents,
-            universe=universe,
-        )
-        strategy_names = strategy_function_names(intents)
-        if strategy_names:
-            with StrategyPolicyRunner(
-                self.ctx.executor,
-                self.ctx.paths,
-                timeout_seconds=float(self.ctx.manifest.get("per_call_timeout_seconds", 300)),
-                decision_time=decision_time,
-                replay_granularity=replay_granularity,
-            ) as policy:
-                policy.validate_functions(strategy_names)
+        ) as policy:
+            policy.validate_main()
         summary = {
             "tool": self.name,
             "tool_spec": self.spec.to_record(),
             "kind": "contract_check",
             "checked_at": utc_now_iso(),
             "status": "ok",
-            "trade_intent_rows": int(len(intents)),
-            "trade_strategies": strategy_names,
-            "strategy_metadata": sanitize_for_log(program.metadata),
+            "strategy_entry": "main",
             "artifact_files": len(artifact.files),
             "model_artifact_files": len(load_model_artifacts(self.ctx.paths.model_artifacts).files),
         }
@@ -138,58 +114,40 @@ class BacktestTool:
         result_dir = self._planned_result_dir(mode, result_name)
         if result_dir.exists():
             raise ToolError(f"result directory already exists: {result_dir}")
+        per_call_timeout = float(manifest.get("per_call_timeout_seconds", 300))
         tmp_nl_dir = self.ctx.paths.workspace / f".{new_id('nl_tool')}"
+        requests_host = self.ctx.paths.workspace / f".{new_id('nl_requests')}.jsonl"
+        responses_host = self.ctx.paths.workspace / f".{new_id('nl_responses')}.jsonl"
+        requests_host.write_text("", encoding="utf-8")
+        responses_host.write_text("", encoding="utf-8")
 
         nl_service = _StrategyNLService(
             proxy=self.ctx.effective_nl_proxy,
             snapshot_dir=snapshot_dir,
             log_dir=tmp_nl_dir,
             failure_policy=str(manifest.get("nl_failure_policy", "return_error_with_audit")),
-            per_call_timeout_seconds=float(manifest.get("per_call_timeout_seconds", 300)),
+            per_call_timeout_seconds=per_call_timeout,
         )
         try:
-            program = run_strategy_program(
+            profile = BrokerProfile(**_profile_kwargs(dict(manifest.require("broker_profile"))))
+            shortable = load_shortable_codes(snapshot_dir, _decision_date(decision_time))
+            with MainPolicyRunner(
                 self.ctx.executor,
                 self.ctx.paths,
-                timeout_seconds=float(manifest.get("per_call_timeout_seconds", 300)),
+                timeout_seconds=per_call_timeout,
                 decision_time=decision_time,
                 replay_granularity=replay_granularity,
                 nl_service=nl_service,
-            )
-            universe = self._universe(snapshot_dir)
-            intents = validate_trade_intents(
-                program.trade_intents,
-                universe=universe,
-            )
-            strategy_names = strategy_function_names(intents)
-
-            profile = BrokerProfile(**_profile_kwargs(dict(manifest.require("broker_profile"))))
-            shortable = load_shortable_codes(snapshot_dir, _decision_date(decision_time))
-            if strategy_names:
-                with StrategyPolicyRunner(
-                    self.ctx.executor,
-                    self.ctx.paths,
-                    timeout_seconds=float(manifest.get("per_call_timeout_seconds", 300)),
-                    decision_time=decision_time,
-                    replay_granularity=replay_granularity,
-                ) as policy:
-                    policy.validate_functions(strategy_names)
-                    replay = run_trade_intent_replay(
-                        intents,
-                        replay_daily,
-                        profile,
-                        decision_time_iso=decision_time,
-                        shortable_codes=shortable,
-                        replay_intraday_1min=replay_minutes,
-                        strategy_policy=policy,
-                    )
-            else:
-                replay = run_trade_intent_replay(
-                    intents,
+                requests_path=requests_host,
+                responses_path=responses_host,
+            ) as policy:
+                policy.validate_main()
+                replay = run_main_ctx_replay(
                     replay_daily,
                     profile,
                     decision_time_iso=decision_time,
                     shortable_codes=shortable,
+                    main_policy=policy,
                     replay_intraday_1min=replay_minutes,
                 )
             stats = compute_return_stats(replay)
@@ -203,23 +161,10 @@ class BacktestTool:
         finally:
             if tmp_nl_dir.exists():
                 shutil.rmtree(tmp_nl_dir, ignore_errors=True)
+            requests_host.unlink(missing_ok=True)
+            responses_host.unlink(missing_ok=True)
 
-        intents_path = result_dir / "trade_intents.parquet"
-        intents_to_write = intents.copy()
-        if "params" in intents_to_write.columns:
-            intents_to_write["params"] = intents_to_write["params"].map(
-                lambda value: json.dumps(value if isinstance(value, dict) else {}, ensure_ascii=False, sort_keys=True)
-            )
-        intents_to_write.to_parquet(intents_path, index=False)
-        metadata_path = result_dir / "strategy_metadata.json"
-        metadata_path.write_text(
-            json.dumps(sanitize_for_log(program.metadata), ensure_ascii=False, indent=2, sort_keys=True, default=str),
-            encoding="utf-8",
-        )
-        candidates_path = None
-        if not program.candidates.empty:
-            candidates_path = result_dir / "candidates.parquet"
-            program.candidates.to_parquet(candidates_path, index=False)
+        orders_path = self._write_orders(result_dir, replay.broker.query_orders())
         (result_dir / "detailed_return.json").write_text(
             json.dumps(sanitize_for_log(stats), ensure_ascii=False, indent=2, sort_keys=True, default=str),
             encoding="utf-8",
@@ -238,13 +183,12 @@ class BacktestTool:
             "result_path": self.ctx.executor.map_path(result_dir),
             "host_result_path": str(result_dir),
             "decision_time": decision_time,
-            "candidate_rows": int(len(program.candidates)),
-            "trade_intent_rows": int(len(intents)),
-            "trade_strategies": strategy_names,
+            "strategy_entry": "main",
             "model_artifact_files": len(model_artifacts.files),
             "model_artifact_bytes": model_artifacts.total_bytes,
             "replay_granularity": replay.granularity,
             "order_count": int(stats["order_count"]),
+            "trade_count": int(stats["trade_count"]),
             "total_return": stats["total_return"],
             "long_return": stats["long_return"],
             "short_return": stats["short_return"],
@@ -252,12 +196,8 @@ class BacktestTool:
             "max_drawdown": stats["max_drawdown"],
             "margin_secs_reject_count": stats["margin_secs_reject_count"],
             "max_holdings_reject_count": stats["max_holdings_reject_count"],
-            "trade_intents_path": self.ctx.executor.map_path(intents_path),
-            "host_trade_intents_path": str(intents_path),
-            "strategy_metadata_path": self.ctx.executor.map_path(metadata_path),
-            "host_strategy_metadata_path": str(metadata_path),
-            "candidates_path": self.ctx.executor.map_path(candidates_path) if candidates_path else None,
-            "host_candidates_path": str(candidates_path) if candidates_path else None,
+            "orders_path": self.ctx.executor.map_path(orders_path) if orders_path else None,
+            "host_orders_path": str(orders_path) if orders_path else None,
             "nl_tool_dir": self.ctx.executor.map_path(nl_tool_dir),
             "host_nl_tool_dir": str(nl_tool_dir),
             "modification_delta_summary": _modification_delta_summary(modification_check),
@@ -276,12 +216,21 @@ class BacktestTool:
                 model_artifact_root=self.ctx.paths.model_artifacts,
                 metrics={k: stats[k] for k in ("total_return", "long_return", "short_return", "sharpe", "max_drawdown")},
                 complete_validation=True,
-                attachments={
-                    "detailed_return.json": result_dir / "detailed_return.json",
-                    "strategy_metadata.json": metadata_path,
-                },
+                attachments={"detailed_return.json": result_dir / "detailed_return.json"},
             )
         return summary
+
+    def _write_orders(self, result_dir: Path, orders: list[dict[str, object]]) -> Path | None:
+        if not orders:
+            return None
+        frame = pd.DataFrame(orders)
+        if "source_artifacts" in frame.columns:
+            frame["source_artifacts"] = frame["source_artifacts"].map(
+                lambda value: json.dumps(list(value) if isinstance(value, (list, tuple)) else [], ensure_ascii=False)
+            )
+        orders_path = result_dir / "orders.parquet"
+        frame.to_parquet(orders_path, index=False)
+        return orders_path
 
     def _enforce_modification_check(self, mode: str) -> dict[str, object] | None:
         manifest = self.ctx.manifest
@@ -328,25 +277,13 @@ class BacktestTool:
                 f"{actual.get('snapshot_id')} != {expected.get('snapshot_id')}"
             )
 
-    def _universe(self, snapshot_dir: Path) -> set[str]:
-        universe = pd.read_parquet(snapshot_dir / "universe.parquet")
-        return set(universe["ts_code"].astype(str))
-
-    def _new_result_dir(self, mode: str, result_name: str | None) -> Path:
-        result_dir = self._planned_result_dir(mode, result_name)
-        if result_dir.exists():
-            raise ToolError(f"result directory already exists: {result_dir}")
-        result_dir.mkdir(parents=True)
-        return result_dir
-
     def _planned_result_dir(self, mode: str, result_name: str | None) -> Path:
         results_root = self.ctx.paths.results
         if result_name is None:
             prefix = "valid" if mode == "valid" else "test"
             existing = sorted(p.name for p in results_root.glob(f"{prefix}_*"))
             result_name = f"{prefix}_{len(existing):03d}"
-        result_dir = results_root / result_name
-        return result_dir
+        return results_root / result_name
 
     def _record_failure(self, mode: str, error: str) -> None:
         summary = {
@@ -371,35 +308,6 @@ class BacktestTool:
                 error=error,
                 artifact_hash=failed_hash,
             )
-
-
-class _NeutralNLService:
-    def __init__(self, log_dir: Path) -> None:
-        self.log_dir = log_dir
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-
-    def run(
-        self,
-        ts_code: str,
-        *,
-        prompt: str,
-        kwargs: dict[str, object],
-        request: dict[str, object],
-    ) -> dict[str, object]:
-        result = {
-            "task_id": "contract_check",
-            "ts_code": ts_code,
-            "status": "ok",
-            "state": "completed",
-            "content": "",
-            "error": "",
-            "rounds": 0,
-            "tool_calls": [],
-            "evidence": [],
-            "company_context": {},
-        }
-        _append_jsonl(self.log_dir / "nl_requests.jsonl", {"request": request, "result": result, "contract_check": True})
-        return result
 
 
 class _StrategyNLService:

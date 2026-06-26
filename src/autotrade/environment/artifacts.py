@@ -91,8 +91,8 @@ def load_strategy_artifact(root: str | Path) -> StrategyArtifact:
             raise ArtifactError(f"missing required artifact file: {name}")
     main_py = root / "main.py"
     main_functions = defined_function_names(main_py)
-    if "run_strategy" not in main_functions:
-        raise ArtifactError("main.py must define run_strategy(context)")
+    if "main" not in main_functions:
+        raise ArtifactError("main.py must define main(ctx)")
     python_files = [root / relpath for relpath in files if relpath.endswith(".py")]
     for needle in FORBIDDEN_CODE_REFERENCES:
         if any(needle in value for path in python_files for value in _runtime_string_constants(path)):
