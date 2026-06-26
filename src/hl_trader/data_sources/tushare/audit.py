@@ -690,9 +690,7 @@ def audit_revision_sentinel(args: argparse.Namespace) -> int:
     output = Path(args.output or REVISION_SUMMARY_PATH)
     if not output.is_absolute():
         output = repo_root / output
-    ledger = Path(args.revision_ledger)
-    if not ledger.is_absolute():
-        ledger = repo_root / ledger
+    ledger = core.resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
 
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     datasets = list(args.datasets or (DAILY_REQUIRED_DATASETS + DAILY_OPTIONAL_DATASETS))
@@ -885,7 +883,7 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
         "conclusions": [
             "The date-organized minute store is the preferred research/live-update layout for PIT daily replay.",
             "The stock-year source store remains the historical download and traceability layer.",
-            "Rows must still be filtered by available_at <= decision_time inside PIT feature construction.",
+            "Rows must still be filtered by available_at <= decision_time inside PIT snapshot construction.",
         ],
     }
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -997,7 +995,7 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
     })
     add("warning" if not auction_day_stats else "info", "minute_0930_vs_stk_auction", "09:30 minute bar against live stk_auction ratios by market bucket", {
         "days": auction_day_stats,
-        "expected_pattern": "SH/BJ buckets should stay near 1.0; historical SZ 09:30 minute bars are adjusted in PIT feature construction before comparing with live stk_auction.",
+        "expected_pattern": "SH/BJ buckets should stay near 1.0; historical SZ 09:30 minute bars are adjusted in PIT snapshot construction before comparing with live stk_auction.",
         "correction_factors": {"sz_main_00": 0.76, "sz_gem_30": 0.58, "others": 1.0},
     })
     add("warning" if not daily_day_stats else "info", "minute_sum_vs_daily_units", "full-day minute sums against daily unit ratios", {
@@ -1021,7 +1019,7 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
         "findings": findings,
         "conclusions": [
             "Raw minute files are not modified by this audit.",
-            "Historical 09:30 minute auction bars should be corrected in the Environment feature layer when they are used as a proxy for live stk_auction.",
+            "Historical 09:30 minute auction bars should be corrected in the Environment snapshot layer when they are used as a proxy for live stk_auction.",
             "Full-day minute sums should still align with daily units after the documented share/hand and CNY/thousand-CNY conversions.",
         ],
     }
@@ -1271,18 +1269,22 @@ def audit_trade_cal(raw_dir: Path, add) -> set[str]:
     add("error" if sse_open != szse_open else "info", "trade_cal_sse_szse", "SSE/SZSE open-day alignment", {"sse_not_szse": len(sse_open - szse_open), "szse_not_sse": len(szse_open - sse_open)})
     return sse_open
 
-def audit_bak_basic(raw_dir: Path, sse_open: set[str], add) -> None:
+def audit_bak_basic(raw_dir: Path, sse_open: set[str], end_date: str, add) -> None:
     files = sorted((raw_dir / "bak_basic").glob("trade_date=*.parquet"))
     rows = {path.stem.split("=", 1)[1]: parquet_rows(path) for path in files}
-    expected = {d for d in sse_open if d >= "20160101"}
-    zero_dates = sorted(d for d, count in rows.items() if count == 0)
-    nonzero_dates = sorted(d for d, count in rows.items() if count > 0)
+    expected = {d for d in sse_open if "20160101" <= d <= end_date}
+    scoped_rows = {d: count for d, count in rows.items() if d <= end_date}
+    missing_dates = sorted(expected - set(scoped_rows))
+    extra_dates = sorted(set(scoped_rows) - expected)
+    zero_dates = sorted(d for d in expected if scoped_rows.get(d, 0) == 0)
+    nonzero_dates = sorted(d for d in expected if scoped_rows.get(d, 0) > 0)
     details = {
-        "files": len(files), "rows": int(sum(rows.values())),
-        "missing_expected_files": len(expected - set(rows)), "extra_files": len(set(rows) - expected),
+        "files": len(files), "rows": int(sum(rows.values())), "end_date": end_date,
+        "missing_expected_files": len(missing_dates), "extra_files": len(extra_dates),
         "zero_row_partitions": len(zero_dates), "first_nonzero_date": nonzero_dates[0] if nonzero_dates else None,
         "last_nonzero_date": nonzero_dates[-1] if nonzero_dates else None,
         "zero_after_first_nonzero": len([d for d in zero_dates if nonzero_dates and d > nonzero_dates[0]]),
+        "missing_sample": missing_dates[:20], "extra_sample": extra_dates[:20], "zero_sample": zero_dates[:20],
     }
     severity = "error" if details["missing_expected_files"] else "warning" if zero_dates else "info"
     add(severity, "bak_basic_partitions", "bak_basic partition and source-empty checks", details)
@@ -1554,7 +1556,7 @@ def audit_pit_availability(raw_dir: Path, add) -> None:
             continue
         meta = json.loads(meta_files[0].read_text(encoding="utf-8"))
         sidecar_has_fetched_at[dataset] = bool(meta.get("fetched_at"))
-    add("warning", "pit_available_at", "raw files carry fetch metadata but no row-level available_at; feature construction must enforce PIT rules", {
+    add("warning", "pit_available_at", "raw files carry fetch metadata but no row-level available_at; snapshot construction must enforce PIT rules", {
         "row_level_available_at_present": row_available_at,
         "sample_sidecar_has_fetched_at": sidecar_has_fetched_at,
         "rules": {
@@ -1692,7 +1694,7 @@ def audit_fundamental_unit_and_pit_semantics(raw_dir: Path, add) -> None:
             "fina_indicator_vip": "no f_ann_date in local schema; use ann_date conservatively and expect duplicate same-period rows",
             "forecast_vip": "use first_ann_date/ann_date and keep update_flag/type; it is an event table, not a final statement table",
             "express_vip": "use ann_date; it is a preliminary result table and may differ from later statements",
-            "dividend": "use imp_ann_date, ex_date, record_date, and pay_date according to feature meaning; ann_date can be blank",
+            "dividend": "use imp_ann_date, ex_date, record_date, and pay_date according to field meaning; ann_date can be blank",
             "disclosure_date": "calendar/planned disclosure table; do not treat it as a fundamental value",
         },
         "doc_refs": {key: INTEGRATED_DOC_REFS[key] for key in sorted(INTEGRATED_DOC_REFS)},
@@ -1885,7 +1887,7 @@ def expected_macro_paths(raw_dir: Path, spec: MacroDataset, start_date: str, end
 
 def macro_pit_rules() -> dict[str, str]:
     return {
-        "cn_schedule": "publish_date is the intended release date and should refine monthly/quarterly macro visibility when feature engineering maps data_api to realized releases.",
+        "cn_schedule": "publish_date is the intended release date and should refine monthly/quarterly macro visibility when snapshot construction maps data_api to realized releases.",
         "monthly_macro": "raw month-only indicators are stamped conservatively as month-end plus 31 days until cn_schedule or another release timestamp is applied.",
         "quarterly_macro": "raw quarter-only indicators are stamped conservatively as quarter-end plus 45 days until a release schedule is applied.",
         "daily_rates": "date-only rates and cross-market daily series are stamped at local end-of-day; do not use them for same-day open decisions without an explicit release time.",
@@ -2042,9 +2044,9 @@ def audit_macro_only(args: argparse.Namespace) -> int:
         "pit_rules": macro_pit_rules(),
         "doc_refs": {dataset: INTEGRATED_DOC_REFS[dataset] for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))},
         "conclusions": [
-            "Macro/global context is stored as raw evidence and regime context; feature construction must still apply release-time and event-specific PIT rules.",
+            "Macro/global context is stored as raw evidence and regime context; snapshot construction must still apply release-time and event-specific PIT rules.",
             "Monthly and quarterly macro tables use conservative availability fallbacks until cn_schedule or a more precise source release time is joined.",
-            "Economic-calendar values are heterogeneous by event and should not be turned into numeric factors without event-specific parsing.",
+            "Economic-calendar values are heterogeneous by event and should not be turned into numeric signals without event-specific parsing.",
             "monetary_policy is text/PDF evidence; hash and truncate content before LLM prompts and keep it shadow-only until the trading policy explicitly allows text impact.",
         ],
     }
@@ -2073,7 +2075,7 @@ def event_unit_rules() -> dict[str, str]:
         "stk_holdernumber": "holder_num is shareholder account count.",
         "stk_holdertrade": "change_vol/after_share/total_share are raw share fields; ratios are percent-style raw fields.",
         "repurchase": "vol/amount/high_limit/low_limit are raw TuShare repurchase units; treat as event evidence until normalized.",
-        "share_float": "float_share and float_ratio are raw unlock-share and ratio fields; feature availability should be based on ann_date, not float_date, when ann_date exists.",
+        "share_float": "float_share and float_ratio are raw unlock-share and ratio fields; field availability should be based on ann_date, not float_date, when ann_date exists.",
         "block_trade": "price/vol/amount are raw block-trade fields; block_trade is sparse and zero-row trade dates are expected.",
     }
 
@@ -2087,7 +2089,7 @@ def event_pit_rules() -> dict[str, str]:
         "stk_holdernumber": "available_at uses ann_date end-of-day.",
         "stk_holdertrade": "available_at uses ann_date 19:00+08.",
         "repurchase": "available_at uses ann_date end-of-day.",
-        "share_float": "available_at uses ann_date end-of-day; if ann_date is blank, raw layer falls back to float_date and feature layer must treat that as conservative event-date availability, not pre-event knowledge.",
+        "share_float": "available_at uses ann_date end-of-day; if ann_date is blank, raw layer falls back to float_date and snapshot layer must treat that as conservative event-date availability, not pre-event knowledge.",
     }
 
 def event_partition_prefix(spec: EventDataset) -> str:
@@ -2310,7 +2312,7 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
             "Event/flow raw data is sparse by design; zero-row event months or block-trade dates are expected for sparse event sources.",
             "Daily flow tables must still be joined with explicit PIT availability; same-day open decisions cannot use post-close or next-day event/flow values.",
             "share_float raw partitions and the optional share_float_complete union are audited together; exact 6000-row partitions remain source-cap risks.",
-            "Raw event rows are not deduplicated; downstream evidence/feature layers need deterministic event-key and availability rules.",
+            "Raw event rows are not deduplicated; downstream evidence/snapshot layers need deterministic event-key and availability rules.",
         ],
     }
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -2445,10 +2447,10 @@ def board_pit_rules() -> dict[str, dict[str, str]]:
         "limit_step": {"available_at": "conservative trade-date end-of-day", "usage": "market height and limit-up ladder after close"},
         "limit_cpt_list": {"available_at": "conservative trade-date end-of-day", "usage": "topic strength and limit-up board rotation after close"},
         "limit_list_ths": {"available_at": "official around 16:00 from trade_date", "usage": "post-close THS limit-up/down pool evidence; no same-day intraday lookahead"},
-        "top_list": {"available_at": "official 20:00 from trade_date", "usage": "next-day Dragon-Tiger list feature/evidence"},
-        "top_inst": {"available_at": "official 20:00 from trade_date", "usage": "next-day institutional seat feature/evidence"},
+        "top_list": {"available_at": "official 20:00 from trade_date", "usage": "next-day Dragon-Tiger list evidence"},
+        "top_inst": {"available_at": "official 20:00 from trade_date", "usage": "next-day institutional seat evidence"},
         "hm_list": {"available_at": "static reference list; do not use as historical time-series signal without hm_detail rows"},
-        "hm_detail": {"available_at": "conservative trade-date end-of-day", "usage": "next-day hot-money seat feature/evidence"},
+        "hm_detail": {"available_at": "conservative trade-date end-of-day", "usage": "next-day hot-money seat evidence"},
         "ths_hot": {"available_at": "rank_time when returned; is_new=Y falls back to 22:30", "usage": "intraday/evening hot-list evidence by observable rank_time"},
         "dc_hot": {"available_at": "rank_time when returned; is_new=Y falls back to 22:30", "usage": "intraday/evening hot-list evidence by observable rank_time"},
     }
@@ -2631,7 +2633,7 @@ def find_financial_pit_case(raw_dir: Path) -> dict[str, Any]:
         "business_key": {"ts_code": json_scalar(target["ts_code"]), "end_date": json_scalar(target["end_date"])},
         "group_stats": records_for_json(pd.DataFrame([target.to_dict()])),
         "sample_rows": records_for_json(group, limit=10),
-        "interpretation": "same stock/report period has multiple announcement or report versions; feature construction must select only records visible by f_ann_date/ann_date at decision time.",
+        "interpretation": "same stock/report period has multiple announcement or report versions; snapshot construction must select only records visible by f_ann_date/ann_date at decision time.",
     }
 
 def find_financial_duplicate_key_case(raw_dir: Path) -> dict[str, Any]:
@@ -2664,7 +2666,7 @@ def find_financial_duplicate_key_case(raw_dir: Path) -> dict[str, Any]:
                 "rows_in_group": int(len(group)),
                 "varying_columns_sample": varying[:20],
                 "sample_rows": records_for_json(group, columns=columns, limit=8),
-                "interpretation": "duplicate business keys are not always full-row duplicates; raw layer should preserve them, while PIT feature layer needs a deterministic version rule.",
+                "interpretation": "duplicate business keys are not always full-row duplicates; raw layer should preserve them, while PIT snapshot layer needs a deterministic version rule.",
             }
     return {"case_id": "fundamental_duplicate_business_key_case", "available": False, "reason": "no duplicate fundamental business key found"}
 
@@ -2685,7 +2687,7 @@ def find_dividend_issue_case(raw_dir: Path) -> dict[str, Any]:
                     "case_id": "dividend_blank_ann_date_case",
                     "partition": path.name,
                     "sample_rows": records_for_json(blank, limit=8),
-                    "interpretation": "dividend ann_date can be blank; availability should be derived from imp_ann_date, ex_date, record_date, or pay_date according to feature meaning.",
+                    "interpretation": "dividend ann_date can be blank; availability should be derived from imp_ann_date, ex_date, record_date, or pay_date according to field meaning.",
                 }
         key_cols = [col for col in FUNDAMENTAL_SPECS["dividend"].key_columns if col in df.columns]
         if key_cols:
@@ -2697,7 +2699,7 @@ def find_dividend_issue_case(raw_dir: Path) -> dict[str, Any]:
                     "partition": path.name,
                     "key_columns": key_cols,
                     "sample_rows": records_for_json(group, limit=8),
-                    "interpretation": "dividend rows can repeat by business key; feature construction should deduplicate after deciding the correct event date.",
+                    "interpretation": "dividend rows can repeat by business key; snapshot construction should deduplicate after deciding the correct event date.",
                 }
     return {"case_id": "dividend_issue_case", "available": False, "reason": "no blank ann_date or duplicate dividend key found"}
 
@@ -2815,7 +2817,7 @@ def audit_unified(args: argparse.Namespace) -> int:
     stock_basic = audit_stock_basic(raw_dir, add)
     audit_stock_company(raw_dir, stock_basic, add)
     sse_open = audit_trade_cal(raw_dir, add)
-    audit_bak_basic(raw_dir, sse_open, add)
+    audit_bak_basic(raw_dir, sse_open, args.end_date, add)
     audit_namechange(raw_dir, add)
     classify = audit_index_classify(raw_dir, add)
     audit_index_member_all(raw_dir, classify, stock_basic, add)
@@ -2863,9 +2865,9 @@ def audit_unified(args: argparse.Namespace) -> int:
         "doc_refs": INTEGRATED_DOC_REFS,
         "conclusions": [
             "Base research audit covers reference, daily market, and fundamental raw data.",
-            "Reference/daily/fundamental raw files are structurally usable when errors are zero, but source and semantic warnings require PIT-aware feature construction.",
+            "Reference/daily/fundamental raw files are structurally usable when errors are zero, but source and semantic warnings require PIT-aware snapshot construction.",
             "bak_basic and bak_daily are supplemental snapshots; neither should replace daily/daily_basic as the main daily market data source.",
-            "Raw financial records are intentionally not deduplicated; choose report versions by availability date in the feature layer.",
+            "Raw financial records are intentionally not deduplicated; choose report versions by availability date in the snapshot layer.",
             "Do not compare amount, market value, or share fields across interfaces until each field is normalized to a common unit.",
         ],
     }
@@ -2918,7 +2920,7 @@ def audit_intraday_only(args: argparse.Namespace) -> int:
         "conclusions": [
             "Intraday minute data is stored as stock-year Parquet partitions and sidecar metadata under data/raw/stk_mins_1min.",
             "TuShare stk_mins uses shares for vol and CNY for amount; do not mix it with daily.amount or bak_daily.amount without unit conversion.",
-            "For historical minute features, 09:30 and 15:00 bars are the auction-inclusive source; separate stk_auction/stk_auction_c downloads are unnecessary unless live auction validation is needed.",
+            "For historical minute rows, 09:30 and 15:00 bars are the auction-inclusive source; separate stk_auction/stk_auction_c downloads are unnecessary unless live auction validation is needed.",
         ],
     }
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .common import normalize_date_key, read_many
+
 
 DEFAULT_CONFIG = Path("configs/tushare_update_schedule.json")
 RUNTIME_ROOT = Path(".runtime/tushare")
@@ -53,6 +55,50 @@ def load_config(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def resolve_sse_open_on_or_before(repo_root: Path, raw_dir: str, target_date: str) -> str:
+    trade_cal_dir = repo_root / raw_dir / "trade_cal" / "exchange=SSE"
+    files = sorted(trade_cal_dir.glob("year=*.parquet"))
+    if not files:
+        raise RuntimeError(f"SSE trade_cal partitions are missing under {trade_cal_dir}; run reference download first")
+    calendar = read_many(files, columns=["cal_date", "is_open"])
+    if calendar.empty:
+        raise RuntimeError(f"SSE trade_cal is empty under {trade_cal_dir}; refresh reference trade_cal first")
+    calendar["cal_date"] = calendar["cal_date"].map(normalize_date_key)
+    open_dates = sorted(
+        calendar.loc[
+            (calendar["is_open"].astype(str) == "1")
+            & (calendar["cal_date"] != "")
+            & (calendar["cal_date"] <= target_date),
+            "cal_date",
+        ].tolist()
+    )
+    if not open_dates:
+        raise RuntimeError(f"no SSE open date found on or before {target_date}")
+    return str(open_dates[-1])
+
+
+def resolve_job_end_date(job: dict, repo_root: Path, raw_dir: str, target_date: str) -> str:
+    mode = str(job.get("end_date_mode", "calendar_date"))
+    if mode == "calendar_date":
+        return target_date
+    if mode == "sse_open_on_or_before":
+        return resolve_sse_open_on_or_before(repo_root, raw_dir, target_date)
+    raise ValueError(f"unsupported end_date_mode: {mode}")
+
+
+def resolve_event_flow_audit_end_date(ctx: RunContext, raw_dir: str) -> str:
+    mode = ctx.job.get("event_flow_end_date_mode")
+    if mode:
+        return resolve_job_end_date({"end_date_mode": mode}, ctx.repo_root, raw_dir, ctx.end_date)
+    event_flow_end_date = ctx.end_date
+    event_extra_offset = int(ctx.job.get("event_flow_end_extra_offset_days", 0))
+    if event_extra_offset:
+        event_flow_end_date = (
+            datetime.strptime(ctx.end_date, "%Y%m%d").date() - timedelta(days=event_extra_offset)
+        ).strftime("%Y%m%d")
+    return event_flow_end_date
+
+
 def build_context(args: argparse.Namespace) -> RunContext:
     config = load_config(Path(args.config))
     jobs = config.get("jobs", {})
@@ -62,8 +108,12 @@ def build_context(args: argparse.Namespace) -> RunContext:
     tz = ZoneInfo(timezone_name)
     now = datetime.now(tz)
     job = jobs[args.job]
+    repo_root = Path(config.get("repo_root", ".")).resolve()
+    python = config.get("python") or sys.executable
+    raw_dir = config.get("default_raw_dir", "data/raw")
     offset_days = int(job.get("end_date_offset_days", 0))
-    end_date = args.end_date or (now.date() - timedelta(days=offset_days)).strftime("%Y%m%d")
+    target_date = args.end_date or (now.date() - timedelta(days=offset_days)).strftime("%Y%m%d")
+    end_date = resolve_job_end_date(job, repo_root, raw_dir, target_date)
     env_start_date = os.environ.get("TUSHARE_UPDATE_START_DATE")
     if args.start_date or env_start_date:
         start_date = args.start_date or env_start_date or config["default_start_date"]
@@ -74,19 +124,12 @@ def build_context(args: argparse.Namespace) -> RunContext:
         start_date = (end_day - timedelta(days=int(job["start_date_lookback_days"]))).strftime("%Y%m%d")
     else:
         start_date = config["default_start_date"]
-    repo_root = Path(config.get("repo_root", ".")).resolve()
-    python = config.get("python") or sys.executable
     return RunContext(config, repo_root, python, args.job, job, start_date, end_date, timezone_name)
 
 
 def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
     raw_dir = ctx.config.get("default_raw_dir", "data/raw")
-    event_flow_end_date = ctx.end_date
-    event_extra_offset = int(ctx.job.get("event_flow_end_extra_offset_days", 0))
-    if event_extra_offset:
-        event_flow_end_date = (
-            datetime.strptime(ctx.end_date, "%Y%m%d").date() - timedelta(days=event_extra_offset)
-        ).strftime("%Y%m%d")
+    event_flow_end_date = resolve_event_flow_audit_end_date(ctx, raw_dir)
     return [
         [
             ctx.python,
@@ -248,61 +291,42 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
         ]
         command.extend(ctx.job.get("extra_args", []))
         return [command]
-    if operation == "hl_feature_pipeline":
+    if operation == "pit_event_pipeline":
         raw_dir = ctx.config.get("default_raw_dir", "data/raw")
-        feature_root = ctx.config.get("default_feature_root", "data/features")
-        fundamental_root = ctx.job.get("fundamental_events_root", f"{feature_root}/fundamental_events")
-        feature_start_date = feature_pipeline_start_date(ctx, fundamental_root)
-        daily_dataset = ctx.job.get("daily_alpha_dataset", "daily_alpha")
+        pit_root = ctx.config.get("default_pit_root", "data/pit")
+        fundamental_root = ctx.job.get("fundamental_events_root", f"{pit_root}/fundamental_events")
+        event_start_date = pit_event_start_date(ctx, fundamental_root)
         commands = [
             [
                 ctx.python,
-                "scripts/data/build_features.py",
+                "scripts/data/build_pit_events.py",
                 "build-fundamental-events",
                 "--raw-dir",
                 raw_dir,
                 "--output-root",
                 fundamental_root,
                 "--start-date",
-                feature_start_date,
+                event_start_date,
                 "--end-date",
                 ctx.end_date,
             ],
             [
                 ctx.python,
-                "scripts/data/build_features.py",
+                "scripts/data/build_pit_events.py",
                 "audit-fundamental-events",
                 "--events-root",
                 fundamental_root,
                 "--start-date",
-                feature_start_date,
+                event_start_date,
                 "--end-date",
                 ctx.end_date,
                 "--output",
                 ctx.job.get("fundamental_events_status", "results/data_quality/fundamental_events_status.json"),
                 "--require-partitions",
             ],
-            [
-                ctx.python,
-                "scripts/data/build_features.py",
-                "build-features",
-                "--raw-dir",
-                raw_dir,
-                "--output-root",
-                feature_root,
-                "--dataset",
-                daily_dataset,
-                "--fundamental-events-dir",
-                fundamental_root,
-                "--start-date",
-                feature_start_date,
-                "--end-date",
-                ctx.end_date,
-            ],
         ]
         commands[0].extend(ctx.job.get("fundamental_events_extra_args", []))
         commands[1].extend(ctx.job.get("fundamental_events_audit_extra_args", []))
-        commands[2].extend(ctx.job.get("daily_alpha_extra_args", []))
         return commands
     if operation == "revision_sentinel":
         revision_config = ctx.config.get("revision_monitor", {})
@@ -337,14 +361,21 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
     raise ValueError(f"unsupported cron operation: {operation}")
 
 
-def feature_pipeline_start_date(ctx: RunContext, fundamental_root: str) -> str:
+def pit_event_start_date(ctx: RunContext, fundamental_root: str) -> str:
     if not ctx.job.get("initialize_from_default_start_date_when_missing", True):
-        return ctx.start_date
+        return month_start(ctx.start_date)
     root = ctx.repo_root / fundamental_root
     has_partitions = root.exists() and any(root.glob("*/available_month=*.parquet"))
     if has_partitions:
-        return ctx.start_date
+        return month_start(ctx.start_date)
     return str(ctx.config.get("default_start_date", ctx.start_date))
+
+
+def month_start(date_text: str) -> str:
+    normalized = str(date_text)
+    if len(normalized) != 8 or not normalized.isdigit():
+        raise ValueError(f"expected YYYYMMDD date, got {date_text!r}")
+    return f"{normalized[:6]}01"
 
 
 def read_state() -> dict:
@@ -456,6 +487,7 @@ def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path) -> in
             env = os.environ.copy()
             src_path = str(ctx.repo_root / "src")
             env["PYTHONPATH"] = src_path if not env.get("PYTHONPATH") else f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
+            env["PYTHONUNBUFFERED"] = "1"
             process = subprocess.run(command, cwd=ctx.repo_root, stdout=log, stderr=subprocess.STDOUT, check=False, env=env)
             returncodes.append(process.returncode)
             log.write(f"\ncommand_index={index}\nreturncode={process.returncode}\n")

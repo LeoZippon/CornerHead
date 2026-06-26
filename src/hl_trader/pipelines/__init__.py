@@ -7,7 +7,14 @@ from .config import (
     RawSnapshotProvider,
 )
 from .experiment import ExperimentPipeline
-from .folds import FoldSpec, build_fold_schedule, heldout_periods, load_sse_trading_days
+from .folds import (
+    FoldSpec,
+    build_fold_schedule,
+    heldout_periods,
+    load_sse_trading_days,
+    period_bounds,
+    period_range,
+)
 from .ledger import ExperimentLedger
 
 __all__ = [
@@ -23,4 +30,6 @@ __all__ = [
     "build_fold_schedule",
     "heldout_periods",
     "load_sse_trading_days",
+    "period_bounds",
+    "period_range",
 ]

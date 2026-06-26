@@ -12,13 +12,14 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from hl_trader.environment.runtime import sanitize_for_log
+
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_CHAT_COMPLETIONS_PATH = "/chat/completions"
 SUPPORTED_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"}
 SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "max", "xhigh"}
 USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
-SECRET_PATTERN = re.compile(r"(sk-[A-Za-z0-9_-]{8,})")
 SENSITIVE_LOG_KEYS = {
     "api_key",
     "apikey",
@@ -72,6 +73,7 @@ class DeepSeekConfig:
     temperature: float = 0.0
     thinking_enabled: bool = False
     reasoning_effort: str | None = None
+    stream_tool_calls: bool = True
     user_id: str = "macroquant-hl"
     conversation_log_dir: str | Path | None = "data/llm_conversations"
 
@@ -124,6 +126,7 @@ class DeepSeekResponse:
     usage: dict[str, Any] = field(default_factory=dict)
     response_id: str = ""
     reasoning_content: str = ""
+    tool_calls: tuple[dict[str, Any], ...] = ()
 
     def json_content(self) -> dict[str, Any]:
         try:
@@ -171,6 +174,30 @@ class DeepSeekClient:
             raise DeepSeekAPIError(str(exc), retryable=False) from exc
         return response
 
+    def chat_tools(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]],
+        tool_choice: str | dict[str, Any] = "auto",
+        max_tokens: int | None = None,
+    ) -> DeepSeekResponse:
+        """Native function-calling turn.
+
+        ``messages`` are already OpenAI-shaped dicts (``role``/``content`` plus,
+        for the tool loop, ``tool_calls`` on assistant turns and ``tool_call_id``
+        on ``tool`` turns). The response may carry ``tool_calls`` with an empty
+        ``content`` -- that is the normal tool-call shape, not an error.
+        """
+        payload = self._tools_payload(
+            messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            max_tokens=max_tokens,
+            stream=self.config.stream_tool_calls,
+        )
+        return self._post_with_retries(payload)
+
     def _payload(self, messages: list[ChatMessage], *, json_mode: bool, max_tokens: int | None = None) -> dict[str, Any]:
         if not messages:
             raise ValueError("messages cannot be empty")
@@ -192,6 +219,40 @@ class DeepSeekClient:
             body["thinking"] = {"type": "enabled"}
         else:
             body["thinking"] = {"type": "disabled"}
+        if self.config.reasoning_effort:
+            body["reasoning_effort"] = self.config.reasoning_effort
+        return body
+
+    def _tools_payload(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]],
+        tool_choice: str | dict[str, Any],
+        max_tokens: int | None,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        if not messages:
+            raise ValueError("messages cannot be empty")
+        if not tools:
+            raise ValueError("tools cannot be empty for a tool-calling request")
+        records = [_tool_message_record(message) for message in messages]
+        body: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": records,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "stream": stream,
+            "temperature": self.config.temperature,
+            "max_tokens": int(max_tokens or self.config.max_tokens),
+        }
+        if stream:
+            # Keep the socket fed during long max-effort turns so a slow first
+            # token does not trip the idle read timeout; ask for final usage.
+            body["stream_options"] = {"include_usage": True}
+        if self.config.user_id:
+            body["user_id"] = self.config.user_id
+        body["thinking"] = {"type": "enabled"} if self.config.thinking_enabled else {"type": "disabled"}
         if self.config.reasoning_effort:
             body["reasoning_effort"] = self.config.reasoning_effort
         return body
@@ -243,7 +304,12 @@ class DeepSeekClient:
             with urlopen(request, timeout=self.config.timeout_seconds) as response:
                 http_status_code = _response_status_code(response)
                 raw_body = response.read().decode("utf-8")
-                parsed_body = json.loads(raw_body)
+                if payload.get("stream"):
+                    # Reconstruct the non-streaming completion shape so the rest
+                    # of the parse/log path is identical for both modes.
+                    parsed_body = _merge_stream_chunks(_read_sse_chunks(raw_body))
+                else:
+                    parsed_body = json.loads(raw_body)
         except HTTPError as exc:
             body = _read_http_error_body(exc)
             error = _http_error(exc, body)
@@ -384,17 +450,24 @@ def _parse_response(data: dict[str, Any]) -> DeepSeekResponse:
     finish_reason = first_choice.get("finish_reason")
     if finish_reason in {"length", "content_filter", "insufficient_system_resource"}:
         raise DeepSeekAPIError(f"DeepSeek response stopped with finish_reason={finish_reason}")
-    message = first_choice.get("message")
+    message = first_choice.get("message") if isinstance(first_choice, dict) else None
+    raw_tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+    tool_calls = (
+        tuple(tc for tc in raw_tool_calls if isinstance(tc, dict)) if isinstance(raw_tool_calls, list) else ()
+    )
     content = message.get("content") if isinstance(message, dict) else None
-    if not isinstance(content, str) or not content.strip():
+    content_str = content if isinstance(content, str) else ""
+    # A tool-call turn legitimately has empty content; only fail when both are empty.
+    if not content_str.strip() and not tool_calls:
         raise DeepSeekAPIError("DeepSeek response content is empty")
     reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
     return DeepSeekResponse(
-        content=content,
+        content=content_str,
         model=str(data.get("model", "")),
         usage=dict(data.get("usage") or {}),
         response_id=str(data.get("id", "")),
         reasoning_content=reasoning if isinstance(reasoning, str) else "",
+        tool_calls=tool_calls,
     )
 
 
@@ -429,6 +502,125 @@ def _extract_error_detail(body: str) -> str | None:
     if detail is None:
         return None
     return _redact_secrets(str(detail))
+
+
+def _read_sse_chunks(raw_body: str) -> list[dict[str, Any]]:
+    """Parse a ``data: {...}`` SSE body into the list of chunk objects."""
+    chunks: list[dict[str, Any]] = []
+    for line in raw_body.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, dict):
+            chunks.append(decoded)
+    return chunks
+
+
+def _merge_stream_chunks(chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Fold streamed delta chunks back into one completion ``data`` dict.
+
+    Tool-call argument fragments arrive split across chunks keyed by ``index``;
+    they are concatenated in first-seen order.
+    """
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_by_index: dict[int, dict[str, Any]] = {}
+    tool_order: list[int] = []
+    finish_reason: Any = None
+    usage: dict[str, Any] | None = None
+    model = ""
+    response_id = ""
+    for chunk in chunks:
+        if chunk.get("model"):
+            model = str(chunk["model"])
+        if chunk.get("id"):
+            response_id = str(chunk["id"])
+        if isinstance(chunk.get("usage"), dict):
+            usage = chunk["usage"]
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            continue
+        if choice.get("finish_reason"):
+            finish_reason = choice["finish_reason"]
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        if isinstance(delta.get("content"), str):
+            content_parts.append(delta["content"])
+        if isinstance(delta.get("reasoning_content"), str):
+            reasoning_parts.append(delta["reasoning_content"])
+        for tool_call in delta.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            index = tool_call.get("index", 0)
+            slot = tool_by_index.get(index)
+            if slot is None:
+                slot = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                tool_by_index[index] = slot
+                tool_order.append(index)
+            if tool_call.get("id"):
+                slot["id"] = str(tool_call["id"])
+            if tool_call.get("type"):
+                slot["type"] = str(tool_call["type"])
+            function = tool_call.get("function")
+            if isinstance(function, dict):
+                if function.get("name"):
+                    slot["function"]["name"] = str(function["name"])
+                if isinstance(function.get("arguments"), str):
+                    slot["function"]["arguments"] += function["arguments"]
+    message: dict[str, Any] = {"role": "assistant", "content": "".join(content_parts)}
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
+    tool_calls = [
+        tool_by_index[index]
+        for index in tool_order
+        if tool_by_index[index]["function"]["name"] or tool_by_index[index]["id"]
+    ]
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    data: dict[str, Any] = {"choices": [{"finish_reason": finish_reason, "message": message}]}
+    if model:
+        data["model"] = model
+    if response_id:
+        data["id"] = response_id
+    if usage is not None:
+        data["usage"] = usage
+    return data
+
+
+def _tool_message_record(message: dict[str, Any]) -> dict[str, Any]:
+    """Build one wire record for the native tool-calling loop.
+
+    Accepts the four OpenAI roles. Assistant turns may carry ``tool_calls`` with
+    empty ``content``; ``tool`` turns must carry a ``tool_call_id``.
+    """
+    role = str(message.get("role", ""))
+    if role not in {"system", "user", "assistant", "tool"}:
+        raise ValueError(f"unsupported chat role={role}")
+    content = message.get("content")
+    record: dict[str, Any] = {"role": role, "content": "" if content is None else str(content)}
+    if role == "assistant":
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            record["tool_calls"] = list(tool_calls)
+    elif role == "tool":
+        tool_call_id = message.get("tool_call_id")
+        if not tool_call_id:
+            raise ValueError("tool message requires tool_call_id")
+        record["tool_call_id"] = str(tool_call_id)
+    elif not record["content"]:
+        raise ValueError(f"{role} message content cannot be empty")
+    return record
 
 
 def _messages_request_json(records: list[dict[str, str]]) -> bool:
@@ -536,7 +728,7 @@ def _stable_hash(value: Any) -> str:
 
 
 def _redact_secrets(value: str) -> str:
-    return SECRET_PATTERN.sub("sk-***", value)
+    return str(sanitize_for_log(value))
 
 
 def _is_sensitive_log_key(key: str) -> bool:

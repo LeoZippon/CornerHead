@@ -39,6 +39,32 @@ EVENT_FLOW_STATUS_PATH = "results/data_quality/event_flow_status.json"
 
 BOARD_TRADING_STATUS_PATH = "results/data_quality/board_trading_status.json"
 
+def resolve_revision_ledger(
+    raw_dir: Path | str,
+    revision_ledger: Path | str | None = REVISION_EVENTS_PATH,
+    *,
+    repo_root: Path | str | None = None,
+) -> Path | None:
+    """Resolve revision ledger path without letting temp raw dirs pollute production."""
+    if revision_ledger in {None, ""}:
+        return None
+    root = Path(repo_root or Path.cwd()).resolve()
+    raw_path = Path(raw_dir)
+    if not raw_path.is_absolute():
+        raw_path = root / raw_path
+    raw_path = raw_path.resolve()
+    ledger = Path(revision_ledger)
+    if ledger.is_absolute():
+        return ledger
+    if ledger == Path(REVISION_EVENTS_PATH):
+        production_raw = (root / "data/raw").resolve()
+        if raw_path != production_raw:
+            try:
+                raw_path.relative_to(production_raw)
+            except ValueError:
+                return raw_path.parent / "revision_events.jsonl"
+    return root / ledger
+
 DOWNLOAD_TIER_CHOICES = ("reference", "daily", "fundamental", "intraday", "event_flow", "board_trading", "text_evidence", "macro", "global")
 
 REFERENCE_DATASETS = [
@@ -952,6 +978,7 @@ def query_paged(client: TuShareClient, api_name: str, params: dict[str, Any], fi
     page_limit = page_limit or 10000
     all_items: list[list[Any]] = []
     result_fields: list[str] = []
+    page_hashes: set[str] = set()
     pages = 0
     offset = 0
     while True:
@@ -962,6 +989,13 @@ def query_paged(client: TuShareClient, api_name: str, params: dict[str, Any], fi
             result_fields = result.fields
         elif result.fields != result_fields:
             raise RuntimeError(f"{api_name} returned inconsistent fields while paging")
+        page_hash = stable_hash({"fields": result.fields, "items": result.items})
+        if result.items and page_hash in page_hashes:
+            raise RuntimeError(
+                f"{api_name} returned a repeated page while paging params={params}; "
+                f"offset={offset} page_limit={page_limit}"
+            )
+        page_hashes.add(page_hash)
         all_items.extend(result.items)
         pages += 1
         if len(result.items) < page_limit:
@@ -1238,7 +1272,9 @@ def load_stock_codes(raw_dir: Path) -> list[str]:
     if not files:
         raise RuntimeError("stock_basic partitions are missing")
     data = read_many(files, columns=["ts_code"])
-    return sorted(data["ts_code"].dropna().astype(str).str.strip().unique().tolist())
+    codes = data["ts_code"].dropna().astype(str).str.strip()
+    valid = codes[codes.str.fullmatch(r"\d{6}\.(SH|SZ|BJ)")]
+    return sorted(valid.unique().tolist())
 
 def normalize_date_key(value: object) -> str:
     digits = re.sub(r"\D", "", str(value or ""))[:8]

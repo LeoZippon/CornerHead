@@ -9,16 +9,28 @@ deadline policy belongs to the Pipeline.
 
 from __future__ import annotations
 
-from hl_trader.environment.artifacts import artifact_hash
+from hl_trader.environment.artifacts import ArtifactError, artifact_hash, model_artifact_hash
 from hl_trader.environment.runtime import utc_now_iso
 
 from .backtest import BacktestTool
-from .base import PHASE_TRAIN_VALID, ToolContext, ToolError
+from .base import ActionSpec, PHASE_TRAIN_VALID, ToolContext, ToolError
 from .modification_check import ModificationCheckTool
 
 
 class FinishFoldTool:
     name = "finish_fold_tool"
+    spec = ActionSpec(
+        action="finish_fold",
+        tool_name=name,
+        description=(
+            "End the current Fold after artifact hash, modification_check, and light strategy "
+            "contract checks pass; locks further writes in this session."
+        ),
+        read_only=False,
+        destructive=False,
+        concurrency_safe=False,
+        allowed_modes=("fold",),
+    )
 
     def __init__(self, ctx: ToolContext) -> None:
         self.ctx = ctx
@@ -29,18 +41,36 @@ class FinishFoldTool:
 
         last = self.ctx.manifest.get("last_modification_check")
         current_hash = artifact_hash(self.ctx.paths.agent_output)
-        if not last or str(last.get("artifact_hash")) != current_hash:
+        try:
+            current_model_hash = model_artifact_hash(self.ctx.paths.model_artifacts)
+        except ArtifactError:
+            current_model_hash = None
+        if (
+            not last
+            or str(last.get("artifact_hash")) != current_hash
+            or str(last.get("model_artifact_hash")) != str(current_model_hash)
+        ):
             last = ModificationCheckTool(self.ctx).run()
         if not last.get("allowed_to_backtest"):
             raise ToolError(f"finish_fold rejected: modification check failed: {last.get('reasons')}")
+        current_model_hash = str(last.get("model_artifact_hash"))
 
         contract = BacktestTool(self.ctx).contract_check()
+        post_hash = artifact_hash(self.ctx.paths.agent_output)
+        post_model_hash = model_artifact_hash(self.ctx.paths.model_artifacts)
+        if post_hash != current_hash or post_model_hash != current_model_hash:
+            raise ToolError(
+                "finish_fold rejected: contract check changed formal artifacts; "
+                "rerun modification_check and a validation backtest"
+            )
 
         self.ctx.write_locked = True
         fold_end = {
             "status": "fold_finished",
             "finish_reason": "finish_fold_tool",
+            "tool_spec": self.spec.to_record(),
             "artifact_hash": current_hash,
+            "model_artifact_hash": current_model_hash,
             "contract_check": contract,
             "finished_at": utc_now_iso(),
         }

@@ -1,9 +1,17 @@
 import json
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
+from hl_trader.agent import AgentSessionConfig
+from hl_trader.environment.data_summary import write_agent_data_summary
+from hl_trader.environment.runtime import RunManifest
+from hl_trader.environment.snapshot import SnapshotConfig
 from hl_trader.environment.llm.proxy import ScriptedLLM
 from hl_trader.environment.tools import BacktestTool, FinishFoldTool, ModificationCheckTool, ToolContext, ToolError
 from hl_trader.pipelines import (
@@ -12,9 +20,10 @@ from hl_trader.pipelines import (
     ExperimentPipeline,
     build_fold_schedule,
 )
-from hl_trader.pipelines.folds import quarter_bounds
+from hl_trader.pipelines.folds import period_bounds, quarter_bounds
+from scripts.experiments.run_experiment import _session_config_summary
 
-from .fixtures_sandbox import TEMPLATE_DIR, TRADING_DAYS, FakeSnapshotProvider, nl_score_response, write_strategy
+from .fixtures_sandbox import TEMPLATE_DIR, TRADING_DAYS, FakeSnapshotProvider, write_strategy
 
 SRC_ENV_DIR = Path(__file__).resolve().parents[2] / "src" / "hl_trader" / "environment"
 
@@ -28,7 +37,22 @@ class ScriptedFoldAgent:
     def run(self) -> dict[str, object]:
         write_strategy(self.ctx.paths.agent_output)
         ModificationCheckTool(self.ctx).run()
-        BacktestTool(self.ctx).run(mode="valid", nl_mode="on")
+        BacktestTool(self.ctx).run(mode="valid")
+        FinishFoldTool(self.ctx).run()
+        return {"finish_status": "fold_finished"}
+
+
+class ModelArtifactFoldAgent:
+    """Fold agent that produces a small persisted model parameter artifact."""
+
+    def __init__(self, ctx: ToolContext) -> None:
+        self.ctx = ctx
+
+    def run(self) -> dict[str, object]:
+        write_strategy(self.ctx.paths.agent_output)
+        (self.ctx.paths.model_artifacts / "params.json").write_text('{"threshold": 0.42}\n', encoding="utf-8")
+        ModificationCheckTool(self.ctx).run()
+        BacktestTool(self.ctx).run(mode="valid")
         FinishFoldTool(self.ctx).run()
         return {"finish_status": "fold_finished"}
 
@@ -39,10 +63,10 @@ def make_config(tmp: Path, **overrides) -> ExperimentConfig:
         experiments_root=tmp / "experiments",
         work_root=tmp / "sandboxes",
         template_dir=TEMPLATE_DIR,
-        first_test_quarter="2022Q1",
-        last_test_quarter="2022Q1",
-        heldout_first_quarter="2026Q1",
-        heldout_last_quarter="2026Q1",
+        first_test_period="2022Q1",
+        last_test_period="2022Q1",
+        heldout_first_period="2026Q1",
+        heldout_last_period="2026Q1",
         use_docker=False,
     )
     defaults.update(overrides)
@@ -64,11 +88,36 @@ class FoldScheduleTest(unittest.TestCase):
 
     def test_heldout_must_not_overlap_development(self):
         with self.assertRaisesRegex(ValueError, "must not overlap"):
-            make_config(Path("/tmp"), heldout_first_quarter="2022Q1", heldout_last_quarter="2022Q1")
+            make_config(Path("/tmp"), heldout_first_period="2022Q1", heldout_last_period="2022Q1")
 
     def test_quarter_bounds(self):
         self.assertEqual(quarter_bounds("2022Q1"), ("20220101", "20220331"))
         self.assertEqual(quarter_bounds("2021Q4"), ("20211001", "20211231"))
+
+    def test_fold_period_can_be_month_week_day_or_year(self):
+        month = build_fold_schedule("202201", "202201", TRADING_DAYS, period="month")[0]
+        self.assertEqual(month.fold_id, "fold_202201")
+        self.assertEqual((month.validation_start, month.validation_end), ("20211201", "20211231"))
+        self.assertEqual((month.test_start, month.test_end), ("20220101", "20220131"))
+
+        week = build_fold_schedule("20220104", "20220104", TRADING_DAYS, period="week")[0]
+        self.assertEqual(week.fold_id, "fold_20220104")
+        self.assertEqual((week.validation_start, week.validation_end), ("20211228", "20220103"))
+        self.assertEqual((week.test_start, week.test_end), ("20220104", "20220110"))
+
+        day = build_fold_schedule("20220104", "20220104", ["20220103", "20220104"], period="day")[0]
+        self.assertEqual((day.validation_start, day.validation_end), ("20220103", "20220103"))
+        self.assertEqual((day.test_start, day.test_end), ("20220104", "20220104"))
+
+        day_after_weekend = build_fold_schedule("20220110", "20220110", ["20220107", "20220110"], period="day")[0]
+        self.assertEqual((day_after_weekend.validation_start, day_after_weekend.validation_end), ("20220107", "20220107"))
+        self.assertEqual((day_after_weekend.test_start, day_after_weekend.test_end), ("20220110", "20220110"))
+
+        year = build_fold_schedule("2022", "2022", TRADING_DAYS, period="year")[0]
+        self.assertEqual(year.fold_id, "fold_2022")
+        self.assertEqual((year.validation_start, year.validation_end), ("20210101", "20211231"))
+        self.assertEqual((year.test_start, year.test_end), ("20220101", "20221231"))
+        self.assertEqual(period_bounds("20220104..20220110", period="day"), ("20220104", "20220110"))
 
 
 class LedgerTest(unittest.TestCase):
@@ -83,15 +132,133 @@ class LedgerTest(unittest.TestCase):
             self.assertEqual(len(ledger.read("fold")), 1)
 
 
+class ExperimentCliTest(unittest.TestCase):
+    def test_help_exposes_meta_learning_network_options(self):
+        script = Path(__file__).resolve().parents[2] / "scripts" / "experiments" / "run_experiment.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--meta-learning-network", result.stdout)
+        self.assertIn("--meta-learning-env", result.stdout)
+        self.assertIn("--meta-learning-host-proxy", result.stdout)
+
+    def test_non_quarter_period_requires_explicit_generic_periods(self):
+        script = Path(__file__).resolve().parents[2] / "scripts" / "experiments" / "run_experiment.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--experiment-id", "x", "--fold-period", "month"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires explicit generic period args", result.stderr)
+
+    def test_session_config_summary_records_context_token_thresholds(self):
+        config = AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc))
+        summary = _session_config_summary(config, compact_enabled=True)
+
+        self.assertEqual(summary["trim_token_threshold"], 60000)
+        self.assertEqual(summary["tool_result_clear_token_threshold"], 24000)
+        self.assertTrue(summary["clear_tool_results"])
+
+    def test_data_summary_metadata_error_redacts_host_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp) / "snapshot"
+            snapshot_dir.mkdir()
+            (snapshot_dir / "manifest.json").write_text('{"kind":"decision_input"}', encoding="utf-8")
+            (snapshot_dir / "broken.parquet").write_text("not parquet", encoding="utf-8")
+
+            summary = write_agent_data_summary(
+                Path(tmp) / "data_summary.json",
+                kind="fold",
+                fold_id="fold_x",
+                views={"snapshot": (snapshot_dir, "/mnt/snapshot")},
+            )
+
+            error = summary["views"]["snapshot"]["files"][0]["metadata_error"]
+            self.assertNotIn(str(snapshot_dir), error)
+            self.assertNotIn(str(Path(tmp)), error)
+
+
 class PipelineEndToEndTest(unittest.TestCase):
-    def test_single_epoch_runs_meta_learning_before_fold_and_heldout(self):
+    def test_development_history_uses_compact_fold_summaries(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             config = make_config(tmp)
-            # NL responses: fold valid + fold frozen test + heldout frozen eval.
-            proxy = ScriptedLLM([nl_score_response(), nl_score_response(), nl_score_response()])
+            manifest_path = tmp / "run_manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "backtest_summaries": [
+                            {
+                                "result_name": "valid_000",
+                                "mode": "valid",
+                                "status": "ok",
+                                "total_return": 0.1,
+                                "large_internal_field": "drop",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, fold, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+            )
+            pipeline.ledger.append(
+                {
+                    "record_type": "fold",
+                    "experiment_id": "exp_e2e",
+                    "epoch_id": "epoch_001",
+                    "fold_id": "fold_2022Q1",
+                    "run_id": "run_001",
+                    "fold_status": "frozen",
+                    "finish_reason": "fold_finished",
+                    "run_manifest_ref": str(manifest_path),
+                    "validation_result": {"total_return": 0.1},
+                    "test_result": {"total_return": 0.2},
+                    "verbose_agent_trace": ["not for meta history"],
+                }
+            )
+
+            history = pipeline._development_history("taste")
+
+            self.assertNotIn("folds", history)
+            self.assertEqual(len(history["fold_backtest_summaries"]), 1)
+            compact = history["fold_backtest_summaries"][0]
+            self.assertTrue(compact["fold_id"].startswith("fold_ref_"))
+            self.assertNotEqual(compact["fold_id"], "fold_2022Q1")
+            self.assertEqual(compact["backtest_summaries"][0]["total_return"], 0.1)
+            self.assertNotIn("test_result", compact)
+            self.assertNotIn("large_internal_field", compact["backtest_summaries"][0])
+
+    def test_single_epoch_runs_meta_learning_before_fold_and_heldout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            snapshot_config = SnapshotConfig(window_months=6, macro_window_months=12, intraday_trade_days=2)
+            config = make_config(tmp, window_months=6, snapshot_config=snapshot_config)
+            proxy = ScriptedLLM([])
+            captured_meta: dict[str, object] = {}
 
             def meta_learner(ctx: ToolContext) -> None:
+                captured_meta["snapshot_files"] = sorted(path.name for path in ctx.paths.snapshot.iterdir())
+                captured_meta["train_files"] = sorted(path.name for path in ctx.paths.train.iterdir())
+                captured_meta["valid_files"] = sorted(path.name for path in ctx.paths.valid.iterdir())
+                captured_meta["test_files"] = sorted(path.name for path in ctx.paths.test.iterdir())
+                captured_meta["snapshot_manifest"] = json.loads(
+                    (ctx.paths.snapshot / "manifest.json").read_text(encoding="utf-8")
+                )
+                captured_meta["valid_manifest"] = json.loads(
+                    (ctx.paths.valid / "manifest.json").read_text(encoding="utf-8")
+                )
+                captured_meta["data_summary"] = json.loads(ctx.paths.data_summary.read_text(encoding="utf-8"))
                 (ctx.paths.workspace / "taste.md").write_text("prefer robust price-volume tests", encoding="utf-8")
 
             pipeline = ExperimentPipeline(
@@ -115,18 +282,44 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual(record["steps"][0]["status"], "accepted")
             self.assertEqual(record["steps"][0]["modification_check_ref"], "embedded:modification_delta_summary")
             self.assertIsNotNone(record["steps"][0]["modification_delta_summary"])
-            self.assertIn("factor_changes", record["steps"][0]["modification_delta_summary"])
+            self.assertIn("code_diff_lines", record["steps"][0]["modification_delta_summary"])
             self.assertGreater(record["validation_result"]["total_return"], 0.0)
             self.assertGreater(record["test_result"]["total_return"], 0.0)
 
             frozen_dir = Path(record["frozen_strategy_artifact_path"])
             self.assertTrue((frozen_dir / "manifest.json").exists())
             manifest = json.loads((frozen_dir / "manifest.json").read_text(encoding="utf-8"))
-            self.assertTrue(manifest["frozen"])
-            self.assertEqual(manifest["created_at_step"], "step_001")
+            self.assertEqual(manifest["source_fold_id"], "fold_2022Q1")
+            self.assertEqual(manifest["source_step_id"], "step_001")
+            self.assertNotIn("frozen", manifest)
+            self.assertNotIn("validation_result_ref", manifest)
+            self.assertNotIn("modification_check_ref", manifest)
+            self.assertNotIn("run_manifest_ref", manifest)
 
             run_dir = config.experiment_dir / "artifacts" / record["run_id"]
             self.assertTrue((run_dir / "run_manifest.json").exists())
+            run_manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_manifest["runtime_env_ref"], "/mnt/artifacts/runtime_env.json")
+            self.assertEqual(run_manifest["data_summary_ref"], "/mnt/artifacts/data_summary.json")
+            self.assertEqual(run_manifest["fold_period"], "quarter")
+            self.assertEqual(run_manifest["fold"]["input_window"], "20210401..20210930")
+            self.assertEqual(run_manifest["snapshot_config"]["decision_windows"]["daily_months"], 6)
+            self.assertEqual(run_manifest["snapshot_config"]["decision_windows"]["macro_months"], 12)
+            self.assertEqual(run_manifest["snapshot_config"]["decision_windows"]["intraday_trade_days"], 2)
+            self.assertEqual(run_manifest["snapshots"]["train_snapshot"]["alias_of"], "valid_decision_input")
+            self.assertEqual(
+                run_manifest["snapshots"]["train_snapshot"]["snapshot_hash"],
+                run_manifest["snapshots"]["valid_decision_input"]["snapshot_hash"],
+            )
+            self.assertNotIn("test_decision_time", run_manifest)
+            self.assertNotIn("test_period", run_manifest["fold"])
+            self.assertNotIn("test_decision_input", run_manifest["snapshots"])
+            self.assertTrue((run_dir / "host_run_manifest.json").exists())
+            host_run_manifest = json.loads((run_dir / "host_run_manifest.json").read_text(encoding="utf-8"))
+            self.assertIn("test_period", host_run_manifest["fold"])
+            self.assertIn("test_replay", host_run_manifest["snapshots"])
+            self.assertTrue((run_dir / "runtime_env.json").exists())
+            self.assertTrue((run_dir / "data_summary.json").exists())
             self.assertTrue((run_dir / "agent_trace.jsonl").exists())
             self.assertTrue((run_dir / "results" / "test_000" / "detailed_return.json").exists())
 
@@ -135,24 +328,79 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual(meta[0]["epoch_id"], "epoch_001")
             self.assertEqual(meta[0]["status"], "taste_only")
             self.assertGreater(meta[0]["taste_chars"], 0)
+            meta_run_dir = config.experiment_dir / "artifacts" / meta[0]["run_id"]
+            meta_manifest = json.loads((meta_run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta_manifest["runtime_env_ref"], "/mnt/artifacts/runtime_env.json")
+            self.assertEqual(meta_manifest["data_summary_ref"], "/mnt/artifacts/data_summary.json")
+            self.assertTrue(meta_manifest["meta_learning_visible_fold"]["fold_id"].startswith("fold_ref_"))
+            self.assertNotEqual(meta_manifest["meta_learning_visible_fold"]["fold_id"], "fold_2022Q1")
+            self.assertTrue(meta_manifest["valid_decision_time"].startswith("2021-10-08T09:25"))
+            self.assertEqual(meta_manifest["snapshots"]["train_snapshot"]["alias_of"], "valid_decision_input")
+            self.assertEqual(
+                meta_manifest["snapshots"]["train_snapshot"]["snapshot_hash"],
+                meta_manifest["snapshots"]["valid_decision_input"]["snapshot_hash"],
+            )
+            self.assertIn("valid_replay", meta_manifest["snapshots"])
+            self.assertEqual(meta_manifest["experiment_parameters"]["fold_period"], "quarter")
+            self.assertEqual(meta_manifest["experiment_parameters"]["snapshot_config"]["decision_windows"]["daily_months"], 6)
+            self.assertEqual(meta_manifest["experiment_parameters"]["snapshot_config"]["decision_windows"]["intraday_trade_days"], 2)
+            self.assertEqual(meta_manifest["experiment_parameters"]["max_fold_minutes"], 60)
+            self.assertTrue((meta_run_dir / "runtime_env.json").exists())
+            self.assertTrue((meta_run_dir / "data_summary.json").exists())
+            self.assertIn("daily.parquet", captured_meta["snapshot_files"])
+            self.assertIn("manifest.json", captured_meta["train_files"])
+            self.assertIn("daily.parquet", captured_meta["valid_files"])
+            self.assertIn("manifest.json", captured_meta["valid_files"])
+            self.assertEqual(captured_meta["test_files"], [])
+            self.assertEqual(captured_meta["snapshot_manifest"]["kind"], "decision_input")
+            self.assertEqual(captured_meta["snapshot_manifest"]["decision_date"], "20211008")
+            self.assertEqual(captured_meta["valid_manifest"]["kind"], "replay_slot")
+            self.assertEqual(captured_meta["valid_manifest"]["label"], "valid")
+            self.assertEqual(captured_meta["valid_manifest"]["period_start"], "20211001")
+            self.assertEqual(captured_meta["valid_manifest"]["period_end"], "20211231")
+            data_summary = captured_meta["data_summary"]
+            self.assertEqual(data_summary["kind"], "meta_learning")
+            self.assertNotIn("schema_version", data_summary)
+            self.assertIn("large_table_guidance", data_summary)
+            self.assertEqual(sorted(data_summary["views"]), ["snapshot", "train", "valid"])
+            self.assertNotIn("test", data_summary["views"])
+            snapshot_view = data_summary["views"]["snapshot"]
+            self.assertNotIn("build_profile", snapshot_view)
+            daily_summary = next(item for item in snapshot_view["files"] if item["path"] == "daily.parquet")
+            self.assertIn("key_columns", daily_summary)
+            self.assertNotIn("columns", daily_summary)
             heldout = pipeline.ledger.read("heldout")[0]
             self.assertEqual(heldout["strategy_artifact_id"], "strategy_epoch_001_fold_2022Q1")
             self.assertGreater(heldout["test_result"]["total_return"], 0.0)
+
+    def test_pipeline_freezes_model_artifacts_with_strategy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, fold, manifest: ModelArtifactFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+            )
+
+            result = pipeline.run(TRADING_DAYS)
+
+            self.assertEqual(result["final_strategy_artifact"], "strategy_epoch_001_fold_2022Q1")
+            record = pipeline.ledger.read("fold")[0]
+            model_path = Path(record["frozen_model_artifact_path"])
+            self.assertTrue((model_path / "params.json").exists())
+            self.assertTrue(record["frozen_model_artifact_hash"].startswith("sha256:"))
+            manifest = json.loads((Path(record["frozen_strategy_artifact_path"]) / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["model_artifact_hash"], record["frozen_model_artifact_hash"])
+            heldout = pipeline.ledger.read("heldout")[0]
+            self.assertEqual(heldout["model_artifact_hash"], record["frozen_model_artifact_hash"])
 
     def test_multi_epoch_runs_meta_learning_before_each_epoch(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             config = make_config(tmp, epochs=2)
-            # Epoch 1 fold valid/test, Epoch 2 fold valid/test, then heldout.
-            proxy = ScriptedLLM(
-                [
-                    nl_score_response(),
-                    nl_score_response(),
-                    nl_score_response(),
-                    nl_score_response(),
-                    nl_score_response(),
-                ]
-            )
+            proxy = ScriptedLLM([])
             meta_epochs: list[str] = []
 
             def meta_learner(ctx: ToolContext) -> None:
@@ -160,13 +408,10 @@ class PipelineEndToEndTest(unittest.TestCase):
                 (ctx.paths.workspace / "taste.md").write_text(
                     f"taste for {ctx.manifest.require('epoch_id')}", encoding="utf-8"
                 )
-                prior_path = ctx.paths.agent_output / "nl_prior" / "prior.json"
-                payload = json.loads(prior_path.read_text(encoding="utf-8"))
-                if payload["rules"]:
-                    payload["rules"][0]["text"] = "negative regulatory evidence lowers the score"
-                prior_path.write_text(json.dumps(payload), encoding="utf-8")
+                prompt_path = ctx.paths.agent_output / "nl_prompt.md"
+                prompt_path.write_text("prefer robust negative evidence checks\n", encoding="utf-8")
                 with self.assertRaisesRegex(ToolError, "not allowed"):
-                    BacktestTool(ctx).run(mode="valid", nl_mode="off")
+                    BacktestTool(ctx).run(mode="valid")
 
             pipeline = ExperimentPipeline(
                 config,
@@ -188,14 +433,65 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual(len(meta_records), 2)
             self.assertEqual([r["epoch_id"] for r in meta_records], ["epoch_001", "epoch_002"])
             self.assertEqual(meta_records[1]["status"], "meta_regularized")
+            for record in meta_records:
+                trace_ref = Path(str(record["agent_trace_ref"]))
+                self.assertTrue(trace_ref.exists())
+                self.assertFalse(
+                    (config.experiment_dir / "meta_learning" / str(record["epoch_id"]) / "agent_trace.jsonl").exists()
+                )
             heldout = pipeline.ledger.read("heldout")[0]
             self.assertEqual(heldout["strategy_artifact_id"], "strategy_epoch_002_fold_2022Q1")
+
+    def test_meta_learning_injects_full_records_and_prior_epoch_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp, epochs=2)
+            captured: dict[str, dict[str, str]] = {}
+
+            def meta_learner(ctx: ToolContext) -> None:
+                eid = str(ctx.manifest.require("epoch_id"))
+                captured[eid] = {
+                    "ledger_full": (ctx.paths.workspace / "experiment_ledger_full.jsonl").read_text(encoding="utf-8"),
+                    "memory": (ctx.paths.workspace / "meta_learning_memory.jsonl").read_text(encoding="utf-8"),
+                }
+                ctx.trace.emit("note", {"marker": f"meta-marker-{eid}"})
+                (ctx.paths.workspace / "taste.md").write_text(f"taste {eid}", encoding="utf-8")
+
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, fold, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+                meta_learner=meta_learner,
+            )
+            pipeline.run(TRADING_DAYS)
+
+            # Epoch 1 runs before any fold/meta record exists.
+            self.assertEqual(captured["epoch_001"]["ledger_full"], "")
+            self.assertEqual(captured["epoch_001"]["memory"], "")
+            # Item 2: epoch 2 sees the full raw records of epoch 1 (no held-out).
+            epoch2_ledger = captured["epoch_002"]["ledger_full"]
+            self.assertIn("fold_ref_", epoch2_ledger)
+            self.assertNotIn("fold_2022Q1", epoch2_ledger)
+            self.assertIn("meta_learning", epoch2_ledger)
+            self.assertNotIn("heldout", epoch2_ledger)
+            self.assertNotIn("test_result", epoch2_ledger)
+            self.assertNotIn("test_period", epoch2_ledger)
+            self.assertNotIn("test_decision_time", epoch2_ledger)
+            # Item 3: epoch 2's memory concatenates epoch 1's meta-learning log.
+            self.assertIn("meta-marker-epoch_001", captured["epoch_002"]["memory"])
+            self.assertNotIn("meta-marker-epoch_002", captured["epoch_002"]["memory"])
+            for record in pipeline.ledger.read("meta_learning"):
+                self.assertTrue(Path(str(record["agent_trace_ref"])).exists())
+                self.assertFalse(
+                    (config.experiment_dir / "meta_learning" / str(record["epoch_id"]) / "agent_trace.jsonl").exists()
+                )
 
     def test_failed_acceptance_falls_back_to_parent(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             config = make_config(tmp)
-            proxy = ScriptedLLM([nl_score_response(), nl_score_response(), nl_score_response()])
+            proxy = ScriptedLLM([])
             pipeline = ExperimentPipeline(
                 config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=proxy
             )
@@ -208,7 +504,7 @@ class PipelineEndToEndTest(unittest.TestCase):
                     return {"finish_status": "deadline_timeout"}
 
             pipeline_idle = ExperimentPipeline(
-                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: IdleAgent(), proxy=ScriptedLLM([nl_score_response()])
+                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: IdleAgent(), proxy=ScriptedLLM([])
             )
             second = pipeline_idle.run_fold(folds[0], epoch_id="epoch_001b", parent=outcome.frozen)
             self.assertEqual(second.fold_status, "no_update_timeout")
@@ -229,15 +525,7 @@ class PipelineEndToEndTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             config = make_config(tmp, epochs=2)
-            proxy = ScriptedLLM(
-                [
-                    nl_score_response(),
-                    nl_score_response(),
-                    nl_score_response(),
-                    nl_score_response(),
-                    nl_score_response(),
-                ]
-            )
+            proxy = ScriptedLLM([])
             pipeline = ExperimentPipeline(
                 config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=proxy
             )
@@ -252,11 +540,82 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertTrue(nodes[0]["node_id"].startswith("epoch_001__fold_2022Q1__"))
             self.assertTrue(nodes[1]["node_id"].startswith("epoch_002__fold_2022Q1__"))
 
+    def test_meta_learning_can_read_existing_step_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+            pipeline = ExperimentPipeline(
+                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=ScriptedLLM([])
+            )
+            folds = build_fold_schedule("2022Q1", "2022Q1", TRADING_DAYS)
+            outcome = pipeline.run_fold(folds[0], epoch_id="epoch_001", parent=None)
+            captured: dict[str, object] = {}
+
+            def inspect_meta_learner(ctx: ToolContext) -> None:
+                tree_json = ctx.paths.steps / "tree.json"
+                tree_txt = ctx.paths.steps / "tree.txt"
+                captured["tree"] = json.loads(tree_json.read_text(encoding="utf-8"))
+                captured["rendered"] = tree_txt.read_text(encoding="utf-8")
+                (ctx.paths.workspace / "taste.md").write_text("read step tree", encoding="utf-8")
+
+            pipeline.meta_learner = inspect_meta_learner
+            frozen, taste = pipeline.run_meta_learning(epoch_id="epoch_002", parent=outcome.frozen)
+
+            self.assertEqual(frozen.artifact_id, outcome.frozen.artifact_id)
+            self.assertIn("read step tree", taste)
+            tree = captured["tree"]
+            self.assertGreaterEqual(len(tree["nodes"]), 1)
+            self.assertEqual(tree["current_node_id"], tree["nodes"][-1]["node_id"])
+            self.assertIn("epoch_001__fold_2022Q1__", captured["rendered"])
+
+    def test_meta_learning_directive_is_recorded_in_manifest_and_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            directive = "Explore liquidity shock reversal under minute replay."
+            config = make_config(tmp, meta_learning_directive=directive)
+            captured: dict[str, object] = {}
+
+            def inspect_meta_learner(ctx: ToolContext) -> None:
+                captured["manifest_directive"] = ctx.manifest.get("meta_learning_directive")
+                (ctx.paths.workspace / "taste.md").write_text("directive checked", encoding="utf-8")
+
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, fold, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+                meta_learner=inspect_meta_learner,
+            )
+
+            frozen, taste = pipeline.run_meta_learning(epoch_id="epoch_001", parent=None)
+
+            self.assertIsNone(frozen)
+            self.assertEqual(taste, "directive checked")
+            self.assertEqual(captured["manifest_directive"], directive)
+            meta = pipeline.ledger.read("meta_learning")[0]
+            self.assertEqual(meta["meta_learning_directive"], directive)
+
+    def test_meta_learning_rejects_unfinished_session_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+            pipeline = ExperimentPipeline(
+                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=ScriptedLLM([])
+            )
+
+            def unfinished_meta_learner(ctx: ToolContext) -> dict[str, object]:
+                (ctx.paths.workspace / "taste.md").write_text("should not be accepted", encoding="utf-8")
+                return {"finish_status": "deadline_timeout"}
+
+            pipeline.meta_learner = unfinished_meta_learner
+            with self.assertRaisesRegex(RuntimeError, "did not finish with done"):
+                pipeline.run_meta_learning(epoch_id="epoch_001", parent=None)
+
     def test_meta_learning_violating_constraints_keeps_parent(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             config = make_config(tmp)
-            proxy = ScriptedLLM([nl_score_response(), nl_score_response()])
+            proxy = ScriptedLLM([])
             pipeline = ExperimentPipeline(
                 config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=proxy
             )
@@ -264,12 +623,9 @@ class PipelineEndToEndTest(unittest.TestCase):
             outcome = pipeline.run_fold(folds[0], epoch_id="epoch_001", parent=None)
 
             def bad_meta_learner(ctx: ToolContext) -> None:
-                (ctx.paths.workspace / "taste.md").write_text("too many prior rules", encoding="utf-8")
-                prior_path = ctx.paths.agent_output / "nl_prior" / "prior.json"
-                rules = [
-                    {"id": f"r{i}", "text": "x", "evidence": "e", "effect": "f"} for i in range(30)
-                ]
-                prior_path.write_text(json.dumps({"rules": rules}), encoding="utf-8")
+                (ctx.paths.workspace / "taste.md").write_text("too many helper files", encoding="utf-8")
+                for i in range(30):
+                    (ctx.paths.agent_output / f"helper_{i:02d}.py").write_text("x = 1\n", encoding="utf-8")
 
             pipeline.meta_learner = bad_meta_learner
             frozen, taste = pipeline.run_meta_learning(epoch_id="epoch_002", parent=outcome.frozen)
@@ -283,7 +639,7 @@ class PipelineEndToEndTest(unittest.TestCase):
             tmp = Path(tmp)
             config = make_config(tmp)
             pipeline = ExperimentPipeline(
-                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=ScriptedLLM([nl_score_response(), nl_score_response()])
+                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=ScriptedLLM([])
             )
             fold = build_fold_schedule("2022Q1", "2022Q1", TRADING_DAYS)[0]
             outcome = pipeline.run_fold(fold, epoch_id="epoch_001", parent=None)
@@ -299,6 +655,88 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual(meta["status"], "taste_only_kept_parent")
             artifacts = list((config.experiment_dir / "strategy_artifacts" / "epoch_002").glob("*"))
             self.assertEqual(artifacts, [])
+
+    def test_meta_learning_environment_request_builds_derived_sandbox_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp, use_docker=True)
+            pipeline = ExperimentPipeline(
+                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=ScriptedLLM([])
+            )
+            workspace = tmp / "workspace"
+            workspace.mkdir()
+            request_path = workspace / "sandbox_environment.json"
+            request_path.write_text(
+                json.dumps(
+                    {
+                        "python_packages": ["lightgbm==4.5.0"],
+                        "apt_packages": ["libgomp1"],
+                        "npm_packages": ["@scope/tool@1.2.3"],
+                        "reason": "meta-learning selected a stable tree model dependency",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest = RunManifest.create(
+                tmp / "artifacts" / "run_manifest.json",
+                {"kind": "meta_learning", "experiment_id": "exp_e2e"},
+            )
+
+            completed = subprocess.CompletedProcess(
+                args=["docker", "build"],
+                returncode=0,
+                stdout="build ok",
+                stderr="",
+            )
+            with patch("hl_trader.pipelines.experiment.subprocess.run", return_value=completed) as mocked_run:
+                result = pipeline._maybe_rebuild_sandbox_image(
+                    request_path,
+                    epoch_id="epoch_001",
+                    run_id="run_meta",
+                    manifest=manifest,
+                )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertTrue(str(pipeline._active_sandbox_spec.image).startswith("macroquant-sandbox:exp_e2e-epoch_001-"))
+            dockerfile = Path(str(result["dockerfile_ref"]))
+            text = dockerfile.read_text(encoding="utf-8")
+            self.assertIn("FROM macroquant-sandbox:latest", text)
+            self.assertIn("libgomp1", text)
+            self.assertIn("lightgbm==4.5.0", text)
+            self.assertIn("@scope/tool@1.2.3", text)
+            self.assertEqual(mocked_run.call_args.args[0][0:2], ["docker", "build"])
+            stored = json.loads((tmp / "artifacts" / "run_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["sandbox_image_update"]["status"], "ok")
+
+    def test_meta_learning_environment_request_rejects_invalid_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp, use_docker=True)
+            pipeline = ExperimentPipeline(
+                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=ScriptedLLM([])
+            )
+            workspace = tmp / "workspace"
+            workspace.mkdir()
+            request_path = workspace / "sandbox_environment.json"
+            request_path.write_text(
+                json.dumps({"python_packages": ["--extra-index-url"], "shell": "pip install x"}),
+                encoding="utf-8",
+            )
+            manifest = RunManifest.create(
+                tmp / "artifacts" / "run_manifest.json",
+                {"kind": "meta_learning", "experiment_id": "exp_e2e"},
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "sandbox environment request rejected"):
+                pipeline._maybe_rebuild_sandbox_image(
+                    request_path,
+                    epoch_id="epoch_001",
+                    run_id="run_meta",
+                    manifest=manifest,
+                )
+
+            stored = json.loads((tmp / "artifacts" / "run_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["sandbox_image_update"]["status"], "rejected")
 
 
 def _docker_with_image() -> bool:
@@ -319,7 +757,7 @@ class DockerizedFoldE2ETest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             config = make_config(tmp, use_docker=True)
-            proxy = ScriptedLLM([nl_score_response(), nl_score_response()])
+            proxy = ScriptedLLM([])
             pipeline = ExperimentPipeline(
                 config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=proxy
             )

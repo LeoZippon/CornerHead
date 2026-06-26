@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""PIT feature-layer entrypoint (docs/environment_design.md 2.5).
+"""PIT event-layer entrypoint (docs/environment_design.md 3).
 
-Subcommands are the three used by the nightly cn_nightly_feature_build job:
-build-fundamental-events, audit-fundamental-events, and build-features.
+Subcommands are used by the nightly PIT event job:
+build-fundamental-events and audit-fundamental-events.
 Experiment orchestration lives in scripts/experiments/run_experiment.py.
 """
 from __future__ import annotations
@@ -22,8 +22,6 @@ add_repo_src(__file__)
 
 from hl_trader.environment.features import (
     FUNDAMENTAL_EVENT_DATASETS,
-    DailyPITFeatureBuilder,
-    FeatureBuildConfig,
     FundamentalEventsBuilder,
     FundamentalEventsConfig,
     audit_fundamental_events,
@@ -44,25 +42,12 @@ def main() -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="PIT feature-layer commands.")
+    parser = argparse.ArgumentParser(description="PIT event-layer commands.")
     sub = parser.add_subparsers(dest="command", required=True)
-
-    build = sub.add_parser("build-features", help="build next-day tradable daily PIT features")
-    build.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
-    build.add_argument("--output-root", type=Path, default=Path("data/features"))
-    build.add_argument("--dataset", default="daily_alpha")
-    build.add_argument("--start-date", required=True, help="YYYYMMDD or ISO date.")
-    build.add_argument("--end-date", required=True, help="YYYYMMDD or ISO date.")
-    build.add_argument("--lookback-days", type=int, default=80)
-    build.add_argument("--no-limit-list", action="store_true", help="Do not join optional limit_list_d events.")
-    build.add_argument(
-        "--fundamental-events-dir", type=Path, help="Optional PIT fundamental event directory to join into daily_alpha."
-    )
-    build.set_defaults(handler=run_build_features)
 
     fundamental = sub.add_parser("build-fundamental-events", help="build PIT-ready fundamental event partitions")
     fundamental.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
-    fundamental.add_argument("--output-root", type=Path, default=Path("data/features/fundamental_events"))
+    fundamental.add_argument("--output-root", type=Path, default=Path("data/pit/fundamental_events"))
     fundamental.add_argument("--start-date", required=True, help="YYYYMMDD or ISO date.")
     fundamental.add_argument("--end-date", required=True, help="YYYYMMDD or ISO date.")
     fundamental.add_argument(
@@ -71,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     fundamental.set_defaults(handler=run_build_fundamental_events)
 
     fundamental_audit = sub.add_parser("audit-fundamental-events", help="audit PIT-ready fundamental event partitions")
-    fundamental_audit.add_argument("--events-root", type=Path, default=Path("data/features/fundamental_events"))
+    fundamental_audit.add_argument("--events-root", type=Path, default=Path("data/pit/fundamental_events"))
     fundamental_audit.add_argument("--start-date", required=True, help="YYYYMMDD or ISO date.")
     fundamental_audit.add_argument("--end-date", required=True, help="YYYYMMDD or ISO date.")
     fundamental_audit.add_argument(
@@ -83,28 +68,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fundamental_audit.set_defaults(handler=run_audit_fundamental_events)
     return parser
-
-
-def run_build_features(args: argparse.Namespace) -> dict[str, object]:
-    builder = DailyPITFeatureBuilder(args.raw_dir)
-    features = builder.build(
-        FeatureBuildConfig(
-            start_date=args.start_date,
-            end_date=args.end_date,
-            lookback_days=args.lookback_days,
-            output_dataset=args.dataset,
-            include_limit_list=not args.no_limit_list,
-            fundamental_events_dir=args.fundamental_events_dir,
-        )
-    )
-    written = builder.write_partitioned(features, args.output_root, dataset=args.dataset)
-    return {
-        "rows": int(len(features)),
-        "partitions": len(written),
-        "output_dir": str(args.output_root / args.dataset),
-        "first_partition": str(written[0]) if written else None,
-        "last_partition": str(written[-1]) if written else None,
-    }
 
 
 def run_build_fundamental_events(args: argparse.Namespace) -> dict[str, object]:

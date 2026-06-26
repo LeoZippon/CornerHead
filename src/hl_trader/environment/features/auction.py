@@ -15,7 +15,7 @@ class AuctionCorrectionConfig:
     """PIT-layer correction for TuShare minute 09:30 auction bars.
 
     Raw ``stk_mins`` files are immutable. This transform creates corrected
-    PIT columns for historical auction features that need to align with the
+    PIT columns for historical auction columns that need to align with the
     live ``stk_auction`` source.
     """
 

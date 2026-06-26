@@ -43,7 +43,7 @@ def download_reference(args: argparse.Namespace) -> int:
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     refresh_datasets = set(getattr(args, "refresh_reference_datasets", None) or [])
-    revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
+    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     trade_cal_end_date = getattr(args, "trade_cal_end_date", None) or args.end_date
 
     def should_force(dataset: str) -> bool:
@@ -260,9 +260,7 @@ def download_daily(args: argparse.Namespace) -> int:
     ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date)
     trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
     refresh_datasets = set(getattr(args, "refresh_daily_datasets", None) or [])
-    revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
-    if not revision_ledger.is_absolute():
-        revision_ledger = repo_root / revision_ledger
+    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     required_zero_skipped: list[str] = []
     for dataset in selected_daily_datasets(args):
         spec = DAILY_SPECS[dataset]
@@ -419,7 +417,7 @@ def download_macro(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
+    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     retained_start_date = getattr(args, "macro_start_date", None) or args.start_date
     for dataset in selected_macro_datasets(args):
@@ -712,7 +710,7 @@ def download_event_flow(args: argparse.Namespace) -> int:
     raw_dir = repo_root / args.raw_dir
     datasets = selected_event_flow_download_datasets(args)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
+    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     trade_dates: list[str] = []
     trade_end_date = args.end_date
@@ -909,7 +907,7 @@ def download_board_trading(args: argparse.Namespace) -> int:
     raw_dir = repo_root / args.raw_dir
     datasets = selected_board_trading_datasets(args)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
+    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     trade_dates: list[str] = []
     if any(BOARD_TRADING_SPECS[name].strategy != "static_once" for name in datasets):
@@ -1514,6 +1512,7 @@ def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dic
 def download_share_float_complete(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
+    args.revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     report: dict[str, Any] = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1599,12 +1598,13 @@ def download_fundamental(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
+    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     datasets = selected_fundamental_datasets(args)
     stock_codes: list[str] = []
     if any(FUNDAMENTAL_SPECS[name].strategy == "ts_code" for name in datasets):
-        stock_codes = load_stock_codes(raw_dir)
+        explicit_codes = [str(code).strip() for code in (getattr(args, "codes", None) or []) if str(code).strip()]
+        stock_codes = sorted(set(explicit_codes)) if explicit_codes else load_stock_codes(raw_dir)
         if args.max_codes:
             stock_codes = stock_codes[: args.max_codes]
     refresh_periods = set(recent_quarter_periods(args.end_date, getattr(args, "fundamental_refresh_period_count", 0)))
@@ -2098,6 +2098,7 @@ def compact_intraday_by_date(args: argparse.Namespace) -> int:
 def update_intraday_by_date(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = (repo_root / args.raw_dir).resolve()
+    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date)
     trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
@@ -2197,7 +2198,7 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
             trade_date=trade_date,
             source="daily_incremental_update",
             params=params,
-            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
         )
         written += 1
@@ -2210,7 +2211,7 @@ def download_text(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    revision_ledger = Path(getattr(args, "revision_ledger", REVISION_EVENTS_PATH))
+    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     windows = month_windows(args.start_date, args.end_date)
     days = date_range_days(args.start_date, args.end_date)
@@ -2551,6 +2552,9 @@ def update_share_float_complete_data(
     start_date: str,
     force: bool,
 ) -> None:
+    repo_root = Path.cwd().resolve()
+    raw_dir = repo_root / args.raw_dir
+    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     run_update_step(
         "share_float_complete",
         download_share_float_complete,
@@ -2580,7 +2584,7 @@ def update_share_float_complete_data(
             write_union=True,
             union_output=args.union_output,
             output=args.share_float_process_output,
-            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
@@ -2589,6 +2593,9 @@ def update_share_float_complete_data(
     )
 
 def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]]) -> None:
+    repo_root = Path.cwd().resolve()
+    raw_dir = repo_root / args.raw_dir
+    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     start_date = args.start_date
     if parse_yyyymmdd(start_date) > parse_yyyymmdd(args.end_date):
         raise RuntimeError(f"start_date {start_date} is after end_date {args.end_date}")
@@ -2613,7 +2620,7 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             force=args.force,
             page_limit=args.page_limit,
             refresh_reference_datasets=getattr(args, "refresh_reference_datasets", []),
-            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=getattr(args, "reference_min_interval_seconds", None) or args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
@@ -2631,7 +2638,7 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             datasets=args.daily_datasets,
             include_limit_list=args.include_limit_list,
             refresh_daily_datasets=getattr(args, "refresh_daily_datasets", []),
-            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             force=args.force,
             page_limit=args.page_limit,
@@ -2652,7 +2659,7 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             datasets=args.macro_datasets,
             force=force_open_window,
             page_limit=args.page_limit,
-            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
@@ -2671,7 +2678,7 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             datasets=args.global_datasets,
             force=force_open_window,
             page_limit=args.page_limit,
-            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
@@ -2689,7 +2696,7 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             datasets=args.event_datasets,
             force=force_open_window,
             page_limit=args.page_limit,
-            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
@@ -2708,7 +2715,7 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
                 datasets=args.board_datasets,
                 force=force_open_window,
                 page_limit=args.page_limit,
-                revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+                revision_ledger=revision_ledger,
                 allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
                 min_interval_seconds=args.min_interval_seconds,
                 timeout_seconds=args.timeout_seconds,
@@ -2746,7 +2753,7 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
                 min_interval_seconds=args.min_interval_seconds,
                 timeout_seconds=args.timeout_seconds,
                 force=intraday_force,
-                revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+                revision_ledger=revision_ledger,
                 allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             ),
             summary,
@@ -2764,7 +2771,7 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             datasets=args.text_datasets,
             force=force_open_window,
             page_limit=args.page_limit,
-            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
@@ -2787,7 +2794,7 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             fundamental_dividend_probe_days=getattr(args, "fundamental_dividend_probe_days", 90),
             force=args.force,
             page_limit=args.page_limit,
-            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
@@ -2846,7 +2853,7 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         "--trade-cal-lookahead-days",
         type=int,
         default=7,
-        help="Extend reference trade_cal this many calendar days beyond --end-date so pre-open jobs and next-session feature mapping have calendar coverage.",
+        help="Extend reference trade_cal this many calendar days beyond --end-date so pre-open jobs and next-session PIT mapping have calendar coverage.",
     )
     parser.add_argument("--daily-datasets", nargs="+", choices=core.DAILY_REQUIRED_DATASETS + core.DAILY_OPTIONAL_DATASETS)
     parser.add_argument("--include-limit-list", action=argparse.BooleanOptionalAction, default=True)

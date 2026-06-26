@@ -9571,3 +9571,5404 @@ Validation:
 
 Current conclusion:
 - The branch is ready for PR from a verification standpoint. The PR includes the broader single-Agent experiment runtime, Docker/Sandbox contracts, TuShare script organization, reporting visualization, short-side order rollover, Semantic Scholar meta-learning search provider, and synchronized living documentation/logbook updates.
+
+## 2026-06-18 audit fixes for Environment/Pipeline contracts
+
+Task: fix the code/documentation mismatches found in the project audit and keep the living docs concise.
+
+Resource checks:
+- Confirmed the real repository path with `pwd -P`: `/Data/lzp/MacroQuant`.
+- Before validation: system RAM stayed above 424 GiB available; GPUs were occupied by unrelated jobs, but this work used CPU-only tests.
+- After validation: system RAM stayed above 424 GiB available; no MacroQuant long-running job was left active.
+
+Implementation:
+- Broker/profile:
+  - `BrokerProfile` records are restored from manifest using the dataclass field list, so cost/slippage/stamp-duty/maintenance fields no longer get silently dropped.
+  - Exit-side constraints now keep positions open and record broker events when long exits are suspended/limit-down blocked or short covers are suspended/limit-up blocked.
+  - Short realized PnL now includes the opening short sale fee and stamp duty; replay avoids charging borrow fees twice on an exit day when exits are blocked.
+- NL scoring:
+  - `neutral_with_audit` now gives timeout and provider failures an auditable neutral score.
+  - `nl_mode=on` now fails if any candidate lacks an NL score, preventing silent fallback to factor-only scoring.
+  - Unexpected per-task exceptions are normalized into terminal task states.
+- PIT/features:
+  - Decision snapshot daily joins now filter `daily`, `daily_basic`, `adj_factor`, `stk_limit`, and `suspend_d` by their own dataset contracts before joining.
+  - Added shared daily unit normalization for snapshots and `daily_alpha`; `daily_alpha` now emits decimal percentages, shares, and CNY values.
+- Pipeline/agent:
+  - Meta-learning `development_history.json` no longer includes full fold records, only compact fold summaries plus meta-learning memory.
+  - When a web-search provider is configured, meta-learning `done` requires all three categories: `finance`, `cross_domain`, and `philosophy`; a rejected `done` no longer terminates the session.
+  - `pyproject.toml` now lists direct runtime imports: `numpy`, `matplotlib`, and `requests`.
+- Documentation:
+  - Updated `docs/environment_design.md` for per-dataset PIT daily joins, standard units, NL timeout policy, and exit-side liquidity constraints.
+  - Updated `docs/pipeline_design.md` for compact meta-learning history and enforced search categories.
+  - Updated meta-learning prompt text to match the provider-gated search requirement.
+
+Validation:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine tests.unit.test_nl_scoring tests.unit.test_snapshot_builder tests.unit.test_features tests.unit.test_pipeline_e2e -v`
+  - Result: 70 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e -v`
+  - Result: 32 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py' -v`
+  - Result: 196 tests OK.
+- `git diff --check`
+  - Result: passed.
+
+Current conclusion:
+- The audited high-risk contract mismatches are fixed and covered by focused regression tests.
+- An unrelated untracked `claude-code-main.zip` is present in the working tree and was left untouched.
+
+## 2026-06-18 Agent tool protocol and structured search
+
+Task: implement the high- and medium-priority Agent improvements identified by the Claude Code comparison: typed action metadata, structured grep/glob, stronger shell guard, result budgeting, deterministic context summary, and auditable cancellation.
+
+Resource checks:
+- Confirmed the real repository path with `pwd -P`: `/Data/lzp/MacroQuant`.
+- Before validation: `free -h` reported 503 GiB total RAM and about 425 GiB available; `nvidia-smi` showed unrelated Python jobs on GPUs 0 and 7, while this work used CPU-only tests.
+- After validation: `free -h` reported about 423 GiB available; the same unrelated GPU jobs remained, and no MacroQuant long-running job was left active.
+
+Implementation:
+- Added lightweight Runner-side action schema metadata in `src/hl_trader/environment/tools/base.py`: each action can declare fields, allowed modes, read-only/destructive/concurrency-safe flags, and result budget.
+- Added `src/hl_trader/environment/tools/search.py` with structured read-only `grep` and `glob` over allowlisted sandbox roots. `grep` supports `content`, `files`, and `count` modes plus `glob`, pagination, context lines, case-insensitive search, multiline search, VCS-dir exclusion, and result-budget storage.
+- Updated `AgentSessionRunner` to validate action payloads before dispatch, expose `grep`/`glob`, record tool schema in observations/traces, return `cancelled` observations after the Fold deadline, and inject deterministic `context_summary` observations when message history is trimmed.
+- Hardened `SandboxShellTool` path checks for explicit test/runtime/Docker-socket/host-outside-sandbox references and write-like commands against read-only roots. Shell stdout/stderr previews remain capped at 20k chars; oversized bounded capture is stored under `logs/tool_results/`.
+- Added tool metadata to modification check, backtest, finish-fold, and web-search trace payloads.
+- Updated `src/hl_trader/agent/prompts.py`, `docs/agent_design.md`, `docs/environment_design.md`, and `docs/pipeline_design.md` to document the current tool contract without adding historical migration notes.
+
+Validation:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow -v`
+  - Result: 18 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation -v`
+  - Result: 19 tests OK, including Docker E2E on this machine.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/tools/base.py src/hl_trader/environment/tools/shell.py src/hl_trader/environment/tools/search.py src/hl_trader/agent/runner.py src/hl_trader/agent/prompts.py tests/unit/test_tools_flow.py`
+  - Result: passed.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py' -v`
+  - Result: 200 tests OK.
+- `git diff --check`
+  - Result: passed.
+
+SubAgent audit follow-up:
+- Raman (GPT-5.5 xhigh) completed a read-only audit and found no direct test/held-out escape, but flagged real risks in the new tooling.
+- Fixes after the audit:
+  - `StructuredSearchTool` no longer reads full `rg` output before paging; it streams lines and terminates after `offset + head_limit + 1`, with `head_limit` capped at 1000.
+  - `glob` now stops after the requested page plus one extra item instead of sorting/enumerating the whole tree.
+  - `SandboxShellTool` now uses executor-side bounded capture for stdout/stderr, avoiding unlimited `subprocess.run(..., capture_output=True)` memory growth on Agent shell calls.
+  - Shell path guard now recognizes `sed -i.bak`, Python write snippets against explicit read-only paths, quoted `>` patterns without treating them as redirection, and path-prefix boundaries such as `/mnt/agent/workspace_evil`.
+  - `grep` content filenames now split only on the `path:line:content` colon separator, so paths containing hyphens stay intact.
+  - `WebSearchTool` returns `result_count`; CLI meta-learning records the actual provider name or `disabled` in the manifest.
+  - `ActionSpec.validate()` rejects unknown action fields instead of silently dropping typo fields.
+  - `docs/environment_design.md` no longer claims Agent main trace records `temperature` or `seed`, and tool-result wording now says bounded captured content rather than unlimited full output.
+
+Re-validation after SubAgent fixes:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_sandbox_isolation -v`
+  - Result: 37 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/executor.py src/hl_trader/environment/tools/base.py src/hl_trader/environment/tools/shell.py src/hl_trader/environment/tools/search.py src/hl_trader/environment/web_search.py src/hl_trader/agent/runner.py scripts/experiments/run_experiment.py tests/unit/test_tools_flow.py`
+  - Result: passed.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py' -v`
+  - Result: 200 tests OK.
+- `git diff --check`
+  - Result: passed before the logbook update; final diff check is still pending.
+
+Final SubAgent audit follow-up:
+- Bohr (GPT-5.5 high) completed a final read-only audit after the Raman fixes. It found no direct formal Docker hard-isolation escape, but reported four remaining issues.
+- Fixes:
+  - Container paths in `SandboxShellTool` are now mapped back to the host sandbox path and resolved before permission checks, so `/mnt/agent/workspace/../../snapshots/test/...` is rejected by the same real-path guard.
+  - `$PWD` and `${PWD}` path tokens are expanded to the Agent cwd before guard checks, closing the local-dev bypass for `$PWD/../snapshots/test/...`.
+  - `grep output_mode="count"` now reports `page_matches`, `num_matches_lower_bound`, and `num_matches_known` instead of presenting a paged count as a global total.
+  - `glob` preserves the requested `offset` in observation metadata.
+  - Removed the unused `_text_or_empty()` helper from the structured search tool.
+
+Final validation:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_sandbox_isolation -v`
+  - Result: 37 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/tools/shell.py src/hl_trader/environment/tools/search.py tests/unit/test_tools_flow.py`
+  - Result: passed.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py' -v`
+  - Result: 200 tests OK.
+- `git diff --check`
+  - Result: passed before this final logbook update; a final diff check follows this entry.
+
+Current conclusion:
+- The Agent now has structured code/file search and auditable tool metadata while preserving the project boundary: ordinary Fold Agents remain offline, cannot read test, and cannot call the NL evidence retriever directly.
+- Full-suite validation passed; Raman's audit findings were addressed. A final short SubAgent review is planned after the follow-up fixes.
+
+## 2026-06-18 Backtest strategy-program interface
+
+Task: extend the formal backtest path so the Agent can submit a `main.py`
+strategy program that coordinates candidate selection, audited NL scores, and
+trade-intent construction while the Environment still owns PIT binding, NL API
+logging, cash, margin, short inventory, fills, rejects, and return statistics.
+
+Implementation in progress:
+- Added the new artifact scaffold: `factor/main.py`, `factor/candidate.py`,
+  `factor/trading.py`, `factor/factors.json`, `nl_prior/prior.json`, and
+  `nl_prior/prompt.md`.
+- `load_strategy_artifact()` now validates the new files, permits registered
+  factor functions in `factor/*.py`, rejects hard-coded stage/runtime/artifact
+  paths in strategy code, and counts total strategy files/bytes in modification
+  checks.
+- Added `run_strategy_program()` in `backtest_engine.py`. It executes
+  `run_strategy(context)` when present and normalizes legacy
+  `generate_candidates()` output into the same candidate result shape.
+- Added structured `trade_intents` validation, default plan-to-intent
+  conversion, custom-intent order-plan merge, and daily trade-intent replay.
+- `backtest_tool` now runs the strategy once for candidates, performs audited
+  NL scoring, writes `nl_scores.json` and `scored_candidates.parquet`, and
+  optionally reruns the strategy to collect `trade_intents`. It persists
+  `trade_intents.parquet` and `strategy_metadata.json` alongside existing
+  return and NL artifacts.
+- Updated Agent prompt export, factor/NL templates, and the living Agent,
+  Environment, and Pipeline docs.
+
+Validation so far:
+- Resource checks before tests: about 425 GiB system RAM available; unrelated
+  GPU jobs on GPU 0 and 7, no new GPU workload from this task.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/artifacts.py src/hl_trader/environment/backtest_engine.py src/hl_trader/environment/broker.py src/hl_trader/environment/tools/backtest.py src/hl_trader/agent/prompts.py configs/agent_output_template/factor/main.py configs/agent_output_template/factor/candidate.py configs/agent_output_template/factor/trading.py`
+  - Result: passed.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_artifacts tests.unit.test_broker_engine tests.unit.test_tools_flow -v`
+  - Result: 49 tests OK.
+
+Current conclusion:
+- The minimal code path for two-stage strategy programs and custom trade intents
+  is implemented and covered by focused tests.
+- Full-suite validation, API/proxy flow validation, `git diff --check`, and
+  iterative SubAgent audit are still pending.
+
+Franklin SubAgent audit follow-up:
+- Franklin found four blocking issues: unforced artifact file whitelist, legacy
+  compatibility conflict for new required files, `close_buy` filling at the
+  open instead of the close, and active trade intents being removed even when
+  exit was blocked by suspension/limits.
+- Fixes:
+  - `artifacts.py` now rejects any non-cache file outside the formal
+    whitelist. New helper files are template-standard but not required for old
+    minimal artifacts; missing `prompt.md` is treated as an empty prompt.
+  - `SimBroker` now has `fill_close()`, and daily `close_buy` intents fill at
+    the close.
+  - Trade-intent replay activates intents only after orders actually fill and
+    removes active exit intents only after `close_position()` returns True.
+  - Trade-intent validation now checks strategy/side compatibility and
+    `YYYYMMDD` start/end dates; unavailable shorts are filtered before holding
+    count enforcement.
+  - Added regression tests for extra artifact-file rejection, old minimal
+    artifact loading, close-price `close_buy`, blocked-exit retry, date/side
+    validation, unavailable short filtering before plan size, and custom
+    trade-intent attribution skipping.
+- Re-validation:
+  - `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/artifacts.py src/hl_trader/environment/backtest_engine.py src/hl_trader/environment/broker.py src/hl_trader/environment/tools/backtest.py tests/unit/test_artifacts.py tests/unit/test_broker_engine.py tests/unit/test_tools_flow.py`
+    - Result: passed.
+  - `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_artifacts tests.unit.test_broker_engine tests.unit.test_tools_flow -v`
+    - Result: 54 tests OK.
+
+Laplace SubAgent audit follow-up:
+- Laplace found two blocking issues after the Franklin fixes:
+  - `copy_artifact()` copied whole `factor/` and `nl_prior/` directories, so
+    runtime cache files could enter frozen/step artifacts while hash/diff/load
+    ignored them.
+  - Formal strategy execution hid replay slots but not `/mnt/artifacts`, so
+    runtime path construction could read trusted result/step artifacts despite
+    the static string-constant check.
+- Fixes:
+  - `artifacts.py` now rejects `__pycache__`, `.pyc`, and `.pyo` in formal
+    artifacts instead of ignoring them.
+  - `init_from_template()` and `copy_artifact()` now copy exactly the formal
+    file whitelist returned by `_artifact_files()`.
+  - `run_strategy_program()` passes a forbidden-path list into the strategy
+    driver and temporarily hides train/valid/test/artifacts during formal
+    execution.
+  - `backtest_tool` now stages second-pass `nl_scores.json` and
+    `scored_candidates.parquet` under `/mnt/agent/workspace/.strategy_inputs/`
+    before rerunning strategy code, then removes the temporary copy. The
+    durable artifacts remain in `results/<phase>_<idx>/`.
+  - Trade-intent `start_date`/`end_date` now use real `YYYYMMDD` calendar-date
+    parsing, not only a regex.
+  - Pipeline docs now mention `factor_attribution.json` and the custom
+    `trade_intents` skip reason; Agent/Environment docs and prompt export now
+    state that formal artifacts reject Python caches and extra files.
+- Validation:
+  - Resource checks before/after tests: about 426 GiB available system RAM;
+    unrelated GPU jobs on GPU 0 and GPU 7; this work did not launch a GPU job.
+  - Real API smoke earlier in this task used the local DeepSeek-compatible
+    proxy with keys redacted and returned
+    `{"ok": true, "check": "strategy_program_smoke"}`; raw local smoke logs are
+    under ignored `logs/api_smoke/`.
+  - `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+    - Result: regenerated `configs/prompts/PROMPTS.md`.
+  - `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/artifacts.py src/hl_trader/environment/backtest_engine.py src/hl_trader/environment/tools/backtest.py src/hl_trader/agent/prompts.py tests/unit/test_artifacts.py tests/unit/test_broker_engine.py tests/unit/test_tools_flow.py`
+    - Result: passed.
+  - `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_artifacts tests.unit.test_broker_engine tests.unit.test_tools_flow -v`
+    - Result: 56 tests OK.
+  - `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py'`
+    - Result: 211 tests OK.
+  - `git diff --check`
+    - Result: passed before this logbook update.
+  - Generated Python caches were removed after validation.
+
+Current conclusion:
+- The strategy-program backtest path now has the intended two-stage interface
+  while preserving Environment-owned NL scoring, artifact auditability, broker
+  constraints, and formal runtime isolation.
+- A third SubAgent audit is required after these fixes before delivery.
+
+Plato SubAgent audit follow-up:
+- Plato found one blocking issue:
+  - The default template returned `rerun_after_nl=True`, but the default
+    `build_trade_intents()` returned an empty table. New strategies that only
+    implement candidates would therefore fail instead of using the default
+    Environment order plan.
+- Fixes:
+  - `configs/agent_output_template/factor/main.py` now defaults to
+    `rerun_after_nl=False`; the README states Agent should enable rerun only
+    after implementing non-empty custom `trade_intents`.
+  - `trading.py`, Agent docs, Environment docs, and prompt export now list
+    optional `start_date`/`end_date` intent fields and their `YYYYMMDD`
+    contract.
+  - The factor README and prompt now distinguish default-order attribution
+    from the custom-intent path, where the summary records
+    `factor_attribution_skipped_reason=custom_trade_intents`.
+  - `init_from_template()` ignores local runtime cache files in the trusted
+    template source but still copies only formal whitelist files; formal
+    artifacts and copied parent artifacts still reject cache files.
+  - Added tests for template-source cache ignoring and for a template-default
+    strategy that only modifies `candidate.py`, runs formal backtest, and uses
+    the default order plan without rerun.
+- Validation:
+  - `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+    - Result: regenerated `configs/prompts/PROMPTS.md`.
+  - `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/artifacts.py src/hl_trader/agent/prompts.py tests/unit/test_artifacts.py tests/unit/test_tools_flow.py`
+    - Result: passed.
+  - `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_artifacts tests.unit.test_broker_engine tests.unit.test_tools_flow -v`
+    - Result: 58 tests OK.
+  - `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py'`
+    - Result: 213 tests OK.
+  - `git diff --check`
+    - Result: passed before this logbook update.
+  - Generated Python caches were removed after validation.
+
+Current conclusion:
+- The template-default path now works without custom trade intents, while
+  two-stage custom trade-intent strategies remain supported.
+- A fourth SubAgent audit is required after these fixes before delivery.
+
+Mencius SubAgent audit follow-up:
+- Mencius reported no blocking findings.
+- One non-blocking documentation issue was fixed:
+  - Agent prompt now states explicitly that the first `run_strategy(context)`
+    call must return `rerun_after_nl=True` before Environment performs the
+    second call with `scored_candidates_path` and `nl_scores_path`.
+  - `configs/prompts/PROMPTS.md` was regenerated from the prompt source.
+- Validation:
+  - `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+    - Result: regenerated `configs/prompts/PROMPTS.md`.
+  - `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/prompts.py`
+    - Result: passed.
+  - `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py'`
+    - Result: 213 tests OK.
+  - Resource checks after the run still showed about 426 GiB available system
+    RAM and no new GPU workload from this task.
+  - `git diff --check`
+    - Result: passed before this logbook update.
+  - Generated Python caches were removed.
+
+Current conclusion:
+- All SubAgent findings so far have been resolved. A final short SubAgent
+  review is required to confirm no remaining findings after the prompt sync.
+
+Final SubAgent review:
+- Chandrasekhar completed a final read-only review after the prompt sync.
+- Findings:
+  - No blocking findings.
+  - No non-blocking findings.
+- It confirmed:
+  - `src/hl_trader/agent/prompts.py` and `configs/prompts/PROMPTS.md` explicitly
+    state the `rerun_after_nl=True` trigger for second-pass strategy execution.
+  - The factor README, Agent design doc, and Environment design doc have
+    consistent two-stage semantics.
+  - The prior fixes remain intact: default template does not force rerun,
+    two-stage inputs are workspace-staged, formal artifacts reject runtime
+    cache files while trusted template sources ignore local cache, `/mnt/artifacts`
+    runtime access is guarded, date fields are documented, and custom
+    `trade_intents` attribution skip semantics match the implementation.
+- Final local checks after closing the SubAgent:
+  - `git diff --check`
+    - Result: passed.
+  - Cache scan for `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`,
+    `*.pyc`, and `*.pyo`
+    - Result: empty.
+
+Final conclusion:
+- The requested backtest strategy-program interface, related templates, docs,
+  validation coverage, and iterative SubAgent audit cycle are complete for this
+  work item.
+
+## 2026-06-19 - Custom trade-intent minute replay
+
+Task:
+- Add minute-line replay for custom `trade_intents` so strategies such as
+  `close_buy`, `low_buy`, `high_short`, and `t` can execute at finer granularity
+  when replay slots provide minute bars.
+
+Implementation:
+- `backtest_tool` now reads `intraday_1min.parquet` once per replay slot and
+  passes `replay_granularity="minute"` to `run_strategy(context)` only when the
+  minute file is present and non-empty. Empty or missing minute files use daily
+  fallback consistently in context, summary, and `detailed_return.json`.
+- `run_trade_intent_replay()` uses minute replay for custom intents when a
+  non-empty minute frame is available; default order-plan replay remains daily
+  fixed holding.
+- Minute replay normalizes `trade_time` to `HH:MM`, uses first bar at or after
+  `trigger_time`, defaults `close_buy` to `14:57`, uses minute `low/high` to
+  trigger `low_buy/high_short`, fills triggered minute entries at minute
+  `close`, and lets `t` exits happen on later trading days at minute `close`.
+- Missing minute coverage is handled with daily synthetic bars:
+  - If a whole day has no minutes, daily open/close synthetic bars are used.
+  - If a code is missing from a partially covered day, daily synthetic bars are
+    added for that code so Broker rejection/constraint paths still run.
+  - If a code has only early minutes and no real late/close bar, a synthetic
+    `15:00` close bar is added for late triggers such as `close_buy`.
+- Daily fallback for `low_buy/high_short` now uses daily `low/high` when
+  present, or an `open/close` range when those columns are absent. Entry fill
+  price remains the existing daily entry price.
+- Broker gained explicit-price fills and exits through `fill_prices()` and
+  `close_position_at_price()` while preserving commission, stamp duty, cash,
+  short margin, T+1, suspension, limit-price, and shortability checks.
+- `validate_trade_intents()` now requires valid `trigger_price` for executable
+  `low_buy/high_short/t`, rejects non-positive, non-finite, and non-numeric
+  provided trigger prices, and validates non-empty `trigger_time`.
+- Docs and prompt sources now state the non-empty minute-file rule, minute
+  trigger/fill semantics, daily fallback semantics, T+1 limit, and summary
+  `replay_granularity`.
+
+Validation:
+- Resource checks:
+  - Before target tests: system RAM generally stayed above about 59 GiB
+    available after unrelated cluster jobs grew; GPU jobs were unrelated and no
+    GPU workload was launched by this task.
+  - After full tests: system RAM about 59 GiB available; unrelated GPU jobs
+    continued on GPU 0/1-7.
+- Commands:
+  - `/home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/broker.py src/hl_trader/environment/backtest_engine.py src/hl_trader/environment/tools/backtest.py`
+    - Result: passed.
+  - `/home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine`
+    - Result after final fixes: 31 tests OK.
+  - `/home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine tests.unit.test_tools_flow.ToolFlowTest.test_empty_minute_replay_file_reports_daily_granularity`
+    - Result after doc wording fix and cache cleanup: 32 tests OK.
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py'`
+    - Result: 222 tests OK.
+  - `git diff --check`
+    - Result: passed.
+  - Cache scan for `__pycache__`, `.pytest_cache`, `.mypy_cache`,
+    `.ruff_cache`, `*.pyc`, and `*.pyo`
+    - Result: empty after cleanup.
+
+SubAgent audit loop:
+- Nash found five issues:
+  - Empty minute files could make context say minute while replay fell back
+    daily.
+  - Missing trigger prices and invalid trigger times could silently alter
+    strategy semantics.
+  - Partial minute coverage could skip Broker constraints for missing codes.
+  - Daily fallback used only open for `low_buy/high_short`.
+  - Prompt omitted `close_buy` default `14:57`.
+- Fixes were implemented and Nash was closed.
+- Sagan found two follow-up issues:
+  - A code with only early minutes could still skip late `close_buy` triggers.
+  - `trigger_price=inf` passed validation.
+- Fixes were implemented and Sagan was closed.
+- Parfit found one low-severity issue:
+  - Explicit non-numeric `trigger_price` was coerced to missing instead of
+    rejected.
+- Fix was implemented and Parfit was closed.
+- Dirac found no blocking code issues and one low-severity wording mismatch:
+  - Some docs/prompt text said the minute file only needed to exist, while code
+    requires it to be non-empty.
+- Wording was updated and Dirac was closed.
+
+Current conclusion:
+- Custom trade-intent minute replay is implemented, documented, and covered by
+  regression tests. The final SubAgent review found no blocking code findings.
+
+## 2026-06-19 - Living docs format normalization
+
+Task:
+- Unify the visible structure of the five current living docs after noticing
+  that only the data and QMT docs still carried `整理日期：2026-06-07`.
+
+Changes:
+- Removed stale `整理日期` lines from `docs/data_documentation.md` and
+  `docs/QMT_documentation.md`.
+- Moved the QMT doc top matter into the same order as the other living docs:
+  introduction, `相关边界`, `## 术语说明`, then `## 导航`.
+- Added QMT cross-boundary links to the data, Agent, Environment, and Pipeline
+  docs.
+
+Validation:
+- Scanned the five living docs for obsolete metadata labels; no matches
+  remained.
+- Confirmed all five docs now expose `相关边界`, `## 术语说明`, and `## 导航`
+  in the same order.
+- `git diff --check`: passed.
+- Cache scan for `__pycache__`, `.pytest_cache`, `.mypy_cache`,
+  `.ruff_cache`, `*.pyc`, and `*.pyo`: empty.
+
+Current conclusion:
+- The living docs now use a consistent concise top structure, without stale
+  per-file date metadata.
+
+## 2026-06-19 - Data update, audit, and revision sentinel check
+
+Task:
+- Inspect recent TuShare download/update/audit health and check whether
+  revision sampling found source data that differs from existing local data.
+
+Context:
+- Real repository path confirmed with `pwd -P`: `/Data/lzp/MacroQuant`.
+- Existing `LOGBOOK.md`, `logs/tushare_cron_dispatch.log`,
+  `.runtime/tushare/cron_state.json`, `results/data_quality/*_status.json`,
+  and `results/data_quality/revision_events.jsonl` were inspected.
+
+Resource checks:
+- Before API checks: system memory had about 461 GiB available; GPU 0 had an
+  unrelated Python process using about 10.3 GiB, and no GPU workload was
+  launched.
+- After API checks: system memory still had about 461 GiB available; GPU state
+  was unchanged apart from unrelated load.
+
+Findings:
+- The installed crontab still points to
+  `/home/lzp/miniconda3/envs/stock/bin/python` and the removed
+  `scripts/tushare/cron_update.py` entrypoint. This explains why
+  `logs/tushare_cron_dispatch.log` has no structured successful job after
+  2026-06-12 and only repeats old-entrypoint failures.
+- `.runtime/tushare/cron_state.json` last valid entries are from
+  2026-06-11/2026-06-12:
+  - `cn_evening_full`: OK for `20260512-20260611`.
+  - `cn_daily_revision_sentinel`: OK through `20260611`.
+  - `cn_preopen_*`: OK through 2026-06-12 morning for board/text/margin
+    backfills.
+  - `cn_nightly_full_audit`: error on 2026-06-12 because base audit and
+    intraday-by-date audit returned errors.
+  - `cn_nightly_feature_build`: error on 2026-06-12 because
+    `audit-fundamental-events` failed and the job fail-fast skipped the
+    remaining commands.
+- Current formal status files are stale by design after the cron break:
+  base/macro/intraday/text/board are from 2026-06-11 UTC, event-flow is from
+  2026-06-12 01:21 UTC, and the formal `revision_summary.json` is from the
+  last 2026-06-12 sentinel.
+- The formal `revision_events.jsonl` has 7,917 events. Of these, 7,701 point to
+  real `/Data/lzp/MacroQuant/data/raw/...` paths and 216 are `/tmp/...` events
+  from tests or temp runs. Real events stop on 2026-06-12; 2026-06-18/19 ledger
+  tail entries are test/tmp pollution, not real raw-data changes.
+
+Commands and results:
+- Current-gap sentinel:
+  - Command:
+    `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_audit.py revision-sentinel --start-date 20260612 --end-date 20260619 --datasets daily daily_basic adj_factor stk_limit suspend_d limit_list_d --sample-size 0 --seed 20260619 --revision-ledger results/data_quality/process/revision_sentinel_20260619_current_gap_events.jsonl --output results/data_quality/process/revision_sentinel_20260619_current_gap_status.json --min-interval-seconds 0.22 --timeout-seconds 120`
+  - Result: failed before API comparison because local SSE `trade_cal` covers
+    only `20100101-20260618`, not `20260619`.
+- Current-gap sentinel rerun:
+  - Command:
+    `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_audit.py revision-sentinel --start-date 20260612 --end-date 20260618 --datasets daily daily_basic adj_factor stk_limit suspend_d limit_list_d --sample-size 0 --seed 20260619 --revision-ledger results/data_quality/process/revision_sentinel_20260619_current_gap_events.jsonl --output results/data_quality/process/revision_sentinel_20260619_current_gap_status.json --min-interval-seconds 0.22 --timeout-seconds 120`
+  - Result: `status=warning`, `revision_events=0`, `missing_local_dates=30`,
+    `datasets_without_effective_checks=6`.
+  - Interpretation: for `20260612`, `20260615`, `20260616`, `20260617`, and
+    `20260618`, all six checked daily datasets lack local partitions, so the
+    new-date source-vs-local comparison cannot run. This is a freshness gap,
+    not a detected content revision.
+- Historical sample sentinel:
+  - Command:
+    `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_audit.py revision-sentinel --start-date 20200101 --end-date 20260611 --datasets daily daily_basic adj_factor stk_limit suspend_d limit_list_d --sample-size 6 --seed 20260619 --revision-ledger results/data_quality/process/revision_sentinel_20260619_historical_sample_events.jsonl --output results/data_quality/process/revision_sentinel_20260619_historical_sample_status.json --min-interval-seconds 0.22 --timeout-seconds 120`
+  - Result: `status=warning`, 36 checks across six datasets, 3 revision events.
+  - The three events are all `limit_list_d.limit_amount` source rewrites:
+    `20240102` for `688525.SH`, `20240418` for `000628.SZ`/`600083.SH`/
+    `600836.SH`, and `20250305` for `000042.SZ`/`600811.SH`.
+  - In all three cases, `limit_amount` changed from an old non-empty local
+    value to an empty source value; keys and row counts were otherwise stable.
+- Existing formal `revision_summary.json` from 2026-06-12 also showed the same
+  pattern: 10 `limit_list_d` sample events, all `limit_amount` blanking on
+  historical partitions, while sampled `daily`, `adj_factor`, and
+  `daily_basic` had no revision events.
+
+Artifacts:
+- `results/data_quality/process/revision_sentinel_20260619_current_gap_status.json`
+- `results/data_quality/process/revision_sentinel_20260619_historical_sample_status.json`
+- `results/data_quality/process/revision_sentinel_20260619_historical_sample_events.jsonl`
+
+Current conclusion:
+- Recent automated data updates are broken because the installed cron block was
+  not refreshed after the script/env migration. Data is stale after the
+  2026-06-12 morning jobs.
+- There is no successful new-date comparison after 2026-06-12 because the
+  checked local daily partitions for 2026-06-12 through 2026-06-18 are missing.
+- For existing historical partitions, revision sampling continues to detect
+  `limit_list_d.limit_amount` instability. Treat this field as unreliable for
+  frozen trading inputs until a downstream policy either ignores it, rebuilds
+  it from stable sources, or explicitly versions the source rewrites.
+
+## 2026-06-20 - Data repair and cron/sentinel hardening
+
+Task:
+- Repair the data download/update/audit flow after the 2026-06-19 inspection,
+  clean the revision ledger, and make the sentinel field policy explicit.
+
+Resource checks:
+- Before and after the repair/test commands, system memory stayed around
+  457 GiB available. GPU 0 had an unrelated Python process using about
+  10.3 GiB; no project GPU workload was launched.
+
+Code and config changes:
+- `src/hl_trader/data_sources/tushare/common.py`
+  - Added formal-vs-temp revision ledger resolution so test and scratch raw
+    roots write local `revision_events.jsonl` instead of polluting the formal
+    ledger.
+  - Added a repeated full-page guard in paged API reads.
+  - Filtered `stock_basic` code loading to valid A-share codes only.
+- `src/hl_trader/data_sources/tushare/download.py`
+  - Routed revision-aware writes through the ledger resolver.
+  - Made fundamental downloads honor explicit `--codes`.
+- `src/hl_trader/data_sources/tushare/cron_update.py`
+  - Runs child commands with unbuffered Python output for live cron logs.
+- `src/hl_trader/data_sources/tushare/audit.py`
+  - Capped `bak_basic` expected trade dates at the audit `end_date`.
+- `configs/tushare_update_schedule.json`
+  - Added `limit_list_d.unstable_fields=["limit_amount"]`.
+  - Added `field_policy.limit_amount=raw_audit_only_until_field_versioned`.
+
+Data actions:
+- Removed 216 `/tmp/...` pollution rows from
+  `results/data_quality/revision_events.jsonl`; formal ledger now contains only
+  real raw-data paths.
+- Reinstalled the crontab to use
+  `/home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_cron_update.py`.
+- Backfilled recent gaps:
+  - `margin` and `margin_detail` for `20260612-20260617`.
+  - `cctv_news` and `news` for `20260612-20260618`.
+  - `stk_mins_1min_by_date` for `20260612`, `20260615`, `20260616`,
+    `20260617`, and `20260618`.
+  - Explicit `920126.BJ` fundamental zero-row valid partitions.
+  - Removed invalid code partitions `T600018.SH`, `T00018.SH`, `TS0018.SH`.
+
+Audits:
+- Full audit command:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_cron_update.py --job cn_nightly_full_audit --start-date 20200101 --end-date 20260618 --force-run`
+- Result: return code 0.
+- Current formal statuses:
+  - `base_research_status.json`: warning, errors 0, warnings 15.
+  - `macro_context_status.json`: warning, errors 0, warnings 2.
+  - `intraday_minutes_status.json`: ok, errors 0, warnings 0.
+  - `event_flow_status.json`: warning, errors 0, warnings 5.
+  - `board_trading_status.json`: warning, errors 0, warnings 1.
+  - `text_evidence_status.json`: warning, errors 0, warnings 20.
+- Current-gap revision sentinel over `20260612-20260618` for
+  `daily/adj_factor/daily_basic/stk_limit/suspend_d/limit_list_d` completed
+  with no revision events after the backfill.
+- Historical revision sentinel over `20200101-20260618`, sample size 6,
+  seed `20260619-history`, found only `limit_list_d.limit_amount` source
+  blanking on sampled historical partitions; no sampled key, row-count, or
+  other field changes were found.
+
+Validation:
+- `tests.unit.test_data_sources_tushare` passed as part of the 107-test target
+  run on 2026-06-20.
+- Cache scan for `__pycache__` and `*.pyc`: empty after cleanup.
+
+Current conclusion:
+- The automated data path is repaired and documented. Sentinel policy is now
+  both human-readable in `docs/data_documentation.md` and machine-readable in
+  `configs/tushare_update_schedule.json`.
+- `limit_list_d.limit_amount` remains raw/audit-only until a field-versioning
+  policy exists.
+
+## 2026-06-20 - Flat agent_output/main.py backtest refactor
+
+Task:
+- Refactor formal strategy execution to the user-requested model:
+  `agent_output/main.py` is the only required entrypoint, Agent output stays
+  flat, NL is callable from strategy code, and Broker replays daily/minute
+  strategy logic while enforcing constraints.
+
+Implementation:
+- Replaced the fixed `factor/` + `nl_prior/` artifact contract with a flat
+  `agent_output/` contract:
+  - `main.py` required.
+  - `candidate.py`, `trading.py`, `nl_prompt.md`, and other flat text/code
+    helpers allowed.
+  - Subdirectories, caches, hidden files, symlinks, binary/data dumps, logs and
+    unsupported suffixes rejected.
+- Reworked `modification_check_tool` to compare only flat `agent_output`
+  files, total diff lines, Python code diff lines, file count, byte count, and
+  readonly violations. Early Epoch constraints are looser; later Epochs use the
+  stricter limits.
+- Reworked `backtest_tool`:
+  - Runs only `agent_output/main.py`.
+  - Does not load `factor.json` or `prior.json`.
+  - Does not force NL scoring or score fusion.
+  - Serves `mq_tools.nl(ts_code, prompt=...)` over JSONL RPC only when strategy
+    code calls it.
+  - Writes `detailed_return.json`, `trade_intents.parquet`,
+    `strategy_metadata.json`, optional `candidates.parquet`, and optional
+    `nl_tool/` logs.
+- Added a sandbox policy runner for custom trade strategy functions:
+  - Built-ins: `target_weight`, `low_buy`, `close_buy`, `high_short`, `t`.
+  - Non-built-in `trade_strategy` names must resolve to a function in
+    `trading.py` or `main.py`.
+  - The function runs inside Sandbox for every due daily/minute bar and receives
+    `state` or keyword arguments including `bar`, `account`, `positions`,
+    `price`, `cur_time`, `position`, `params`, and helpers
+    `buy/sell/short/cover/close`.
+  - Returned actions are executed by the host Broker; Agent code never writes
+    cash, positions, fills, or returns.
+- Updated prompt source, prompt export, templates, Agent/Environment/Pipeline
+  docs, and root logbook.
+- Removed the unused `factor_attribution_enabled` experiment config field; the
+  attribution module remains marked legacy for historical tests/reports.
+
+Validation:
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+- Syntax:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/backtest_engine.py src/hl_trader/environment/tools/backtest.py src/hl_trader/environment/executor.py src/hl_trader/environment/broker.py src/hl_trader/agent/prompts.py configs/agent_output_template/main.py configs/agent_output_template/trading.py`
+- Targeted custom callback test:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ToolFlowTest.test_custom_trading_function_runs_during_minute_replay -v`
+  passed.
+- Full tool-flow test:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow -v`
+  passed, 24 tests.
+- Core regression set:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_artifacts tests.unit.test_broker_engine tests.unit.test_pipeline_e2e tests.unit.test_data_sources_tushare -v`
+  passed, 107 tests.
+- Cache scan for `__pycache__` and `*.pyc`: empty after cleanup.
+
+Current conclusion:
+- The formal backtest path now matches the flat `agent_output/main.py` design.
+- NL and trading strategy freedom are moved into strategy code, while Broker
+  and Environment keep the trusted enforcement/audit boundary.
+
+## 2026-06-20 - SubAgent audit fixes after flat backtest refactor
+
+Task:
+- Close the issues found by the first SubAgent review and remove remaining
+  obsolete score-fusion/order-plan code that no longer matches the accepted
+  `agent_output/main.py` contract.
+
+Audit findings and fixes:
+- Fixed `audit_revision_sentinel()` so temporary/test raw roots use a local
+  `revision_events.jsonl` via `resolve_revision_ledger()` instead of polluting
+  the formal `results/data_quality/revision_events.jsonl`.
+- Removed the misleading `nl_mode` field from BacktestTool-facing schemas,
+  summaries, runner calls, pipeline calls and failure records. Backtest runs
+  `main.py`; NL executes only when strategy code calls `mq_tools.nl(...)`.
+- Set `SandboxSpec.max_fold_minutes` to 60 to match the Fold time budget.
+- Removed legacy `compose_final_scores`, `build_order_plan`,
+  `build_order_plan_from_trade_intents`, `validate_order_plan`,
+  `build_trade_intents_from_plan`, and `run_fixed_holding_replay` from
+  `backtest_engine.py`, plus their historical tests. Current tests now cover
+  direct trade-intent validation and Broker replay.
+- Removed the legacy factor-attribution module and tests because they only
+  referenced retired `factor_score` / `factor_<id>` candidate semantics and had
+  no active production caller.
+- Replaced stale NL internal error strings (`nl_mode=off/sample`) with neutral
+  tool-local labels, and renamed the LLM proxy purpose from `final_score` to
+  `nl_score`.
+
+Validation:
+- Affected set:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine tests.unit.test_tools_flow tests.unit.test_nl_scoring -v`
+  passed, 67 tests.
+- Full suite:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py'`
+  passed, 209 tests.
+- `git diff --check` passed.
+- Cache scans for `__pycache__` and `*.pyc` were empty after the final test
+  run.
+
+Current conclusion:
+- Active code no longer contains the retired forced factor/NL score-fusion
+  path. The remaining historical references to `nl_mode` are only old logbook
+  records.
+
+## 2026-06-20 - SubAgent follow-up fixes for no-op strategies and RPC cleanup
+
+Task:
+- Resolve the follow-up findings from the third SubAgent audit.
+
+Implementation:
+- Made `trade_strategy=flat` and `trade_strategy=none` explicit built-in no-op
+  strategies.
+- `validate_trade_intents()` now forces `side=flat` for those no-op strategies
+  even when the Agent provided `side=long` or `side=short`.
+- Expanded `run_strategy_program()` cleanup so `.strategy_*`,
+  `.nl_requests_*`, and `.nl_responses_*` are unlinked even when executor path
+  mapping, hide-context setup, or sandbox process startup raises.
+- Hardened `StrategyPolicyRunner.__enter__()` so failed startup calls
+  `__exit__()` and cleans `.policy_nl_*` files. Added `_hide_entered` to avoid
+  exiting a snapshot-hide context that was never entered.
+- Updated Agent/Environment docs, the flat template README, prompt source, and
+  exported prompts to document `flat` / `none` as no-op built-ins.
+
+Validation:
+- Syntax:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/backtest_engine.py tests/unit/test_broker_engine.py`
+  passed.
+- Affected set:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine tests.unit.test_tools_flow -v`
+  passed, 49 tests.
+- Full suite:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py'`
+  passed, 212 tests.
+- `git diff --check` passed.
+- Cache scans for `__pycache__` and `*.pyc` were empty after cleanup.
+
+Current conclusion:
+- No-op strategies cannot create orders, and formal strategy / custom policy
+  temporary RPC files are cleaned on normal and setup-failure paths.
+
+## 2026-06-20 - Restore living doc detail after refactor compression
+
+Task:
+- Improve readability of the Agent, Environment and Pipeline living docs after
+  the flat backtest refactor, restore the previous second-level navigation
+  style, and recover operational detail that was compressed even though it was
+  unrelated to the refactor.
+
+Review:
+- Opened three SubAgents and closed all three after completion:
+  - Agent doc comparison: restored session isolation, visible PIT data,
+    tool semantics, Step workflow, workspace paths, modification checks, NL
+    logs, forbidden behavior and acceptance checklist.
+  - Environment doc comparison: restored PIT data windows, snapshot paths,
+    feature units, Sandbox/Runner boundaries, trusted tools, Broker replay,
+    shorting rules, LLM/NL boundaries, logs and audit checklist.
+  - Pipeline doc comparison: restored rolling Fold windows, Step execution,
+    Fold acceptance, frozen evaluation, artifact manifest, Epoch/meta-learning,
+    Held-out workflow, ledger schema, reporting and failure conditions.
+
+Implementation:
+- Rewrote `docs/agent_design.md`, `docs/environment_design.md`, and
+  `docs/pipeline_design.md` with explicit `## 导航` lists pointing to
+  second-level numbered sections.
+- Kept the accepted flat `agent_output/main.py` contract while expanding
+  retained operating details for PIT windows, Sandbox, Agent tools, Broker
+  replay, Fold/Epoch orchestration and reporting.
+- Updated `src/hl_trader/agent/prompts.py` and regenerated
+  `configs/prompts/PROMPTS.md` so prompt docs match the restored living docs.
+- Updated the concise `LOGBOOK.md` current-state summary with positive current
+  contracts for the Agent and backtest path.
+
+Validation:
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+- Checked restored headings:
+  `rg -n "^(# |## 导航|## [0-9]|## 术语说明)" docs/agent_design.md docs/environment_design.md docs/pipeline_design.md`
+- Checked retired comparison keywords in living docs and prompt exports:
+  `rg -n "final_score|nl_mode|factor\\.json|prior\\.json|build_order_plan|compose_final_scores|order-plan|order_plan|nl_prior|factor/|不再强制|不再生成|旧版|旧版本|重构前|重构后" docs/agent_design.md docs/environment_design.md docs/pipeline_design.md src/hl_trader/agent/prompts.py configs/prompts/PROMPTS.md`
+  returned no matches.
+- `git diff --check` passed.
+- Cache scans for `__pycache__` and `*.pyc` were empty after cleanup.
+
+Current conclusion:
+- The three restored living docs are still shorter than the pre-refactor
+  versions because duplicated history and superseded wording were removed, but
+  the non-refactor operational details identified by SubAgents are back in the
+  current design contract.
+
+## 2026-06-20 - Remove precomputed daily alpha layer
+
+Task:
+- Remove the fixed daily alpha feature path so Agent-visible inputs are only
+  PIT snapshot/history windows, normalized units, and visibility constraints.
+
+Implementation:
+- Deleted `src/hl_trader/environment/features/daily_pit.py` and removed
+  `DailyPITFeatureBuilder` / `FeatureBuildConfig` exports.
+- Renamed the PIT event CLI from `scripts/data/build_features.py` to
+  `scripts/data/build_pit_events.py`; the CLI now exposes only
+  `build-fundamental-events` and `audit-fundamental-events`.
+- Changed the scheduled job from `cn_nightly_feature_build` /
+  `hl_feature_pipeline` to `cn_nightly_pit_event_build` /
+  `pit_event_pipeline`. The job now builds and audits only
+  `fundamental_events`.
+- Changed the default PIT event root from `data/features/fundamental_events`
+  to `data/pit/fundamental_events`.
+- Updated Data, Environment and QMT living docs to state that Agent-visible
+  input is the PIT snapshot/history window with standardized units and
+  visibility filtering, not precomputed rolling alpha columns.
+- Removed daily-alpha-specific unit tests and kept coverage for PIT raw store,
+  auction correction and fundamental event visibility indexing.
+
+Validation:
+- Syntax: `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile scripts/data/build_pit_events.py src/hl_trader/data_sources/tushare/cron_update.py src/hl_trader/data_sources/tushare/audit.py src/hl_trader/environment/snapshot.py src/hl_trader/environment/features/__init__.py src/hl_trader/pipelines/config.py scripts/experiments/run_experiment.py tests/unit/test_features.py tests/unit/test_data_sources_tushare.py`
+- CLI help: `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/build_pit_events.py --help`
+- Cron dry-run: `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_cron_update.py --job cn_nightly_pit_event_build --end-date 20260618 --dry-run`
+- Tests: `tests.unit.test_features` passed, 7 tests.
+- Tests: `tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest` passed, 57 tests.
+- Tests: `tests.unit.test_snapshot_builder` passed, 4 tests.
+- Tests: `tests.unit.test_pipeline_e2e` passed, 13 tests.
+
+Current conclusion:
+- The current path no longer builds or exposes `daily_alpha`, fixed rolling
+  returns, moving averages, volatility, final scores, or candidate rankings as
+  Environment-provided alpha inputs.
+
+## 2026-06-20 - Sandbox null audit and PIT/NL follow-up fixes
+
+Task:
+- Inspect `.runtime/sandboxes/run_00add6d7173e/snapshots/train/macro.parquet`
+  for the high null rate in `cn_gdp`, check the same sandbox for similar data
+  issues, decide whether data needs reprocessing/deletion, and run iterative
+  SubAgent review over the current code/docs changes.
+
+Data inspection:
+- Resource checks before and after the local scripts showed more than 400 GiB
+  available RAM. GPUs were already occupied by unrelated Python jobs; this work
+  used CPU/IO only.
+- The train snapshot manifest is `kind=decision_input`,
+  `decision_time=2022-07-01T09:25:00+08:00`, and
+  `window_start=2020-10-01T09:25:00+08:00`.
+- `macro.parquet` shape is `(7649, 124)`. `cn_gdp` has 7 rows and 124 columns;
+  its non-null columns are `dataset`, `quarter`, `gdp`, `gdp_yoy`, `pi`,
+  `pi_yoy`, `si`, `si_yoy`, `ti`, `ti_yoy`, `available_at`, and
+  `available_at_rule`. The other 112 columns are structural nulls from the
+  multi-dataset wide union, not missing GDP data.
+- `daily.parquet`, `intraday_1min.parquet`, and `text_index.parquet` had no
+  high-null data columns in the same scan. `universe.delist_date` is high-null
+  because most visible names are not delisted. `events.parquet` and
+  `fundamentals.parquet` are sparse by dataset for the same wide-union reason;
+  observed high-null fields such as `repurchase.exp_date` and optional
+  financial statement fields are source/schema sparsity rather than join
+  failure.
+
+PIT event repair:
+- Built the new event layer:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/build_pit_events.py build-fundamental-events --raw-dir data/raw --output-root data/pit/fundamental_events --start-date 20200101 --end-date 20260618`
+- Audited the new event layer:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/build_pit_events.py audit-fundamental-events --events-root data/pit/fundamental_events --start-date 20200101 --end-date 20260618 --output results/data_quality/fundamental_events_status.json --require-partitions`
+- Audit result: `status=warning`, `errors=0`, `warnings=6`,
+  `rows=1,828,774`; `data/pit/fundamental_events` contains 742 parquet
+  partitions.
+- A SubAgent found that snapshot construction did not enforce the PIT event
+  audit. Fixed by adding `fundamental_events_status` to `SnapshotBuilder` and
+  `RawSnapshotProvider`, checking the status file when `fundamental_datasets`
+  is non-empty, and making `read_fundamental_events(require_partitions=True)`
+  fail fast on missing root or zero usable partitions.
+- Added snapshot tests for missing PIT event partitions and audit error
+  blocking decision snapshot construction.
+- A follow-up SubAgent noted that direct `SnapshotBuilder` construction could
+  still omit the audit status path. Fixed by requiring a PIT event status file
+  whenever `fundamental_datasets` is non-empty and setting the default
+  `RawSnapshotProvider` status path to
+  `results/data_quality/fundamental_events_status.json`.
+
+NL schema repair:
+- A follow-up SubAgent found the NL prompt/schema still referenced
+  `prior_rules` and `applied_prior_ids`. Removed that contract from
+  `ROUND_INSTRUCTION`, `FINAL_INSTRUCTION`, `NLScoringEngine`,
+  `validate_score_payload()`, `backtest_tool` neutral scores, prompt export,
+  and NL-related tests.
+- Current `mq_tools.nl(ts_code, prompt=...)` score schema is
+  `ts_code`, `nl_score`, `confidence`, `risk_tags`, and `evidence_ids`.
+
+Documentation and cleanup:
+- Restored `###`-level navigation in `docs/agent_design.md`,
+  `docs/environment_design.md`, and `docs/pipeline_design.md`.
+- Removed ignored `src/macroquant_hl_trader.egg-info` after SubAgent noted it
+  still referenced a deleted source file.
+- Removed the unused legacy `run_generate_candidates()` wrapper from
+  `src/hl_trader/environment/backtest_engine.py`; the formal path is
+  `run_strategy_program()` executing flat `agent_output/main.py`.
+- Cleared generated `__pycache__` / `*.pyc` after validation.
+- Old `data/features/daily_alpha` (2.1G) and
+  `data/features/fundamental_events` (598M) are retired local data products.
+  They are not required for current correctness and do not need reprocessing;
+  they can be deleted or quarantined later as a disk cleanup step. Raw data and
+  the current `data/pit/fundamental_events` layer should be retained.
+
+Validation:
+- Syntax checks passed for the affected PIT/NL modules and tests.
+- `tests.unit.test_snapshot_builder` passed, 7 tests.
+- `tests.unit.test_features` passed, 7 tests.
+- `tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest`
+  passed, 57 tests.
+- `tests.unit.test_pipeline_e2e` passed, 13 tests.
+- `tests.unit.test_nl_scoring` + `tests.unit.test_tools_flow` passed, 45
+  tests.
+- Full suite:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t . -p 'test_*.py'`
+  passed, 208 tests.
+- `git diff --check` passed after removing a trailing blank line.
+- Keyword scan for current code/docs/tests found no matches for
+  `prior_rules`, `applied_prior_ids`, `nl_prior`, `factor.json`,
+  `prior.json`, forced `final_score`, `daily_alpha`, `DailyPITFeatureBuilder`,
+  `build_features.py`, or `data/features/fundamental_events` outside the
+  historical detailed logbook and external references.
+- Cache scans for `__pycache__` and `*.pyc` were empty after cleanup.
+
+Current conclusion:
+- The `cn_gdp` null pattern is reasonable under the current wide-union macro
+  schema. No sandbox data reprocessing is needed for this issue.
+- The current PIT event layer is usable with warnings and errors=0; snapshot
+  construction now fails fast on unavailable, omitted, or failed PIT event
+  status inputs.
+- The current NL tool no longer depends on prior-rule artifacts.
+
+## 2026-06-22 - Delete retired daily alpha data product
+
+Task:
+- Delete the retired `data/features/daily_alpha` data product after confirming
+  it is no longer used by the current PIT snapshot/backtest pipeline.
+
+Commands:
+- Confirmed the real path with `pwd -P`:
+  `/Data/lzp/MacroQuant`.
+- Checked size before deletion:
+  `du -sh data/features/daily_alpha` -> `2.1G`.
+- Deleted:
+  `rm -rf data/features/daily_alpha`.
+- Verified:
+  `test ! -e data/features/daily_alpha && echo deleted` -> `deleted`.
+
+Current conclusion:
+- `data/features/daily_alpha` has been removed. Current raw data and
+  `data/pit/fundamental_events` were not touched. The old
+  `data/features/fundamental_events` directory remains as a separate retired
+  product and can be handled in a later cleanup if requested.
+
+## 2026-06-22 - Repair TuShare trading-day cron windows and refresh data status
+
+Task:
+- Remove fixed-date operational wording from living data documentation.
+- Fix scheduled TuShare jobs so trade-date windows use the latest SSE open date
+  on or before the natural target date.
+- Backfill the missing margin data, refresh audits, install the current crontab,
+  and verify the PIT event job.
+
+Code and documentation changes:
+- Added `end_date_mode=sse_open_on_or_before` support in
+  `src/hl_trader/data_sources/tushare/cron_update.py`.
+- Updated `configs/tushare_update_schedule.json` so trade-date jobs use open
+  trading-day semantics while text evidence keeps natural-day windows.
+- Updated `docs/data_documentation.md` to describe reusable status-file
+  acceptance criteria instead of a one-off dated audit result.
+- Removed the top-level `更新时间` metadata from the five living design docs.
+  Example dates remain only where they are part of command, window, or payload
+  examples.
+- Aligned `cn_nightly_pit_event_build` rolling windows to the first day of the
+  month, because the PIT event layer writes monthly partitions and the audit
+  checks the same partition granularity.
+- Refreshed the system crontab with `ops/cron/install_tushare_cron.py`; the
+  installed block now calls `cn_nightly_pit_event_build` and no longer calls
+  `cn_nightly_feature_build`.
+
+Data repair and audits:
+- Resource checks before and after data operations showed more than 400 GiB
+  available RAM. GPUs were occupied by unrelated jobs; these TuShare operations
+  were CPU/IO only.
+- Ran:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_cron_update.py --job cn_preopen_margin_backfill_0905 --end-date 20260621 --force-run`
+  - Result: `status=ok`, `start_date=end_date=20260618`.
+  - Log: `logs/tushare_cron_cn_preopen_margin_backfill_0905_20260618_20260622_191627.log`.
+  - Wrote `margin` rows=3 and `margin_detail` rows=4370 for the repaired
+    trade date.
+- Ran:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_cron_update.py --job cn_preopen_event_flow_audit_0920 --end-date 20260621 --force-run`
+  - Result: `status=ok`, `end_date=20260618`.
+  - Log: `logs/tushare_cron_cn_preopen_event_flow_audit_0920_20260618_20260622_191644.log`.
+- Ran:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_cron_update.py --job cn_nightly_full_audit --end-date 20260621 --force-run`
+  - Result: `status=ok`, return codes `[0, 0, 0, 0, 0, 0]`.
+  - Log: `logs/tushare_cron_cn_nightly_full_audit_20260621_20260622_191804.log`.
+- Ran:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_cron_update.py --job cn_nightly_pit_event_build --end-date 20260621 --force-run`
+  - First run exposed a month-window audit error from a mid-month rolling
+    start. After aligning PIT starts to month start, rerun succeeded.
+  - Final log: `logs/tushare_cron_cn_nightly_pit_event_build_20260621_20260622_194630.log`.
+- Ran:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_cron_update.py --job cn_evening_full --end-date 20260621 --force-run`
+  - Result: `status=ok`, resolved trade-date window `20260519-20260618`.
+  - Log: `logs/tushare_cron_cn_evening_full_20260618_20260622_195604.log`.
+  - This refreshed reference, daily, macro, global, event-flow, board-trading,
+    intraday, share-float, text-evidence, and fundamental raw domains.
+- Because the evening update changed raw fundamental data, reran:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_cron_update.py --job cn_nightly_pit_event_build --end-date 20260621 --force-run`
+  - Result: `status=ok`.
+  - Log: `logs/tushare_cron_cn_nightly_pit_event_build_20260621_20260622_223725.log`.
+- Reran:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_cron_update.py --job cn_nightly_full_audit --end-date 20260621 --force-run`
+  - Result: `status=ok`.
+  - Log: `logs/tushare_cron_cn_nightly_full_audit_20260621_20260622_224404.log`.
+
+Final status:
+- `cn_evening_full`: ok, `20260519-20260618`.
+- `cn_preopen_margin_backfill_0905`: ok, `20260618-20260618`.
+- `cn_preopen_event_flow_audit_0920`: ok, `20200101-20260618`.
+- `cn_nightly_full_audit`: ok, `20200101-20260621`.
+- `cn_nightly_pit_event_build`: ok, command window `20260201-20260621`
+  internally, cron state target `20260221-20260621`.
+- `base_research_status.json`: warning, errors=0.
+- `macro_context_status.json`: warning, errors=0.
+- `intraday_minutes_status.json`: ok, errors=0.
+- `event_flow_status.json`: warning, errors=0.
+- `board_trading_status.json`: warning, errors=0.
+- `text_evidence_status.json`: warning, errors=0.
+- `fundamental_events_status.json`: warning, errors=0.
+- No TuShare cron/update/audit process remained running; `.runtime/tushare/locks`
+  was empty.
+
+Validation:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest`
+  passed, 59 tests.
+- Dry-run checks confirmed `cn_preopen_margin_backfill_0905 --end-date
+  20260621` resolves to `20260618`, and `cn_nightly_full_audit` keeps natural
+  text windows while using `20260618` for event-flow.
+- `crontab -l` contains `cn_nightly_pit_event_build` and does not contain
+  `cn_nightly_feature_build`.
+- Living-data-doc scan no longer finds fixed operational result wording; only
+  example dates remain in living docs.
+- `git diff --check` passed.
+
+## 2026-06-22 Decouple trading strategies from the Broker into Agent ctx functions
+
+Task: remove the Broker's built-in strategy vocabulary so trading strategies live
+entirely in the Agent layer; the Broker exposes only fundamental primitives and
+the Environment replays minute-by-minute, calling each mapped stock's strategy
+function. Branch `refactor/decouple-broker-strategies` off `a662b77` (work kept
+as uncommitted working-tree changes per the user; not committed).
+
+Design (confirmed with user): strategy functions take a single `ctx` object
+(`ctx.broker`, `ctx.stock`, `ctx.cur_price/cur_time/cur_date`, `ctx.params`,
+`ctx.nl`). `main.py` returns `trade_intents` mapping each stock to one function
+name, e.g. `{"code": "600000.SH", "trade_strategy": "t", "amount": 2000}`.
+
+Key changes:
+- `src/hl_trader/environment/broker.py`: `SimBroker` now exposes amount-based
+  partial primitives via `execute(ts_code, action, ...)` (+`buy/sell/short/
+  cover/close` wrappers) with weighted-average cost, per-position `locked_today`
+  T+1 sellable tracking (`_advance_date` releases prior-day shares), runtime
+  `max_total_holdings` (`max_holdings_reached`), single-name weight cap clamp,
+  per-code `trade_ledger`/`trades_for()`, and `position_reduced`/`position_closed`
+  PnL events. Removed the two-phase submit/fill order path.
+- `src/hl_trader/environment/backtest_engine.py`: removed built-in strategy
+  names and trigger helpers; unified minute/daily replay into a single
+  minute-canonical loop (daily-synthesized 09:30/15:00 fallback) that calls the
+  strategy function for every due intent each bar; rewrote `_STRATEGY_POLICY_
+  DRIVER` to build the `ctx` object (broker/stock proxies with optimistic
+  intra-bar view); simplified `validate_trade_intents` (unique codes, resolvable
+  function name, params merge, date checks); renamed `custom_trade_strategy_
+  names` → `strategy_function_names`; `compute_return_stats` sums partial + full
+  exits and adds `max_holdings_reject_count`.
+- `src/hl_trader/environment/tools/backtest.py`: always runs through the policy
+  runner; dropped the static side/gross/`_short_unavailable_intent_count`
+  checks (now runtime); summary uses `trade_strategies`.
+- `src/hl_trader/environment/executor.py`: Docker `popen` now passes `-i` so the
+  persistent stdin-based policy runner works in-container (previously masked
+  because built-in strategies bypassed the runner).
+- Template `configs/agent_output_template/{trading.py,main.py,README.md}`,
+  `src/hl_trader/agent/prompts.py`, and `configs/prompts/PROMPTS.md` rewritten to
+  the `ctx` contract. Living docs updated: `docs/environment_design.md` §6.1/§7,
+  `docs/agent_design.md` §5.2/§5.3.
+- Tests rewritten: `tests/unit/test_broker_engine.py` (primitive accounting,
+  T+1 partial clamp, max-holdings, single-name cap, `trades_for`, ctx-replay via
+  a fake policy), `tests/unit/test_tools_flow.py`, `tests/unit/fixtures_sandbox.py`.
+
+Resource checks: system memory ~404Gi available before and after (CPU-only unit
+tests; no GPU workload).
+
+Validation (env `~/miniconda3/envs/quant`):
+- `python -m unittest tests.unit.test_broker_engine tests.unit.test_artifacts
+  tests.unit.test_tools_flow tests.unit.test_pipeline_e2e` → 66 tests OK
+  (includes the Dockerized fold e2e, which exercises the in-container ctx policy
+  runner).
+- `python -m unittest discover -s tests` → 208 tests OK.
+- `python scripts/dev/export_prompts.py` regenerated `configs/prompts/PROMPTS.md`.
+- `git diff --check` passed; no tracked caches/`.pyc`.
+
+## 2026-06-22 - Strategy template wording cleanup
+
+Task: follow up on the Broker/Agent strategy decoupling review by reducing the
+appearance of built-in strategy names and making the documented T-strategy
+example safe when no prior trade exists.
+
+Changes:
+- Renamed optional template strategy examples in
+  `configs/agent_output_template/trading.py` to `example_*` names and documented
+  that they are ordinary Agent-owned code, not Broker or Environment keywords.
+- Updated `configs/agent_output_template/README.md`,
+  `docs/agent_design.md`, and `docs/environment_design.md` to state that
+  examples are editable samples and not built-ins.
+- Updated the sample T strategy to guard empty `ctx.stock.trades` by falling
+  back to the current bar price.
+- Adjusted affected unit-test fixtures to use `example_build_once` and
+  `example_swing_t`.
+
+Validation:
+- Resource checks before tests showed about 405 GiB available RAM; GPU load was
+  unrelated to these CPU-only tests.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine tests.unit.test_tools_flow tests.unit.test_artifacts`
+  passed, 53 tests.
+
+## 2026-06-22 - Remove retired feature fundamental events directory
+
+Task: delete the retired `data/features/fundamental_events` local data product
+after the current PIT event layer moved to `data/pit/fundamental_events`.
+
+Actions:
+- Confirmed real repository path with `pwd -P`: `/Data/lzp/MacroQuant`.
+- Confirmed `data/features/fundamental_events` was an old 598M generated data
+  product and current configuration/code use `data/pit/fundamental_events`.
+- Deleted `data/features/fundamental_events`.
+- Removed the now-empty `data/features/` parent directory.
+- Confirmed `data/pit/fundamental_events` remains present.
+
+Validation:
+- `test ! -e data/features/fundamental_events` returned `removed`.
+- `data/pit/fundamental_events` remains present at about 600M.
+
+## 2026-06-23 - Rename Agent formal output mount
+
+Task: rename the sandbox-visible Agent formal strategy output path from
+`/mnt/agent/agent_output/` to `/mnt/agent/output/` while keeping the existing
+internal strategy-artifact APIs stable.
+
+Actions:
+- Confirmed real repository path with `pwd -P`: `/Data/lzp/MacroQuant`.
+- Changed `SandboxPaths.agent_output` to resolve to `agent/output`, so Docker
+  path mapping exposes the formal strategy artifact as `/mnt/agent/output`.
+- Changed `AGENT_TOP_LEVEL` to collect `workspace/` and `output/` from
+  `/mnt/agent/`.
+- Updated `MQ_AGENT_OUTPUT_DIR` default to `/mnt/agent/output`.
+- Updated structured search to expose root `output`; removed the old
+  `agent_output` public search root.
+- Kept internal Python method/property names such as `paths.agent_output` and
+  `lock_agent_output()` to avoid unrelated API churn.
+- Updated current living docs, generated prompt snapshot, prompt source, and
+  template README to use `output/`.
+- Regenerated `configs/prompts/PROMPTS.md` with
+  `scripts/dev/export_prompts.py`.
+- Added a unit-test assertion that structured search can read `root="output"`.
+
+Validation:
+- Resource checks before tests showed about 409 GiB available RAM; GPU was not
+  used by these CPU-only tests.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_tools_flow tests.unit.test_pipeline_e2e tests.unit.test_step_tree`
+  passed, 60 tests.
+- `git diff --check` passed.
+- Cache scan under `src`, `tests`, and `scripts` returned empty after cleanup.
+
+## 2026-06-23 - Delegate concentration limits to Agent strategy
+
+Task: make maximum holdings and single-name weight limits Agent strategy
+decisions by default rather than mandatory Broker defaults.
+
+Actions:
+- Changed `BrokerProfile.max_total_holdings` and
+  `BrokerProfile.max_single_name_weight` defaults to `None`.
+- Bumped the default Broker profile id to `citic_default_v3` because the
+  default concentration behavior changed.
+- Broker now enforces those two concentration limits only when the profile
+  explicitly sets them.
+- Removed the unused `max_single_name_weight` parameter from
+  `validate_trade_intents()`; trade-intent validation remains structural.
+- Removed the top-level `max_total_holdings` run-manifest field from Pipeline
+  records; optional concentration limits remain inside `broker_profile` when
+  explicitly configured.
+- Updated `docs/environment_design.md`, `docs/agent_design.md`, Agent prompt
+  source, generated `configs/prompts/PROMPTS.md`, and Agent output template
+  docs to state that concentration is controlled by Agent logic by default.
+- Kept tests proving explicit Broker concentration limits still work when set.
+
+Validation:
+- Resource checks before tests showed about 410 GiB available RAM; GPU was not
+  used by these CPU-only tests.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine tests.unit.test_tools_flow tests.unit.test_pipeline_e2e`
+  passed, 61 tests.
+- `git diff --check` passed.
+- Cache scan under `src`, `tests`, and `scripts` returned empty.
+
+## 2026-06-23 - Refactor NL service into Sub Agent tool
+
+Task: replace fixed-schema NL scoring with an Agent-callable NL Sub Agent that
+can use PIT text retrieval and return free-form results for strategy code to
+parse.
+
+Actions:
+- Replaced `NLScoringEngine` with `NLSubAgentEngine`. The host now starts one
+  bounded NL Sub Agent task for each `mq_tools.nl()` request.
+- Preserved `TextRetriever` grep/PIT retrieval semantics and wrapped it as the
+  Sub Agent-only `text_retrieve` tool. Tool calls use a small JSON protocol;
+  final Sub Agent answers are not schema-limited.
+- Changed sandbox `mq_tools.nl()` / `ctx.nl` to return a result dict with
+  `status`, `content`, `tool_calls`, `evidence`, `error`, and related metadata.
+  Agent code must parse any score, label, or rule signal itself.
+- Removed fixed `nl_score` validation and neutral-score failure handling.
+  Default NL failure behavior is now `return_error_with_audit`.
+- Updated BacktestTool logs so `nl_requests.jsonl` records Sub Agent results,
+  `search_requests.jsonl` records text retrieval tool calls, `evidence.jsonl`
+  records returned PIT evidence, and `nl_llm_calls.jsonl` records provider
+  calls.
+- Updated Agent prompts, exported `configs/prompts/PROMPTS.md`, Agent output
+  template docs/code, `docs/agent_design.md`, and `docs/environment_design.md`.
+
+Validation:
+- Resource checks before validation showed about 410 GiB available RAM; GPU was
+  not used by these CPU-only tests.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_nl_scoring tests.unit.test_tools_flow tests.unit.test_pipeline_e2e`
+  passed, 50 tests.
+- `git diff --check` passed.
+- Cache scan under `src`, `tests`, and `scripts` returned empty.
+- Post-validation resource check showed about 411 GiB available RAM; GPU load
+  was from unrelated existing processes.
+
+## 2026-06-23 - Simplify frozen strategy artifact manifest
+
+Task: reduce the strategy artifact `manifest.json` to fields that belong to
+the frozen artifact itself, and keep Step/run audit references in the Fold
+ledger.
+
+Actions:
+- Updated `ExperimentPipeline._freeze()` so artifact manifests now use
+  `source_fold_id` and `source_step_id` instead of `created_at_fold` and
+  `created_at_step`.
+- Removed the redundant `frozen` field from artifact manifests. The artifact
+  directory under `strategy_artifacts/` and the immutable hash check define the
+  frozen boundary.
+- Kept `validation_result_ref`, `run_manifest_ref`, `modification_check_ref`,
+  and `modification_delta_summary` in Fold ledger Step records rather than in
+  artifact manifests.
+- Updated `docs/pipeline_design.md` section 5.2 to describe artifact manifest
+  as identity, lineage, source run/fold/step, hash, and creation time only.
+
+Validation:
+- Resource checks before validation showed about 410 GiB available RAM; GPU was
+  not used by these CPU-only tests.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e tests.unit.test_artifacts tests.unit.test_step_tree`
+  passed, 23 tests.
+- `git diff --check` passed.
+- Cache scan under `src`, `tests`, and `scripts` returned empty.
+- Post-validation resource check showed about 410 GiB available RAM; GPU load
+  was from unrelated existing processes.
+
+## 2026-06-23 - Step tree visibility and meta-learning full records
+
+Task: three small Step-tree visibility improvements plus two meta-learning input
+fixes, scoped deliberately small (no new memory-store module). Approved scope:
+(1) surface the tree rendering, optionally record failed attempts, reuse the
+attachment field; (2) inject full raw development records into the meta-learning
+Agent; (3) concatenate all prior-epoch meta-learning logs.
+
+Step tree (`src/hl_trader/environment/step_tree.py`, `tools/backtest.py`,
+`pipelines/config.py`, `pipelines/experiment.py`):
+- `StepTree.save()` now also writes `steps/tree.txt` (the existing but unused
+  `render_ascii()` rendering) on every mutation, so the Fold Agent reads a
+  digest instead of parsing `tree.json`. `render_ascii()` marks dead ends with
+  `[failed]`.
+- Added `StepTree.record_failed_attempt(...)`: a lightweight dead-end node with
+  no `output/` snapshot that intentionally does NOT move `current_node_id`.
+  `position_for_hash()` now skips non-`complete_validation` nodes so a failed
+  attempt can never be resolved as a parent. `BacktestTool._record_failure()`
+  records one for `mode=="valid"` failures, gated by the new
+  `ExperimentConfig.record_failed_attempts` flag (default True) threaded into
+  the fold run manifest.
+- `BacktestTool._execute()` now passes `attachments={detailed_return.json,
+  strategy_metadata.json}` to `record_step`, so each validated node carries its
+  own return/metadata digest.
+
+Meta-learning inputs (`ExperimentPipeline.run_meta_learning`):
+- Fixed the dead `meta_learning_memory.jsonl` wiring (it previously read this
+  epoch's own not-yet-written `agent_trace.jsonl`, so it was always empty). New
+  helper `_prior_meta_learning_logs(epoch_id)` concatenates the `agent_trace`
+  logs of every earlier epoch's meta-learning session, ordered by epoch.
+- Added `experiment_ledger_full.jsonl` to `workspace/`: every raw `fold` /
+  `meta_learning` ledger record, with `heldout` excluded. Recorded the new path
+  under the run manifest `development_inputs`.
+
+Prompts/docs:
+- `agent/prompts.py`: STEP_TREE_SECTION documents `tree.txt`, `[failed]` nodes
+  and per-node attachments; META_LEARNING_INSTRUCTION documents the raw ledger
+  and concatenated prior-epoch memory. Regenerated `configs/prompts/PROMPTS.md`
+  via `scripts/dev/export_prompts.py` (the snapshot was stale relative to recent
+  refactors, so the regen also caught it up; no commits exist yet, so this is
+  purely working-tree alignment).
+- Updated `docs/agent_design.md` (steps tree description) and
+  `docs/pipeline_design.md` 6.1 (meta-learning inputs).
+
+Tests:
+- `tests/unit/test_step_tree.py`: failed-attempt dead-end semantics
+  (position/parent/no-snapshot/hash-skip) and the persisted `tree.txt` rendering
+  with `[failed]`; extended the phase-prompt assertion.
+- `tests/unit/test_pipeline_e2e.py`: a 2-epoch run asserting epoch 1 has empty
+  ledger/memory inputs, epoch 2 sees epoch 1's raw fold+meta records (no
+  held-out) and its concatenated meta-learning log.
+
+Validation:
+- Pre/post resource checks showed about 420 GiB available RAM; CPU-only tests.
+- `/home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests`
+  passed, 204 tests.
+- `git diff --check` clean; cache/artifact leak scan empty.
+
+## 2026-06-23 - Living docs consistency audit
+
+Task: audit the five living docs (`data_documentation`, `agent_design`,
+`environment_design`, `pipeline_design`, `QMT_documentation`) for consistency
+with the current code, analyze process-logic rationality, and trim redundant or
+obsolete content while keeping them concise yet comprehensive.
+
+Consistency checks (all matched code/config):
+- Tool action names and `allowed_modes` (runner + tool specs): fold tools
+  shell/grep/glob/modification_check/backtest/finish_fold/note; meta-learning
+  adds web_search/done, no backtest/finish_fold.
+- Snapshot files (`snapshot.py` SNAPSHOT_FILES) and replay-slot subset.
+- Broker primitives and profile (`broker.py`: buy/sell/short/cover/close +
+  get_account/get_positions/query_orders/trades_for; default
+  `proxy_margin_secs`, no forced max-holdings/single-name caps).
+- 09:30 SZ auction factors 0.76 (`00*`) / 0.58 (`30*`) (`features/auction.py`).
+- NL classes `TextRetriever` / `NLSubAgentEngine` / `build_company_contexts`
+  and the `status/content/tool_calls/evidence/error` result dict.
+- 11 cron jobs (`configs/tushare_update_schedule.json` + `ops/cron`), CLI
+  subcommands (`download.py` / `audit.py`), the 6 raw status-file names
+  (`common.py`) + `fundamental_events_status.json`, code-entry files, and the
+  `output/` template file set.
+- Stale-token scan and obsolete/migration/version-label scan over the five docs
+  both came back empty — the living docs had been kept current (unlike the
+  `PROMPTS.md` snapshot fixed earlier).
+
+Two fixes applied:
+- `agent_design.md` 5.3: removed the `ctx` interface bullet list that duplicated
+  `environment_design.md` 7.2 almost verbatim; replaced with a one-line summary
+  pointing to environment_design chapter 7 (the owner of the Broker/runtime
+  contract). Removes cross-doc redundancy.
+- `pipeline_design.md` 8.3: the fold-record example listed
+  `parent_strategy_artifact_hash`, but `ExperimentPipeline` writes only
+  `parent_strategy_artifact_id` into the fold ledger record (the parent hash
+  lives in the run manifest, reachable via `run_manifest_ref`). Removed that
+  field and corrected `snapshot_ids` keys to the actual
+  `valid_decision_input` / `test_decision_input` / `valid_replay` /
+  `test_replay`.
+
+Process-logic review: download/update/audit gating, Fold/Epoch/Held-out
+orchestration, freeze-before-test, roll-forward (test quarter -> next validation
+quarter), PIT visibility, and the QMT standby workflow are all rational and
+internally consistent. Deliberately retained: the data-doc 2/5.2 visibility
+quick-reference and the agent/environment mount-path tables — overlapping by
+design (different readers/uses), not redundant cruft.
+
+Validation: `git diff --check` clean on `docs/`. Documentation-only pass; no
+code or tests changed.
+
+## 2026-06-23 - Full audit follow-up and configurable Fold period
+
+Task: continue the repository-wide audit follow-up, close the SubAgent audit,
+fix remaining clarity/contract issues, and ensure each Fold decision period can
+be configured at day/week/month/quarter/year cadence.
+
+Repository/path checks:
+- Logical cwd: `/home/coder/projects/adm-cube-l20-8884/macroquant-1741651ef8a3`
+- Physical cwd confirmed by `pwd -P` / `realpath .`: `/Data/lzp/MacroQuant`
+- Worktree was already dirty from the broader backtest/data/docs refactor; only
+  related changes were edited.
+
+SubAgent result:
+- Audit SubAgent completed and was closed.
+- Findings: missing `train_snapshot` alias/hash in run manifest; Step summary
+  docs overpromised timeout/no-update status details; legacy candidate/score
+  fields remained in code paths; experiment CLI defaults were cwd-sensitive;
+  `external_references/` is intentional external reference material and should
+  remain outside production code paths.
+
+Implementation:
+- `folds.py`: generalized schedule generation from quarter-only helpers to
+  `period_range`, `period_bounds`, `previous_period`, `heldout_periods`, and
+  `build_fold_schedule(..., period=...)`. Supported units are `day`, `week`,
+  `month`, `quarter`, and `year`; quarter helpers remain for compatibility.
+- `ExperimentConfig`: main config fields are now `first_test_period`,
+  `last_test_period`, `heldout_first_period`, and `heldout_last_period`, with
+  legacy `*_quarter` InitVar aliases guarded against conflicting values.
+- `ExperimentPipeline`: passes `fold_period` through development and held-out
+  scheduling; run manifests record `fold_period`; `/mnt/snapshots/train` is
+  recorded as `train_snapshot` with `alias_of=valid_decision_input` and the same
+  snapshot hash.
+- `run_experiment.py`: default paths now resolve from the repository root, not
+  the caller's cwd; CLI adds generic `--fold-period`, `--first-test-period`,
+  `--last-test-period`, `--heldout-first-period`, and
+  `--heldout-last-period`, while legacy quarter flags remain accepted.
+- Removed dead legacy configuration/reporting fields:
+  `long_score_threshold`, `short_score_threshold`, `max_candidates`, and
+  `candidates_truncated`. BrokerProfile now only records active replay/Broker
+  constraints and costs.
+- Docs updated: `agent_design.md`, `environment_design.md`, and
+  `pipeline_design.md` describe the train snapshot alias, configurable Fold
+  cadence, and actual Step summary fields. Old “测试季度/历史季度” wording was
+  replaced with period-neutral language where relevant.
+
+Validation:
+- Resource checks before tests: GPUs already occupied by existing workloads; no
+  new GPU workload was started. System memory about 421 GiB available.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e tests.unit.test_broker_engine tests.unit.test_tools_flow`
+  passed, 66 tests.
+- CLI/schedule smoke checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/run_experiment.py --help`
+  passed; the Fold period boundary unit test passed.
+- Full test suite:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests`
+  passed, 210 tests.
+- Post-test resource check: about 422 GiB available RAM; no new GPU workload.
+- `git diff --check` clean.
+- Cache scan empty after removing test-created `__pycache__` directories.
+
+## 2026-06-24 - Runner context compact layer
+
+Task: reference `external_references/claude-code-main` and implement a compact
+layer so long Agent sessions can use DeepSeek V4 Flash to compress context
+before expensive main-model calls.
+
+Repository/path checks:
+- Logical cwd:
+  `/home/coder/projects/adm-cube-l20-8884/macroquant-1741651ef8a3`
+- Physical cwd confirmed by `pwd -P`: `/Data/lzp/MacroQuant`
+- Local Python: `/home/lzp/miniconda3/envs/quant/bin/python`
+
+Reference inspection:
+- Reviewed Claude Code context/token files under
+  `external_references/claude-code-main/src/`, especially
+  `services/compact/autoCompact.ts`, `services/compact/compact.ts`,
+  `services/compact/prompt.ts`, `services/compact/microCompact.ts`,
+  `utils/tokens.ts`, and `utils/analyzeContext.ts`.
+- Adopted the relevant design idea rather than the full implementation:
+  measure context by token estimate, reserve output/main-call budget, keep
+  recent raw messages, use failure circuit breakers, and record compact
+  boundaries/events.
+
+Implementation:
+- Added `src/hl_trader/agent/compact.py`:
+  - `ContextCompactionConfig` with token threshold, minimum messages,
+    preserved recent messages, max summary tokens, max failures, max calls,
+    timeout and reserved remaining time.
+  - `ContextCompactor` that calls a dedicated `LLMProxy` in JSON mode, asks
+    for a structured continuation state, replaces older messages with
+    `context_compaction`, and returns a trace event payload.
+  - Conservative rough token estimation and compact-message helpers.
+  - Error summary redaction for bearer/authorization-style tokens before
+    trace emission.
+- Updated `AgentSessionRunner`:
+  - Optional `compact_proxy`.
+  - Runs compaction before main LLM calls when the estimated context exceeds
+    threshold.
+  - Recomputes remaining deadline after compaction and does not start a main
+    call if the deadline has expired.
+  - Keeps the latest LLM compact summary when deterministic message-count
+    trimming later fires.
+  - Session summary now reports `context_compactions` and
+    `context_compaction_calls`.
+- Updated `scripts/experiments/run_experiment.py`:
+  - Defaults context compact to `deepseek-v4-flash` with thinking disabled.
+  - Added CLI flags:
+    `--compact-model`, `--disable-context-compact`,
+    `--compact-token-threshold`, `--compact-keep-recent-messages`,
+    `--compact-max-tokens`, and `--compact-max-calls`.
+- Updated `ScriptedLLM` test proxy to record `max_tokens` for compact tests.
+
+SubAgent audit:
+- Spawned best-available read-only SubAgents for iterative code audit and
+  closed each one after completion.
+- First-round findings:
+  - High: stale remaining time after compact could allow a main LLM call after
+    the Fold deadline.
+  - Medium: compact calls needed a separate cap and explicit accounting.
+  - Medium: failure/circuit paths needed test coverage.
+  - Low: raw provider exception text should be defensively redacted.
+- First-round fixes:
+  - Compact timeout now uses only `remaining_seconds - min_remaining_seconds`;
+    Runner recomputes deadline immediately after compact.
+  - `max_calls` limits compact provider calls per session; session summary
+    exposes attempted compact calls separately from main `llm_calls`.
+  - Added tests for deadline recomputation, time reservation, failure trace,
+    failure circuit, and preserving LLM compact summaries during deterministic
+    trim.
+  - Added bearer/authorization redaction in compact error summaries.
+- Second-round findings and fixes:
+  - `max_calls=0` previously disabled the limit; it now means zero compact
+    provider calls, and a direct regression test covers this.
+  - Main LLM provider error trace now uses the same bearer/authorization
+    redaction as compact errors, with a regression test.
+- Third-round audit found no blocking or obvious remaining compact-layer
+  issues.
+
+Documentation:
+- `docs/agent_design.md`: compact is an internal Runner continuation
+  mechanism, not a new data permission or new conversation boundary.
+- `docs/environment_design.md`: Runner responsibility, LLM boundary, trace
+  fields and deadline/failure behavior now include context compact.
+- `docs/pipeline_design.md`: `max_llm_calls` is the main Agent action budget;
+  compact has an independent low-cost model, call cap and trace event while
+  sharing the same Fold deadline.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: about 221 GiB available RAM.
+  - `nvidia-smi`: GPUs were already occupied by external Python workloads; no
+    new GPU workload was started.
+- Targeted Runner tests:
+  `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.AgentSessionRunnerTest -v`
+  passed, 12 tests.
+- Syntax checks:
+  `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/compact.py src/hl_trader/agent/runner.py src/hl_trader/agent/__init__.py src/hl_trader/environment/llm/proxy.py scripts/experiments/run_experiment.py tests/unit/test_tools_flow.py`
+  passed.
+- CLI smoke:
+  `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/run_experiment.py --help`
+  passed and shows compact flags.
+- Pipeline regression:
+  `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e -v`
+  passed, 16 tests.
+- `git diff --check` passed.
+- Commit-surface cache scan excluding `.runtime`, `data`, `results`, `wandb`,
+  `external_references`, and `experiments` returned empty.
+- Post-test resources:
+  - `free -h`: about 221 GiB available RAM.
+  - `nvidia-smi`: GPU load remained external to this run.
+
+## 2026-06-23 - Configurable snapshot preparation windows and final audits
+
+Task: make the data preparation window configurable from each Experiment Config,
+then run one code SubAgent audit and one documentation SubAgent audit, fixing
+the issues they found.
+
+Repository/path checks:
+- Logical cwd:
+  `/home/coder/projects/adm-cube-l20-8884/macroquant-1741651ef8a3`
+- Physical cwd confirmed by `pwd -P`: `/Data/lzp/MacroQuant`
+- Local Python: `/home/lzp/miniconda3/envs/quant/bin/python`
+
+Implementation:
+- `SnapshotConfig` now carries the experiment-level preparation policy:
+  `window_months`, optional per-domain months for daily/fundamentals/events/
+  macro/text, and `intraday_trade_days`.
+- `build_decision_snapshot` computes and applies per-domain PIT windows. Daily,
+  fundamentals, events, macro, text, and intraday inputs no longer share a
+  hard-coded default window unless the config intentionally leaves them to the
+  unified fallback.
+- Snapshot manifests record the effective `window_config` and `domain_windows`;
+  run manifests record `snapshot_config` for both Fold and held-out runs.
+- `ExperimentConfig` owns `snapshot_config`; `run_experiment.py` exposes
+  `--window-months`, per-domain window flags, and `--intraday-trade-days`.
+
+SubAgent audits:
+- Code audit SubAgent completed and was closed.
+- Documentation audit SubAgent completed and was closed.
+- Follow-up fixes:
+  - Local shell path guard blocks direct reads of host
+    `runtime/snapshot_views`; Agent-visible snapshot access must go through the
+    mounted `/mnt/snapshot` contract.
+  - Day-level Fold schedules use SSE trading days, including previous trading
+    day validation periods.
+  - Non-quarter CLI runs must provide generic period arguments explicitly,
+    avoiding accidental inheritance of quarter defaults.
+  - Required fundamental datasets fail fast per configured dataset, not only
+    when all datasets are absent.
+  - The strategy runtime proxy updates its optimistic same-bar position view
+    for weight-based orders as well as share-based orders.
+  - Prompt/docs wording now matches code: Step tree is visible in the rendered
+    prompt snapshot, `amount` is 100 shares / 1 lot, Broker API docs separate
+    strategy `ctx.broker` from host-side `SimBroker`, and data documentation
+    uses stable ledger rules rather than migration notes.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: about 377 GiB available RAM.
+  - `nvidia-smi`: GPUs already occupied by existing Python workloads; no new
+    GPU workload was started.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  wrote `configs/prompts/PROMPTS.md`.
+- Targeted regression suite:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_snapshot_builder tests.unit.test_pipeline_e2e tests.unit.test_tools_flow tests.unit.test_sandbox_isolation tests.unit.test_broker_engine`
+  passed, 96 tests.
+- Full suite:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests`
+  passed, 214 tests.
+- CLI smoke checks:
+  `run_experiment.py --help` passed; `--fold-period month` without explicit
+  generic periods exits with the expected parser error.
+- Post-test resources:
+  - `free -h`: about 352 GiB available RAM.
+  - `nvidia-smi`: existing GPU workloads remained external to this run.
+- `git diff --check` clean.
+- Cache scan for `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`,
+  `*.pyc`, and `*.pyo` returned empty.
+
+## 2026-06-23 - One-Epoch smoke run with configurable data windows
+
+Task: configure and run one Epoch to inspect the new configurable data-window
+flow.
+
+Experiment configuration:
+- Fold cadence: `month`
+- Development Fold: `2022-01`
+- Held-out: `2022-02`
+- Epochs: `1`
+- Snapshot windows:
+  - daily: 6 months
+  - fundamentals: 12 months
+  - events: 6 months
+  - macro: 24 months
+  - text: 3 months
+  - intraday: 2 recent trading days
+- Docker sandbox used for the successful controlled run.
+
+Real-LLM attempts:
+- `epoch_smoke_20260623_0315`: local-dev run exposed that local executor does
+  not provide real `/mnt/...` mounts; this should remain a development-only
+  mode.
+- `epoch_smoke_20260623_0325`: Docker run reached validation backtest but the
+  template produced no candidates/trades. With default `min_return=0.0`, the
+  strict acceptance rule rejected total_return `0.0`.
+- `epoch_smoke_20260623_0341` and `epoch_smoke_20260623_0400`: `deepseek-v4-flash`
+  repeatedly emitted the same shell heredoc in the Fold session until
+  `deadline_timeout`; no successful complete validation backtest was produced.
+
+Fixes made during the run:
+- `sandbox_shell_tool` no longer treats fd-duplication redirection like
+  `2>&1` as a write-to-file redirect. This preserves rejection of real write
+  redirections while allowing common read-only diagnostic commands such as
+  `ls /mnt/snapshot 2>&1`.
+- `run_experiment.py` now exposes acceptance thresholds:
+  `--min-return`, `--min-sharpe`, `--max-drawdown`, and
+  `--allow-incomplete-validation`. Defaults are unchanged.
+- `pipeline_design.md` documents that CLI threshold overrides are for explicit
+  experiments/smoke runs; production should retain strict acceptance.
+
+Successful controlled run:
+- Experiment: `epoch_smoke_scripted_20260623_0419`
+- LLM: `ScriptedLLM` with actions `done`, `modification_check`, `backtest`,
+  `finish_fold`
+- Result: `{"status": "ok", "final_strategy_artifact":
+  "strategy_epoch_001_fold_202201", "heldout_runs": 1}`
+- Fold `fold_202201`:
+  - `fold_status`: `frozen`
+  - selected step: `step_001`
+  - validation: total_return `0.0`, sharpe `0.0`, max_drawdown `0.0`,
+    order_count `0`
+  - frozen test: total_return `0.0`, sharpe `0.0`, max_drawdown `0.0`,
+    order_count `0`
+- Held-out `heldout_202202`:
+  - total_return `0.0`, sharpe `0.0`, max_drawdown `0.0`, order_count `0`
+- Interpretation: the configurable snapshot/Pipeline/Broker/freeze/held-out
+  path runs end-to-end. The starting template intentionally produces no
+  candidates or trades, so this is a process smoke result, not a profitable
+  strategy result.
+
+Validation:
+- Resource checks were run before and after long runs. Available RAM stayed
+  safely above 300 GiB; GPU usage shown by `nvidia-smi` came from existing
+  external Python workloads, and no new GPU workload was started.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ShellToolTest tests.unit.test_pipeline_e2e tests.unit.test_sandbox_isolation`
+  passed, 38 tests.
+- `git diff --check` clean.
+- Commit-surface cache scan excluding `.runtime`, `data`, `results`, `wandb`,
+  and `external_references` returned empty.
+
+## 2026-06-24 - Model artifacts contract
+
+Task: add a separate `model_artifacts` design so Agent code can persist model
+parameters outside `output/`, while still allowing training logic to live in
+`main.py` and rerun during backtests.
+
+Implementation:
+- Added `SandboxPaths.model_artifacts` at `/mnt/agent/model_artifacts` and
+  `SandboxPaths.parent_model_artifacts` at
+  `/mnt/artifacts/parent_model_artifacts`.
+- `LocalSandbox.prepare_layout()` creates the new directories; install/fallback
+  paths copy parent model artifacts into both the trusted parent baseline and
+  the Agent-writable working directory; lock/unlock applies to both `output/`
+  and `model_artifacts/`.
+- `artifacts.py` now has separate model-artifact validation and hashing:
+  flat regular files only, no hidden files, no symlinks, no runtime caches, no
+  directories, no unsupported suffixes, plus independent file/byte limits.
+  `output/` remains flat text/code and still rejects model weights.
+- `modification_check_tool` records `artifact_hash`, `model_artifact_hash`,
+  `combined_artifact_hash`, strategy delta, and model delta.
+- `backtest_tool` exposes `MQ_MODEL_ARTIFACTS_DIR`,
+  `context["model_artifacts_dir"]`, `MQ_WORKSPACE_DIR`, and
+  `context["workspace_dir"]`; strategy-policy `ctx` exposes
+  `ctx.model_artifacts_dir` and `ctx.workspace_dir`. Backtest summaries include
+  model file count, model bytes, and strategy/model/combined hashes.
+- `finish_fold_tool`, Pipeline acceptance, fallback, frozen eval, held-out,
+  and freeze manifests now require strategy hash and model hash consistency.
+- Frozen strategy code remains in
+  `strategy_artifacts/<epoch>/<strategy_artifact_id>/`; frozen model parameters
+  are stored separately as
+  `strategy_artifacts/<epoch>/<strategy_artifact_id>.model_artifacts/`.
+- StepTree stores `model_artifact_hash`, `combined_artifact_hash`, and copies
+  successful Step model artifacts under each node's `model_artifacts/` subdir.
+- Structured search and shell guards allow the `model_artifacts` root while
+  preserving read-only/test-data restrictions.
+
+Documentation and prompts:
+- Updated `docs/agent_design.md`, `docs/environment_design.md`, and
+  `docs/pipeline_design.md`.
+- Updated `src/hl_trader/agent/prompts.py` and regenerated
+  `configs/prompts/PROMPTS.md`.
+- Updated `configs/agent_output_template/README.md` and `main.py` to describe
+  stored-parameter and retrain-each-backtest modes.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: about 222 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by existing external workloads; this work
+    started no GPU job.
+- Targeted regression suite:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_artifacts tests.unit.test_tools_flow tests.unit.test_pipeline_e2e tests.unit.test_step_tree tests.unit.test_sandbox_isolation`
+  passed, 87 tests.
+- Finish-fold mutation guard:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow`
+  passed, 37 tests after adding the contract-check artifact mutation rejection.
+- Full suite:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests`
+  passed, 226 tests.
+- `git diff --check` clean.
+- Cache scan for `__pycache__` under `src`, `tests`, and
+  `configs/agent_output_template` returned empty.
+- Post-test resources:
+  - `free -h`: about 215 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Runtime env artifact and experiment parameter visibility
+
+Task: add Prompt-visible Python/package environment information and make the
+experiment parameters needed by Fold and Meta Learning Agents available through
+machine-readable run artifacts.
+
+Implementation:
+- Added `/mnt/artifacts/runtime_env.json` to the Sandbox artifact contract and
+  collection list. `LocalSandbox.prepare_layout()` writes a local Python probe;
+  `ExperimentPipeline._start_sandbox()` rewrites it as a Dockerfile-based
+  contract for real Docker runs.
+- `runtime_env.json` records:
+  - Python mode/version/executable source;
+  - key packages (`numpy`, `pandas`, `pyarrow`, `duckdb`, `scikit-learn`,
+    `statsmodels`, `torch`);
+  - `rg` availability;
+  - network and package-install policy;
+  - Sandbox resource spec for Docker runs.
+- Ordinary Fold run manifests now include
+  `runtime_env_ref=/mnt/artifacts/runtime_env.json`.
+- Meta-learning run manifests now include `runtime_env_ref` and
+  `experiment_parameters`, covering Fold period, development/held-out periods,
+  snapshot windows, acceptance rules, Broker profile, NL failure policy, Step
+  tree settings, deadline, max steps, finalization window, call timeout, and
+  Sandbox spec.
+- The formal CLI (`scripts/experiments/run_experiment.py`) writes
+  `agent_session_config` and a sanitized `llm_config_summary` into each run
+  manifest so context compact thresholds, max calls, model names, reasoning
+  effort, and timeouts are auditable without exposing API keys.
+- Fold and Meta Learning prompts now instruct Agents to read
+  `run_manifest.json` and `runtime_env.json` before coding or forming Taste.
+  The prompts explicitly say not to assume unlisted packages are installed and
+  not to install packages during a Fold.
+- Structured search roots now include `parent_models`, matching the documented
+  readable path table. Prompt exports were regenerated.
+- Updated `docs/agent_design.md`, `docs/environment_design.md`, and
+  `docs/pipeline_design.md` to describe the new environment and parameter
+  facts sources.
+
+Validation:
+- Pre-run resource checks:
+  - `free -h`: about 272 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by existing external workloads; this task
+    started no GPU work.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Syntax check:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/runtime.py src/hl_trader/environment/sandbox.py src/hl_trader/pipelines/experiment.py src/hl_trader/agent/prompts.py src/hl_trader/environment/tools/search.py scripts/experiments/run_experiment.py tests/unit/test_sandbox_isolation.py tests/unit/test_pipeline_e2e.py tests/unit/test_tools_flow.py tests/unit/test_step_tree.py`
+  passed.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e tests.unit.test_tools_flow tests.unit.test_step_tree -v`
+  passed, 87 tests.
+- CLI check:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/run_experiment.py --help`
+  passed.
+- `git diff --check` over the touched code/docs/tests/prompt files passed.
+- Cache scan initially found Python cache directories generated by the test
+  run; `src/`, `tests/`, and `scripts/` caches were removed, and the follow-up
+  cache scan returned empty.
+- Post-run resources:
+  - `free -h`: about 275 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Meta Learning directive interface and max effort defaults
+
+Task: ensure future Agent/NL calls use max reasoning effort by default and add
+an experiment-level interface for injecting a user-provided exploration
+direction into the Epoch-start meta-learning prompt.
+
+Implementation:
+- `scripts/experiments/run_experiment.py` defaults the main Agent and NL
+  `DeepSeekProxy.from_env()` calls to `thinking_enabled=True` and
+  `reasoning_effort=max`. The CLI keeps `--reasoning-effort` and
+  `--no-thinking` as explicit ablation/debug overrides. Compact remains
+  `thinking_enabled=False`, so it does not receive reasoning effort.
+- Added `ExperimentConfig.meta_learning_directive`.
+- `ExperimentPipeline.run_meta_learning()` writes
+  `meta_learning_directive` to the meta-learning run manifest and the
+  `meta_learning` ledger record.
+- `AgentSessionRunner` accepts `meta_learning_directive` and passes it to
+  `build_meta_learning_prompt()`.
+- `build_meta_learning_prompt(experiment_directive=...)` appends a dedicated
+  `# 实验级探索方向（用户注入）` section. The prompt tells the Agent to treat the
+  injected direction as a hypothesis to test or refine, not a verified result,
+  while preserving PIT, search, NL-risk and anti-overfit constraints.
+- CLI injection can use either `--meta-learning-directive "..."` or
+  `--meta-learning-directive-file path/to/directive.txt`; passing both is an
+  argument error.
+- `scripts/dev/export_prompts.py` now includes an audit example of this
+  injection section in `configs/prompts/PROMPTS.md`.
+- Updated `docs/agent_design.md`, `docs/environment_design.md`, and
+  `docs/pipeline_design.md`.
+
+Validation:
+- Real path confirmed: `/Data/lzp/MacroQuant`.
+- Resource check after tests:
+  - `free -h`: about 274 GiB available RAM.
+  - GPUs remained occupied by external workloads; no new GPU training job was
+    started.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Syntax:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/prompts.py src/hl_trader/agent/runner.py src/hl_trader/pipelines/config.py src/hl_trader/pipelines/experiment.py scripts/experiments/run_experiment.py scripts/dev/export_prompts.py tests/unit/test_sandbox_isolation.py tests/unit/test_pipeline_e2e.py tests/unit/test_llm_deepseek.py`
+  passed.
+- CLI:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/run_experiment.py --help`
+  passed and shows `--reasoning-effort`, `--no-thinking`,
+  `--meta-learning-directive`, and `--meta-learning-directive-file`.
+- Tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_llm_deepseek tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e`
+  passed, 58 tests.
+- Grep confirmed the injected prompt section in `PROMPTS.md`.
+- `git diff --check` clean for touched code, tests, docs, and prompt export.
+
+## 2026-06-24 - DeepSeek max reasoning and meta-learning rerun
+
+Task: set DeepSeek `reasoning_effort` to `max`, add a general prompt
+instruction encouraging deeper reasoning before decisions, then rerun one real
+Docker meta-learning Fold with the same audit configuration.
+
+Implementation:
+- Updated `src/hl_trader/environment/llm/proxy.py` so
+  `DeepSeekProxy.from_env()` defaults `reasoning_effort` to `max` whenever
+  `thinking_enabled=True`.
+- Kept compact calls unchanged: compact uses `thinking_enabled=False`, so
+  `reasoning_effort` is omitted.
+- Added prompt text to both Fold Agent and Meta Learning prompts requiring
+  reasoning over mechanism hypotheses, visible data, execution constraints,
+  falsification paths, and failure modes while keeping the final action/Taste
+  concise.
+- Regenerated `configs/prompts/PROMPTS.md`.
+- Updated `docs/agent_design.md` and `docs/environment_design.md`.
+- Added `test_proxy_defaults_thinking_reasoning_effort_to_max`.
+
+Validation before rerun:
+- Real path: `/Data/lzp/MacroQuant`.
+- Resource checks:
+  - `free -h`: about 274 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by existing external workloads; no local
+    model training was launched.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Syntax check:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/llm/proxy.py src/hl_trader/agent/prompts.py tests/unit/test_llm_deepseek.py`
+  passed.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_llm_deepseek tests.unit.test_sandbox_isolation`
+  passed, 38 tests.
+- Prompt grep confirmed `reasoning_effort=max` and the new deep-thinking text
+  in source docs and exported `PROMPTS.md`.
+
+Meta-learning rerun:
+- Experiment ID: `meta_learning_audit_20260624_171700`.
+- Invocation: direct `ExperimentPipeline.run_meta_learning()` call, so this
+  was meta-learning-only and did not run ordinary Fold replay or held-out.
+- Sandbox: real Docker, image `macroquant-sandbox:latest`
+  (`sha256:5f574f7d1ebb6e5d73b957bddd943a268aaf007c56f3a2c4508a4146c49fe8da`).
+- Configuration: `deepseek-v4-pro` main Agent, `deepseek-v4-flash` NL,
+  `deepseek-v4-flash` compact, quarterly WF, `window_months=21`,
+  `intraday_trade_days=5`, Fold deadline 60 minutes, compact threshold 200k.
+- Run log: `logs/meta_learning_audit_20260624_171700.log`.
+- Log config line confirmed:
+  - main: `thinking_enabled=true`, `reasoning_effort=max`;
+  - NL: `thinking_enabled=true`, `reasoning_effort=max`;
+  - compact: `thinking_enabled=false`, `reasoning_effort=null`.
+
+Key paths:
+- Ledger:
+  `experiments/meta_learning_audit_20260624_171700/ledgers/experiment_ledger.jsonl`.
+- Taste:
+  `experiments/meta_learning_audit_20260624_171700/meta_learning/epoch_001/taste.md`.
+- Canonical trace:
+  `experiments/meta_learning_audit_20260624_171700/artifacts/run_877f23366817/agent_trace.jsonl`.
+- Run manifest:
+  `experiments/meta_learning_audit_20260624_171700/artifacts/run_877f23366817/run_manifest.json`.
+- Runtime sandbox:
+  `.runtime/sandboxes/run_877f23366817/`.
+
+Result:
+- Run ID: `run_877f23366817`.
+- Fold ID: `epoch_001_meta_learning`.
+- Status: `taste_only`.
+- Taste length: 2951 chars.
+- Modification check: passed; formal output/model artifacts had zero changed
+  files.
+- Docker runtime: container `mqsbx_45cae967363f`, allocated GPU `[3]`.
+- One initial shell action using `2>/dev/null` was rejected by sandbox path
+  checks; the Agent recovered with structured glob/grep actions.
+
+Trace summary:
+- Event counts:
+  `llm_call=18`, `glob=2`, `grep=8`, `web_search=4`, `shell=1`,
+  `tool=1`, `session_end=1`.
+- Web search:
+  - `finance_quant_econ`: 2 successful searches.
+  - `natural_science_engineering`: 1 successful search.
+  - `philosophy_methodology`: 1 successful search.
+  - Engine usage: `semantic_scholar=4`; no 429 or retry-visible failures.
+- Provider usage from trace:
+  prompt tokens 191,728; completion tokens 8,359; total tokens 200,087;
+  reasoning tokens 7,047; prompt cache hit tokens 168,320; prompt cache miss
+  tokens 23,408.
+- Context compact did not trigger:
+  `context_compactions=0`, `context_compaction_calls=0`.
+- Session ended with `finish_status=meta_learning_done`.
+
+Post-run resources:
+- `free -h`: about 275 GiB available RAM.
+- GPU usage returned to pre-existing external workloads after the container
+  stopped.
+
+## 2026-06-24 - Meta Learning Docker audit rerun
+
+Task: rerun the meta-learning Fold with the same real-sandbox configuration as
+the previous audit run, after the compact threshold and meta-learning prompt
+updates.
+
+Configuration:
+- Experiment ID: `meta_learning_audit_20260624_160835`.
+- Invocation: direct `ExperimentPipeline.run_meta_learning()` call, so this
+  was a meta-learning-only run and did not continue into normal Fold replay or
+  held-out evaluation.
+- Sandbox: real Docker, `macroquant-sandbox:latest`.
+- Agent model: `deepseek-v4-pro`.
+- Compact model: `deepseek-v4-flash`, thinking disabled.
+- Web Search engines exposed to the Agent: `tavily`, `semantic_scholar`.
+- Fold period/default windows: quarterly WF, `window_months=21`,
+  `intraday_trade_days=5`.
+- Fold deadline: 60 minutes.
+- Context compaction: enabled, estimated trigger threshold 200,000 tokens,
+  keep recent messages 12, max compaction calls 8.
+
+Pre-run checks:
+- Real path confirmed earlier by `pwd -P`: `/Data/lzp/MacroQuant`.
+- `.env` was loaded for the run; `DEEPSEEK_API_KEY`, `TAVILY_API_KEY`, and
+  `SEMANTIC_SCHOLAR_API_KEY` were present. Secret values were not printed.
+- Docker image check:
+  `docker image inspect macroquant-sandbox:latest --format '{{.Id}}'`
+  returned image id `sha256:5f574f7d1ebb6e5d73b957bddd943a268aaf007c56f3a2c4508a4146c49fe8da`.
+- `free -h` before the run: about 274 GiB available RAM.
+- `nvidia-smi` before the run: all L20 GPUs had existing external workloads;
+  the meta-learning run itself did not launch local training.
+
+Run command summary:
+- Used `/home/lzp/miniconda3/envs/quant/bin/python` with
+  `PYTHONDONTWRITEBYTECODE=1`.
+- Constructed `ExperimentConfig` with `use_docker=True`,
+  `first_test_period=2022Q1`, `last_test_period=2025Q4`,
+  `heldout_first_period=2026Q1`, `heldout_last_period=2026Q1`,
+  `fold_period=quarter`, `window_months=21`, `max_fold_minutes=60`,
+  and `SnapshotConfig(window_months=21, intraday_trade_days=5)`.
+- Called `pipeline.run_meta_learning(epoch_id="epoch_001", parent=None,
+  previous_taste="")`.
+- Host log:
+  `logs/meta_learning_audit_20260624_160835.log`.
+
+Key paths:
+- Experiment ledger:
+  `experiments/meta_learning_audit_20260624_160835/ledgers/experiment_ledger.jsonl`.
+- Meta output:
+  `experiments/meta_learning_audit_20260624_160835/meta_learning/epoch_001/taste.md`.
+- Canonical trace:
+  `experiments/meta_learning_audit_20260624_160835/artifacts/run_ba28c68398b5/agent_trace.jsonl`.
+- Run manifest:
+  `experiments/meta_learning_audit_20260624_160835/artifacts/run_ba28c68398b5/run_manifest.json`.
+- Runtime sandbox:
+  `.runtime/sandboxes/run_ba28c68398b5/`.
+
+Result:
+- Run ID: `run_ba28c68398b5`.
+- Fold ID: `epoch_001_meta_learning`.
+- Status: `taste_only`.
+- Taste length: 2514 characters.
+- Modification check: passed; no formal strategy/model changes.
+- Docker runtime from manifest:
+  container `mqsbx_9e6110b1c00d`, image `macroquant-sandbox:latest`,
+  allocated GPU indices `[1]`.
+
+Trace summary:
+- Trace lines: 33.
+- Event counts:
+  `llm_call=17`, `shell=11`, `web_search=2`, `tool=2`, `session_end=1`.
+- LLM model: `deepseek-v4-pro` for all 17 main-conversation calls.
+- Provider usage:
+  prompt tokens 117,045; completion tokens 8,117; total tokens 125,162;
+  prompt cache hit tokens 103,296; prompt cache miss tokens 13,749;
+  reasoning tokens 6,355.
+- Web search calls:
+  - Tavily query `meta-learning automated exploration of trading strategies natural language processing`, 5 results.
+  - Tavily query `minute level trading strategies Chinese A-shares natural language processing`, 5 results.
+- Note: both Tavily and Semantic Scholar were exposed in the manifest, but this
+  Agent run chose Tavily for both searches. This is useful to audit whether the
+  current prompt should hard-require multi-engine or multi-perspective search
+  instead of merely encouraging it.
+- Context compaction did not trigger:
+  `context_compactions=0`, `context_compaction_calls=0`.
+
+Post-run checks:
+- `free -h` after the run: about 275 GiB available RAM.
+- `nvidia-smi` after the run: GPU usage remained dominated by existing
+  external workloads.
+- `find experiments/meta_learning_audit_20260624_160835/meta_learning -type f`
+  shows only `epoch_001/taste.md`; the canonical trace is not duplicated under
+  `meta_learning/`.
+- `git diff --check -- LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md` passed.
+- `docker ps -a --filter name=mqsbx_9e6110b1c00d` returned no container after
+  the run, consistent with sandbox cleanup.
+
+Follow-up trace audit artifact:
+- Replaced `check.md` with a dialogue-style summary of the canonical trace
+  `experiments/meta_learning_audit_20260624_160835/artifacts/run_ba28c68398b5/agent_trace.jsonl`.
+- The summary covers the system/user setup, each Agent action and Environment
+  observation, the first-epoch empty-history state, output/model/template reads,
+  two successful Tavily searches, one Semantic Scholar HTTP 429, the written
+  Taste, the modification check, session end, and audit concerns.
+
+## 2026-06-24 - Meta Learning search hardening and NL risk prompt
+
+Task: add query-API rate limiting and retry, require meta-learning to search
+from three research perspectives, and adjust prompts so NL analysis is treated
+as useful but potentially leaky/noisy.
+
+Implementation:
+- `src/hl_trader/environment/web_search.py`
+  - Added retry handling for retryable HTTP statuses: 429, 500, 502, 503, 504.
+  - Tavily now retries transient HTTP failures with bounded exponential backoff.
+  - Semantic Scholar now uses a lighter default field set and a per-key shared
+    file-lock rate limiter under `.runtime/api_rate_limits` by default.
+  - Semantic Scholar default interval is 1.25 seconds, leaving margin around
+    the provider's introductory 1 RPS limit.
+  - Provider error messages continue to redact API keys and include the attempt
+    count.
+- `src/hl_trader/agent/runner.py`
+  - Added required `web_search.perspective` choices:
+    `finance_quant_econ`, `natural_science_engineering`,
+    `philosophy_methodology`.
+  - Meta-learning `done` now requires at least one successful search for every
+    configured perspective when web search providers are enabled.
+  - `engine` remains independently selected by the Agent; `perspective` is only
+    a research-lens audit field, not a provider/category selector.
+  - Added a Taste guard that rejects workspace `taste.md` if it contains
+    template example-function prefixes or becomes too detailed.
+- `src/hl_trader/agent/prompts.py`
+  - Meta-learning prompt now states the three-perspective search requirement as
+    a hard condition, tells the Agent to retry or switch engines after provider
+    failures, and keeps Taste direction-level rather than implementation-level.
+  - Fold prompt now warns that NL can suffer from timestamp/ingestion ambiguity,
+    retrieval bias, model prior knowledge leakage, free-text parsing instability,
+    and look-ahead risk.
+- Updated `configs/prompts/PROMPTS.md`, `docs/agent_design.md`,
+  `docs/environment_design.md`, and `docs/pipeline_design.md`.
+
+Validation:
+- Pre-run resources:
+  - `free -h`: about 275 GiB available RAM.
+  - `nvidia-smi`: GPU usage belonged to existing external workloads; this work
+    started no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded and wrote `configs/prompts/PROMPTS.md`.
+- Compile check:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/web_search.py src/hl_trader/agent/runner.py src/hl_trader/agent/prompts.py tests/unit/test_sandbox_isolation.py`
+  passed.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e`
+  passed, 39 tests.
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow`
+  passed, 39 tests.
+- `git diff --check` over the touched code/docs/prompt/log files passed.
+- Post-run resources:
+  - `free -h`: about 275 GiB available RAM.
+  - GPU usage remained external.
+
+## 2026-06-24 - Meta Learning three-perspective search prompt
+
+Task: update the Meta Learning system prompt so the Agent is encouraged to
+perform multi-round searches from finance/quant/economics, other natural
+science/engineering, and philosophy/methodology perspectives, then converge on
+one innovative but practical exploration direction that fits the current
+experiment period and trading frequency.
+
+Implementation:
+- Extended `META_LEARNING_INSTRUCTION` under `# 联网检索`:
+  - encourages multi-round searches around the same candidate exploration
+    question;
+  - asks for cross-checking from finance/quant/economics, natural
+    science/engineering, and philosophy/methodology;
+  - states that the goal is not to list sources, but to find an innovative and
+    practically useful exploration direction.
+- Extended Taste requirements so the Agent must explain why the direction fits
+  the current run manifest settings, including Fold period, data window,
+  daily/minute trading frequency, long/short ability, replay costs, and
+  validation metrics.
+- Updated Pipeline and Agent docs with the same concise contract.
+- Regenerated `configs/prompts/PROMPTS.md`.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: 503 GiB total, 277 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by existing external workloads; this work
+    started no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded and wrote `configs/prompts/PROMPTS.md`.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/prompts.py scripts/dev/export_prompts.py`
+  passed.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e`
+  passed, 37 tests.
+- Grep verification:
+  confirmed the new finance/quant/economics, natural science/engineering,
+  philosophy/methodology, Fold-period, trading-frequency, and practical
+  innovation wording is present in source prompt, exported prompt, and living
+  docs.
+- Diff check:
+  `git diff --check -- src/hl_trader/agent/prompts.py configs/prompts/PROMPTS.md docs/agent_design.md docs/pipeline_design.md`
+  passed.
+- Post-test resources:
+  - `free -h`: 503 GiB total, 277 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Context compact threshold raised to 200k
+
+Task: raise the default Runner semantic context compact threshold from the
+initial conservative 50k estimate to 200k estimated tokens.
+
+Rationale:
+- Claude Code's auto-compact logic is based on the model context window minus
+  output reservation and a safety buffer, not a fixed 50k threshold.
+- DeepSeek V4 Pro/Flash expose a 1M-token context window, so a 50k threshold
+  is too early for normal Agent sessions and can discard useful raw context
+  prematurely.
+- 200k is a conservative first step: close to Claude Code's 200k-context
+  effective auto-compact range while avoiding very long 1M-context latency and
+  attention-risk behavior.
+
+Implementation:
+- Changed `ContextCompactionConfig.token_threshold` default from `50_000` to
+  `200_000`.
+- Changed `scripts/experiments/run_experiment.py --compact-token-threshold`
+  default from `50_000` to `200_000`, and made the CLI help state the default.
+- Updated Agent and Environment docs to state the default compact trigger is
+  an estimated 200,000 tokens.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: 503 GiB total, 277 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by existing external workloads; this work
+    started no GPU job.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/compact.py scripts/experiments/run_experiment.py`
+  passed.
+- CLI/default checks:
+  `/home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/run_experiment.py --help`
+  shows `--compact-token-threshold` with `default 200000`.
+  A direct `ContextCompactionConfig()` assertion returned `200000`.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow`
+  passed, 39 tests.
+- Diff checks:
+  `git diff --check -- src/hl_trader/agent/compact.py scripts/experiments/run_experiment.py docs/environment_design.md docs/agent_design.md`
+  passed.
+  Search confirmed no `50_000` / `50,000` compact-threshold residual in the
+  touched code/docs.
+- Post-test resources:
+  - `free -h`: 503 GiB total, 275 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Meta Learning agent trace deduplication
+
+Task: simplify meta-learning trace storage so each run keeps one canonical
+`agent_trace.jsonl` instead of duplicating the same file under both
+`artifacts/run_<id>/` and `meta_learning/<epoch>/`.
+
+Implementation:
+- Removed the copy from collected run artifacts into
+  `experiments/<id>/meta_learning/<epoch>/agent_trace.jsonl`.
+- Added `agent_trace_ref` to the `meta_learning` ledger record. The ref points
+  to the canonical `experiments/<id>/artifacts/<run_id>/agent_trace.jsonl`.
+- Rewired `_prior_meta_learning_logs()` to concatenate prior meta-learning logs
+  from ledger `agent_trace_ref`; old records without the field are resolved via
+  their `run_id` and the canonical artifacts directory.
+- Updated pipeline docs so `meta_learning/<epoch>/` is documented as a Taste
+  directory only, with trace lookup handled by `agent_trace_ref`.
+- Added unit assertions that meta-learning trace refs exist and duplicate
+  `meta_learning/<epoch>/agent_trace.jsonl` files are not created.
+- Removed the existing duplicate historical copy at
+  `experiments/meta_learning_audit_20260624_1458/meta_learning/epoch_001/agent_trace.jsonl`;
+  the canonical trace remains under
+  `experiments/meta_learning_audit_20260624_1458/artifacts/run_15b5d81f61d0/agent_trace.jsonl`.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: 503 GiB total, 277 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by existing external workloads; this work
+    started no GPU job.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e`
+  passed, 18 tests.
+- Diff check:
+  `git diff --check -- src/hl_trader/pipelines/experiment.py tests/unit/test_pipeline_e2e.py docs/pipeline_design.md`
+  passed.
+- Post-test resources:
+  - `free -h`: 503 GiB total, 277 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Agent formal artifact directory freedom
+
+Task: clarify and implement the user's intent that Agent artifact-directory
+freedom should be general, not a hardcoded embedding/KG-style structure. The
+stable contract should keep `output/main.py` as the entrypoint while allowing
+richer code organization and larger/multiple model parameters when an
+experiment chooses that design.
+
+Implementation:
+- Reworked `src/hl_trader/environment/artifacts.py` so strategy and model
+  artifacts are validated, hashed, diffed, and copied recursively.
+- Kept `output/main.py` as the only required strategy entrypoint and kept model
+  parameters separate under `/mnt/agent/models`.
+- Continued to reject symlinks, hidden files/directories, runtime caches
+  (`__pycache__`, `.pyc`, `.pyo`), unsupported suffixes, and formal strategy
+  code references to `/mnt/snapshots/`, `/mnt/runtime/`, or `/mnt/artifacts`.
+- Increased default `ModificationConstraints` to a controlled project scale:
+  64 strategy files, 1 MB strategy bytes, 64 model artifact files, and 1 GiB
+  model artifact bytes. These remain experiment-configurable.
+- Updated artifact tests to prove legal nested helpers/model files are accepted
+  while unsupported files, hidden dirs, runtime caches, symlinks, and forbidden
+  stage-dir references are rejected.
+- Updated `configs/agent_output_template/README.md`, Fold Agent prompt source,
+  exported `configs/prompts/PROMPTS.md`, `docs/agent_design.md`,
+  `docs/environment_design.md`, `docs/pipeline_design.md`, and relevant code
+  docstrings.
+- Follow-up naming cleanup: current prompts/docs/code comments now call
+  `/mnt/agent/output` the formal strategy artifact directory and
+  `/mnt/agent/models` the inheritable model artifact directory, avoiding
+  confusion with the separate Step artifact tree lineage feature.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: about 276-278 GiB available RAM.
+  - `nvidia-smi`: GPUs were heavily occupied by existing external workloads;
+    this run started no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded and wrote `configs/prompts/PROMPTS.md`.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_artifacts tests.unit.test_tools_flow tests.unit.test_step_tree tests.unit.test_sandbox_isolation`
+  passed, 73 tests.
+- Static checks:
+  `rg` over docs/prompts/source/tests found no remaining old flat/single-layer
+  artifact constraints.
+  Follow-up `rg` found no current prompt/source/living-doc references to
+  `output/models` as artifact trees; remaining tree references are Step Tree or
+  historical detailed-log entries.
+  `git diff --check` passed.
+- Cache scan:
+  source/test/config paths had no new Python cache output from the test run.
+  Existing ignored experiment artifacts under `experiments/audit_cli/.../.local`
+  still contain dependency caches; they are ignored by `.gitignore:/experiments/`
+  and were not removed in this task.
+- Post-test resources:
+  - `free -h`: about 437 GiB available RAM after the final targeted test rerun.
+  - GPU usage remained external to this run; several previously busy GPUs were
+    freed by unrelated external jobs by the final check.
+
+## 2026-06-24 - Strategy entrypoint narrowed to run_strategy
+
+Task: remove the ambiguous dual entrypoint contract from `output/main.py`.
+
+Implementation:
+- `load_strategy_artifact()` now requires `run_strategy(context)` and rejects
+  `main(context)`-only strategy files.
+- The backtest strategy driver now calls only `module.run_strategy(context)`;
+  the `main(context)` fallback and error text were removed.
+- Removed the template `main(context)` forwarding wrapper from
+  `configs/agent_output_template/main.py`.
+- Updated Fold Agent prompt source, exported `configs/prompts/PROMPTS.md`,
+  `docs/agent_design.md`, and tests.
+
+Validation:
+- Resource checks before validation:
+  - `free -h`: about 332 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by existing external workloads; this run
+    started no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_artifacts tests.unit.test_tools_flow tests.unit.test_broker_engine`
+  passed, 72 tests.
+- Static checks:
+  Entry-contract search found no current prompt/docs/source references that
+  allow `main(context)` as a valid strategy entrypoint; the only remaining
+  `def main(context)` match is the regression test proving it is rejected.
+  `git diff --check` passed.
+
+## 2026-06-24 - Real Docker meta-learning audit run
+
+Task: configure a real meta-learning Fold for audit with quarterly WF defaults,
+21-month history windows, 5 visible intraday trading days, host-side web search,
+and Claude-Code-inspired context compaction.
+
+Configuration:
+- Experiment ID: `meta_learning_audit_20260624_1458`.
+- Invocation: direct `ExperimentPipeline.run_meta_learning()` call to avoid
+  running the subsequent normal Fold and held-out evaluation.
+- Sandbox: real Docker, `macroquant-sandbox:latest`.
+- Agent model: `deepseek-v4-pro`.
+- Compact model: `deepseek-v4-flash`, thinking disabled.
+- Web Search engines: `tavily`, `semantic_scholar`.
+- Snapshot config used for the experiment object: `window_months=21`,
+  `intraday_trade_days=5`; fold period set to `quarter`.
+- Note: this was a meta-learning-only run, so no train/valid/test snapshot was
+  built. The configured data-window defaults are recorded in the local run log;
+  a normal Fold run will record `snapshot_config` in its fold manifest.
+
+Key paths:
+- Run log: `logs/meta_learning_audit_20260624_1458.log`.
+- Experiment ledger:
+  `experiments/meta_learning_audit_20260624_1458/ledgers/experiment_ledger.jsonl`.
+- Meta output:
+  `experiments/meta_learning_audit_20260624_1458/meta_learning/epoch_001/taste.md`.
+- Meta trace:
+  `experiments/meta_learning_audit_20260624_1458/meta_learning/epoch_001/agent_trace.jsonl`.
+- Collected run artifact:
+  `experiments/meta_learning_audit_20260624_1458/artifacts/run_15b5d81f61d0/`.
+- Runtime sandbox:
+  `.runtime/sandboxes/run_15b5d81f61d0/`.
+
+Result:
+- Run ID: `run_15b5d81f61d0`.
+- Fold ID: `epoch_001_meta_learning`.
+- Status: `taste_only`.
+- Taste length: 3132 characters.
+- Modification check: passed; no formal strategy/model changes.
+- Docker runtime from manifest:
+  container `mqsbx_b9df49936564`, image `macroquant-sandbox:latest`,
+  allocated GPU indices `[1]`.
+
+Trace summary:
+- `llm_call`: 13, all main conversation calls to `deepseek-v4-pro`.
+- `web_search`: 2:
+  - Tavily query `A-share stock selection quantitative strategy multi-factor model 2025`, 5 results.
+  - Semantic Scholar query `meta learning for financial time series alpha discovery`, 5 results.
+- `shell`: 7, `glob`: 1, `modification_check_tool`: 1.
+- Total provider usage in trace: 53,032 prompt tokens, 5,083 completion
+  tokens, 58,115 total tokens.
+- Context compaction was configured but did not trigger because the session was
+  short and stayed below the compaction conditions; `session_end` reports
+  `context_compactions=0` and `context_compaction_calls=0`.
+
+Validation and resources:
+- Pre-run resources:
+  - `free -h`: about 277 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by existing external workloads; this run
+    used Docker allocation but no local model training job.
+- Key availability checks:
+  `DEEPSEEK_API_KEY`, `TAVILY_API_KEY`, and `SEMANTIC_SCHOLAR_API_KEY` were set
+  without printing secret values. `macroquant-sandbox:latest` existed.
+- Post-run resources:
+  - `free -h`: about 276 GiB available RAM.
+  - GPU usage remained dominated by external workloads.
+
+## 2026-06-24 - PROMPTS de-duplication and Meta Learning Step Tree visibility
+
+Task: review whether the Meta Learning prompt sections in `PROMPTS.md` are
+redundant, and verify whether the Meta Learning Agent can read the structured
+`steps` tree.
+
+Implementation:
+- Removed the separate `元学习 Web Search Engine 可选值` section from
+  `scripts/dev/export_prompts.py`. The exported `PROMPTS.md` now avoids the
+  duplicate Web Search Engine example section.
+- Kept `# Web Search Engines` and `# development 摘要` inside the full rendered
+  Meta Learning prompt example because those are actual Runner-injected
+  dynamic sections and should remain visible in an audit snapshot.
+- Fixed `ExperimentPipeline.run_meta_learning()` to call `_install_step_tree()`
+  when `step_tree_enabled` is true. The Meta Learning sandbox now receives the
+  experiment-level `steps/tree.json`, `tree.txt`, and node artifact snapshots,
+  with `current_node_id` positioned at the parent artifact node.
+- Added `test_meta_learning_can_read_existing_step_tree` to confirm a
+  Meta Learning callback can read `ctx.paths.steps/tree.json` and `tree.txt`.
+
+Validation:
+- Pre-run resources:
+  - `free -h`: about 222 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by existing external workloads; this work
+    started no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded and wrote `configs/prompts/PROMPTS.md`.
+- Targeted pipeline tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_can_read_existing_step_tree tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_two_epochs_do_not_collide_in_step_tree tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_multi_epoch_runs_meta_learning_before_each_epoch`
+  passed, 3 tests.
+- Pipeline e2e suite:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e`
+  passed, 18 tests.
+- `git diff --check` clean.
+- Source/script/test/config cache scan returned empty.
+
+## 2026-06-24 - Fold Agent prompt file-structure table
+
+Task: list the Fold Agent-readable/writable file structure directly in the
+Fold Agent prompt.
+
+Implementation:
+- Added `# 文件结构和读写边界` to `PROTOCOL_INSTRUCTION`.
+- The table now covers:
+  `/mnt/agent/workspace/`, `/mnt/agent/output/`, read-only
+  `/mnt/agent/output/README.md`, `/mnt/agent/models/`, `/mnt/snapshot/`,
+  `/mnt/snapshots/train/`, `/mnt/snapshots/valid/`, forbidden
+  `/mnt/snapshots/test/`, `/mnt/artifacts/run_manifest.json`,
+  `/mnt/artifacts/parent_output/`, `/mnt/artifacts/parent_models/`,
+  `/mnt/artifacts/results/`, `/mnt/artifacts/steps/`,
+  `/mnt/artifacts/logs/`, and `/mnt/artifacts/agent_trace.jsonl`.
+- The prompt explicitly distinguishes Agent tool visibility from formal
+  strategy-code visibility: formal strategy code may only read
+  `/mnt/snapshot`, `/mnt/agent/output`, and `/mnt/agent/models`.
+- Regenerated `configs/prompts/PROMPTS.md`.
+
+Validation:
+- Resource checks:
+  - before prompt export/tests: about 207 GiB available RAM; GPU usage was from
+    existing external workloads.
+  - after checks: about 206 GiB available RAM; this work started no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_tools_flow tests.unit.test_step_tree`
+  passed, 64 tests.
+- Prompt grep confirmed the new file-structure table, `历史 Step 记录`, and
+  `/mnt/artifacts/logs/` are present in source/exported prompts.
+- `git diff --check` clean.
+- Source/script/test/config cache scan returned empty.
+
+## 2026-06-24 - Meta Learning first-epoch wording de-duplication
+
+Task: remove duplicated first-Epoch empty-history wording from the Meta
+Learning prompt.
+
+Implementation:
+- Removed `若为空，这是第一轮正常情况` from the role paragraph.
+- Kept the dedicated `# 首轮空历史处理` section as the single source for
+  first-Epoch empty `steps` / ledger / meta-memory behavior.
+- Regenerated `configs/prompts/PROMPTS.md`.
+
+Validation:
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Prompt grep confirmed the removed sentence no longer appears while
+  `# 首轮空历史处理` remains.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_step_tree`
+  passed, 25 tests.
+- `git diff --check` clean.
+- Source/script/test/config cache scan returned empty.
+- Post-run resources:
+  - `free -h`: about 222 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Meta Learning prompt readable-file table
+
+Task: remove the dynamic `Web Search Engines` and `development 摘要` sections
+from the Meta Learning prompt, and directly tell the Meta Learning Agent which
+files and directories are readable.
+
+Implementation:
+- `build_meta_learning_prompt()` now returns only the static
+  `META_LEARNING_INSTRUCTION`; it no longer appends `# Web Search Engines` or
+  `# development 摘要`.
+- The `web_search` action description no longer references a lower
+  `Web Search Engines` section. The static protocol already names supported
+  engines, while the Runner schema still enforces actually configured choices.
+- The first role paragraph now explicitly instructs the Meta Learning Agent to
+  read `/mnt/artifacts/steps/tree.txt` or `/mnt/artifacts/steps/tree.json`.
+- Added a single table under `# 可读文档和组织结构` covering:
+  `steps/tree.txt`, `steps/tree.json`, successful step node directories,
+  `development_history.json`, `experiment_ledger_full.jsonl`,
+  `meta_learning_memory.jsonl`, parent output/models, `run_manifest.json`,
+  writable output/models, and `taste.md`.
+- Regenerated `configs/prompts/PROMPTS.md`.
+
+Validation:
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded and wrote `configs/prompts/PROMPTS.md`.
+- Prompt grep confirmed no `# Web Search Engines`, `# development 摘要`, or
+  stale "engine 必须从下方" wording remains in source/exported prompts.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_can_read_existing_step_tree tests.unit.test_step_tree`
+  passed, 26 tests.
+- `git diff --check` clean.
+- Source/script/test/config cache scan returned empty.
+- Resource checks:
+  - before prompt/test work: about 222 GiB available RAM; no GPU job started.
+  - after checks: about 211 GiB available RAM; GPU usage remained external.
+
+## 2026-06-24 - Meta Learning first-epoch empty-history prompt branch
+
+Task: decide whether the Meta Learning prompt should be optimized for the
+first Epoch, where there are no historical Step records or development
+results.
+
+Implementation:
+- Added `# 首轮空历史处理` to `META_LEARNING_INSTRUCTION`.
+- The prompt now treats `(empty step tree)`, empty `tree.json.nodes`, empty
+  development ledger, or empty `meta_learning_memory.jsonl` as normal first
+  Epoch state.
+- The first-epoch branch tells the Agent not to chase missing history, not to
+  fabricate validated conclusions, and not to regularize nonexistent overfit
+  experience. It should instead inspect initial `output/`, `models/`,
+  `run_manifest.json`, visible data/tool contracts, and web-search results to
+  write the first Taste.
+- Updated the readable-file table to mark `steps/tree.txt`, `tree.json`,
+  `parent_output`, and `parent_models` as possibly empty in the first Epoch.
+- Regenerated `configs/prompts/PROMPTS.md`.
+
+Validation:
+- Pre-run resources:
+  - `free -h`: about 304 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by existing external workloads; this work
+    started no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded and wrote `configs/prompts/PROMPTS.md`.
+- Prompt grep confirmed `# 首轮空历史处理`, `(empty step tree)`, and
+  first-Epoch empty-path wording in both source and exported prompt.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_can_read_existing_step_tree tests.unit.test_step_tree`
+  passed, 26 tests.
+- `git diff --check` clean.
+- Source/script/test/config cache scan returned empty.
+- Post-run resources:
+  - `free -h`: about 277 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Meta Learning prompt consolidation and exploration tolerance
+
+Task: merge the duplicate Meta Learning prompt sections in `PROMPTS.md` and add
+wording that allows continued exploration when the current plan looks weak but
+has a plausible path to improve.
+
+Implementation:
+- Removed the separate `元学习协议模板（META_LEARNING_INSTRUCTION）` section
+  from `scripts/dev/export_prompts.py`. The exported prompt audit now keeps one
+  Meta Learning section: `元学习 + 正则化系统提示词（完整渲染示例）`.
+- Added `# 探索容忍` to `META_LEARNING_INSTRUCTION`: a direction may continue
+  even if the current or previous result is poor when it has a clear
+  hypothesis, interpretable failure reason, and testable improvement path.
+- The same section tells the Agent to downgrade or avoid repeated failed
+  paths, stock/month memorization, or ideas without a verifiable mechanism.
+- Regenerated `configs/prompts/PROMPTS.md`.
+
+Validation:
+- Resource checks:
+  - before prompt/test work: about 208 GiB available RAM; no GPU job started.
+  - after checks: about 208 GiB available RAM; GPU usage remained external.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded and wrote `configs/prompts/PROMPTS.md`.
+- Prompt grep confirmed `元学习协议模板` no longer appears in exported
+  `PROMPTS.md`, while `# 探索容忍` is present in source and export.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_can_read_existing_step_tree tests.unit.test_step_tree`
+  passed, 26 tests.
+- `git diff --check` clean.
+- Source/script/test/config cache scan returned empty.
+
+## 2026-06-24 - Models naming and meta-search provider prompt alignment
+
+Task: answer two follow-up design questions from the model-parameter work:
+whether `model_artifacts` conflicts visually with outer `artifacts`, and
+whether Tavily is explicitly exposed in the Meta Learning System Prompt.
+
+Conclusion:
+- The visible `model_artifacts` directory name was unnecessarily repetitive
+  next to `/mnt/artifacts`, especially for
+  `/mnt/artifacts/parent_model_artifacts` and
+  `strategy_artifacts/<epoch>/<id>.model_artifacts`.
+- Tavily was implemented and selected by `run_experiment.py` by default, but
+  the Meta Learning prompt only described a generic web provider or Semantic
+  Scholar. The manifest recorded the provider after CLI setup, but the System
+  Prompt did not render the concrete provider name.
+
+Implementation:
+- Changed Agent-visible model parameter paths to:
+  - `/mnt/agent/models/`
+  - `/mnt/artifacts/parent_models/`
+  - `strategy_artifacts/<epoch>/<strategy_artifact_id>.models/`
+  - Step tree node model snapshots under `steps/<node_id>/models/`.
+- Kept internal API and hash terminology such as `load_model_artifacts()` and
+  `model_artifact_hash`, because those name the artifact type rather than the
+  visible directory.
+- Formal strategy execution now exposes `context["model_dir"]`, `ctx.model_dir`,
+  and `MQ_MODEL_DIR`; the old agent-visible `model_artifacts_dir` /
+  `MQ_MODEL_ARTIFACTS_DIR` aliases were removed from the strategy runtime.
+- Structured search prompt/root choices now advertise `models`, not
+  `model_artifacts`.
+- `build_meta_learning_prompt()` now renders `# Web Search Provider` with the
+  actual provider name passed by the runner (`tavily`, `semantic_scholar`, or
+  `disabled`).
+- Meta Learning prompt text now distinguishes Tavily as general web search and
+  Semantic Scholar as paper search.
+- Updated `configs/agent_output_template/README.md`, template `main.py`,
+  `configs/prompts/PROMPTS.md`, and the Agent/Environment/Pipeline living docs.
+
+Validation:
+- Pre-test resource checks:
+  - `free -h`: about 196 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by existing external workloads; this work
+    started no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded and wrote `configs/prompts/PROMPTS.md`.
+- Targeted regression suite:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_artifacts tests.unit.test_tools_flow tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e`
+  passed, 82 tests.
+- Full suite:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests`
+  passed, 226 tests.
+- `git diff --check` clean.
+- Source/script/test cache scan returned empty after removing Python cache
+  directories from `src`, `scripts`, and `tests`.
+- Post-test resource checks:
+  - `free -h`: about 197 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Decision-only model/NL boundary
+
+Task: tighten the model/NL/workspace boundary so models and NL are used only
+during decision generation, not during minute-by-minute trade strategy replay.
+
+Implementation:
+- Kept decision-stage access in `output/main.py` and helpers:
+  `context["model_dir"]`, `context["workspace_dir"]`, `MQ_MODEL_DIR`,
+  `MQ_WORKSPACE_DIR`, and `mq_tools.nl(...)`.
+- Removed `model_dir`, `workspace_dir`, and `nl` from the per-bar trade-policy
+  `ctx` built by `_STRATEGY_POLICY_DRIVER`.
+- Removed policy-stage NL RPC files and serving from `StrategyPolicyRunner`.
+  The policy process still provides an importable `mq_tools.nl` stub so
+  modules with top-level `from mq_tools import nl` import cleanly, but calling
+  it during replay raises an explicit "decision stage" error.
+- Policy replay no longer passes `MQ_MODEL_DIR`, `MQ_WORKSPACE_DIR`, or NL
+  request/response env vars. It also treats `/mnt/agent/workspace` and
+  `/mnt/agent/models` as forbidden paths during strategy-function replay.
+- Updated Agent prompt, exported `PROMPTS.md`, Agent template README/trading.py,
+  and Agent/Environment docs to describe `ctx` as a pure trading replay context.
+- Added regression coverage:
+  - trade-policy `ctx` must not expose `model_dir`, `workspace_dir`, or `nl`;
+  - importing `mq_tools.nl` in `trading.py` is allowed, but calling it during
+    replay is rejected.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: about 212-214 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by existing external workloads; this work
+    started no GPU job.
+- Prompt export:
+  `/home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Targeted regression suite:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_broker_engine tests.unit.test_pipeline_e2e`
+  passed, 80 tests.
+- Full suite:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests`
+  passed, 228 tests.
+- `git diff --check` clean.
+- Source/script/test/template cache scan returned empty.
+- Post-test resources:
+  - `free -h`: about 212 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Meta Learning web_search engine selection
+
+Task: let the Meta Learning Agent choose the `web_search` engine per query
+instead of choosing a category under one preselected provider.
+
+Implementation:
+- Reworked `WebSearchTool` into a multi-engine wrapper. It now receives a
+  mapping of engine name to provider, validates the requested `engine`, and
+  traces `engine`, provider, query, result count, and sanitized results.
+- Changed `AgentSessionRunner` meta-learning action schema from
+  `category + query` to `engine + query`. The runner no longer enforces
+  `finance/cross_domain/philosophy` categories; when engines are configured,
+  `done` requires at least one successful `web_search`.
+- Changed `scripts/experiments/run_experiment.py` from
+  `--web-search-provider` to multi-value `--web-search-engines`, defaulting to
+  `tavily semantic_scholar`. The meta-learning manifest and ledger now record
+  `web_search_engines`.
+- Updated `build_meta_learning_prompt()` and exported `PROMPTS.md` to render
+  `# Web Search Engines` and the `{"action": "web_search", "engine": ...}`
+  action contract.
+- Updated Agent, Environment, and Pipeline living docs to describe host-side
+  engine exposure and per-action engine selection.
+- Updated sandbox isolation tests for the new action schema and completion
+  gate.
+
+Validation:
+- Resource checks before prompt export/tests:
+  - `free -h`: about 212-218 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by existing external workloads; this work
+    started no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded and wrote `configs/prompts/PROMPTS.md`.
+- Static/CLI checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/web_search.py src/hl_trader/agent/runner.py src/hl_trader/agent/prompts.py scripts/experiments/run_experiment.py scripts/dev/export_prompts.py tests/unit/test_sandbox_isolation.py`
+  passed.
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/run_experiment.py --help`
+  passed and shows `--web-search-engines {tavily,semantic_scholar} ...`.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation`
+  passed, 19 tests.
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e tests.unit.test_tools_flow`
+  passed, 75 tests.
+- Full suite:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests`
+  passed, 228 tests.
+- `git diff --check` clean.
+- Source/script/test/config cache scan returned empty after removing generated
+  Python cache directories.
+- Post-test resources:
+  - `free -h`: about 215 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Meta Learning shell network and dataset probe prompt
+
+Task: simplify the Meta Learning data-inspection requirement to prompt-level
+guidance, while allowing a deliberately network-enabled Meta Learning Docker
+sandbox to use shell commands such as `git clone`, `hf download`, `pip`, and
+`npm`.
+
+Implementation:
+- Kept the existing `sandbox_shell_tool` as the Agent-facing interactive shell
+  path. No new hard-gated Python-only tool was retained.
+- Updated the Meta Learning prompt so Taste should be written after using
+  shell-invoked Python to inspect visible snapshot/runtime shape, including
+  parquet files, columns, rows, date coverage, key nulls, and unit constraints.
+  This is guidance, not a `done` blocker.
+- Split prompt export so `configs/prompts/PROMPTS.md` contains one complete
+  Meta Learning system prompt plus a short experiment-directive appendix
+  example, instead of two largely duplicated complete prompts.
+- Added `ExperimentConfig.meta_learning_sandbox_spec` and CLI flags:
+  `--meta-learning-network`, `--meta-learning-env`, and
+  `--meta-learning-add-host-gateway`. The override is used only for
+  Epoch-start Meta Learning runs; ordinary Fold and held-out runs continue to
+  use the base sandbox spec.
+- Docker sandbox startup now supports explicit environment-variable
+  passthrough by name and optional `host.docker.internal` gateway mapping.
+  `docker run` uses `--env NAME`, so token/proxy values are not embedded in
+  the rendered command or manifests. The allocation record and runtime
+  contract record names and network mode only.
+- Updated `ops/docker/sandbox.Dockerfile` to install `git`, `curl`, `npm`, and
+  `huggingface_hub[cli]`; it creates an `hf` compatibility symlink when the
+  package only exposes `huggingface-cli`.
+- Updated runtime env records to list `git`, `npm`, `pip`, `hf`, and
+  `huggingface-cli` as important tools, and to document the meta-learning
+  package-install/network policy.
+- Relaxed the shell path scanner so URLs such as `https://github.com/...` are
+  not mistaken for absolute filesystem paths; filesystem boundary checks still
+  apply to `/mnt/...` and local paths.
+- Updated Agent, Environment, and Pipeline living docs. The XRay/proxy flow is
+  documented generically: start a local proxy on the host, set proxy
+  environment variables locally, and pass variable names into the Meta Learning
+  container. No proxy subscription URL or token was written.
+
+Security notes:
+- The HuggingFace token and proxy URL provided in chat were not written to the
+  repository, command outputs, manifests, docs, prompts, or logbooks.
+- GitHub tokens cannot be generated by this code path; use GitHub/`gh auth` to
+  create a scoped token, then expose it locally as an environment variable if
+  needed.
+- The exposed HuggingFace token should be rotated because it appeared in chat.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: 272 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by existing external workloads; this work
+    started no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/prompts.py src/hl_trader/agent/runner.py src/hl_trader/environment/sandbox.py src/hl_trader/environment/tools/shell.py src/hl_trader/environment/executor.py src/hl_trader/pipelines/config.py src/hl_trader/pipelines/experiment.py scripts/experiments/run_experiment.py scripts/dev/export_prompts.py tests/unit/test_sandbox_isolation.py tests/unit/test_pipeline_e2e.py`
+  passed.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e tests.unit.test_tools_flow tests.unit.test_step_tree -v`
+  passed, 89 tests.
+- Secret/proxy scan: searched for the concrete token/proxy fragments provided
+  in chat across the working tree, excluding historical logbooks and external
+  references; no matches were found outside transient conversation context.
+- `git diff --check` over touched files passed.
+- Generated Python cache directories under `src/`, `scripts/`, and `tests/`
+  were removed after tests.
+- Post-test resources:
+  - `free -h`: 273 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Meta Learning direct network and optional host proxy
+
+Task: make the Meta Learning Docker sandbox use normal direct networking by
+default, keep proxy usage optional, and pass the proxy option into the Meta
+Learning system prompt without recording proxy subscriptions or token values.
+
+Implementation:
+- Changed `scripts/experiments/run_experiment.py` so
+  `--meta-learning-network` defaults to `bridge`. This applies only to
+  Epoch-start Meta Learning runs through `meta_learning_sandbox_spec`;
+  ordinary Fold and held-out runs continue to use the base sandbox policy.
+- Added default meta-learning credential env passthrough names:
+  `GITHUB_TOKEN` and `HF_TOKEN`. Docker still receives env values only if
+  those variables are already present in the host process environment.
+- Added `--meta-learning-host-proxy`. When enabled, the meta-learning sandbox
+  passthrough list includes standard proxy env names, and host gateway mapping
+  is enabled so Docker bridge containers can reach host proxy ports via
+  `host.docker.internal`.
+- Added a dynamic non-secret Meta Learning system prompt section:
+  `# 本次联网与代理选项`. It records network mode, credential/proxy env variable
+  names, default direct-network behavior, and secret-handling rules.
+- Added `ExperimentConfig.meta_learning_network_guidance`, persisted it into
+  the meta-learning run manifest and `experiment_parameters`, and passed it
+  from the CLI meta learner into `AgentSessionRunner`.
+- Updated prompt export to include a short network/proxy appendix example
+  rather than another full Meta Learning prompt.
+- Updated Agent, Environment, and Pipeline docs to state that Meta Learning
+  defaults to direct Docker bridge networking; proxy is opt-in and should be
+  configured on the host through Docker-reachable proxy env vars.
+
+Security notes:
+- The raw GitHub token provided in chat was not used in a command, written to
+  files, or recorded in docs/logbooks. Current host environment reported
+  `GITHUB_TOKEN` missing, so token usability was not checked.
+- The correct operational path is to set `GITHUB_TOKEN` in the host environment
+  outside the repository; the pipeline will pass the variable by name when it
+  exists.
+- Any token pasted into chat should be rotated before use.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: 272 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by external workloads; this work started
+    no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/__init__.py src/hl_trader/agent/prompts.py src/hl_trader/agent/runner.py src/hl_trader/pipelines/config.py src/hl_trader/pipelines/experiment.py scripts/experiments/run_experiment.py scripts/dev/export_prompts.py tests/unit/test_sandbox_isolation.py tests/unit/test_pipeline_e2e.py`
+  passed.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e -v`
+  passed, 45 tests.
+- Generic secret/proxy scan found no token or VLESS-style strings in the
+  working tree outside external references.
+- `git diff --check` over touched files passed.
+- Generated Python cache directories under `src/`, `scripts/`, and `tests/`
+  were removed after tests.
+- Post-test resources:
+  - `free -h`: 272 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Meta Learning first Fold visible data parity
+
+Task: make Meta Learning see the same visible data as the first Fold Agent.
+The previous implementation exposed the first Fold `valid_decision_input` as
+`/mnt/snapshot` and `/mnt/snapshots/train`, but did not install the first
+Fold validation replay slot under `/mnt/snapshots/valid`. That made old
+runtime directories such as `.runtime/sandboxes/run_2ce27d85d933/snapshots/valid`
+empty even though the ordinary Fold Agent can read a validation replay slot.
+
+Implementation:
+- Updated `ExperimentPipeline.run_meta_learning()` to create a first-Fold
+  validation replay slot with `snapshot_views.replay_slot(...)` when a
+  visible Fold is supplied.
+- The Meta Learning sandbox now exposes:
+  - `/mnt/snapshot`: first Fold decision-input PIT view.
+  - `/mnt/snapshots/train`: alias/copy of the same first Fold decision-input
+    PIT view.
+  - `/mnt/snapshots/valid`: first Fold validation replay slot.
+  - no `/mnt/snapshots/test` and no held-out data.
+- The Meta Learning run manifest now records `valid_replay` beside the
+  visible decision-input snapshot reference.
+- Updated Agent, Environment, and Pipeline docs plus exported
+  `configs/prompts/PROMPTS.md` to match the runtime contract.
+- Extended the pipeline end-to-end unit test to assert that Meta Learning can
+  list and read `daily.parquet` and `manifest.json` under
+  `/mnt/snapshots/valid`, while `/mnt/snapshots/test` remains unavailable.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: 444 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by external workloads; this work started
+    no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/pipelines/experiment.py src/hl_trader/agent/prompts.py tests/unit/test_pipeline_e2e.py`
+  passed.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_single_epoch_runs_meta_learning_before_fold_and_heldout tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_multi_epoch_runs_meta_learning_before_each_epoch tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_injects_full_records_and_prior_epoch_logs`
+  passed, 3 tests.
+- Prompt snapshot consistency:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -c 'from pathlib import Path; from scripts.dev.export_prompts import render; assert Path("configs/prompts/PROMPTS.md").read_text(encoding="utf-8") == render()'`
+  passed.
+- `git diff --check` over touched files passed.
+- Generated Python cache directories under `src/`, `scripts/`, and `tests/`
+  were removed after tests; follow-up cache scan was empty.
+
+Note:
+- Existing runtime sandboxes are immutable historical artifacts. The old
+  `.runtime/sandboxes/run_2ce27d85d933/snapshots/valid` directory remains
+  empty because it was created before this fix. A new Meta Learning run is
+  required to observe the corrected mounted data layout.
+
+## 2026-06-24 - Meta Learning visible data and Shell guard simplification
+
+Task: give the Epoch-start Meta Learning Agent the same visible PIT data as the
+first ordinary Fold, keep the Agent-facing language Chinese, and refine Shell
+path guarding so read-only exploration is not rejected as a write.
+
+Implementation:
+- `ExperimentPipeline.run()` now passes the first scheduled Fold into
+  `run_meta_learning()`.
+- `run_meta_learning()` builds only that Fold's `valid_decision_input`, binds it
+  as `/mnt/snapshot`, and copies it into `/mnt/snapshots/train` as the
+  Agent-visible alias. It does not build validation replay, test replay, or
+  held-out slots for Meta Learning.
+- The meta-learning run manifest records the visible Fold, decision time, and
+  `train_snapshot` / `valid_decision_input` snapshot id/hash. Existing
+  `experiment_parameters` remains the source for fold period and window
+  configuration, avoiding duplicate top-level fields.
+- Runner initial user messages for both Meta Learning and ordinary Fold
+  sessions are now Chinese.
+- Fold and Meta Learning prompts now say not to hide errors with
+  `2>/dev/null`; stderr should remain visible in trace.
+- `SandboxShellTool` now separates command-level writes from redirection or
+  copy targets. Read-only listing and reading are allowed, and copying a
+  visible read-only file into `/mnt/agent/workspace` is allowed. Writes to
+  snapshot, artifacts, results/steps, test, runtime, unmanaged sandbox paths, or
+  outside the sandbox remain blocked. Common bash redirections including `>`,
+  `2>`, `&>`, and `&>>` are treated as write-target syntax.
+- Living docs and `configs/prompts/PROMPTS.md` were updated to match the
+  current contract.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: 440 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by external workloads; this work started
+    no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/pipelines/experiment.py src/hl_trader/environment/tools/shell.py src/hl_trader/agent/runner.py src/hl_trader/agent/prompts.py tests/unit/test_pipeline_e2e.py tests/unit/test_tools_flow.py`
+  passed.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e tests.unit.test_tools_flow.ShellToolTest tests.unit.test_sandbox_isolation.MetaLearningSessionTest`
+  passed, 38 tests.
+- `git diff --check` over touched files passed.
+- Post-test resources were not materially changed; no GPU job was launched.
+
+## 2026-06-24 - Standard Meta Learning Fold rerun
+
+Task: rerun one formal Epoch-start Meta Learning Fold using the standard
+experiment environment and configuration after the visible-data and Shell guard
+changes.
+
+Configuration:
+- Experiment ID: `meta_learning_formal_20260624_230548`.
+- Invocation: direct `ExperimentPipeline.run_meta_learning()` call; this was
+  meta-learning-only and did not run ordinary Fold replay or held-out.
+- Visible Fold: first scheduled Fold, `fold_2022Q1`.
+- Visible decision input: `valid_decision_input` at
+  `2021-10-08T09:25:00+08:00`, bound to `/mnt/snapshot` and installed as
+  `/mnt/snapshots/train`.
+- Sandbox: real Docker, image `macroquant-sandbox:latest`
+  (`sha256:5f574f7d1ebb6e5d73b957bddd943a268aaf007c56f3a2c4508a4146c49fe8da`).
+- Agent model: `deepseek-v4-pro`.
+- NL model: `deepseek-v4-flash`.
+- Compact model: `deepseek-v4-flash`, thinking disabled.
+- Reasoning effort: `max` for Agent and NL calls.
+- Web Search engines: `tavily`, `semantic_scholar`.
+- Fold period/default windows: quarterly WF, `window_months=21`,
+  `intraday_trade_days=5`.
+- Fold deadline: 60 minutes.
+- Context compaction: enabled, trigger threshold 200,000 tokens, keep recent
+  messages 12, max compaction calls 8.
+- Docker network: meta-learning sandbox `bridge`; base ordinary Fold sandbox
+  remains `none`.
+
+Pre-run checks:
+- Real path: `/Data/lzp/MacroQuant`.
+- Docker image check:
+  `docker image inspect macroquant-sandbox:latest --format '{{.Id}}'`
+  returned `sha256:5f574f7d1ebb6e5d73b957bddd943a268aaf007c56f3a2c4508a4146c49fe8da`.
+- `free -h` before the run: 439 GiB available RAM.
+- `nvidia-smi` before the run: GPUs were occupied by external workloads; the
+  meta-learning run itself was not local training.
+- Python cache scan before the run was empty.
+
+Run:
+- Used `/home/lzp/miniconda3/envs/quant/bin/python` with
+  `PYTHONDONTWRITEBYTECODE=1` and `PYTHONPATH=src`.
+- Constructed `ExperimentConfig` with `use_docker=True`,
+  `first_test_period=2022Q1`, `last_test_period=2025Q4`,
+  `heldout_first_period=2026Q1`, `heldout_last_period=2026Q1`,
+  `fold_period=quarter`, `window_months=21`, `max_fold_minutes=60`, and
+  `SnapshotConfig(window_months=21, intraday_trade_days=5)`.
+- Called `pipeline.run_meta_learning(epoch_id="epoch_001", parent=None,
+  previous_taste="", visible_fold=fold_2022Q1)`.
+- Host log:
+  `logs/meta_learning_formal_20260624_230548.log`.
+
+Result:
+- Run ID: `run_2ce27d85d933`.
+- Fold ID: `epoch_001_meta_learning`.
+- Status: `taste_only`.
+- Agent session finish status: `meta_learning_done`.
+- Taste length: 969 characters.
+- Modification check: `allowed_to_backtest=true`, no reasons, no regularized
+  parent artifact because this was the first epoch with no parent.
+- Context compaction: 0 calls / 0 compactions.
+- LLM usage from trace integer counters:
+  `prompt_tokens=204750`, `completion_tokens=13167`,
+  `total_tokens=217917`, `prompt_cache_hit_tokens=186752`,
+  `prompt_cache_miss_tokens=17998`.
+- Trace event counts:
+  `llm_call=20`, `shell=11`, `web_search=3`, `tool=1`, `session_end=1`.
+- Web search calls:
+  - `finance_quant_econ`: Tavily, 5 results.
+  - `natural_science_engineering`: Semantic Scholar, 5 results.
+  - `philosophy_methodology`: Tavily, 5 results.
+- Shell trace showed multiple read-only data checks over `/mnt/snapshot`
+  parquet/text files and Step tree. It did not use `2>/dev/null`; one command
+  used `2>&1`, which merged stderr into stdout rather than hiding it.
+
+Key paths:
+- Experiment ledger:
+  `experiments/meta_learning_formal_20260624_230548/ledgers/experiment_ledger.jsonl`.
+- Taste:
+  `experiments/meta_learning_formal_20260624_230548/meta_learning/epoch_001/taste.md`.
+- Canonical trace:
+  `experiments/meta_learning_formal_20260624_230548/artifacts/run_2ce27d85d933/agent_trace.jsonl`.
+- Run manifest:
+  `experiments/meta_learning_formal_20260624_230548/artifacts/run_2ce27d85d933/run_manifest.json`.
+- Runtime env:
+  `experiments/meta_learning_formal_20260624_230548/artifacts/run_2ce27d85d933/runtime_env.json`.
+- Runtime sandbox:
+  `.runtime/sandboxes/run_2ce27d85d933/` (about 2.6 GiB, retained for audit).
+
+Post-run checks:
+- Manifest snapshot check: `train_snapshot.alias_of=valid_decision_input`; both
+  entries share snapshot hash
+  `sha256:55996c50915eb753e3138b39e0ca4a1735bdc85e1d800c75124b20883d8d0fc2`.
+- `docker ps --filter name=mqsbx` showed no running sandbox container.
+- Secret/proxy scan over the run log, experiment artifacts, and runtime
+  sandbox found no GitHub/HF/OpenAI-style token or VLESS-style proxy string.
+- Generated Python cache scan under `src/`, `scripts`, and `tests` was empty.
+- `free -h` after the run: 443 GiB available RAM.
+- `nvidia-smi` after the run: GPU usage remained external to this run; Docker
+  allocation record shows GPU 5 was assigned to the sandbox, but no local
+  training workload was launched.
+
+## 2026-06-24 - Formal meta-learning Fold audit run
+
+Task: start one formal Epoch-start meta-learning Fold with the same real
+Docker audit configuration used in the previous run, so the process and output
+can be manually audited.
+
+Configuration:
+- Experiment ID: `meta_learning_formal_20260624_2153`.
+- Invocation: direct `ExperimentPipeline.run_meta_learning()` call, so this
+  was meta-learning-only and did not run ordinary Fold replay or held-out.
+- Sandbox: real Docker, image `macroquant-sandbox:latest`
+  (`sha256:5f574f7d1ebb6e5d73b957bddd943a268aaf007c56f3a2c4508a4146c49fe8da`).
+- Agent model: `deepseek-v4-pro`.
+- NL model: `deepseek-v4-flash`.
+- Compact model: `deepseek-v4-flash`, thinking disabled.
+- Reasoning effort: `max` for Agent and NL calls.
+- Web Search engines: `tavily`, `semantic_scholar`.
+- Fold period/default windows: quarterly WF, `window_months=21`,
+  `intraday_trade_days=5`.
+- Fold deadline: 60 minutes.
+- Context compaction: enabled, estimated trigger threshold 200,000 tokens,
+  keep recent messages 12, max compaction calls 8.
+- Docker network: meta-learning sandbox `bridge`; base ordinary Fold sandbox
+  remains `none`.
+- Environment variables: `DEEPSEEK_API_KEY`, `TAVILY_API_KEY`,
+  `SEMANTIC_SCHOLAR_API_KEY`, and `GITHUB_TOKEN` were present via `.env`;
+  `HF_TOKEN` and standard host proxy variables were not present. Values were
+  not printed or written.
+
+Pre-run checks:
+- Real path: `/Data/lzp/MacroQuant`.
+- Docker image check:
+  `docker image inspect macroquant-sandbox:latest --format '{{.Id}}'`
+  returned `sha256:5f574f7d1ebb6e5d73b957bddd943a268aaf007c56f3a2c4508a4146c49fe8da`.
+- `free -h` before the run: 272 GiB available RAM.
+- `nvidia-smi` before the run: GPUs were occupied by external workloads; the
+  meta-learning run itself was not a local training workload.
+
+Run:
+- Used `/home/lzp/miniconda3/envs/quant/bin/python` with
+  `PYTHONDONTWRITEBYTECODE=1`.
+- Constructed `ExperimentConfig` with `use_docker=True`,
+  `first_test_period=2022Q1`, `last_test_period=2025Q4`,
+  `heldout_first_period=2026Q1`, `heldout_last_period=2026Q1`,
+  `fold_period=quarter`, `window_months=21`, `max_fold_minutes=60`,
+  and `SnapshotConfig(window_months=21, intraday_trade_days=5)`.
+- Called `pipeline.run_meta_learning(epoch_id="epoch_001", parent=None,
+  previous_taste="")`.
+- Host log:
+  `logs/meta_learning_formal_20260624_2153.log`.
+
+Result:
+- Run ID: `run_c68b0781704c`.
+- Fold ID: `epoch_001_meta_learning`.
+- Status: `taste_only`.
+- Agent session finish status: `meta_learning_done`.
+- Taste length: 761 characters.
+- Context compaction: 0 calls / 0 compactions.
+- LLM usage from trace integer counters:
+  `prompt_tokens=231042`, `completion_tokens=14096`,
+  `total_tokens=245138`, `prompt_cache_hit_tokens=209024`,
+  `prompt_cache_miss_tokens=22018`.
+- Trace event counts:
+  `llm_call=22`, `shell=12`, `web_search=3`, `tool=1`, `session_end=1`.
+- Web search calls:
+  - `finance_quant_econ`: Tavily, 5 results.
+  - `natural_science_engineering`: Semantic Scholar, 3 results.
+  - `philosophy_methodology`: Semantic Scholar, 5 results.
+
+Key paths:
+- Experiment ledger:
+  `experiments/meta_learning_formal_20260624_2153/ledgers/experiment_ledger.jsonl`.
+- Taste:
+  `experiments/meta_learning_formal_20260624_2153/meta_learning/epoch_001/taste.md`.
+- Canonical trace:
+  `experiments/meta_learning_formal_20260624_2153/artifacts/run_c68b0781704c/agent_trace.jsonl`.
+- Run manifest:
+  `experiments/meta_learning_formal_20260624_2153/artifacts/run_c68b0781704c/run_manifest.json`.
+- Runtime env:
+  `experiments/meta_learning_formal_20260624_2153/artifacts/run_c68b0781704c/runtime_env.json`.
+- Runtime sandbox:
+  `.runtime/sandboxes/run_c68b0781704c/`.
+
+Post-run checks:
+- `free -h` after the run: 273 GiB available RAM.
+- `nvidia-smi` after the run: GPU usage remained external to this run.
+- Secret/proxy scan over the run log, experiment artifacts, and runtime
+  sandbox found no GitHub/HF/OpenAI-style token or VLESS-style proxy string.
+- Generated Python cache scan under `src/`, `scripts/`, and `tests/` was empty.
+
+## 2026-06-24 - Meta Learning network prompt simplification
+
+Task: fold the Meta Learning network/proxy rules into the static
+`# 环境与配置` system-prompt section and remove the separate
+`network_guidance` option, because Meta Learning network access is now a
+default capability and run-specific details are already visible in
+`runtime_env.json` and the run manifest.
+
+Implementation:
+- Rewrote the Meta Learning prompt subsection as
+  `## 运行环境、联网与代理` under `# 环境与配置`.
+- Removed `build_meta_learning_network_section(...)`,
+  `build_meta_learning_prompt(network_guidance=...)`,
+  `AgentSessionRunner(meta_learning_network_guidance=...)`, and the
+  `ExperimentConfig.meta_learning_network_guidance` field.
+- Removed the duplicated `meta_learning_network_guidance` manifest entries.
+  Runtime facts now come from `/mnt/artifacts/runtime_env.json`
+  (`network`, `sandbox_spec.env_passthrough`, `sandbox_spec.env_aliases`) and
+  the run manifest.
+- Removed the separate PROMPTS.md network/proxy example section; the base Meta
+  Learning system prompt now contains the full stable policy.
+- Updated `agent_design.md`, `pipeline_design.md`, CLI help text, and unit
+  tests to reference runtime metadata instead of a dynamic prompt fragment.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: 271 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by external workloads; this work started
+    no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/prompts.py src/hl_trader/agent/runner.py src/hl_trader/agent/__init__.py src/hl_trader/pipelines/config.py src/hl_trader/pipelines/experiment.py scripts/experiments/run_experiment.py scripts/dev/export_prompts.py tests/unit/test_sandbox_isolation.py`
+  passed.
+- Prompt snapshot consistency:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -c 'from pathlib import Path; from scripts.dev.export_prompts import render; assert Path("configs/prompts/PROMPTS.md").read_text(encoding="utf-8") == render()'`
+  passed.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation -q`
+  passed, 29 tests.
+- Pipeline tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e -q`
+  passed, 21 tests.
+- Tool-flow regression tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow -q`
+  passed, 40 tests.
+- CLI smoke:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/run_experiment.py --help`
+  succeeded and now describes `--meta-learning-host-proxy` as recording alias
+  names in `runtime_env.json`.
+- Secret/proxy scan excluding `.env`, external references, logs,
+  experiments, data, results, and wandb found no GitHub/HF token or
+  VLESS-style strings in the working tree.
+- `git diff --check` over touched files passed.
+- Generated Python cache directories under `src/`, `scripts/`, and `tests/`
+  were removed after tests; follow-up cache scan was empty.
+- Post-test resources:
+  - `free -h`: 272 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Meta Learning network prompt injection
+
+Task: make the Meta Learning network/proxy options section part of every
+Meta Learning system prompt, and keep the injected guidance in Chinese.
+
+Implementation:
+- `build_meta_learning_prompt()` now always includes
+  `build_meta_learning_network_section(...)`.
+- When no experiment-specific network guidance is provided, the system prompt
+  still includes `# 本次联网与代理选项` with a Chinese default section:
+  follow `/mnt/artifacts/run_manifest.json` and
+  `/mnt/artifacts/runtime_env.json`, use direct internet by default, do not
+  enable proxy variables unless they are explicitly listed, and never print or
+  persist credential/proxy values.
+- `_meta_learning_network_guidance()` now renders the configured Docker
+  network mode, credential env names, passthrough env names, proxy alias env
+  names, and host-proxy behavior in Chinese.
+- `scripts/dev/export_prompts.py` was updated so `PROMPTS.md` shows the
+  always-present base section plus a Chinese configured-section example.
+- Unit coverage now checks both configured guidance and the no-guidance default
+  prompt path.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: 271 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by external workloads; this work started
+    no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/prompts.py scripts/experiments/run_experiment.py scripts/dev/export_prompts.py tests/unit/test_sandbox_isolation.py`
+  passed.
+- Prompt snapshot consistency:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -c 'from pathlib import Path; from scripts.dev.export_prompts import render; assert Path("configs/prompts/PROMPTS.md").read_text(encoding="utf-8") == render()'`
+  passed.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation -q`
+  passed, 29 tests.
+- Secret/proxy scan excluding `.env`, external references, logs,
+  experiments, data, results, and wandb found no GitHub/HF token or
+  VLESS-style strings in the working tree.
+- `git diff --check` over touched files passed.
+- Generated Python cache directories under `src/`, `scripts/`, and `tests/`
+  were removed after tests; follow-up cache scan was empty.
+- Post-test resources:
+  - `free -h`: 271 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Meta Learning system prompt cleanup
+
+Task: make the Meta Learning Agent system prompt cleaner, easier to audit,
+and complete enough for current data, networking, tool, and Taste semantics.
+
+Implementation:
+- Reorganized `META_LEARNING_INSTRUCTION` in
+  `src/hl_trader/agent/prompts.py` into stable sections:
+  role and goal, work order, first-run empty-history handling, readable and
+  writable files, runtime/networking, action protocol, research protocol,
+  Taste output contract, exploration tolerance, optional regularization, and
+  forbidden behavior.
+- Kept the prompt focused on the current accepted behavior: read the Step
+  tree first, inspect run/runtime manifests, sample visible PIT snapshots with
+  Python through shell, use all configured research perspectives when web
+  search is enabled, write `/mnt/agent/workspace/taste.md`, and call
+  `modification_check` only if `output/` or `models/` were changed.
+- Clarified that credentials and proxy values are environment-only and must
+  not be printed, copied, written to Taste, written to artifacts, or logged.
+- Renamed the exported prompt audit section from a rendered-example title to
+  `元学习 Agent System Prompt（基础模板）`.
+- Re-rendered `configs/prompts/PROMPTS.md` from the source templates.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: 271 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by external workloads; this work started
+    no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/prompts.py scripts/dev/export_prompts.py tests/unit/test_sandbox_isolation.py`
+  passed.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation -v`
+  passed, 26 tests.
+- Prompt snapshot scan confirmed the old `Web Search Engines`,
+  `development 摘要`, and duplicate rendered-example meta prompt labels are not
+  present in the exported Meta Learning prompt section.
+- Secret/proxy scan excluding `.env` and `external_references/` found no
+  GitHub/HF token or VLESS-style strings in the working tree.
+- `git diff --check` over the touched prompt/log files passed.
+- Generated Python cache directories under `src/`, `scripts/`, and `tests/`
+  were removed after tests; follow-up cache scan was empty.
+- Post-test resources:
+  - `free -h`: 271 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Prompt structure cleanup
+
+Task: reorganize Fold Agent and Meta Learning Agent prompts into the requested
+three top-level sections, make Meta Learning workflow steps non-sequential,
+and replace sampling-oriented wording with detailed data inspection language.
+
+Implementation:
+- Split the Fold Agent prompt source into `FOLD_ROLE_SECTION`,
+  `FOLD_ENV_SECTION`, and `FOLD_ACTION_SECTION`, rendered as:
+  `# 角色与目标`, `# 环境与配置`, and `# 动作与流程`.
+- Updated `build_system_prompt()` so dynamic Fold info, acceptance rules,
+  Step tree, Taste, anti-overfit rules, convergence guidance, and phase
+  guidance are inserted as second-level sections under the three top-level
+  blocks instead of creating additional top-level prompt sections.
+- Reorganized `META_LEARNING_INSTRUCTION` into the same three top-level
+  sections. Under `# 环境与配置`, it now contains first-run empty-history
+  handling, readable/writable files, and runtime/networking. Under
+  `# 动作与流程`, it now contains action protocol, non-sequential work steps,
+  Taste output contract, and forbidden behavior.
+- Changed Meta Learning wording from fixed `工作顺序` to flexible `工作步骤`,
+  explicitly allowing repeated `shell`, `grep/glob`, and `web_search` calls as
+  new evidence appears.
+- Replaced sampling wording with detailed inspection wording:
+  visible snapshot checks are now described as read-only detailed inspection
+  and analysis. The old “再形成 Taste” phrase was removed.
+- Updated the Runner initial Meta Learning user message to match the flexible
+  shell/web_search workflow.
+- Kept ordinary Fold networking and package installation disabled by default.
+  The decision is intentional: ordinary Fold validation should stay
+  reproducible and not depend on transient workspace downloads. Meta Learning
+  remains the place for networked research and dependency feasibility checks.
+- Re-rendered `configs/prompts/PROMPTS.md`.
+- Updated `docs/agent_design.md` and `docs/pipeline_design.md` to match the
+  new detailed data-inspection wording.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: 271 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by external workloads; this work started
+    no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/prompts.py src/hl_trader/agent/runner.py scripts/dev/export_prompts.py tests/unit/test_sandbox_isolation.py`
+  passed.
+- Prompt snapshot consistency:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -c 'from pathlib import Path; from scripts.dev.export_prompts import render; assert Path("configs/prompts/PROMPTS.md").read_text(encoding="utf-8") == render()'`
+  passed.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e -v`
+  passed, 49 tests.
+- Residual wording scan confirmed no `工作顺序`, `再形成 Taste`, or
+  Meta-Learning-specific `抽样检查` remains in prompt sources or prompt
+  snapshot. Data sentinel documentation still uses `抽样检查` for its separate
+  historical-partition audit concept.
+- Secret/proxy scan excluding `.env` and `external_references/` found no
+  GitHub/HF token or VLESS-style strings in the working tree.
+- `git diff --check` over touched files passed.
+- Generated Python cache directories under `src/`, `scripts/`, and `tests/`
+  were removed after tests; follow-up cache scan was empty.
+- Post-test resources:
+  - `free -h`: 272 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Meta Learning audit fixes and runtime cleanup
+
+Task: delete the current `.runtime` directory and fix the SubAgent audit
+findings around Meta Learning completion, Taste output, ordinary Fold shell
+network/package boundaries, secret redaction, and web_search success semantics.
+
+Runtime cleanup:
+- Confirmed the physical repository path with `pwd -P`: `/Data/lzp/MacroQuant`.
+- `.runtime` was about 222 GiB before deletion.
+- Initial `rm -rf .runtime` removed most contents but was blocked by read-only
+  historical sandbox files.
+- The remaining tree was about 2.3 MiB and owned by the current user. Applied
+  `chmod -R u+w .runtime`, then removed it.
+- Final check confirmed `.runtime` no longer exists.
+
+Implementation:
+- `AgentSessionRunner.run()` now stores the session summary in `ctx.extra` and
+  marks `meta_learning_done` only after the explicit `done` path succeeds.
+- Meta Learning `done` now requires non-empty
+  `/mnt/agent/workspace/taste.md`; missing or blank Taste is rejected.
+- `web_search` only counts a research perspective as complete when the result
+  count is non-zero. Empty search results are traced as `empty_results` and do
+  not satisfy the three-perspective requirement.
+- The production CLI meta learner now returns the `AgentSessionRunner` summary.
+  Pipeline validates real summaries and accepts Taste/regularization only when
+  `finish_status == "meta_learning_done"`; it also fail-fasts on missing or
+  empty Taste.
+- Ordinary Fold `sandbox_shell_tool` now rejects common install/download/network
+  entry points such as `pip install`, `python -m pip install`, `conda install`,
+  `npm install`, `git clone`, `hf download`, `curl`, and `wget`. Meta Learning
+  runs retain the configured open-network shell behavior.
+- Runtime log redaction now covers common OpenAI/HF/GitHub token forms, VLESS
+  links, and proxy URLs with embedded credentials. Oversized Shell stdout/stderr
+  files are sanitized before being written under tool results.
+- Meta Learning prompt wording no longer hard-codes a fixed web_search engine
+  list in the action example; the tool schema remains the source of actual
+  configured engines.
+- Updated living docs and re-rendered `configs/prompts/PROMPTS.md`.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: 271 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by external workloads; this work started
+    no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/runner.py src/hl_trader/agent/prompts.py src/hl_trader/environment/runtime.py src/hl_trader/environment/tools/base.py src/hl_trader/environment/tools/shell.py src/hl_trader/pipelines/config.py src/hl_trader/pipelines/experiment.py scripts/experiments/run_experiment.py tests/unit/test_sandbox_isolation.py tests/unit/test_pipeline_e2e.py tests/unit/test_tools_flow.py`
+  passed.
+- Prompt snapshot consistency:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -c 'from pathlib import Path; from scripts.dev.export_prompts import render; assert Path("configs/prompts/PROMPTS.md").read_text(encoding="utf-8") == render()'`
+  passed.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e tests.unit.test_tools_flow -v`
+  passed, 89 tests.
+- Secret/proxy scan excluding `.env` and `external_references/` found no
+  GitHub/HF token or VLESS-style strings in the working tree.
+- `git diff --check` over touched files passed.
+- Generated Python cache directories under `src/`, `scripts/`, and `tests/`
+  were removed after tests; follow-up cache scan was empty.
+- Post-test resources:
+  - `free -h`: 271 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Meta Learning proxy aliases and GitHub token check
+
+Task: keep Meta Learning Docker proxy configuration available without making
+proxy the default networking path, and verify the locally configured GitHub
+token without exposing it.
+
+Implementation:
+- Added `SandboxSpec.env_aliases`, recorded as container env name to host env
+  name mappings. Values are not written to manifests.
+- Docker startup now supports alias env vars by placing values in the
+  `subprocess.run(env=...)` environment and passing only `--env CONTAINER_NAME`
+  to `docker run`. This avoids embedding proxy values in the command line.
+- `--meta-learning-host-proxy` now maps host standard proxy variables into
+  non-standard container aliases:
+  `MQ_PROXY_HTTP`, `MQ_PROXY_HTTPS`, `MQ_PROXY_ALL`, `MQ_PROXY_NO_PROXY`.
+  It does not inject standard `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or
+  `NO_PROXY`, so Agent shell commands use direct internet by default.
+- The experiment CLI now selectively loads the allowed passthrough variable
+  names from the repository `.env` into the process environment before
+  rendering the Meta Learning sandbox spec. Values are not printed or
+  recorded, and existing process env values are not overwritten.
+- For Docker bridge mode with host gateway enabled, localhost proxy URLs are
+  rewritten to `host.docker.internal` before being placed into the container
+  alias env vars.
+- Meta Learning system prompt guidance now tells Agent to try direct access
+  first and only map alias vars to standard proxy vars for a specific command
+  if GitHub/HuggingFace/PyPI/npm is slow or blocked.
+- Updated Agent/Environment/Pipeline docs and prompt snapshot to match the
+  proxy-alias behavior.
+
+GitHub token check:
+- `.env` is ignored by `.gitignore`.
+- Loaded `GITHUB_TOKEN` from `.env` in memory and called GitHub `/user` with an
+  Authorization header. The token authenticated successfully as login
+  `LeoZippon`; GitHub reported a 5000/hour rate-limit bucket. The token value
+  was not printed or written.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: 272 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by external workloads; this work started
+    no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/sandbox.py scripts/experiments/run_experiment.py src/hl_trader/agent/prompts.py src/hl_trader/agent/runner.py src/hl_trader/pipelines/config.py src/hl_trader/pipelines/experiment.py tests/unit/test_sandbox_isolation.py tests/unit/test_pipeline_e2e.py`
+  passed.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e -v`
+  passed, 46 tests.
+- Secret scan excluding `.env` found no GitHub/HF token or VLESS-style strings
+  in the working tree outside external references.
+- `git diff --check` over touched files passed.
+- Generated Python cache directories under `src/`, `scripts/`, and `tests/`
+  were removed after tests.
+- Post-test resources:
+  - `free -h`: 272 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-24 - Shell output budget and template path cleanup
+
+Task: review whether the Agent-facing shell schema should support
+`max_output_chars`, compare with `external_references/claude-code-main`, and
+explain why inner Agent sessions could see the host path
+`/Data/lzp/MacroQuant/configs/agent_output_template/`.
+
+Findings:
+- Claude Code's `BashTool` does not expose a model-facing
+  `max_output_chars` field. Its input schema includes command metadata such as
+  command, timeout, description and background/sandbox options, while output is
+  controlled by fixed tool/result budgets. Large command output is persisted to
+  a tool-results file and the model receives a preview plus path.
+- This repository already had the lower-level executor parameter
+  `max_output_chars` and tool-result persistence, but the Agent-facing shell
+  action schema only accepted `command`. The model could not ask for a smaller
+  inline budget when running noisy commands.
+- Inner Agent sessions could see the host template path because Pipeline wrote
+  `"template_dir": str(self.config.template_dir)` into the Agent-readable
+  `/mnt/artifacts/run_manifest.json`. `modification_check_tool` used that host
+  path as the initial diff baseline.
+
+Implementation:
+- Added optional shell action field `max_output_chars` with bounds
+  `1..20000`. It can only reduce inline stdout/stderr; executor capture remains
+  bounded separately and oversized output is still written to tool-results.
+- Runner now passes the validated field to `SandboxShellTool.run(...)`, and
+  shell trace records the effective inline output budget.
+- Initial strategy template is now copied into read-only
+  `/mnt/artifacts/parent_output/`, making the diff baseline sandbox-local.
+- `modification_check_tool` uses `parent_output` for initial artifacts and
+  validates it against `initial_template_hash` when present.
+- Fold and Meta Learning run manifests now write `template_ref` and
+  `initial_template_hash`; they no longer write the host `template_dir` path.
+- Updated Agent/Environment/Pipeline docs and exported prompt snapshot.
+
+Validation:
+- Pre-test resources:
+  - `free -h`: 442 GiB available RAM.
+  - `nvidia-smi`: GPUs were occupied by external workloads; this work started
+    no GPU job.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/tools/shell.py src/hl_trader/agent/runner.py src/hl_trader/environment/sandbox.py src/hl_trader/environment/tools/modification_check.py src/hl_trader/pipelines/experiment.py src/hl_trader/agent/prompts.py tests/unit/test_tools_flow.py`
+  passed.
+- Prompt snapshot consistency:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -c 'from pathlib import Path; from scripts.dev.export_prompts import render; assert Path("configs/prompts/PROMPTS.md").read_text(encoding="utf-8") == render()'`
+  passed.
+- Tool flow tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow -v`
+  passed, 41 tests.
+- Pipeline and sandbox tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e tests.unit.test_sandbox_isolation -v`
+  passed, 50 tests.
+- Path scan over source/docs/prompt snapshots found no new Agent-visible
+  manifest `template_dir` field. Remaining `template_dir` references are
+  internal CLI/config/template-copy implementation details.
+- `git diff --check` over touched files passed.
+- Generated Python cache directories under `src/`, `scripts/`, and `tests/`
+  were removed after tests; follow-up cache scan was empty.
+- Post-test resources:
+  - `free -h`: 441 GiB available RAM.
+  - GPU usage remained external to this run.
+
+## 2026-06-25 - Claude Code tool-pattern selective adoption
+
+Task: selectively adopt useful Claude Code Tool patterns while keeping the
+system simple and maintainable; also make `web_search` structurally consistent
+with other Agent-facing tools.
+
+Adopted:
+- `ActionSpec` now records `schema_version` and `result_policy`. These fields
+  are emitted through `tool_spec` in trace records and make future schema
+  evolution and output-budget audits explicit.
+- `sandbox_shell_tool` now records `command_kind` for audit:
+  `read`, `list`, `search`, `write`, `install`, `network`, `neutral`, or
+  `unknown`. This is a best-effort trace label; enforcement remains in the
+  existing phase policy, Sandbox mounts, path guard, and install/network guard.
+- `sandbox_shell_tool` accepts optional `timeout_seconds`, bounded by the
+  existing default per-call shell timeout. Agent can shorten a noisy command
+  but cannot extend execution beyond the configured boundary.
+- `grep` and `glob` mark their result policy as `paginated_bounded_inline`.
+- `web_search_tool` is now an Agent-facing tool under
+  `src/hl_trader/environment/tools/web_search.py`. The provider aggregation and
+  concrete Tavily/Semantic Scholar clients remain in
+  `src/hl_trader/environment/web_search.py` as `WebSearchService`.
+- Runner now gets the web-search spec and trace behavior from
+  `AgentWebSearchTool` instead of constructing that tool inline.
+
+Not adopted:
+- Provider-native Claude/Anthropic tool-use protocol: useful later, but it
+  would force a broader LLM Proxy and trace migration across providers.
+- Arbitrary background shell tasks: high operational risk for Fold deadlines,
+  resource limits, and reproducible freezing.
+- Interactive permission prompts and sed preview: useful in a human CLI, but
+  not aligned with automated Docker Fold execution.
+
+Validation:
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/tools/base.py src/hl_trader/environment/tools/shell.py src/hl_trader/environment/tools/search.py src/hl_trader/environment/tools/web_search.py src/hl_trader/environment/tools/__init__.py src/hl_trader/environment/web_search.py src/hl_trader/agent/runner.py src/hl_trader/agent/prompts.py tests/unit/test_tools_flow.py tests/unit/test_sandbox_isolation.py`
+  passed.
+- Prompt snapshot consistency:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -c 'from pathlib import Path; from scripts.dev.export_prompts import render; assert Path("configs/prompts/PROMPTS.md").read_text(encoding="utf-8") == render()'`
+  passed.
+- Combined tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e -v`
+  passed, 93 tests.
+- Resource checks after tests:
+  - `free -h`: 446 GiB available RAM.
+  - `nvidia-smi`: existing external GPU process remained on GPU 0; this work
+    started no GPU job.
+- `git diff --check` over touched files passed.
+- Generated Python cache directories under `src/`, `scripts/`, and `tests/`
+  were removed after tests; follow-up cache scan was empty.
+
+## 2026-06-25 - Tool guard audit fixes and meta-learning Fold rerun
+
+Task: open SubAgents to audit current code structure/tool logic, close all
+SubAgents after completion, fix discovered issues, then rerun one formal
+meta-learning Fold in the Docker sandbox.
+
+SubAgent audit trail:
+- Initial broad tool/code audit found Shell guard weaknesses around
+  install/network command segmentation and write-like commands under read-only
+  paths.
+- Follow-up focused audits found additional Shell boundary cases:
+  naked relative write targets, `bash/sh -c` wrappers, `find -exec`, Python
+  write APIs, command substitution, background execution, and no-space shell
+  redirection such as `printf x>stray`.
+- Final focused audit over `printf x>stray`, nested shell, and `find -exec`
+  returned `Blocking: 无`, `Should Fix: 无`, `Nice To Have: 无`.
+- All spawned SubAgents were closed after their results were consumed.
+
+Implementation:
+- `sandbox_shell_tool` now scans command segments including `&&`, `||`, `;`,
+  `&`, `|`, and newline where safe; it also recurses through `env` and
+  `bash/sh/zsh -c` wrappers.
+- Ordinary Fold install/network guard now blocks wrapped and nested forms such
+  as `echo ok && pip install`, `true & curl`, command substitution with
+  `curl/wget`, and `find -exec curl` / `find -exec sh -c 'curl ...'`.
+- Path guard now sends all write targets through `_guard_one_path()`, including
+  bare relative writes such as `touch stray`, `printf x>stray`, `cp ... stray`,
+  Python write APIs (`open`, `Path.open`, `write_text`, `to_csv`), nested
+  `bash/sh -c`, and `find -exec sh -c` write targets.
+- The no-space redirection scanner skips quoted text, preserving read-only
+  commands like `rg "a>b" /mnt/snapshots/train`.
+- `sandbox_shell_tool` result policy was renamed to
+  `bounded_inline_with_persisted_captured_output` to match actual executor
+  capture semantics.
+- `web_search_tool` now emits a `web_search` trace record even on provider
+  failure, with sanitized error text and the relevant tool spec/engine/query
+  metadata.
+- Runner now sanitizes ToolError/WebSearchError and generic Exception
+  observations before returning them to the Agent context and trace.
+- `StructuredSearchTool.glob()` now returns deterministically sorted matches.
+- Meta/Fold prompt text was updated to reference `run_manifest.web_search_engines`
+  instead of implying the complete schema is directly visible in the prompt;
+  `configs/prompts/PROMPTS.md` was regenerated.
+
+Verification before formal run:
+- Resource checks:
+  - `free -h`: about 441 GiB available RAM.
+  - `nvidia-smi`: existing external process on GPU 0 using about 10.5 GiB; no
+    local training started by this work.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static checks:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/tools/shell.py src/hl_trader/environment/tools/web_search.py src/hl_trader/environment/tools/search.py src/hl_trader/agent/runner.py src/hl_trader/agent/prompts.py tests/unit/test_tools_flow.py tests/unit/test_sandbox_isolation.py`
+  passed.
+- Focused tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ShellToolTest tests.unit.test_sandbox_isolation.MetaLearningSessionTest -v`
+  passed, 22 tests.
+- Combined regression:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_sandbox_isolation tests.unit.test_pipeline_e2e -v`
+  passed, 95 tests.
+- `git diff --check` over touched tool/runner/test/prompt files passed.
+
+Formal meta-learning-only Fold:
+- Command log:
+  `logs/meta_learning_tool_audit_20260625_013641.log`
+- Experiment:
+  `experiments/meta_learning_tool_audit_20260625_013641/`
+- Run:
+  `run_id=run_4c7511878785`
+- Entry point:
+  direct `ExperimentPipeline.run_meta_learning(epoch_id="epoch_001", parent=None, visible_fold=folds[0])`.
+- Config:
+  - `fold_period=quarter`
+  - first development test period `2022Q1`, last `2025Q4`
+  - held-out config `2026Q1..2026Q1` recorded but not executed in this
+    meta-learning-only run
+  - default decision window 21 months
+  - intraday visible window 5 trading days
+  - deadline 60 minutes
+  - Docker sandbox network `bridge` for meta-learning, ordinary sandbox spec
+    remains `network=none`
+  - main Agent model `deepseek-v4-pro`, reasoning effort `max`
+  - NL/compact model `deepseek-v4-flash`; compact thinking disabled
+  - context compaction token threshold `200000`
+  - web search engines `tavily`, `semantic_scholar`
+- Visible fold:
+  - `fold_id=fold_2022Q1`
+  - input window `20200101..20210930`
+  - validation period `20211001..20211231`
+  - test period `20220101..20220331`
+  - valid decision time `2021-10-08T09:25:00+08:00`
+- Important artifacts:
+  - Manifest:
+    `experiments/meta_learning_tool_audit_20260625_013641/artifacts/run_4c7511878785/run_manifest.json`
+  - Trace:
+    `experiments/meta_learning_tool_audit_20260625_013641/artifacts/run_4c7511878785/agent_trace.jsonl`
+  - Taste:
+    `experiments/meta_learning_tool_audit_20260625_013641/meta_learning/epoch_001/taste.md`
+  - Ledger:
+    `experiments/meta_learning_tool_audit_20260625_013641/ledgers/experiment_ledger.jsonl`
+  - Runtime sandbox:
+    `.runtime/sandboxes/run_4c7511878785/`
+
+Formal run result:
+- Pipeline command returned code 0 after about 8.6 minutes.
+- Ledger status: `taste_only`.
+- Agent session summary:
+  - `finish_status=meta_learning_done`
+  - `llm_calls=22`
+  - `steps_used=1`
+  - `context_compactions=0`
+  - `context_compaction_calls=0`
+- Modification check passed:
+  - `allowed_to_backtest=true`
+  - no reasons
+  - no frozen parent because this was first meta-learning taste-only run
+- Trace counts:
+  - `llm_call=22`
+  - `shell=16`
+  - `web_search=3`
+  - `tool=1`
+  - `session_end=1`
+- Token summary from `agent_trace.jsonl`:
+  - prompt tokens: 385,881
+  - completion tokens: 13,213
+  - total tokens: 399,094
+  - prompt cache hit tokens: 343,680
+  - prompt cache miss tokens: 42,201
+- Web search:
+  - Tavily `finance_quant_econ`, 5 results, status OK
+  - Semantic Scholar `natural_science_engineering`, 5 results, status OK
+  - Tavily `philosophy_methodology`, 5 results, status OK
+- Shell:
+  - 16 shell calls.
+  - One `duckdb -c ...` call returned exit 127 because the CLI was unavailable
+    in the sandbox; the Agent continued and completed via Python/pandas.
+- Taste summary:
+  event-driven candidate selection with text evidence as an auxiliary filter,
+  combined with rule-based price/volume and event signals; NL should not be
+  treated as a primary signal because of forward-looking and leakage risks.
+
+Post-run resource checks:
+- `free -h`: about 441 GiB available RAM.
+- `nvidia-smi`: existing external GPU 0 process remained; no local training
+  job started by this run.
+- `docker ps` showed no running sandbox container from this run.
+
+Cleanup:
+- Generated Python cache directories under `src/`, `scripts/`, and `tests/`
+  were removed after tests/runs where found.
+
+## 2026-06-25 - Shell guard slimming and structured failure hints
+
+Task:
+- Reassess whether Shell guard had become too strict now that formal
+  experiments use Docker sandboxing rather than local-dev.
+- Slim the guard while preserving the experiment contract, and make failed
+  tool calls more actionable for the Agent.
+
+Resource checks:
+- Before work:
+  - `free -h`: about 446 GiB available RAM.
+  - `nvidia-smi`: GPU 0 had an existing external Python process using about
+    10.5 GiB; no GPU job was started for this change.
+- After verification:
+  - `free -h`: about 447 GiB available RAM.
+  - `nvidia-smi`: same external GPU 0 process remained.
+
+Implementation:
+- `src/hl_trader/environment/tools/base.py`
+  - Extended `ToolError` with optional structured fields:
+    `error_type`, `reason`, `retry_hint`, `blocked_target`, and `details`.
+  - Preserved `ToolError("message")` compatibility for existing tools.
+- `src/hl_trader/agent/runner.py`
+  - Schema errors now include `error_type=schema_error`, `reason`, and a
+    retry hint while still returning the original `error` string and
+    `tool_spec`.
+  - ToolError observations now include structured fields from `ToolError`.
+- `src/hl_trader/environment/tools/shell.py`
+  - Reframed Shell guard as a light contract guard rather than a full Bash
+    parser.
+  - Kept the hard policy checks that matter for the experiment contract:
+    phase/write lock, explicit forbidden paths, explicit writes to read-only
+    roots, writes to unmanaged sandbox paths, ordinary Fold install/download
+    commands, output budget, and timeout budget.
+  - Removed Python literal write-target regex handling and nested write-target
+    recursion for `bash/sh -c` and `find -exec`; those cases are now left to
+    Docker read-only mounts, directory permissions, and artifact checks.
+  - Fixed the previous global `-i*` write heuristic so read-only commands such
+    as `rg -i` and `grep -i` are not misclassified. Only `sed`/`perl`
+    in-place flags are treated as write-like.
+  - Added structured path/network errors with retry hints, e.g. telling the
+    Agent to write scratch files under `/mnt/agent/workspace/...`.
+- `src/hl_trader/environment/sandbox.py`
+  - Changed the `/mnt/agent` root directory mode to non-writable (`0555`) and
+    kept only `/mnt/agent/workspace`, `/mnt/agent/output`, and
+    `/mnt/agent/models` writable as documented.
+- `tests/unit/test_tools_flow.py`
+  - Updated Shell guard tests to match the slimmer contract.
+  - Added coverage that `rg -i` is allowed and Shell guard failures returned
+    through Runner include `error_type`, `retry_hint`, and `blocked_target`.
+- Docs/prompt updates:
+  - `src/hl_trader/agent/prompts.py`
+  - `configs/prompts/PROMPTS.md`
+  - `docs/agent_design.md`
+  - `docs/environment_design.md`
+  now describe Shell guard as a light contract layer and document structured
+  failure fields.
+
+Commands:
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static syntax check:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/tools/base.py src/hl_trader/environment/tools/shell.py src/hl_trader/environment/sandbox.py src/hl_trader/agent/runner.py src/hl_trader/agent/prompts.py tests/unit/test_tools_flow.py`
+  succeeded.
+- Focused regression:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ShellToolTest tests.unit.test_sandbox_isolation.MetaLearningSessionTest tests.unit.test_pipeline_e2e -v`
+  passed, 44 tests.
+- Broader tool/sandbox regression:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_sandbox_isolation -v`
+  passed, 75 tests.
+- Diff whitespace check:
+  `git diff --check -- src/hl_trader/environment/tools/base.py src/hl_trader/environment/tools/shell.py src/hl_trader/environment/sandbox.py src/hl_trader/agent/runner.py src/hl_trader/agent/prompts.py configs/prompts/PROMPTS.md docs/agent_design.md docs/environment_design.md tests/unit/test_tools_flow.py`
+  passed.
+
+Cleanup:
+- Removed generated caches:
+  `src/hl_trader/environment/tools/__pycache__`,
+  `src/hl_trader/environment/__pycache__`,
+  `src/hl_trader/agent/__pycache__`,
+  `tests/unit/__pycache__`.
+- Final cache scan for `src`, `tests`, and `scripts` was clean before the
+  logbook edit.
+
+Conclusion:
+- Shell guard is now less dependent on fragile Bash/Python source parsing while
+  still enforcing the key experiment contract.
+- Agent-facing failures are more actionable and include structured retry hints.
+
+2026-06-24 Runtime env package field clarification
+
+Resource checks:
+- Before verification:
+  - `free -h`: about 446 GiB available RAM.
+  - `nvidia-smi`: GPU 0 had an existing external Python process using about
+    10.5 GiB; no new GPU workload was started.
+- After verification:
+  - `free -h`: about 446 GiB available RAM.
+  - `nvidia-smi`: same external GPU 0 process remained.
+
+Implementation:
+- `src/hl_trader/environment/sandbox.py`
+  - Renamed the runtime environment package field from `important_packages` to
+    `python_packages`.
+  - Renamed the internal package constant to `PYTHON_PACKAGES`.
+  - Kept `schema_version=1` to keep this as a lightweight wording/schema-field
+    clarification rather than a broader contract migration.
+- `tests/unit/test_sandbox_isolation.py`
+  - Updated the runtime env contract assertions to use `python_packages`.
+- `src/hl_trader/agent/prompts.py`
+  - Clarified runtime env wording as Python packages plus CLI tools.
+- `configs/prompts/PROMPTS.md`
+  - Regenerated from the prompt source.
+- `docs/agent_design.md`, `docs/environment_design.md`,
+  `docs/pipeline_design.md`
+  - Applied matching lightweight terminology updates.
+
+Commands:
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static syntax check:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/sandbox.py src/hl_trader/agent/prompts.py tests/unit/test_sandbox_isolation.py`
+  succeeded.
+- Runtime env focused test:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation.SandboxSpecTest.test_runtime_env_artifact_records_local_and_docker_contracts -v`
+  passed.
+- Diff whitespace check:
+  `git diff --check -- src/hl_trader/environment/sandbox.py src/hl_trader/agent/prompts.py configs/prompts/PROMPTS.md docs/agent_design.md docs/environment_design.md docs/pipeline_design.md tests/unit/test_sandbox_isolation.py`
+  passed.
+
+Cleanup:
+- Removed generated caches under `src/hl_trader/environment`,
+  `src/hl_trader/agent`, and `tests/unit`.
+
+Conclusion:
+- New runtime env artifacts distinguish Python import packages
+  (`python_packages`) from executable CLI tools (`tools`), reducing the chance
+  that an Agent tries a package name such as `duckdb` as a shell command.
+
+2026-06-24 Backtest engine lightweight slimming
+
+Resource checks:
+- Before verification:
+  - `free -h`: about 446 GiB available RAM.
+  - `nvidia-smi`: GPU 0 had an existing external Python process using about
+    10.5 GiB; no new GPU workload was started.
+- After verification:
+  - `free -h`: about 445 GiB available RAM.
+  - `nvidia-smi`: same external GPU 0 process remained.
+
+Implementation:
+- `src/hl_trader/environment/backtest_engine.py`
+  - Extracted the duplicated sandbox path-guard/open/listdir/scandir bootstrap
+    used by the decision-stage strategy driver and minute-policy RPC driver
+    into `_STRATEGY_PATH_GUARD`.
+  - Removed the old `target_weight` action alias in replay execution; strategy
+    actions now use the current `weight` field only.
+
+Commands:
+- Static syntax check:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/backtest_engine.py`
+  succeeded.
+- Broker/backtest engine regression:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine -v`
+  passed, 25 tests.
+- Tool-flow regression:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ToolFlowTest -v`
+  passed, 23 tests.
+
+Cleanup:
+- Removed generated Python caches under `src`, `scripts`, and `tests`.
+
+Conclusion:
+- The change keeps the external backtest contract unchanged while trimming a
+  stale compatibility alias and reducing duplicated sandbox bootstrap code.
+
+2026-06-24 Meta-learning rerun audit trace
+
+Resource checks:
+- Before run:
+  - `free -h`: about 447 GiB available RAM.
+  - `nvidia-smi`: GPU 0 had an existing external Python process using about
+    10.5 GiB; no new training workload was started.
+- After run:
+  - `free -h`: about 445 GiB available RAM.
+  - `nvidia-smi`: same external GPU 0 process remained.
+
+Run:
+- Ran a real Docker meta-learning-only Fold by constructing the standard
+  `ExperimentPipeline` components and calling `run_meta_learning()` directly,
+  avoiding a full Fold/held-out experiment.
+- Config:
+  - experiment_id: `meta_learning_rerun_20260625_0238`
+  - run_id: `run_1b509f529ccf`
+  - fold_period: `quarter`
+  - first/last test period: `2022Q1`
+  - held-out period fields for config validity: `2022Q2`
+  - visible Fold: first quarterly Fold
+  - history window: 21 months
+  - intraday visible window: 5 trading days
+  - meta-learning Docker network: `bridge`
+  - main model: `deepseek-v4-pro`
+  - reasoning_effort: `max`
+  - compact model: `deepseek-v4-flash`
+  - compact threshold: 200000 estimated tokens
+  - web_search engines: `tavily`, `semantic_scholar`
+
+Command:
+- The Python one-off runner was executed with:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python`
+  and stdout/stderr tee'd to
+  `logs/meta_learning_rerun_20260625_0238.log`.
+
+Artifacts:
+- Ledger:
+  `experiments/meta_learning_rerun_20260625_0238/ledgers/experiment_ledger.jsonl`
+- Run manifest:
+  `experiments/meta_learning_rerun_20260625_0238/artifacts/run_1b509f529ccf/run_manifest.json`
+- Runtime env:
+  `experiments/meta_learning_rerun_20260625_0238/artifacts/run_1b509f529ccf/runtime_env.json`
+- Canonical trace:
+  `experiments/meta_learning_rerun_20260625_0238/artifacts/run_1b509f529ccf/agent_trace.jsonl`
+- Taste:
+  `experiments/meta_learning_rerun_20260625_0238/meta_learning/epoch_001/taste.md`
+- Audit digest:
+  `check.md`
+
+Result:
+- `finish_status=meta_learning_done`
+- `status=taste_only`
+- `taste_chars=1538`
+- Trace events:
+  - 24 `llm_call`
+  - 16 `shell`
+  - 3 `web_search`
+  - 1 `glob`
+  - 1 `tool`
+  - 1 `session_end`
+- Context compact did not trigger.
+- Trace usage totals from recorded provider usage:
+  prompt tokens 536410, completion tokens 10688, total tokens 547098.
+- Notable trace issues:
+  - Two main LLM calls failed with `DeepSeek response content is not valid JSON`;
+    Runner continued and the session completed.
+  - One DuckDB Python query referenced missing `text_index.trade_date`; the
+    Agent corrected it by inspecting columns and querying `available_at`.
+
+Report:
+- Overwrote `check.md` with only this run's dialogue-style audit summary,
+  including Agent actions, tool observations, final Taste, and audit notes.
+
+Conclusion:
+- The meta-learning flow completed in a real Docker sandbox with the standard
+  experimental settings and produced a new Taste without modifying output or
+  models.
+
+2026-06-24 Meta-learning JSON retry hint and overfit boundary fix
+
+Analysis:
+- The two `LLMProxyError: deepseek request failed: DeepSeek response content is
+  not valid JSON` events in
+  `experiments/meta_learning_rerun_20260625_0238/artifacts/run_1b509f529ccf/agent_trace.jsonl`
+  were not HTTP/network/provider availability failures.
+- The provider conversation log showed HTTP 200 responses whose content was an
+  action-like JSON object, but the `command` string embedded multiline
+  `python -c` code and nested quotes without valid JSON escaping. The client
+  therefore rejected the response before the Runner could parse the action.
+- Runner appended `invalid_action` observations and the model recovered on the
+  following call by using a heredoc.
+- The final Taste also expressed an incorrect anti-overfit principle by saying
+  not to inspect the validation period. In this project, validation replay and
+  validation results are development feedback. They may be used for review and
+  model selection, while test and held-out remain invisible.
+
+Implementation:
+- `src/hl_trader/agent/runner.py`
+  - Added a concrete retry hint to `invalid_action` observations: return
+    exactly one valid JSON object, and use heredoc or correct escaping for
+    multiline Python/shell commands.
+- `src/hl_trader/agent/prompts.py`
+  - Extended the Fold anti-overfit prompt to clarify that validation results
+    are development feedback, while test and held-out are invisible.
+  - Extended the meta-learning Taste contract to distinguish training input,
+    validation feedback, test, and held-out.
+- `configs/prompts/PROMPTS.md`
+  - Regenerated from the prompt source.
+
+Commands:
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Static syntax check:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/runner.py src/hl_trader/agent/prompts.py`
+  succeeded.
+- Focused regression:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.AgentSessionRunnerTest.test_main_llm_error_trace_redacts_bearer_token tests.unit.test_sandbox_isolation.MetaLearningSessionTest.test_meta_learning_prompt_describes_default_network_without_secret_values -v`
+  passed, 2 tests.
+
+Conclusion:
+- The JSON action failure is now more actionable for the model.
+- Future Taste output should no longer describe validation feedback as
+  forbidden data; the boundary is decision input vs validation feedback vs
+  test/held-out.
+
+2026-06-25 Meta Learning rerun after Claude prompt/docs update
+
+Task:
+- Re-run one formal meta-learning Fold after Claude optimized documentation and
+  prompt text.
+
+Resource checks:
+- Before run:
+  - `free -h`: about 368 GiB available RAM.
+  - `nvidia-smi`: multiple GPUs were already occupied by external processes;
+    this run did not start local training.
+- After run:
+  - `free -h`: about 339 GiB available RAM.
+  - GPU load remained attributable to pre-existing external processes.
+
+Run:
+- Ran a real Docker meta-learning-only Fold by constructing standard pipeline
+  components and calling `ExperimentPipeline.run_meta_learning()` directly.
+- This intentionally avoided ordinary Fold replay and held-out evaluation; the
+  goal was to audit the meta-learning flow and generated Taste only.
+
+Config:
+- experiment_id: `meta_learning_after_claude_20260625_1113`
+- run_id: `run_2bdfdf1a4375`
+- fold_period: `quarter`
+- first/last test period: `2022Q1`
+- held-out config fields: `2022Q2`
+- visible Fold: first quarterly Fold
+- history window: 21 months
+- intraday visible window: 5 trading days
+- meta-learning Docker network: `bridge`
+- main model: `deepseek-v4-pro`
+- reasoning_effort: `max`
+- compact model: `deepseek-v4-flash`
+- compact threshold: 200000 estimated tokens
+- web_search engines: `tavily`, `semantic_scholar`
+
+Command:
+- The Python one-off runner used:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python`
+  with stdout/stderr saved to
+  `logs/meta_learning_after_claude_20260625_1113.log`.
+
+Artifacts:
+- Ledger:
+  `experiments/meta_learning_after_claude_20260625_1113/ledgers/experiment_ledger.jsonl`
+- Run manifest:
+  `experiments/meta_learning_after_claude_20260625_1113/artifacts/run_2bdfdf1a4375/run_manifest.json`
+- Runtime env:
+  `experiments/meta_learning_after_claude_20260625_1113/artifacts/run_2bdfdf1a4375/runtime_env.json`
+- Canonical trace:
+  `experiments/meta_learning_after_claude_20260625_1113/artifacts/run_2bdfdf1a4375/agent_trace.jsonl`
+- Taste:
+  `experiments/meta_learning_after_claude_20260625_1113/meta_learning/epoch_001/taste.md`
+
+Result:
+- `finish_status=meta_learning_done`
+- `status=taste_only`
+- `taste_chars=1627`
+- `modification_check.allowed_to_backtest=true`
+- Strategy artifact hash stayed at
+  `sha256:349964db2cc6bc9c7445bd9c4f018fe59183e669b803b6f81e14761c20add92d`.
+- Model artifact hash was empty:
+  `sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+Trace summary:
+- 37 `llm_call`
+- 28 `shell`
+- 6 `web_search`
+- 7 `context_summary`
+- 1 `tool`
+- 1 `session_end`
+- Context compact did not trigger:
+  `context_compactions=0`, `context_compaction_calls=0`.
+- Recorded provider usage totals:
+  prompt tokens 747450, completion tokens 22573, total tokens 770023.
+- Two `llm_call` events had no usage because the provider response content was
+  not valid JSON.
+
+Notable non-fatal issues:
+- Two DeepSeek calls failed with
+  `LLMProxyError: deepseek request failed: DeepSeek response content is not valid JSON`;
+  the Runner retried and the session completed.
+- One web search returned `empty_results`.
+- The Agent attempted a few overly large or incorrect exploratory data queries
+  while inspecting parquet/DuckDB data, then continued with narrower checks.
+- The generated Taste improved the validation/test boundary, but still used
+  external world knowledge about the 2022Q1 down market and described expected
+  test-period conditions. This is a residual leakage risk at the prompt level:
+  calendar labels should not permit inferring or discussing realized hidden
+  test/held-out market outcomes.
+
+Verification:
+- Sensitive scan across the new run log, trace, manifest, and runtime env found
+  no raw GitHub/HuggingFace/proxy/API-key patterns.
+- Source/test/script `__pycache__` directories created during inspection were
+  removed.
+- `git diff --check` is run separately after the logbook update.
+
+Conclusion:
+- The post-Claude meta-learning rerun completed successfully in a real Docker
+  sandbox and produced a new Taste.
+- The main remaining design issue is prompt-level: explicitly forbid use of
+  model-internal historical knowledge about hidden test or held-out outcomes,
+  even when the date range is visible as scheduling metadata.
+
+2026-06-25 Meta Learning no-lookahead prompt hardening and check report
+
+Task:
+- Add an explicit no-lookahead rule to the meta-learning prompt prohibitions.
+- Rewrite `check.md` as a dialogue-style audit summary for the latest
+  `meta_learning_after_claude_20260625_1113` run.
+
+Implementation:
+- `src/hl_trader/agent/prompts.py`
+  - Added a `## 禁止事项` bullet: meta-learning must not use model-internal
+    historical knowledge, public search results, or date labels to infer hidden
+    test/held-out realized market returns, sector rotation, or stock
+    performance. Date ranges are experiment scheduling metadata, not available
+    trading evidence.
+- `configs/prompts/PROMPTS.md`
+  - Regenerated from source via `scripts/dev/export_prompts.py`.
+- `tests/unit/test_sandbox_isolation.py`
+  - Updated one stale assertion from the older mixed-language network phrase to
+    the current Chinese prompt wording.
+- `check.md`
+  - Rewritten with the latest run's experiment parameters, artifact paths,
+    dialogue-style tool flow, non-fatal failures, token stats, Taste summary,
+    and audit conclusion.
+
+Validation commands:
+- Resource checks:
+  - Before script/test work: `free -h`, `nvidia-smi`.
+  - After script/test work: `free -h`, `nvidia-smi`.
+- Prompt export:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+  succeeded.
+- Syntax check:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/prompts.py tests/unit/test_sandbox_isolation.py`
+  succeeded.
+- Focused tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation.MetaLearningSessionTest -v`
+  passed, 15 tests.
+- Diff whitespace check:
+  `git diff --check -- src/hl_trader/agent/prompts.py configs/prompts/PROMPTS.md tests/unit/test_sandbox_isolation.py check.md LOGBOOK.md docs/logbook/DETAILED_LOGBOOK.md`
+  succeeded.
+
+Resource notes:
+- RAM stayed healthy, about 339 GiB available before the work and about 337 GiB
+  after the focused tests.
+- GPUs remained heavily occupied by pre-existing external processes; this task
+  did not start GPU training.
+
+Conclusion:
+- The meta-learning prompt now directly blocks the exact forward-looking
+  failure mode seen in the latest Taste.
+- `check.md` is ready for manual audit of the run process and result.
+
+2026-06-25 Meta Learning rerun after no-lookahead hardening
+
+Task:
+- Re-run one real Docker meta-learning Fold after adding the explicit
+  no-lookahead prohibition to the meta-learning prompt.
+
+Resource checks:
+- Before run:
+  - `pwd -P`: `/Data/lzp/MacroQuant`.
+  - `free -h`: about 417 GiB available RAM.
+  - `nvidia-smi`: several GPUs were already occupied by external processes;
+    this run did not start local model training.
+  - `find src tests scripts -name __pycache__`: empty.
+  - Docker image:
+    `macroquant-sandbox:latest`
+    `sha256:5f574f7d1ebb6e5d73b957bddd943a268aaf007c56f3a2c4508a4146c49fe8da`.
+- After run:
+  - `free -h`: about 339 GiB available RAM.
+  - `nvidia-smi`: GPU occupancy remained attributable to external processes.
+  - No running Docker container for `run_8caa7f451792`.
+
+Run:
+- Used a direct `ExperimentPipeline.run_meta_learning()` one-off, not the full
+  experiment CLI, so no ordinary Fold replay or held-out evaluation was run.
+- The wrapper used:
+  `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python`.
+- Host log:
+  `logs/meta_learning_no_lookahead_20260625_1148.log`.
+- The Python wrapper printed a successful JSON result, but the outer process
+  returned exit code 120 because the temporary stdout/stderr Tee object was
+  still referenced at interpreter shutdown. Ledger, manifest, trace and Taste
+  all show the pipeline run itself completed successfully.
+
+Config:
+- experiment_id: `meta_learning_no_lookahead_20260625_1148`
+- run_id: `run_8caa7f451792`
+- fold_period: `quarter`
+- first/last test period: `2022Q1`
+- held-out config fields: `2022Q2`
+- visible Fold: `fold_2022Q1`
+- visible decision input: `2020-01-01..2021-09-30`
+- validation replay: `2021-10-01..2021-12-31`
+- hidden test period: `2022-01-01..2022-03-31`
+- history window: 21 months
+- intraday visible window: 5 trading days
+- meta-learning Docker network: `bridge`
+- main model: `deepseek-v4-pro`
+- reasoning_effort: `max`
+- NL model: `deepseek-v4-flash`
+- compact model: `deepseek-v4-flash`
+- compact threshold: 200000 estimated tokens
+- web_search engines: `tavily`, `semantic_scholar`
+
+Artifacts:
+- Ledger:
+  `experiments/meta_learning_no_lookahead_20260625_1148/ledgers/experiment_ledger.jsonl`
+- Run manifest:
+  `experiments/meta_learning_no_lookahead_20260625_1148/artifacts/run_8caa7f451792/run_manifest.json`
+- Runtime env:
+  `experiments/meta_learning_no_lookahead_20260625_1148/artifacts/run_8caa7f451792/runtime_env.json`
+- Canonical trace:
+  `experiments/meta_learning_no_lookahead_20260625_1148/artifacts/run_8caa7f451792/agent_trace.jsonl`
+- Taste:
+  `experiments/meta_learning_no_lookahead_20260625_1148/meta_learning/epoch_001/taste.md`
+- Runtime sandbox retained for audit:
+  `.runtime/sandboxes/run_8caa7f451792/` (~3.9 GiB).
+
+Result:
+- `finish_status=meta_learning_done`
+- `status=taste_only`
+- `taste_chars=2429`
+- `modification_check.allowed_to_backtest=true`
+- Strategy artifact hash stayed at
+  `sha256:349964db2cc6bc9c7445bd9c4f018fe59183e669b803b6f81e14761c20add92d`.
+- Model artifact hash was empty:
+  `sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+Trace summary:
+- 40 `llm_call`
+- 24 `shell`
+- 5 `web_search`
+- 11 `context_summary`
+- 2 `tool`
+- 1 `session_end`
+- Context compact did not trigger:
+  `context_compactions=0`, `context_compaction_calls=0`.
+- Recorded provider usage totals:
+  prompt tokens 990218, completion tokens 21108, total tokens 1011326.
+- One LLM event had no usage because the provider response content was empty.
+- Web search calls:
+  - Tavily finance/quant/econ: 5 results.
+  - Semantic Scholar finance/quant/econ: 5 results.
+  - Semantic Scholar natural science/engineering: empty results.
+  - Tavily natural science/engineering: 5 results.
+  - Tavily philosophy/methodology: 5 results.
+
+Notable non-fatal issues:
+- One pyarrow schema probe failed because the code referenced a missing
+  `num_columns` attribute.
+- One pandas query failed due to a missing column access.
+- One shell data inspection command timed out after 120 seconds.
+- One DeepSeek call failed with empty content; the Runner recovered.
+- One Semantic Scholar query returned empty results; Agent retried the
+  perspective with Tavily and succeeded.
+
+No-lookahead audit:
+- The generated Taste no longer states hidden test-period realized market
+  direction, index return, sector rotation, or stock performance.
+- It still contains an imprecise period-label sentence:
+  `禁止将验证期（2022Q1）或测试期（2022Q2）的具体股票、行业、月份特征等硬编码进策略`.
+- Manifest shows the correct boundary for this run:
+  validation replay is `20211001..20211231`, hidden test is
+  `20220101..20220331`, and `2022Q2` is only the held-out config field.
+  This is not the same leak as before, but it indicates the prompt should make
+  the relationship between Fold label, validation replay, test period and
+  held-out config even clearer.
+
+Verification:
+- Sensitive scan across log, trace, manifest and runtime env found no raw
+  GitHub/HuggingFace/proxy/API key patterns.
+- `find src tests scripts -name __pycache__` remained empty after the run.
+
+Conclusion:
+- The no-lookahead hardening improved the main failure mode: the new Taste did
+  not discuss hidden test-period realized outcomes.
+- Remaining issue is terminology/period labeling, not realized outcome leakage.
+
+2026-06-25 Meta Learning runtime analysis report
+
+Task:
+- Analyze why `meta_learning_no_lookahead_20260625_1148` took much longer than
+  expected and overwrite `check.md` with a process/result report.
+
+Inputs:
+- Trace:
+  `experiments/meta_learning_no_lookahead_20260625_1148/artifacts/run_8caa7f451792/agent_trace.jsonl`
+- Runtime sandbox:
+  `.runtime/sandboxes/run_8caa7f451792/`
+- Taste:
+  `experiments/meta_learning_no_lookahead_20260625_1148/meta_learning/epoch_001/taste.md`
+- Host log:
+  `logs/meta_learning_no_lookahead_20260625_1148.log`
+
+Findings:
+- Outer command wall time was about 2958 seconds, about 49 minutes.
+- Agent trace elapsed time was only 508.6 seconds, about 8.5 minutes.
+- The dominant cost happened before manifest/trace/Agent startup:
+  `run_meta_learning()` synchronously built the visible decision snapshot and
+  validation replay before writing development history and starting the Agent.
+- Approximate pre-Agent timeline from runtime file mtimes:
+  - runtime env prepared at 11:49:53.
+  - decision daily completed at 11:58:28, about +515 seconds.
+  - decision intraday completed at 12:01:30, about +182 seconds.
+  - decision fundamentals completed at 12:18:38, about +1028 seconds.
+  - decision events completed at 12:21:59, about +201 seconds.
+  - decision text_index completed at 12:23:28, about +89 seconds.
+  - valid replay intraday completed at 12:30:35, about +391 seconds.
+  - Agent trace then ran from 12:30:39 to 12:39:07.
+- Data volume was large:
+  - decision `events.parquet`: 8.69M rows, about 239 MB.
+  - decision `text_index.parquet`: 3.55M rows, about 369 MB.
+  - decision `text_library/major_news.parquet`: about 1.3 GB.
+  - valid replay `intraday_1min.parquet`: 66.8M rows, about 970 MB.
+  - runtime sandbox total: about 3.9 GB.
+- Agent-stage costs were secondary:
+  - LLM calls: 40, cumulative 354.8 seconds.
+  - Shell calls: 24, cumulative 130.5 seconds, including one 120-second
+    timeout from full-reading `events.parquet`.
+  - Web search: 5 calls, cumulative 22.6 seconds.
+  - Total recorded tokens: 1,011,326.
+
+Report:
+- Overwrote `check.md` with:
+  - runtime split,
+  - detailed timeline,
+  - data volume table,
+  - code-path explanation,
+  - Agent-stage call analysis,
+  - no-lookahead result,
+  - prioritized optimization suggestions.
+
+Recommended follow-ups:
+- Add deterministic snapshot/replay caching keyed by decision/replay period,
+  `SnapshotConfig`, source data manifests/hashes and fundamental event status.
+- Add domain-level timing logs to `build_decision_snapshot()` and
+  `build_replay_slot()`.
+- Consider a lighter meta-learning validation replay view if full quarter
+  minute replay is not needed for Taste generation.
+- Pre-generate a data summary artifact so Agent can inspect schema/rows/nulls
+  without repeatedly scanning large parquet files.
+- Encourage DuckDB/Parquet metadata probes for large files instead of full
+  `pd.read_parquet()` loads.
+
+Conclusion:
+- The long runtime was a normal performance bottleneck in snapshot/replay
+  preparation, not an Agent hang, Web Search problem, or DeepSeek-only issue.
+
+2026-06-25 Data build summary and dynamic data facts
+
+Task:
+- Inspect data construction bottlenecks from the latest meta-learning runtime
+  and implement a first optimization plus Agent-visible data summaries.
+- Clarify that future data changes should not require editing static Prompt
+  data facts.
+
+Changes:
+- `src/hl_trader/environment/features/fundamental_events.py`
+  - Added optional `min_available_at` to `read_fundamental_events()`.
+  - Decision snapshot construction now pushes the fundamentals window down to
+    `available_month` partition selection and still applies an `available_at`
+    row filter afterward.
+- `src/hl_trader/environment/snapshot.py`
+  - Added lightweight `build_profile` and `data_profile` entries to decision
+    and replay manifests.
+  - Profiles record rows, columns, size, selected date ranges, key null counts,
+    and build/write timing without changing parquet contents or snapshot hash
+    semantics.
+- `src/hl_trader/environment/data_summary.py`
+  - New Agent-visible summary writer based on snapshot manifests and Parquet
+    metadata, not full-table reads.
+  - Summaries include only the views visible to the current Agent run and add
+    large-table guidance for events, text index, and minute bars.
+- `src/hl_trader/pipelines/experiment.py`
+  - Fold runs now write `/mnt/artifacts/data_summary.json` for snapshot/train/
+    valid only; test remains omitted.
+  - Meta-learning runs write the same visible first-Fold views.
+  - Run manifests include `data_summary_ref=/mnt/artifacts/data_summary.json`.
+- `src/hl_trader/environment/runtime.py`
+  - Added `SandboxPaths.data_summary` and included `data_summary.json` in
+    collected trusted artifacts.
+- Prompt/tool/docs:
+  - Fold and meta-learning Prompt, Runner initial messages, Shell tool
+    description, and living docs now tell Agent to read `data_summary.json`
+    before expensive probes.
+  - Prompts explicitly state that Prompt text is a stable protocol, not current
+    data facts. Current fields, rows, coverage, and snapshot hashes are bound to
+    each run's dynamically generated data summary and manifests.
+  - Large tables should be inspected with DuckDB `count(*)`/`limit`, Parquet
+    metadata, column-select reads, or date filters; unknown large tables should
+    not be fully loaded with pandas.
+
+Design conclusion:
+- Future data changes do not require static Prompt edits. A new Fold/meta run
+  rebuilds snapshots and writes a fresh `data_summary.json` from the actual
+  snapshot/replay parquet metadata.
+- The current run remains frozen: if raw data changes after the run starts, the
+  already-generated snapshot and summary do not mutate underneath the Agent.
+- If snapshot/replay caching is added later, the cache key must include
+  SnapshotConfig, decision/replay period, source-data manifests/hashes, and
+  `fundamental_events_status.json` so stale summaries cannot be reused.
+
+Resource checks:
+- Before tests: system memory about 338 GiB available; GPUs were heavily used
+  by unrelated processes, but this work was CPU-only.
+- After tests: system memory still about 338 GiB available; no GPU workload was
+  started by this task.
+
+Verification:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/data_summary.py src/hl_trader/environment/snapshot.py src/hl_trader/environment/features/fundamental_events.py src/hl_trader/pipelines/experiment.py src/hl_trader/agent/prompts.py src/hl_trader/agent/runner.py src/hl_trader/environment/runtime.py src/hl_trader/environment/tools/shell.py`
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_snapshot_builder -v`
+  - 10 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_single_epoch_runs_meta_learning_before_fold_and_heldout -v`
+  - 1 test OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation.MetaLearningSessionTest.test_meta_learning_prompt_describes_default_network_without_secret_values tests.unit.test_sandbox_isolation.MetaLearningSessionTest.test_meta_learning_network_policy_is_inside_environment_section -v`
+  - 2 tests OK.
+- Combined rerun of the above focused suite: 13 tests OK.
+- After dynamic-data-fact Prompt clarification: prompt export OK, prompt
+  `py_compile` OK, 2 meta-learning prompt tests OK.
+- `git diff --check` OK.
+- Generated `__pycache__` directories were removed.
+
+2026-06-25 Meta Learning rerun with data summary
+================================================
+
+Task:
+- Rerun one real meta-learning Fold so the current data-summary workflow and
+  Prompt/tool behavior can be audited.
+
+Run configuration:
+- Experiment id: `meta_learning_data_summary_20260625_1343`.
+- Run id: `run_89f2ee1f54e4`.
+- Entry: direct `ExperimentPipeline.run_meta_learning(epoch_id="epoch_001",
+  parent=None, visible_fold=fold_2022Q1)` from the `quant` Python
+  environment.
+- Mode: Docker sandbox, meta-learning only, taste-only output.
+- Agent model: DeepSeek `deepseek-v4-pro`, `reasoning_effort=max`.
+- NL/context compact model: `deepseek-v4-flash`; compact threshold 200000
+  tokens.
+- Web search engines: Tavily and Semantic Scholar.
+- Walk-forward config: quarterly Fold, first/last test period `2022Q1`; config
+  includes held-out `2022Q2` only as the held-out boundary.
+- Visible Fold:
+  - input/train window: `20200101..20210930`;
+  - validation window: `20211001..20211231`;
+  - hidden test window: `20220101..20220331`;
+  - valid decision time: `2021-10-08T09:25:00+08:00`.
+- Data windows: default historical window 21 months; minute replay window 5
+  trading days.
+
+Resource checks:
+- Before run: system memory about 338 GiB available. GPUs were occupied by
+  unrelated external processes; this run did not start local GPU training.
+- After run: system memory still about 338 GiB available. Docker sandbox
+  container exited; `docker ps` was empty.
+
+Key artifacts:
+- Runtime log:
+  `logs/meta_learning_data_summary_20260625_1343.log`.
+- Run manifest:
+  `experiments/meta_learning_data_summary_20260625_1343/artifacts/run_89f2ee1f54e4/run_manifest.json`.
+- Agent trace:
+  `experiments/meta_learning_data_summary_20260625_1343/artifacts/run_89f2ee1f54e4/agent_trace.jsonl`.
+- Data summary:
+  `experiments/meta_learning_data_summary_20260625_1343/artifacts/run_89f2ee1f54e4/data_summary.json`.
+- Taste:
+  `experiments/meta_learning_data_summary_20260625_1343/meta_learning/epoch_001/taste.md`.
+- Ledger:
+  `experiments/meta_learning_data_summary_20260625_1343/ledgers/experiment_ledger.jsonl`.
+- Runtime sandbox:
+  `.runtime/sandboxes/run_89f2ee1f54e4`.
+
+Result:
+- Ledger status: `taste_only`.
+- Finish status: `meta_learning_done`.
+- Taste length: about 2110 chars.
+- No frozen strategy artifact was created because this was a parentless
+  meta-learning-only run.
+- Modification check passed for the meta-learning output.
+
+Agent trace summary:
+- LLM calls: 25.
+- Shell calls: 14.
+- Web search calls: 4.
+- Context compactions: 0.
+- Token usage recorded in trace:
+  - prompt tokens: 646216;
+  - completion tokens: 12704;
+  - total tokens: 658920;
+  - prompt cache hit tokens: 561792;
+  - prompt cache miss tokens: 84424.
+- Non-fatal LLM errors:
+  - 4 DeepSeek responses were not valid JSON;
+  - 1 response stopped with `finish_reason=length`.
+- The runner recovered after these errors and completed the run.
+- Shell failures: none.
+- Web search calls:
+  - Tavily finance/quant/econ search returned results;
+  - Semantic Scholar natural-science/engineering search returned results;
+  - Tavily philosophy/methodology search returned results;
+  - one finance search was repeated by the Agent.
+
+Data summary/profile observations:
+- `data_summary.json` includes only visible views: `snapshot`, `train`, and
+  `valid`; no hidden test or held-out view is exposed.
+- Decision snapshot build total: about 188 seconds.
+  - daily build/write: about 15.2s / 2.2s;
+  - intraday build/write: about 8.4s / 4.7s;
+  - fundamentals build/write: about 25.8s / 4.0s;
+  - events build/write: about 28.1s / 17.7s;
+  - macro build/write: about 0.3s / 0.0s;
+  - text index build/write: about 68.8s / 4.5s.
+- Valid replay build total: about 554 seconds.
+  - valid `intraday_1min.parquet` remains the main bottleneck, with build
+    about 452s and write about 43s.
+- The fundamentals window pushdown optimization was effective: the previous
+  slow decision fundamentals build was reduced to roughly 30 seconds including
+  write.
+
+Runtime observations:
+- Agent read `/mnt/artifacts/data_summary.json` at the start and used DuckDB
+  for parquet inspection.
+- One non-fatal pandas `FutureWarning` appeared in
+  `snapshot.py:_read_dataset_window` during concatenation of empty/all-NA
+  frames. The run completed, but the warning is worth cleaning up later.
+- Experiment artifact directory size was about 3.8 MiB; runtime sandbox size
+  was about 3.9 GiB.
+
+Cleanup and verification:
+- Generated Python caches under `src`, `scripts`, and `tests` were checked and
+  none remained after the run.
+- `git diff --check` was rerun after logbook updates and passed.
+
+2026-06-25 Meta Learning prompt and data summary slimming
+=========================================================
+
+Task:
+- Remove Taste contract clauses that encouraged the meta-learning Agent to
+  restate a specific Fold period/window.
+- Reduce Agent-visible `data_summary.json` so it is a compact data index, not a
+  large runtime/profile artifact.
+
+Changes:
+- `src/hl_trader/agent/prompts.py`
+  - Removed two Taste output contract bullets:
+    - why the direction fits the current Fold period/window/trading frequency;
+    - a long train/valid/test/held-out boundary explanation inside the Taste
+      output contract.
+  - Kept the actual no-lookahead and hidden-test constraints in `禁止事项`;
+    this keeps the guardrail without asking Taste to narrate specific Fold
+    dates or windows.
+  - Updated data summary wording: it is now a lightweight index; full schema is
+    inspected on demand through snapshot manifest, Parquet metadata or DuckDB.
+- `src/hl_trader/environment/data_summary.py`
+  - Removed Agent-visible `build_profile`.
+  - Removed full per-file `columns`; each file now exposes `column_count` and
+    `key_columns`.
+  - Replaced duplicated full `large_files` entries with `large_tables`, a list
+    of large table paths.
+  - Kept rows, row groups, file size, key metadata null counts, date ranges and
+    recommended large-table access hints.
+- Docs and generated prompt snapshot:
+  - Updated `docs/agent_design.md`, `docs/environment_design.md`,
+    `docs/pipeline_design.md`, and `configs/prompts/PROMPTS.md`.
+  - Clarified that snapshot manifests may retain build/profile information for
+    host-side audit, while Agent-visible `data_summary.json` does not expose
+    build timing.
+- Tests:
+  - Added assertions that meta-learning `data_summary.json` has no
+    `schema_version`, omits `build_profile`, exposes `key_columns`, and does not expose full
+    `columns`.
+
+Audit note:
+- The historical artifact
+  `.runtime/sandboxes/run_89f2ee1f54e4/artifacts/data_summary.json` and the
+  corresponding collected experiment artifact were not rewritten. That run's
+  Agent actually saw the old larger summary, so mutating it would make the
+  audit trace inconsistent.
+- A temporary regenerated sample from the same snapshot showed the new summary
+  size would be about 37,684 bytes versus the old 130,533 bytes.
+
+Resource checks:
+- Before tests: system memory about 337 GiB available. GPUs were occupied by
+  unrelated external processes; this work did not start local GPU training.
+
+Verification:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py`
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/data_summary.py src/hl_trader/agent/prompts.py`
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_single_epoch_runs_meta_learning_before_fold_and_heldout -v`
+  - 1 test OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation.MetaLearningSessionTest.test_meta_learning_prompt_describes_default_network_without_secret_values tests.unit.test_sandbox_isolation.MetaLearningSessionTest.test_meta_learning_network_policy_is_inside_environment_section -v`
+  - 2 tests OK.
+
+## 2026-06-25 Migrate Agent loop to DeepSeek V4 native tool calling
+
+Task: replace the single-JSON-action-per-turn text protocol with provider-native function calling (the "Claude Code tool invocation approach"), motivated by `.runtime/sandboxes/run_89f2ee1f54e4/artifacts/agent_trace.jsonl` (25 LLM calls / 19 tools; 4 of 5 failures = "response content is not valid JSON", 1 = finish_reason=length; context 7K->185K chars; strictly serial).
+
+Repository/path: physical root `/Data/lzp/MacroQuant`; env `~/miniconda3/envs/quant` (py3.11).
+
+Spike (live DeepSeek, key from ignored `.env`, never printed):
+- `deepseek-v4-pro` and `deepseek-v4-flash` both return native `tool_calls` (`finish_reason=tool_calls`); flash emitted 2 parallel tool_calls in one turn; `reasoning_content` present (reasoning_tokens 141-181) alongside tool_calls under `thinking.enabled` + `reasoning_effort=max`; `content` empty when tool_calls present; `tool` role + `tool_call_id` round-trip accepted. All three gates pass.
+
+Changes (code is source of truth; PROMPTS.md is generated):
+- `src/hl_trader/environment/tools/base.py`: `ActionField.to_json_schema()`, `ActionSpec.to_tool_schema()` (function name = `action`).
+- `src/hl_trader/environment/llm/deepseek.py`: `DeepSeekResponse.tool_calls`; `chat_tools()` + `_tools_payload()` + module `_tool_message_record()`; `_parse_response` keeps tool_calls and allows empty content when tool_calls present (finish_reason=length still fails).
+- `src/hl_trader/environment/llm/proxy.py`: `ProviderResponse.tool_calls`; `LLMProxy.complete_tools()` (DeepSeekProxy + ScriptedLLM); test helpers `tool_call()` / `tool_call_response()`.
+- `src/hl_trader/agent/runner.py`: `_tool_schemas()` (mode-filtered), `_next_turn()` (calls `complete_tools`), `_dispatch_tool_calls()` (all calls per turn; concurrency-safe-only batches via ThreadPoolExecutor, else sequential), `_parse_tool_arguments()`; `run()` appends one `assistant` tool_calls msg + one `tool` result per call; `_drop_leading_orphan_tools()` guard in `_trim`; removed JSON-action extraction.
+- `src/hl_trader/agent/compact.py`: token estimate counts `tool_calls`; retained tail guarded by `_drop_leading_orphan_tools`.
+- `src/hl_trader/agent/prompts.py`: Fold + meta-learning action protocol rewritten for native tool calling + parallel read-only; `configs/prompts/PROMPTS.md` regenerated (deterministic, in sync).
+- Living docs: `docs/environment_design.md` 5.1 and `docs/agent_design.md` 3.2 note native function calling + parallel batching + tool-group integrity.
+- Tests: `tests/unit/test_tools_flow.py` and `tests/unit/test_sandbox_isolation.py` scripted actions converted to `tool_call_response(tool_call(...))`; llm_call trace assertion `raw_content`->`content`. `test_pipeline_e2e.py` unaffected (ScriptedFoldAgent/IdleAgent callables, not the LLM loop).
+
+Validation:
+- `PYTHONPATH=src python -m unittest discover -t . -s tests -p "test_*.py"` -> Ran 251 tests, OK.
+- Live integration via refactored `DeepSeekProxy.complete_tools` + `ActionSpec.to_tool_schema()` (deepseek-v4-pro): one turn returned 2 parallel tool_calls (grep + shell), reasoning present, content empty; round 2 (assistant tool_calls echo + tool results) continued -> INTEGRATION_OK.
+- Temp spike/integration scripts removed; `git diff --check` clean. Memory ~ unchanged; GPU was pre-existing external load, no training launched this session.
+
+## 2026-06-25 Six Claude-Code-style agent optimizations (Tier 1+2)
+
+Task: implement the six Tier 1/2 items identified from the Claude Code design survey, fitted to actual project conditions (DeepSeek V4 provider, native tool loop, PIT/audit discipline).
+
+Repository/path: physical root `/Data/lzp/MacroQuant`; env `~/miniconda3/envs/quant` (py3.11).
+
+Changes:
+- #1 Token/cache accounting (`src/hl_trader/agent/runner.py`): `_accumulate_usage()` sums prompt/completion/total/reasoning and cache hit/miss (DeepSeek `prompt_cache_hit_tokens` / `prompt_tokens_details.cached_tokens`); `token_usage` (with `cache_hit_ratio`) added to the session summary. Documented that `_trim`/compaction reset the cached prefix.
+- #2 Read-only Explore sub-agent (`src/hl_trader/environment/explore.py`): `ExploreSubAgentEngine` runs a bounded native-tool loop over read-only `shell`/`grep`/`glob` on a cheaper proxy, returns a compact digest, traces `explore` + `explore_llm_call`. Exposed as the `explore(task, max_rounds?)` tool (read-only, decision-phase, both modes); runner gains `explore_proxy` (falls back to main proxy). CLI `run_experiment.py` wires `explore_proxy = nl_proxy` (flash) into both runner constructions + `llm_config_summary`.
+- #3 write_file/edit_file (`src/hl_trader/environment/tools/artifact_io.py`): `ArtifactIOTool` writes host-side into `workspace`/`output`/`models`; `edit_file` requires a unique `old_string` (staleness) or `replace_all`; rejects `..`/hidden/escape, `output/README.md`, and writes after `write_lock`. Wired into runner specs + dispatch.
+- #4 NL Sub Agent native tools (`src/hl_trader/environment/nl/engine.py`): `complete_tools` + `TEXT_RETRIEVE_SCHEMA` replace the text-JSON extraction; final-after-budget call uses `tool_choice="none"`. Removed the embedded-JSON parsers; system prompt rewritten.
+- #5 Streaming (`src/hl_trader/environment/llm/deepseek.py`): `stream_tool_calls` config (default on); `_tools_payload(stream=...)` adds `stream_options.include_usage`; `_post_json` reconstructs the completion via `_read_sse_chunks` + `_merge_stream_chunks` (reassembles split tool_call argument fragments by index). `_config_kwargs` carries the flag.
+- #6 Context editing (`src/hl_trader/agent/runner.py`): `_clear_stale_tool_results()` replaces oversized old `tool` bodies with a stub (keeps `tool_call_id`), keeping the most recent N; emits `context_edit`. Config `clear_tool_results`/`tool_result_keep_recent`/`tool_result_clear_min_chars`. Runs before `_trim`.
+- Prompts: Fold + meta-learning action protocols list `write_file`/`edit_file`/`explore`; `configs/prompts/PROMPTS.md` regenerated (in sync). Living docs `docs/environment_design.md` 5.1 and `docs/agent_design.md` 3.1 updated.
+- Tests: `tests/unit/test_tools_flow.py` adds `ArtifactIOToolTest` (4) + explore dispatch tests (2); `tests/unit/test_nl_scoring.py` converted to native tool calls.
+
+Validation:
+- `PYTHONPATH=src python -m unittest discover -t . -s tests -p "test_*.py"` -> Ran 257 tests, OK.
+- Live: SSE merge unit (split tool_call args reassembled) + a real streamed `deepseek-v4-pro` tools turn (tool_calls + reasoning + cache-token usage) -> STREAM_LIVE_OK. NL native loop covered by unit tests.
+- py_compile OK; PROMPTS.md in sync; `git diff --check` clean; temp scripts removed. GPU pre-existing external load; no training launched.
+
+## 2026-06-25 Explore Shell hardening and secret-redaction audit fixes
+
+Task: answer whether Explore Shell should be less restrictive by comparing with `external_references/claude-code-main`, then fix the audit findings without importing Claude Code's full Bash runtime.
+
+Repository/path: physical root `/Data/lzp/MacroQuant`; env `~/miniconda3/envs/quant` (py3.11).
+
+Claude Code reference points used:
+- `src/tools/BashTool/BashTool.tsx`: separates search/read/list command classification from permission and side-effect handling.
+- `src/tools/BashTool/readOnlyValidation.ts`: read-only mode is not "unrestricted"; it uses allowlists plus command/flag validation for commands such as git, find, sed, sort and rg.
+
+Changes:
+- `src/hl_trader/environment/tools/shell.py`: Explore/read-only shell now has a narrower review allowlist plus parameter-level danger checks. It allows common read/list/search commands and safe git inspection (`status`, `log`, `diff`, `show`, `ls-files`, `rev-parse`, `blame`), and rejects write-like commands, interpreters, unknown commands, redirection, `find -exec/-delete/-fprint`, `sort -o`, and `rg --pre`.
+- `src/hl_trader/environment/explore.py`: prompt now tells Explore that shell uses read-only parameter validation and should hand complex DuckDB/Python work back to the main Agent.
+- `src/hl_trader/environment/llm/deepseek.py`: conversation logging redacts `sk-*`, `Bearer ...`, and `Authorization: ...` patterns inside nested strings, raw responses, error bodies and error messages.
+- `src/hl_trader/environment/nl/engine.py`: NL SubAgent errors are sanitized before returning to strategy-visible records; malformed native `text_retrieve` arguments now produce an explicit tool error result instead of an empty retrieval.
+- `src/hl_trader/environment/backtest_engine.py`: NL RPC and strategy-policy RPC error responses are sanitized. The policy RPC driver has its own tiny local sanitizer because it runs as generated sandbox-side Python.
+- `docs/environment_design.md` and `docs/agent_design.md`: documented the Claude-Code-style Explore shell boundary and the side-effect forms that are rejected.
+- Tests:
+  - Added coverage for `find -delete`, `find -fprint`, `awk`/`sed` write-like forms, `sort -o`, and safe `find`/git inspection.
+  - Added DeepSeek log redaction coverage for Bearer/Authorization strings.
+  - Added NL malformed native tool-call argument handling and sanitized provider failure coverage.
+  - Added strategy policy RPC error redaction coverage.
+
+Resource checks:
+- Before targeted tests: memory about 417 GiB available; GPUs were already occupied by unrelated external Python processes. No GPU work was launched.
+- After full test run: memory about 418 GiB available; GPUs still occupied by unrelated external processes.
+
+Verification:
+- `/home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ToolFlowTest.test_policy_rpc_error_is_redacted tests.unit.test_tools_flow.ShellToolTest tests.unit.test_tools_flow.AgentSessionRunnerTest tests.unit.test_tools_flow.StructuredSearchToolTest tests.unit.test_llm_deepseek.DeepSeekClientTest tests.unit.test_nl_scoring.NLSubAgentEngineTest`
+  - 58 tests OK.
+- `/home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_llm_deepseek tests.unit.test_nl_scoring tests.unit.test_broker_engine tests.unit.test_pipeline_e2e tests.unit.test_sandbox_isolation tests.unit.test_artifacts tests.unit.test_step_tree`
+  - 183 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p "test_*.py"`
+  - 268 tests OK.
+- `git diff --check`
+  - OK.
+- `find src tests scripts -type d -name __pycache__`
+  - no output after cleanup.
+
+SubAgent follow-up:
+- Explorer `Laplace` reviewed the Claude-Code-style Explore/Shell/NL/redaction changes and was closed after reporting findings.
+- High finding fixed: `readonly_review` now fails closed on shell expansion and environment overrides: `$(`, backticks, process substitution `<(`/`>(`, heredoc `<<`, leading `VAR=...`, and `env ...` are rejected before command allowlist evaluation. This closes examples such as `cat $(touch workspace/x)`, `cat <(python3 -c ...)`, `PATH=workspace:$PATH ls`, and `GIT_EXTERNAL_DIFF=... git diff`.
+- Medium finding fixed: `text_retrieve` now returns an explicit `status=error` tool result when `pattern`/legacy `keywords` are missing or `pattern` is non-string; the SubAgent no longer sees those mistakes as empty evidence.
+- Medium finding fixed: strategy program failure stderr, policy BrokenPipe stderr, and policy early-exit stderr are sanitized before being wrapped in `BacktestError`; import-time `trading.py` failures with Bearer/Authorization tokens are covered.
+- Medium finding fixed: Explore grep gets a timeout capped by remaining Fold deadline; glob receives a monotonic deadline and fails if it would overrun.
+- Docs and Explore prompt updated to mention command substitution/process substitution/heredoc/env overrides as rejected read-only forms.
+
+Follow-up verification:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ShellToolTest tests.unit.test_tools_flow.ToolFlowTest.test_policy_rpc_error_is_redacted tests.unit.test_tools_flow.ToolFlowTest.test_policy_import_error_is_redacted tests.unit.test_tools_flow.AgentSessionRunnerTest.test_explore_cancels_search_when_deadline_is_too_close tests.unit.test_nl_scoring.NLSubAgentEngineTest.test_invalid_native_tool_arguments_return_tool_error tests.unit.test_nl_scoring.NLSubAgentEngineTest.test_missing_text_retrieve_pattern_returns_tool_error tests.unit.test_nl_scoring.NLSubAgentEngineTest.test_non_string_text_retrieve_pattern_returns_tool_error`
+  - 16 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_nl_scoring tests.unit.test_llm_deepseek tests.unit.test_broker_engine tests.unit.test_pipeline_e2e tests.unit.test_sandbox_isolation tests.unit.test_artifacts tests.unit.test_step_tree`
+  - 187 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p "test_*.py"`
+  - 272 tests OK.
+- `git diff --check`
+  - OK.
+- `find src tests scripts -type d -name __pycache__`
+  - no output.
+
+Second SubAgent follow-up:
+- Explorer `Leibniz` reviewed the post-fix state and was closed. It found no High issues.
+- Medium fixed: `StructuredSearchTool.glob()` no longer performs `sorted(target.glob(...))` before checking the Explore deadline. It now iterates incrementally, checks `deadline_monotonic` before processing each candidate, keeps only a bounded `offset + head_limit + 1` window, then sorts that window for stable output.
+- Low defense-in-depth fixed: `StepTree.save()` sanitizes the JSON payload written to `tree.json`, so failed-attempt error fields are protected even if an upstream error path missed redaction.
+- Tests added/adjusted:
+  - decision-stage `run_strategy()` stderr with Bearer/Authorization token is redacted;
+  - StepTree failed-attempt error is redacted on disk;
+  - Explore search deadline boundary is tested through `_search_timeout()` / `_search_deadline()` and direct expired `glob`, avoiding a brittle 500ms LLM-loop timing test.
+
+Second follow-up verification:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ToolFlowTest.test_strategy_program_failure_stderr_is_redacted tests.unit.test_tools_flow.ToolFlowTest.test_policy_import_error_is_redacted tests.unit.test_tools_flow.AgentSessionRunnerTest.test_explore_search_helpers_reject_expired_deadline tests.unit.test_step_tree.StepTreeTest.test_failed_attempt_error_is_redacted_on_disk tests.unit.test_tools_flow.StructuredSearchToolTest tests.unit.test_step_tree.StepTreeTest`
+  - 11 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_nl_scoring tests.unit.test_llm_deepseek tests.unit.test_broker_engine tests.unit.test_pipeline_e2e tests.unit.test_sandbox_isolation tests.unit.test_artifacts tests.unit.test_step_tree`
+  - 189 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p "test_*.py"`
+  - 274 tests OK.
+- `git diff --check`
+  - OK.
+- `find src tests scripts -type d -name __pycache__`
+  - no output.
+
+Third SubAgent follow-up:
+- Explorer `Epicurus` reviewed the second follow-up and was closed. It found no High/Medium blocking issues.
+- Low note addressed: `glob()` no longer relies on `Path.glob()` iteration order plus per-window sorting. It now uses a deterministic sorted directory traversal and anchored segment matcher (`**` supported), applies deadline checks before directory scans and candidate processing, and paginates the deterministic traversal order without full enumeration.
+- Added regression coverage that `*.py` matches only top-level files, `**/*.py` matches recursive files, and adjacent pages do not repeat entries.
+
+Third follow-up verification:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.StructuredSearchToolTest tests.unit.test_tools_flow.AgentSessionRunnerTest.test_explore_search_helpers_reject_expired_deadline tests.unit.test_step_tree.StepTreeTest`
+  - 8 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_nl_scoring tests.unit.test_llm_deepseek tests.unit.test_broker_engine tests.unit.test_pipeline_e2e tests.unit.test_sandbox_isolation tests.unit.test_artifacts tests.unit.test_step_tree`
+  - 189 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p "test_*.py"`
+  - 274 tests OK.
+- `git diff --check`
+  - OK.
+- `find src tests scripts -type d -name __pycache__`
+  - no output.
+
+Final bounded follow-up:
+- Explorer `Hume` was closed after finding one remaining Medium in the custom glob traversal: directory symlinks could recurse outside the intended tree. Fixed by skipping symlink candidates in `StructuredSearchTool._iter_glob_matches()` and adding a symlink-loop regression test.
+- Explorer `Kuhn` was closed after finding one remaining Medium in replay policy isolation: `_STRATEGY_PATH_GUARD` compared normalized paths without resolving symlinks and did not distinguish write-mode access to `output`. Fixed without starting another review round, per the user instruction to stop further iterative复核:
+  - `_STRATEGY_PATH_GUARD` now checks both normalized and real paths.
+  - Replay policy sets `MQ_WRITE_FORBIDDEN_PATHS` to `output/`, while still allowing read-only import of `output/main.py` and `output/trading.py`.
+  - Replay policy sets `MQ_DISABLE_LINKS=1`; generated strategy code cannot create soft or hard links during replay.
+  - Common write mutators (`open` write modes, `os.open` write flags, mkdir/unlink/rmdir/rename/replace and Path equivalents) go through write guards.
+  - Regression tests cover replay write to `output/`, replay read of `models/` through an external symlink, and replay link creation.
+- Low fixes from the same review:
+  - NL native tool loop returns an explicit tool error for unknown tool names instead of silently ignoring them.
+  - `docs/environment_design.md` describes DeepSeek SSE handling as response compatibility and delta merge, not true incremental consumption.
+
+Final verification:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ToolFlowTest.test_trade_policy_cannot_write_output_artifacts_during_replay tests.unit.test_tools_flow.ToolFlowTest.test_trade_policy_cannot_read_model_artifacts_through_output_symlink tests.unit.test_tools_flow.ToolFlowTest.test_trade_policy_cannot_create_links_during_replay tests.unit.test_nl_scoring.NLSubAgentEngineTest.test_unknown_native_tool_call_returns_tool_error`
+  - 4 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_nl_scoring tests.unit.test_llm_deepseek tests.unit.test_broker_engine tests.unit.test_pipeline_e2e tests.unit.test_sandbox_isolation tests.unit.test_artifacts tests.unit.test_step_tree`
+  - 193 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p "test_*.py"`
+  - 278 tests OK.
+- `git diff --check`
+  - OK.
+- `find src tests scripts -type d -name __pycache__`
+  - no output.
+- Resource check after tests: system memory about 422 GiB available. GPUs were already occupied by unrelated external Python processes; no GPU workload was launched.
+
+## 2026-06-25 - Recent-change redundancy audit
+
+Task: check whether the recent Claude-Code-style Explore/Shell/Search, replay policy guard, NL native-tool and redaction changes introduced junk files or redundant logic.
+
+Findings:
+- Code directories `src/`, `tests/`, and `scripts/` had no remaining `__pycache__` after cleanup.
+- Ignored historical experiment directories under `experiments/audit_cli/` contain local package caches and virtualenv files. They are runtime artifacts ignored by Git, not part of the recent code patch.
+- The large generated replay policy guard in `backtest_engine.py` is intentionally embedded because it runs inside a sandbox-side strategy process and cannot rely on host-only helpers.
+- `StructuredSearchTool.glob()` reimplements deterministic traversal instead of using `Path.glob()` to support deadline checks, stable pagination, and symlink skipping; this is not redundant in the current design.
+- Real redundancy found: `environment/llm/deepseek.py` carried local secret-looking string regexes that overlapped with `runtime.sanitize_for_log`. Fixed by reusing `sanitize_for_log` for string redaction while keeping DeepSeek-specific sensitive-key handling for provider conversation logs.
+
+Verification:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_llm_deepseek tests.unit.test_nl_scoring tests.unit.test_tools_flow.ToolFlowTest.test_policy_rpc_error_is_redacted tests.unit.test_tools_flow.ToolFlowTest.test_policy_import_error_is_redacted tests.unit.test_tools_flow.ToolFlowTest.test_strategy_program_failure_stderr_is_redacted tests.unit.test_tools_flow.AgentSessionRunnerTest.test_explore_llm_error_trace_redacts_bearer_token`
+  - 40 tests OK.
+- `git diff --check`
+  - OK.
+- `find src tests scripts -type d -name __pycache__`
+  - no output.
+
+## 2026-06-25 Revert unsound readonly_review shell guard; audit guards/fallbacks
+
+Task: review/fix a Codex round; remove the over-engineered Explore "read-only shell" static write-detector; audit other redundant security-boundary logic; apply fail-fast; cut unnecessary fallbacks — retaining the Claude Code design philosophy.
+
+Findings on Codex's round:
+- GOOD (kept): `deepseek.py` `_redact_secrets` now delegates to `runtime.sanitize_for_log` (broader redaction; removed single-pattern `SECRET_PATTERN`); `nl/engine.py` native `_parse_native_tool_calls` surfaces invalid-JSON args and unknown tool names as `status:"error"` tool records (one `tool` result per call → message-pairing preserved) + NL errors sanitized; `explore.py` deadline budget + bounded tool timeouts + parallel `_dispatch_calls`.
+- DEFECT (removed): `readonly_review` static write-detector in `shell.py` (~169 lines) used by Explore. Empirically: `sed 'w workspace/nope'` slips through as ALLOWED (failing test `test_readonly_shell_rejects_nested_writes`); `python3 -c "...duckdb..."` BLOCKED (excluded from `READONLY_REVIEW_COMMANDS`) → Explore can't inspect parquet, its core job. Unsound (write detection on arbitrary shell is undecidable) and contradicts the documented "Shell guard 轻量合同层，不是完整 Bash 解析器；Docker/权限/产物检查兜底".
+
+Changes:
+- `src/hl_trader/environment/tools/shell.py`: removed `readonly_review` param on `run()`/`_guard_paths`, the `_guard_readonly_segment`/`_readonly_forbidden_shell_construct`/`_readonly_env_prefix`/`_readonly_review_danger`/`_is_readonly_git_command` functions, and constants `READONLY_REVIEW_COMMANDS`/`READONLY_FORBIDDEN_SHELL_EXPANSION_RE`/`FIND_DANGEROUS_ACTIONS`/`SORT_DANGEROUS_FLAGS`/`RG_DANGEROUS_FLAGS`/`GIT_READ_ONLY_SUBCOMMANDS`/`GIT_DANGEROUS_READ_FLAGS`. Kept `ENV_BINARIES` (used by the shared `_strip_shell_prefix`) and the legitimate path/install-network guard. 987 → 818 lines.
+- `src/hl_trader/environment/explore.py`: dropped `readonly_review=True` on the shell call (Explore is read-only by instruction; writes caught by modification_check/freeze-hash/Docker).
+- `tests/unit/test_tools_flow.py`: removed `test_readonly_shell_rejects_nested_writes`, `test_readonly_shell_allows_safe_git_inspection_only`, `test_explore_shell_rejects_writes` (tested the removed feature).
+- Docs: `agent_design.md` §3.2 and `environment_design.md` §5.1/§6.1 corrected from "hard read-only enforcement" to "read-only by convention, hard isolation via modification_check + freeze-hash + Docker". `PROMPTS.md` regenerated (Codex had edited prompts.py without exporting).
+
+Audit conclusion (fail-fast / fallbacks): the remaining broad `except Exception  # noqa: BLE001` sites (runner `_dispatch`, compaction, explore, NL, proxy boundary) are the intentional, design-mandated "tool/sub-agent failure → audited observation, do not kill the Fold" boundary; the pipeline layer stays fail-fast. They are not redundant fallbacks and were kept. Did not force-abstract the three native-tool loops (main/NL/Explore have distinct concerns) — premature abstraction.
+
+Validation:
+- `PYTHONPATH=src python -m unittest discover -t . -s tests -p "test_*.py"` -> Ran 275 tests, OK.
+- `grep readonly_review|readonly_shell src tests` -> none. `py_compile` OK. `PROMPTS.md` in sync. `git diff --check` clean.
+
+## 2026-06-25 - Post-Claude readonly_review audit and meta-learning Fold
+
+Task: audit Claude's latest code changes, accept the design decision to remove
+the Explore `readonly_review` static shell checker, make any small consistency
+fixes, then run one formal meta-learning Fold in the real Docker sandbox.
+
+Audit:
+- `readonly_review` and `readonly_shell` no longer appear in production source
+  or tests. The remaining historical mentions are in logbook history only.
+- `src/hl_trader/environment/tools/shell.py` keeps the ordinary path/network
+  contract guard but no longer tries to be a read-only Bash parser.
+- `src/hl_trader/environment/explore.py` no longer passes `readonly_review=True`.
+- Fixed one prompt mismatch in `src/hl_trader/environment/explore.py`: the
+  Explore system prompt no longer says shell performs read-only argument
+  validation. It now states the intended contract: Explore is read-only by
+  instruction, shell is a light contract guard, and hard isolation/validation
+  are handled by Docker, modification check, and artifact hashes.
+
+Verification before the run:
+- Real path check: `pwd -P` returned `/Data/lzp/MacroQuant`.
+- Resource checks:
+  - Before full tests: about 425 GiB available RAM; GPUs were occupied by
+    unrelated external Python workloads.
+  - Before meta-learning run: about 408 GiB available RAM; no Docker sandbox
+    was already running.
+- Docker image:
+  `docker image inspect macroquant-sandbox:latest --format '{{.Id}}'`
+  returned `sha256:5f574f7d1ebb6e5d73b957bddd943a268aaf007c56f3a2c4508a4146c49fe8da`.
+- Residual scan:
+  `rg -n "readonly_review|readonly_shell|只读参数校验" src tests configs docs/agent_design.md docs/environment_design.md`
+  returned no matches.
+- Targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow`
+  passed, 62 tests.
+- Full tests:
+  `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p "test_*.py"`
+  passed, 275 tests.
+- `git diff --check` passed.
+- Python caches created by the test run were removed; final
+  `find src tests scripts -type d -name __pycache__` returned no output.
+
+Meta-learning run:
+- Experiment ID: `meta_learning_after_readonly_revert_20260626_0053`.
+- Run ID: `run_de253393feea`.
+- Entry: direct `ExperimentPipeline.run_meta_learning(epoch_id="epoch_001",
+  parent=None, previous_taste="", visible_fold=fold_2022Q1)`.
+- Mode: real Docker sandbox, meta-learning only, taste-only output.
+- Models: main Agent `deepseek-v4-pro` with `reasoning_effort=max`;
+  NL/Explore `deepseek-v4-flash`; compact `deepseek-v4-flash` with thinking
+  disabled.
+- Walk-forward config: quarterly Fold; development periods `2022Q1..2025Q4`;
+  held-out boundary `2026Q1..2026Q1`; visible first Fold `fold_2022Q1`.
+- Data windows: default PIT history 21 months; intraday 1-minute visible window
+  5 trading days.
+- Web search engines: `tavily`, `semantic_scholar`.
+- Meta-learning Docker network: `bridge`; ordinary Fold sandbox spec remains
+  recorded separately with network disabled.
+- Runtime log: `logs/meta_learning_after_readonly_revert_20260626_0053.log`.
+
+Observed runtime:
+- Host-side snapshot/data-summary preparation took about 6.5 minutes before the
+  Docker container started.
+- Runtime sandbox: `.runtime/sandboxes/run_de253393feea/`.
+- A pandas `FutureWarning` was emitted from
+  `src/hl_trader/environment/snapshot.py:503` about concat behavior with empty
+  or all-NA entries. It did not fail the run.
+- Docker container `mqsbx_97378baf51cc` started and was stopped by the
+  pipeline after completion.
+
+Result:
+- Ledger status: `taste_only`.
+- Agent finish status: `meta_learning_done`.
+- Taste length: 3709 characters.
+- Modification check: `allowed_to_backtest=true`, no reasons.
+- No frozen strategy artifact was created because this was parentless
+  meta-learning-only.
+- Trace event counts:
+  - `llm_call`: 22
+  - `shell`: 37
+  - `web_search`: 9
+  - `glob`: 4
+  - `context_edit`: 12
+  - `context_summary`: 4
+  - `session_end`: 1
+  - `tool`: 1
+- Trace errors: 0.
+- Context compaction calls: 0.
+- Token usage from ledger:
+  - prompt tokens: 628009
+  - completion tokens: 17425
+  - total tokens: 645434
+  - cache hit tokens: 324608
+  - cache miss tokens: 303401
+  - cache hit ratio: 0.5169
+
+Artifacts:
+- Manifest:
+  `experiments/meta_learning_after_readonly_revert_20260626_0053/artifacts/run_de253393feea/run_manifest.json`.
+- Canonical trace:
+  `experiments/meta_learning_after_readonly_revert_20260626_0053/artifacts/run_de253393feea/agent_trace.jsonl`.
+- Data summary:
+  `experiments/meta_learning_after_readonly_revert_20260626_0053/artifacts/run_de253393feea/data_summary.json`.
+- Taste:
+  `experiments/meta_learning_after_readonly_revert_20260626_0053/meta_learning/epoch_001/taste.md`.
+- Ledger:
+  `experiments/meta_learning_after_readonly_revert_20260626_0053/ledgers/experiment_ledger.jsonl`.
+
+Post-run resource check:
+- System memory: about 421 GiB available.
+- GPUs remained occupied by the same unrelated external Python workloads; this
+  run did not launch local GPU training.
+- `docker ps` returned no running containers.
+
+## 2026-06-25 Trace/context/guard/data fixes from run_de253393feea audit
+
+Source: deep audit of `.runtime/sandboxes/run_de253393feea` (first-epoch meta-learning, `meta_learning_done`, 22 LLM calls, ~11m). Implemented the 4 agreed tasks plus the subset of Codex's 7 findings that were real.
+
+Changes:
+- Trace delta (`agent/runner.py`): `_next_turn` logs `new_messages` (messages first seen this turn, tagged by a monotonic `_seq`) + `message_count` instead of the full `messages` each call (was 83% of a 2.6 MB/90-event trace). Assistant messages are `_seq`-tagged but excluded (their content/tool_calls are already on the producing llm_call). Reconstruct = concat each call's new_messages with its content/tool_calls. Updated `test_scripted_session_finishes_fold` (`messages`→`new_messages`).
+- Token-primary context triggers (`agent/runner.py`): import `estimate_messages_tokens`; `_trim` fires on `len > max_history_messages(150) OR est_tokens > trim_token_threshold(60000)`; `_clear_stale_tool_results` skips while `est_tokens < tool_result_clear_token_threshold(24000)`. Message counts are now high safety caps; tokens are primary, so the cacheable prefix is rewritten far less often (cache reset cost). Count-cap path still exercised by existing small-`max_history_messages` tests.
+- Prompts (`agent/prompts.py`, regenerated PROMPTS.md): `## 动作协议`→`## 可用工具` as a markdown tool table (FOLD + meta, incl. write_file/edit_file/explore/web_search); workflow note that sandbox data is a sample and later Folds expand the backtest range; Taste contract states template filenames (candidate.py/trading.py/nl_prompt.md) are not a fixed structure — only `output/main.py` is required (#7).
+- Data sample (`environment/snapshot.py`): `SnapshotConfig.intraday_trade_days` 5→21 (one trading month of decision-input minute bars; replay windows are sized by fold periods, not this field).
+- data_summary slim (`environment/data_summary.py`): full schema (key_columns + key-column null counts) only for the primary `snapshot` view; `train`/`valid` compact (path/mount_path/rows/size/large_table/date_ranges); dropped `row_groups`/`recommended_access`; write compact (un-indented) JSON. On the run's real snapshot: 37,661 → 15,058 chars (fits the 20k cat limit; lower token cost). `test_pipeline_e2e` asserts key_columns only on the snapshot view → still passes.
+- Shell guard false positives (`environment/tools/shell.py`): added `_strip_heredoc_bodies` (drops heredoc bodies, keeps the opener line + any real redirect) applied in `run()` and at the top of `_guard_paths`; `_path_references` now scans `_mask_quoted(command)` so the absolute-path regex cannot reach inside quoted `-c` payloads. Verified offline: `python3 << 'EOF' ... > 150 ... [:5] ... EOF` and `python3 -c "... b > 150; '/5' ..."` no longer raise; `echo hi > /etc/passwd`, `cat <<EOF > output/x.txt`, `cp a /mnt/snapshot/x` still flagged. Added regression asserts in `test_shell_runs_and_logs_and_guards_test_dir`.
+- Manifest host paths (`pipelines/experiment.py`): meta `development_inputs` (`experiment_ledger_full`/`development_history`/`meta_learning_memory`) and `taste_output` now `/mnt/agent/workspace/...` mount paths; dropped the un-mounted raw `experiment_ledger` host dir. (These fields are write-only in the manifest — not read back by the pipeline.)
+- web_search (`environment/web_search.py`): cap tavily per-result `content` at 1500 chars (matches the semantic_scholar abstract cap).
+
+Codex-finding verdicts not actioned:
+- #3 snapshot build ~6.5 min: dominated by the ~1 GB valid `intraday_1min.parquet`, which is the replay window the backtest requires — not reducible without breaking validation; "not mandatory" → left as-is.
+- #6 `2>/dev/null`: already prohibited by prompt; a hard guard rule would be brittle over-engineering, and the root cause (the agent probing guessed paths defensively) is removed by the #2 manifest-path fix.
+
+Validation: `python -m unittest discover -t . -s tests` → Ran 275 tests, OK. PROMPTS.md regenerated and in sync. `py_compile` OK. `git diff --check` clean. Nothing committed (left unstaged for review).
+
+## 2026-06-26 Trace/context/data summary audit follow-up
+
+Task: audit Claude's trace/context/tool/data-summary modifications for logical errors, redundant code, stale docs, and junk files.
+
+Independent review:
+- Spawned one read-only Explorer SubAgent for cross-check and closed it after completion.
+- SubAgent confirmed the main DeepSeek tool-call payload strips non-standard fields, but found `_seq` would still enter compact-model prompts through `conversation_messages`; it also found context editing could clear same-turn tool outputs before the LLM had seen them.
+
+Fixes:
+- `scripts/experiments/run_experiment.py`: `--intraday-trade-days` default now comes from `SnapshotConfig().intraday_trade_days`, so CLI runs no longer override the 21-trading-day default back to 5. `agent_session_config` now records `trim_token_threshold`, `clear_tool_results`, `tool_result_keep_recent`, `tool_result_clear_min_chars`, and `tool_result_clear_token_threshold`.
+- `src/hl_trader/agent/compact.py`: compact request serialization strips runner-local keys such as `_seq` before sending history to the compact proxy.
+- `src/hl_trader/agent/runner.py`: `_clear_stale_tool_results()` accepts `protect_from_index`; the main loop protects all tool results generated in the current assistant turn so context editing only clears older outputs already visible to the model.
+- `src/hl_trader/environment/data_summary.py`: metadata-error strings are converted to sandbox-safe text and host absolute paths are redacted before writing Agent-visible `data_summary.json`.
+- `src/hl_trader/agent/prompts.py` and regenerated `configs/prompts/PROMPTS.md`: replaced “later Folds expand the backtest range” with the correct contract that Folds roll forward by configured period and replay windows are sized by each Fold period.
+- `docs/environment_design.md` and `docs/data_documentation.md`: synchronized intraday decision-input default to 21 trading days without retaining obsolete version wording.
+
+Regression tests added:
+- `test_context_compaction_request_strips_runner_internal_fields`
+- `test_context_edit_preserves_current_turn_tool_results`
+- `test_session_config_summary_records_context_token_thresholds`
+- `test_data_summary_metadata_error_redacts_host_paths`
+
+Validation:
+- Pre/post resource checks: system memory stayed above ~432 GiB available; GPUs were occupied by unrelated jobs, and this test run did not use GPU.
+- `PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_pipeline_e2e tests.unit.test_snapshot_builder tests.unit.test_llm_deepseek` → Ran 115 tests, OK.
+- `PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m unittest discover -s tests` → Ran 279 tests, OK.
+- `git diff --check` → clean.
+- Removed generated `__pycache__` directories after tests; no cache files remain under `src/`, `tests/`, or `scripts/`.
+
+## 2026-06-26 Pipeline Taste inheritance clarification
+
+Task: clarify in the Pipeline flow that the Taste produced by the meta-learning session is directly inherited by later Folds, and that each Fold inherits the strategy/model artifacts frozen by the previous Fold.
+
+Changes:
+- `docs/pipeline_design.md`: expanded the core Mermaid flow and text around the two inheritance channels:
+  - Taste is generated once per Epoch and injected into every ordinary Fold Prompt in that Epoch.
+  - Strategy and model artifacts are inherited sequentially from the previous Fold's frozen output, or from the Pipeline-selected fallback parent when no acceptable update is frozen.
+- `src/hl_trader/agent/prompts.py`: updated the meta-learning Pipeline flow section so the meta-learning Agent understands that its `taste.md` is a key implementation guide for all subsequent Fold Agents in the same Epoch.
+- `configs/prompts/PROMPTS.md`: regenerated from `scripts/dev/export_prompts.py`.
+
+Validation:
+- `PYTHONPATH=src ~/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py` → OK.
+- `git diff --check` → clean.
+- Removed `__pycache__` generated by prompt export.
+
+## 2026-06-26 Meta Learning trace detail run
+
+Task: start one formal meta-learning Fold and overwrite `check.md` with a dialogue-style reconstruction of the Agent Trace, including detailed Agent outputs.
+
+Resource checks:
+- Before report extraction, `free -h` showed about 432 GiB available system memory.
+- GPU query showed GPUs 0-6 occupied by unrelated jobs and GPU 7 idle; this meta-learning run did not launch GPU training.
+
+Run:
+- Experiment: `meta_learning_trace_detail_20260626_115832`
+- Run ID: `run_027521b81c60`
+- Config: Docker sandbox, `deepseek-v4-pro`, `reasoning_effort=max`, quarterly fold period, 21-month history window, 21-trading-day intraday decision-input window, Web Search engines `tavily` and `semantic_scholar`.
+- Primary log: `logs/meta_learning_trace_detail_20260626_115832.log`
+
+Artifacts:
+- Trace: `experiments/meta_learning_trace_detail_20260626_115832/artifacts/run_027521b81c60/agent_trace.jsonl`
+- Taste: `experiments/meta_learning_trace_detail_20260626_115832/artifacts/run_027521b81c60/workspace/taste.md`
+- Manifest: `experiments/meta_learning_trace_detail_20260626_115832/artifacts/run_027521b81c60/run_manifest.json`
+- Data summary: `experiments/meta_learning_trace_detail_20260626_115832/artifacts/run_027521b81c60/data_summary.json`
+- Audit report: `check.md`
+
+Trace summary:
+- Agent session reached `finish_status=meta_learning_done` and wrote `taste.md`.
+- Event counts: 18 `llm_call`, 60 `shell`, 10 `grep`, 3 `explore`, 24 `explore_llm_call`, 6 `web_search`, 7 `context_edit`, 0 context compactions.
+- DeepSeek usage from Trace: 494,721 prompt tokens, 10,697 completion tokens, 505,418 total tokens, 2,419 reasoning tokens, 353,280 prompt cache-hit tokens, 141,441 prompt cache-miss tokens.
+
+Known issue:
+- After Agent completion, `sandbox.collect_artifacts()` attempted to copy workspace `.cache/pip` files and hit permission denied. The already-collected Trace/Taste/manifest/data_summary were sufficient for this audit, but the artifact collector should ignore cache directories or prevent pip cache writes inside collectable workspace in a follow-up fix.
+
+Report:
+- `check.md` was overwritten with a dialogue-style reconstruction of the trace, including initial prompt excerpt, each top-level Agent turn, tool calls, selected tool returns, the outer collection error, and the final Taste text.
+- A secret scan over `check.md` for common API token patterns returned no matches.
+
+## 2026-06-26 Meta Taste prompt cleanup
+
+Task: remove concrete time/Fold examples from the meta-learning Taste contract and merge the transferability rule with the continued-exploration rule.
+
+Changes:
+- `src/hl_trader/agent/prompts.py`: replaced the two separate Taste bullets with one generic rule. It now forbids quarter/year/Fold labels, Fold-specific plans, and restating valid/test/held-out ranges without listing concrete example labels; it also states when a weak or failed direction can still be worth continuing.
+- `src/hl_trader/agent/runner.py`: generalized the nearby comment so future edits do not copy concrete period examples back into prompts.
+- `configs/prompts/PROMPTS.md`: regenerated from `scripts/dev/export_prompts.py`.
+
+Validation:
+- Resource checks before script execution showed about 428 GiB available memory; GPUs were occupied by unrelated jobs.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py` → OK.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/prompts.py src/hl_trader/agent/runner.py` → OK.
+- `git diff --check` → clean.
+- Removed the `src/hl_trader/agent/__pycache__` generated by compilation.
+
+Follow-up:
+- Moved the template-file and time-window transferability rules out of the "内容应覆盖" bullet list in the meta-learning Taste contract. They are now two ordinary "注意" paragraphs after the list, so the Agent treats them as writing boundaries rather than required Taste output sections.
+- Regenerated `configs/prompts/PROMPTS.md`.
+- Validation: prompt export OK, `py_compile src/hl_trader/agent/prompts.py` OK, `git diff --check` clean, no `__pycache__` left under `src/hl_trader/agent`.
+
+## 2026-06-26 Meta Learning rerun with prompt-only Taste constraints
+
+Task: rerun one formal meta-learning Fold after prompt cleanup.
+
+Initial run:
+- Experiment: `meta_learning_rerun_20260626_151833`
+- Run ID: `run_14e9415649d7`
+- Config: Docker meta-learning-only run, CPU-only sandbox to avoid current GPU contention, `deepseek-v4-pro` main model, `deepseek-v4-flash` NL/explore/compact, reasoning effort max, quarterly Fold period, 21-month history window, 21-trading-day intraday decision-input window, web search engines `tavily` and `semantic_scholar`.
+- Result: Agent reached `finish_status=meta_learning_done`, status `taste_only`, and artifact collection succeeded. However, Taste still contained concrete decision dates/year windows, showing that the existing policy guard only rejected quarter/Fold/held-out labels and did not catch specific dates/years.
+
+Fix:
+- `src/hl_trader/agent/runner.py`: removed the remaining content-style Taste regex guard. The runner now only enforces that `taste.md` exists and is non-empty before accepting `done`.
+- `src/hl_trader/agent/prompts.py`: strengthened the meta-learning Taste note to forbid concrete dates, quarter/year/Fold labels, Fold-specific plans, and valid/test/held-out ranges; the prompt also tells the Agent to self-check and rewrite before `done` rather than relying on tool-side interception.
+- `configs/prompts/PROMPTS.md`: regenerated.
+- `tests/unit/test_tools_flow.py`: updated the meta-learning `done` test to cover only the actual hard condition: `taste.md` must be written and non-empty. Transferability is prompt-guided and audit-reviewed, not regex-rejected.
+
+Validation before rerun:
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.AgentSessionRunnerTest.test_meta_done_rejects_fold_specific_taste` → OK.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.AgentSessionRunnerTest` → 23 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py` → OK.
+- `git diff --check` → clean.
+
+Final rerun:
+- Experiment: `meta_learning_rerun_strict_20260626_153215`
+- Run ID: `run_c1b20ae82ed1`
+- Log: `logs/meta_learning_rerun_strict_20260626_153215.log`
+- Trace: `experiments/meta_learning_rerun_strict_20260626_153215/artifacts/run_c1b20ae82ed1/agent_trace.jsonl`
+- Taste: `experiments/meta_learning_rerun_strict_20260626_153215/meta_learning/epoch_001/taste.md`
+- Result: `finish_status=meta_learning_done`, ledger status `taste_only`, `modification_check.allowed_to_backtest=true`, Taste 2232 chars.
+- Trace summary: 10 `llm_call`, 25 `shell`, 1 `explore`, 6 `web_search`, 5 `context_edit`, 0 context compactions, 0 trace errors.
+- Token usage: 230,766 prompt tokens, 8,700 completion tokens, 239,466 total tokens, 2,951 reasoning tokens, cache hit ratio 0.5303.
+- Web search: all three required perspectives completed with successful non-empty searches.
+- Taste audit: grep for concrete dates/years/Fold/held-out/test/valid labels returned no matches. The final artifact remains clean, and future prevention is handled by prompt guidance plus audit rather than content regex guards.
+
+Resource and cleanup:
+- Pre/post memory stayed above roughly 427 GiB available. GPUs were occupied by unrelated jobs; meta-learning sandbox was run CPU-only and did not launch local GPU training.
+- Removed generated `__pycache__` directories under `src/`, `tests/`, and `scripts/`.
+
+## 2026-06-25 run_027521b81c60 audit: Explore robustness, Taste period-agnostic, collect_artifacts scope
+
+Source: audit of `.runtime/sandboxes/run_027521b81c60` (first-epoch meta-learning, `meta_learning_done`, 18 main calls, 3 explore tasks, cache_hit_ratio 0.71). Fixed the three reported issues + verified the rest.
+
+Issue 1 — Explore failures: 1 of 3 explore tasks ended `status=error, digest=""` with `deepseek request failed: ... finish_reason=length` at `explore_round_6`. Root cause: `ExploreSubAgentConfig.max_tokens=3000` is too small for a round that emits a long DuckDB tool-call argument plus reasoning; deepseek `_parse_response` treats `finish_reason=length` as a hard error. Fix (`environment/explore.py`): `max_tokens` 3000→6000 (completed digests were only 1913/3286 chars, so no main-context bloat); restructured the rounds loop to a `while` that catches a non-timeout `LLMProxyError` per round, breaks, and forces a single concise final summary (`tool_choice="none"`) — a length/transient cut no longer fails the whole task. Contained already (a sub-agent failure never killed the Fold), now degrades gracefully.
+
+Issue 2 — Taste fold-specific labels: `taste.md` contained `验证期 2021Q4，测试期 2022Q1`, `Held-out 仅 2022Q2`, and a `Fold_2022Q1（首个 Fold）: ...` plan. The Taste is injected into every walk-forward Fold prompt, so quarter/Fold labels are both non-transferable and a leak of the test schedule. Final fix: meta prompt Taste contract (`agent/prompts.py`) explicitly forbids quarter/year/date/Fold labels and restating valid/test/held-out windows, and tells the Agent to self-check and rewrite before `done`. Runner no longer uses content regex guards for Taste; it only requires `taste.md` to exist and be non-empty.
+
+Issue 3 — collect_artifacts too broad: `_copy_path` did `shutil.copytree(workspace, ...)` with no filter, so `workspace/.cache/pip/...` (written by the container user, owner 357607:297607, mode 0600) was archived; the host `lzp` collector can't read 0600 files → PermissionError. Fix (`environment/sandbox.py`): added `_COLLECT_IGNORE = shutil.ignore_patterns(".cache","__pycache__","*.pyc","*.pyo",".git",".mypy_cache",".pytest_cache",".ruff_cache",".ipynb_checkpoints","node_modules",".venv",".conda",".npm",...)` and passed it to the copytree in `_copy_path`. Caches are scratch, not artifacts; genuinely-unexpected unreadable files still fail loudly (fail-fast).
+
+Also verified (no new code):
+- 47 path_guard hits (`.../agent/0`, `/CAST`) came from `duckdb -c "...CAST(count(*) AS VARCHAR)... > 0..."`; these are the OLD guard — the unstaged heredoc-strip + quote-mask fix returns clean for the exact command (checked offline). This run executed pre-fix code; the guard fix just needs to ship.
+- `duckdb` CLI is absent (exit 127); the agent self-corrected to `python3 -c "import duckdb"`. Minor; no change.
+- web_search covered all 3 perspectives (one transient semantic_scholar failure auto-retried).
+
+Validation: `python -m unittest discover -t . -s tests` → Ran 282 tests, OK (3 new regressions: `test_explore_salvages_digest_after_length_cutoff`, `test_meta_done_rejects_fold_specific_taste`, `test_collect_artifacts_excludes_transient_caches`). PROMPTS.md regenerated/in sync. py_compile OK. Nothing committed (unstaged for review).
+
+## 2026-06-26 Strategy context workspace cleanup
+
+Task: revert the previous backtest-summary marker change and remove the workspace path from the formal strategy decision context.
+
+Changes:
+- `src/hl_trader/environment/tools/backtest.py`: reverted `modification_check_auto_run`; `_enforce_modification_check()` again returns only the check summary while retaining the existing missing/stale auto-check behavior.
+- `src/hl_trader/environment/backtest_engine.py`: removed `context["workspace_dir"]` and `MQ_WORKSPACE_DIR` from the `run_strategy(context)` subprocess environment.
+- `tests/unit/test_tools_flow.py`: removed assertions for the reverted summary field and added a regression test that fails if `workspace_dir` or `MQ_WORKSPACE_DIR` reaches the formal decision entrypoint.
+- `src/hl_trader/agent/prompts.py`, generated prompts, template docs, and living docs: synchronized the contract so decision code uses `model_dir` for persisted parameters and does not rely on workspace being passed through context.
+
+Validation:
+- Resource checks before and after scripts/tests showed about 423 GiB available memory. GPUs were occupied by unrelated jobs; this work used CPU-only prompt export and unit tests.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py` -> OK.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ToolFlowTest.test_strategy_program_context_does_not_expose_workspace_dir tests.unit.test_tools_flow.ToolFlowTest.test_modification_check_backtest_and_finish_fold tests.unit.test_tools_flow.ToolFlowTest.test_backtest_runs_strategy_program_trade_intents` -> 3 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow` -> 67 tests OK. Existing ResourceWarning about unclosed file descriptors in `ast.py` appeared, but tests passed.
+- `git diff --check` -> clean.
+- `find src tests scripts -type d -name __pycache__ -print` -> no output.
+
+Follow-up audit:
+- Spawned GPT-5.5 High SubAgent `019f0346-52f3-7901-acff-75771d68b02d` for a read-only audit of the erroneous `modification_check_auto_run` change and the workspace context removal.
+- SubAgent verdict: current runtime protocol is acceptable. It found no code/test/live Prompt residue for `modification_check_auto_run`; it confirmed `run_strategy(context)` no longer receives `workspace_dir` or `MQ_WORKSPACE_DIR`, while `model_dir`, `MQ_MODEL_DIR`, snapshot, output, decision time, replay granularity, and NL remain available.
+- Low-risk cleanup from the audit: clarified `docs/agent_design.md` so workspace is not described as a formal decision context input, and added `assertNotIn("modification_check_auto_run", summary)` regression assertions in `tests/unit/test_tools_flow.py`.
+- Follow-up validation: resource checks showed about 423 GiB available memory; GPUs were occupied by unrelated jobs. `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ToolFlowTest.test_modification_check_backtest_and_finish_fold tests.unit.test_tools_flow.ToolFlowTest.test_backtest_runs_strategy_program_trade_intents tests.unit.test_tools_flow.ToolFlowTest.test_strategy_program_context_does_not_expose_workspace_dir` -> 3 tests OK. `git diff --check` -> clean. `find src tests scripts -type d -name __pycache__ -print` -> no output.
+
+## 2026-06-26 Meta Learning prompt structure cleanup
+
+Task: reorganize the meta-learning system prompt so Pipeline flow carries the sample-data and first-run-empty-history context, while Taste writing constraints are simplified and moved into prohibitions.
+
+Changes:
+- `src/hl_trader/agent/prompts.py`: `META_LEARNING_INSTRUCTION` `Pipeline流程` now states that the visible data is only the first Fold's example visible window; subsequent Folds roll forward in time and use their own windows.
+- Merged the previous standalone `首轮空历史` section into `Pipeline流程`, keeping the behavior but reducing duplicated structure.
+- Removed the two long `注意：...` paragraphs after the Taste contract and replaced them with concise `禁止事项` bullets covering non-fixed template filenames, time-window-agnostic Taste writing, done-before-self-check, and failed-direction continuation rules.
+- Regenerated `configs/prompts/PROMPTS.md` from the prompt source.
+
+Validation:
+- Resource checks before and after prompt export showed about 423 GiB available memory. GPUs were occupied by unrelated jobs; this task used CPU-only scripts.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py` -> OK.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/prompts.py scripts/dev/export_prompts.py` -> OK.
+- `git diff --check` -> clean.
+- Removed `src/hl_trader/agent/__pycache__` and `scripts/dev/__pycache__`; `find src tests scripts -type d -name __pycache__ -print` -> no output.
+
+Follow-up:
+- Moved the positive guidance about continuing a weak-but-mechanistic direction back into the Taste output contract. `禁止事项` now only forbids encouraging repeated failed directions that rely on stock/month/window memory or lack a verifiable mechanism.
+- Regenerated `configs/prompts/PROMPTS.md`; `git diff --check` -> clean; `find src tests scripts -type d -name __pycache__ -print` -> no output.
+- Reworked the meta-learning `Pipeline流程` paragraph into a concise bullet list covering Epoch/Fold order, sample-window visibility, Taste injection, artifact inheritance, first-run-empty-history handling, and Taste quality expectations.
+- Regenerated `configs/prompts/PROMPTS.md`; `git diff --check` -> clean; `find src tests scripts -type d -name __pycache__ -print` -> no output.
+- Removed the remaining prohibition bullet `不得鼓励重复已失败、依赖个股/月度/时间窗口记忆或缺少可验证机制的方向。` from `META_LEARNING_INSTRUCTION`; regenerated `configs/prompts/PROMPTS.md`.
+
+Meta-learning rerun:
+- Started a Docker meta-learning-only run with `experiment_id=meta_learning_prompt_cleanup_20260626_180640`, `run_id=run_77940b553de6`, DeepSeek V4 Pro with `reasoning_effort=max`, compact/explore on DeepSeek V4 Flash, quarterly WF, 21-month PIT windows, 21 visible intraday trading days, and web search engines `tavily, semantic_scholar`.
+- Result: `finish_status=meta_learning_done`, ledger status `taste_only`, `taste_chars=3368`, no frozen artifact because this was a first-parent template Taste-only run. Token usage: total 426,371; prompt 416,437; completion 9,934; reasoning 2,943; cache hit ratio 0.5158. Trace counts: 15 LLM calls, 24 shell calls, 9 web_search calls, 10 context_edit events, 2 tool events, 1 session_end, 0 context compactions.
+- Key paths: log `logs/meta_learning_prompt_cleanup_20260626_180640.log`; trace `experiments/meta_learning_prompt_cleanup_20260626_180640/artifacts/run_77940b553de6/agent_trace.jsonl`; manifest `experiments/meta_learning_prompt_cleanup_20260626_180640/artifacts/run_77940b553de6/run_manifest.json`; ledger `experiments/meta_learning_prompt_cleanup_20260626_180640/ledgers/experiment_ledger.jsonl`; Taste `experiments/meta_learning_prompt_cleanup_20260626_180640/meta_learning/epoch_001/taste.md`.
+- Non-fatal runtime issue: one shell data-check command failed with pandas mixed str/float date comparison while inspecting fundamentals; the Agent read stderr, continued, and completed normally.
+- Taste audit note: despite the Prompt prohibition, the produced Taste still contains time/Fold-specific content (`Fold 1`, `Q4 2021`, and `2020` in a COVID-overfit warning). The current system has no hard Taste-content guard, so the run is operationally successful but the Taste should be treated as having a portability defect before injecting into later Fold prompts.
+- Validation: resource checks before and after showed roughly 423-425 GiB available memory; GPUs were occupied by unrelated jobs. `py_compile` for prompt/export scripts passed; `git diff --check` -> clean; generated `__pycache__` directories were removed; `find src tests scripts -type d -name __pycache__ -print` -> no output; no matching Docker sandbox remained running after completion.
+
+Follow-up prompt contract cleanup:
+- Updated `src/hl_trader/agent/prompts.py` so the sample-window explanation lives in `# 角色与目标`, emphasizing cross-period reuse and real-world investment relevance; removed the same explanation from `Pipeline流程`.
+- Rewrote `Taste 输出合同` as a fixed three-section format: `投资理念与机制假设`, `重点技术与资源使用建议`, and `历史经验、失败教训与正则化原则`.
+- Removed concrete method examples from the technology section and neutralized remaining Fold/date cues such as `Fold 1/2/3` examples and `第一个 Fold` wording in meta-learning prompt text.
+- Regenerated `configs/prompts/PROMPTS.md`.
+- Validation: resource checks before and after prompt export showed about 425-426 GiB available memory; GPUs were occupied by unrelated jobs. `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py` -> OK. `git diff --check -- src/hl_trader/agent/prompts.py configs/prompts/PROMPTS.md` -> clean.
+
+## 2026-06-26 Compact and Explore prompt refinement
+
+Task: execute the accepted OpenCode/Claude-Code-inspired improvements for context compaction and Explore SubAgent behavior, while only advising on Meta Taste, tool-detail placement, and experiment-fact injection.
+
+Changes:
+- `src/hl_trader/agent/compact.py`: context compaction request now carries `previous_summary` plus `messages_since_previous_summary`; previous compaction summaries are not re-embedded as ordinary conversation history. The requested output schema is an anchored continuation state: `goal`, `constraints_and_preferences`, `progress`, `key_decisions`, `errors_and_fixes`, `next_steps`, `critical_context`, `relevant_files`, and `recent_user_feedback`.
+- `src/hl_trader/agent/compact.py`: normalizer accepts the new schema and maps old compact payloads into it for compatibility.
+- `src/hl_trader/environment/explore.py`: Explore prompt now frames the sub-agent as a read-only investigator that answers the delegated question, preserves evidence, avoids hidden errors, avoids full-table reads, and does not design final strategies, write Taste, or do global synthesis for the main Agent.
+- `docs/agent_design.md` and `docs/environment_design.md`: documented the anchored compact summary and Explore digest boundary.
+- `tests/unit/test_tools_flow.py`: added regression coverage for compact previous-summary anchoring and Explore prompt boundary.
+
+Validation:
+- Resource check before tests: about 429 GiB available memory; GPUs 5 and 6 were free, other GPUs had unrelated jobs.
+- First targeted unittest command used the wrong class name for Explore tests; compact tests passed, and unittest reported `AttributeError` for the misnamed Explore test targets. Retried with `AgentSessionRunnerTest`, then ran the corrected combined target set.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.AgentSessionRunnerTest.test_context_compactor_reserves_time_for_next_main_call tests.unit.test_tools_flow.AgentSessionRunnerTest.test_context_compaction_request_strips_runner_internal_fields tests.unit.test_tools_flow.AgentSessionRunnerTest.test_context_compaction_request_anchors_previous_summary tests.unit.test_tools_flow.AgentSessionRunnerTest.test_runner_compacts_long_context_with_dedicated_proxy tests.unit.test_tools_flow.AgentSessionRunnerTest.test_runner_recomputes_deadline_after_compaction_before_main_call tests.unit.test_tools_flow.AgentSessionRunnerTest.test_runner_traces_compaction_failure_and_opens_circuit tests.unit.test_tools_flow.AgentSessionRunnerTest.test_explore_subagent_returns_digest_via_dispatch tests.unit.test_tools_flow.AgentSessionRunnerTest.test_explore_salvages_digest_after_length_cutoff tests.unit.test_tools_flow.AgentSessionRunnerTest.test_explore_subagent_runs_read_only_tools tests.unit.test_tools_flow.AgentSessionRunnerTest.test_explore_subagent_handles_parallel_grep_glob_calls tests.unit.test_tools_flow.AgentSessionRunnerTest.test_explore_uses_fold_deadline_for_proxy_timeout tests.unit.test_tools_flow.AgentSessionRunnerTest.test_explore_search_helpers_reject_expired_deadline tests.unit.test_tools_flow.AgentSessionRunnerTest.test_explore_llm_error_trace_redacts_bearer_token` -> 13 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/compact.py src/hl_trader/environment/explore.py tests/unit/test_tools_flow.py` -> OK.
+- `git diff --check -- src/hl_trader/agent/compact.py src/hl_trader/environment/explore.py tests/unit/test_tools_flow.py docs/agent_design.md docs/environment_design.md` -> clean.
+- Removed py_compile-generated caches under `src/hl_trader/environment/__pycache__`, `src/hl_trader/agent/__pycache__`, and `tests/unit/__pycache__`; `find src tests -name __pycache__ -o -name '*.pyc'` -> no output.
+
+## 2026-06-26 Tool schema detail sinking
+
+Task: keep the system Prompt tool table, but move operational tool details closer to each tool's native schema and error contract.
+
+Changes:
+- `src/hl_trader/environment/tools/base.py`: added `ActionField.description`; field descriptions now appear in both `tool_spec` records and provider-native JSON Schema. Optional defaults are appended to the same schema description instead of replacing tool guidance.
+- `src/hl_trader/environment/tools/shell.py`: clarified shell usage, large parquet access guidance, stderr visibility, `command`, `max_output_chars`, and `timeout_seconds`.
+- `src/hl_trader/environment/tools/search.py`: added grep/glob field descriptions for root/path/glob/output mode/pagination/context/multiline behavior.
+- `src/hl_trader/environment/tools/artifact_io.py`: added write/edit field descriptions for root, relative path, content, old/new strings, and replace-all semantics.
+- `src/hl_trader/environment/tools/web_search.py`: added engine, perspective, query, and max-results descriptions; search results are framed as evidence, not trading labels.
+- `src/hl_trader/agent/runner.py`: added descriptions for note, explore task/max_rounds, and meta-learning done; descriptions for backtest/modification_check/finish_fold were clarified in their tool modules.
+- `docs/environment_design.md`: documented the split: system Prompt keeps the tool table and key boundaries, while parameter semantics, output budgets, pagination, retry hints, and failure reasons live in tool schema and structured `ToolError`.
+- `tests/unit/test_tools_flow.py`: added regression coverage proving field descriptions reach native tool schemas.
+
+Validation:
+- Resource check before work showed about 415 GiB available memory. GPUs were occupied by unrelated jobs; this task used CPU-only tests.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.AgentSessionRunnerTest.test_tool_schemas_include_actionable_field_descriptions tests.unit.test_tools_flow.AgentSessionRunnerTest.test_runner_validates_action_schema_and_records_deadline_cancellation tests.unit.test_tools_flow.AgentSessionRunnerTest.test_explore_subagent_returns_digest_via_dispatch` -> 3 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/environment/tools/base.py src/hl_trader/environment/tools/shell.py src/hl_trader/environment/tools/search.py src/hl_trader/environment/tools/artifact_io.py src/hl_trader/environment/tools/web_search.py src/hl_trader/environment/tools/backtest.py src/hl_trader/environment/tools/modification_check.py src/hl_trader/environment/tools/finish_fold.py src/hl_trader/agent/runner.py tests/unit/test_tools_flow.py` -> OK.
+- `git diff --check -- src/hl_trader/environment/tools/base.py src/hl_trader/environment/tools/shell.py src/hl_trader/environment/tools/search.py src/hl_trader/environment/tools/artifact_io.py src/hl_trader/environment/tools/web_search.py src/hl_trader/environment/tools/backtest.py src/hl_trader/environment/tools/modification_check.py src/hl_trader/environment/tools/finish_fold.py src/hl_trader/agent/runner.py tests/unit/test_tools_flow.py docs/environment_design.md` -> clean.
+- Removed py_compile-generated caches under `src/hl_trader/environment/tools/__pycache__`, `src/hl_trader/agent/__pycache__`, and `tests/unit/__pycache__`; `find src tests -name __pycache__ -o -name '*.pyc'` -> no output.
+
+## 2026-06-26 Meta sandbox image rebuild and manifest cleanup
+
+Task: implement the accepted two-layer dependency inheritance design: meta-learning declares the desired environment, then Pipeline rebuilds a derived Sandbox image for subsequent Fold/held-out runs. Also complete the previous prompt/fact/manifest cleanup and report the final state.
+
+Changes:
+- `src/hl_trader/pipelines/config.py`: added `meta_sandbox_rebuild_enabled` and `meta_sandbox_rebuild_timeout_seconds`.
+- `scripts/experiments/run_experiment.py`: added `--disable-meta-sandbox-rebuild`; default behavior is to honor meta-learning `workspace/sandbox_environment.json`.
+- `src/hl_trader/pipelines/experiment.py`: tracks `_active_sandbox_spec`; meta-learning still uses `meta_learning_sandbox_spec`, while ordinary Fold and held-out runs use the active ordinary spec. After meta-learning, `_maybe_rebuild_sandbox_image()` reads `workspace/sandbox_environment.json`, validates the minimal JSON schema, renders a derived Dockerfile from the current ordinary base image, runs `docker build`, and switches `_active_sandbox_spec.image` on success. Non-empty build requests fail the experiment on timeout or Docker build failure; no silent fallback.
+- `src/hl_trader/pipelines/experiment.py`: `sandbox_image_update` is recorded in the run manifest and meta-learning ledger. Build artifacts are stored under `experiments/<id>/sandbox_images/<epoch>/` with the sanitized request copy and generated Dockerfile.
+- Removed the previously considered `models/python_packages` inheritance path. `models/` remains only for model parameters, weights, and model metadata; Python/npm/apt dependencies belong to the Sandbox image layer.
+- `src/hl_trader/environment/runtime.py`: preserved two manifest views. `/mnt/artifacts/run_manifest.json` is the Agent-visible public projection; `runtime/host_run_manifest.json` is host-only and keeps full audit/test scheduling data.
+- `src/hl_trader/environment/sandbox.py`: artifact collection copies the host-only manifest to collected run artifacts as `host_run_manifest.json`; runtime policy wording now points persistent dependencies to the image layer.
+- `src/hl_trader/pipelines/experiment.py`: meta development inputs use Agent-visible ledger records only. The public ledger projection is allowlist-based, strips test/held-out result fields, strips host-only paths, and maps `fold_id` / strategy artifact IDs to opaque refs to avoid indirect time-window leakage.
+- `src/hl_trader/agent/prompts.py`: meta-learning prompt now documents the `sandbox_environment.json` contract and clarifies that workspace-only installs/cache do not inherit.
+- `docs/agent_design.md`, `docs/environment_design.md`, and `docs/pipeline_design.md`: documented the two-layer model: output/model artifacts inherit as files, dependencies inherit only by rebuilding the Sandbox image from meta-learning's environment request.
+- `configs/prompts/PROMPTS.md`: regenerated from prompt source.
+- `check.md`: overwritten with complete rendered Fold Agent and Meta Learning Agent example prompts for manual audit.
+- Tests updated in `tests/unit/test_pipeline_e2e.py`, `tests/unit/test_step_tree.py`, `tests/unit/test_artifacts.py`, and `tests/unit/test_tools_flow.py` to cover public/host manifest separation, meta experiment facts, opaque Agent-visible ledger refs, sandbox image rebuild request handling, model artifact boundaries, and tool schema descriptions.
+
+SubAgent audit:
+- Opened a GPT-5.5 High SubAgent for code/design audit. Main conclusion: public manifest + host manifest are not redundant because they serve different trust boundaries; public is the Agent contract, host is audit/orchestration truth. The recommended dependency inheritance mechanism is the derived Sandbox image, not copying installed packages into artifacts. The audit also flagged indirect raw Fold labels in Agent-visible development records; this was fixed by opaque refs and stricter allowlists.
+
+Validation:
+- Resource checks before tests: about 415 GiB available memory; GPUs were occupied by unrelated jobs. After tests: about 414 GiB available memory; no new unsafe resource pressure.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/pipelines/experiment.py src/hl_trader/pipelines/config.py scripts/experiments/run_experiment.py src/hl_trader/environment/runtime.py src/hl_trader/agent/prompts.py` -> OK.
+- Targeted Pipeline tests:
+  `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_single_epoch_runs_meta_learning_before_fold_and_heldout tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_injects_full_records_and_prior_epoch_logs tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_development_history_uses_compact_fold_summaries tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_environment_request_builds_derived_sandbox_image` -> 4 tests OK.
+- Broader targeted tests:
+  `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e` -> 24 tests OK.
+  `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_step_tree tests.unit.test_artifacts tests.unit.test_tools_flow.AgentSessionRunnerTest.test_tool_schemas_include_actionable_field_descriptions tests.unit.test_tools_flow.AgentSessionRunnerTest.test_explore_subagent_returns_digest_via_dispatch` -> 21 tests OK.
+- Full suite:
+  `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests` -> 290 tests OK.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py` -> regenerated `configs/prompts/PROMPTS.md`.
+- `git diff --check` -> clean.
+- `find src tests scripts -type d -name __pycache__ -print` -> no output after cleanup.
+
+Notes:
+- The retained host manifest is intentionally not mounted to the Agent. It preserves full run details for host audit and debugging while keeping the Agent-visible manifest/test boundary concise.
+- Step tree node IDs still use internal lineage names in the host-side tree. Agent prompt and public manifest projections use opaque refs where they are part of prompt/development inputs; a deeper StepTree ID rewrite was not taken in this task because it would change artifact lineage semantics and was not required for the requested dependency inheritance work.
+
+## 2026-06-26 Prompt export readability cleanup
+
+Task: inspect `configs/prompts/PROMPTS.md` readability after the prompt/schema refactor and clean up the generated Markdown structure without changing the underlying prompt contents.
+
+Changes:
+- `scripts/dev/export_prompts.py`: added explicit anchors, a navigation list, numbered sections, and `<details>` wrappers around each full prompt body. The first full Fold prompt remains open by default; other long prompt blocks are collapsed to reduce page noise.
+- `configs/prompts/PROMPTS.md`: regenerated from the exporter. The prompt bodies remain inside `text` fences so reviewers can audit exactly what the model receives, but the surrounding document is now scannable.
+
+Validation:
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py` -> OK.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m py_compile scripts/dev/export_prompts.py` -> OK.
+- `git diff --check -- scripts/dev/export_prompts.py configs/prompts/PROMPTS.md` -> clean.
+
+Follow-up:
+- Opened GPT-5.5 High Explorer SubAgent `019f0437-890c-7101-b09d-49d44fc61268` for read-only audit of `configs/prompts/PROMPTS.md` section 7 and the exporter. It confirmed section 7 should not be a standalone “追加片段” prompt, because it is only appended to the meta-learning system prompt when an experiment directive is present; it also flagged nested Markdown fence breakage caused by outer ```text blocks containing inner ```json blocks. The SubAgent was closed after completion.
+- `scripts/dev/export_prompts.py`: replaced the standalone directive fragment export with a full `build_meta_learning_prompt(..., experiment_directive=...)` example titled `元学习 Agent System Prompt（含实验级探索方向示例）`.
+- `scripts/dev/export_prompts.py`: changed exported prompt fences from triple backticks to four-backtick fences so inner prompt fences such as ```json stay literal and do not break the Markdown structure.
+- `src/hl_trader/agent/prompts.py`: added `/mnt/agent/workspace/sandbox_environment.json` to the meta-learning prompt's `可读写文件` table as an optional writable environment request file; removed a line-continuation artifact that made the next section header too close.
+- Regenerated `configs/prompts/PROMPTS.md` and `check.md`.
+- Validation: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py` -> OK. `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/hl_trader/agent/prompts.py scripts/dev/export_prompts.py` -> OK.

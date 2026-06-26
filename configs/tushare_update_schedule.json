@@ -6,7 +6,7 @@
   "python": "/home/lzp/miniconda3/envs/quant/bin/python",
   "default_start_date": "20200101",
   "default_raw_dir": "data/raw",
-  "default_feature_root": "data/features",
+  "default_pit_root": "data/pit",
   "default_lock_wait_seconds": 900,
   "default_lock_stale_seconds": 21600,
   "default_update_args": [
@@ -22,18 +22,28 @@
     "sentinel_datasets": ["daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d", "limit_list_d"],
     "sentinel_sample_size": 12,
     "dataset_policies": {
-      "daily": {"severity": "high", "recent_force_refresh": true, "sentinel": true, "downstream": ["daily_features", "labels", "backtests"]},
+      "daily": {"severity": "high", "recent_force_refresh": true, "sentinel": true, "downstream": ["pit_daily_snapshot", "labels", "backtests"]},
       "adj_factor": {"severity": "medium", "recent_force_refresh": true, "sentinel": true, "downstream": ["adjusted_prices", "return_checks"]},
-      "daily_basic": {"severity": "medium", "recent_force_refresh": true, "sentinel": true, "downstream": ["valuation_features", "liquidity_features"]},
+      "daily_basic": {"severity": "medium", "recent_force_refresh": true, "sentinel": true, "downstream": ["valuation_fields", "liquidity_fields"]},
       "stk_limit": {"severity": "high", "recent_force_refresh": true, "sentinel": true, "downstream": ["trading_constraints", "execution_replay"]},
       "suspend_d": {"severity": "high", "recent_force_refresh": true, "sentinel": true, "downstream": ["tradability_filters", "execution_replay"]},
-      "limit_list_d": {"severity": "medium", "recent_force_refresh": true, "sentinel": true, "downstream": ["board_labels", "event_features"]}
+      "limit_list_d": {
+        "severity": "medium",
+        "recent_force_refresh": true,
+        "sentinel": true,
+        "downstream": ["board_labels", "event_evidence"],
+        "unstable_fields": ["limit_amount"],
+        "field_policy": {
+          "limit_amount": "raw_audit_only_until_field_versioned"
+        }
+      }
     }
   },
   "jobs": {
     "cn_evening_full": {
       "description": "Run one rolling-window retained-domain update after normal A-share, minute, flow, block-trade, text, and macro same-day releases should be available.",
       "end_date_offset_days": 0,
+      "end_date_mode": "sse_open_on_or_before",
       "start_date_lookback_days": 30,
       "extra_args": [
         "--reference-min-interval-seconds",
@@ -81,7 +91,7 @@
       "description": "Refresh the six formal data-quality status files over the full retained research window after the evening update.",
       "operation": "audit_full",
       "end_date_offset_days": 1,
-      "event_flow_end_extra_offset_days": 1,
+      "event_flow_end_date_mode": "sse_open_on_or_before",
       "fail_fast": false,
       "skip_if_already_ok": true
     },
@@ -89,6 +99,7 @@
       "description": "Sample historical daily trade-date partitions, compare TuShare source responses with local raw files without overwriting raw data, and append revision events when differences are found.",
       "operation": "revision_sentinel",
       "end_date_offset_days": 1,
+      "end_date_mode": "sse_open_on_or_before",
       "extra_args": [
         "--sample-size",
         "12",
@@ -103,14 +114,13 @@
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": true
     },
-    "cn_nightly_feature_build": {
-      "description": "Build and audit PIT-ready fundamental events, then refresh recent daily_alpha features with the latest visible financial event layer.",
-      "operation": "hl_feature_pipeline",
+    "cn_nightly_pit_event_build": {
+      "description": "Build and audit PIT-ready financial event availability partitions for snapshot construction.",
+      "operation": "pit_event_pipeline",
       "end_date_offset_days": 1,
       "start_date_lookback_days": 120,
-      "fundamental_events_root": "data/features/fundamental_events",
+      "fundamental_events_root": "data/pit/fundamental_events",
       "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
-      "daily_alpha_dataset": "daily_alpha",
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": true
     },
@@ -119,6 +129,7 @@
       "operation": "download_tier",
       "tier": "board_trading",
       "end_date_offset_days": 1,
+      "end_date_mode": "sse_open_on_or_before",
       "start_date_lookback_days": 0,
       "extra_args": [
         "--datasets",
@@ -146,9 +157,10 @@
       "skip_if_already_ok": true
     },
     "cn_preopen_margin_backfill_0905": {
-      "description": "Pre-open targeted first attempt for previous-day margin data. Keep it light so downstream audit, feature freeze, and Agent decisions can finish before 09:25.",
+      "description": "Pre-open targeted first attempt for previous-day margin data. Keep it light so downstream audit, snapshot freeze, and Agent decisions can finish before 09:25.",
       "operation": "download_event_flow",
       "end_date_offset_days": 1,
+      "end_date_mode": "sse_open_on_or_before",
       "extra_args": [
         "--datasets",
         "margin",
@@ -162,6 +174,7 @@
       "description": "Pre-open first attempt for same-day financing/margin eligibility before Agent decisions.",
       "operation": "download_event_flow",
       "end_date_offset_days": 0,
+      "end_date_mode": "sse_open_on_or_before",
       "extra_args": [
         "--datasets",
         "margin_secs",
@@ -174,6 +187,7 @@
       "description": "Pre-open targeted retry for previous-day margin data. It uses a distinct job name so it still runs if the 09:05 source response was empty but returned successfully.",
       "operation": "download_event_flow",
       "end_date_offset_days": 1,
+      "end_date_mode": "sse_open_on_or_before",
       "extra_args": [
         "--datasets",
         "margin",
@@ -187,6 +201,7 @@
       "description": "Pre-open retry for same-day financing/margin eligibility before Agent decisions.",
       "operation": "download_event_flow",
       "end_date_offset_days": 0,
+      "end_date_mode": "sse_open_on_or_before",
       "extra_args": [
         "--datasets",
         "margin_secs",
@@ -199,6 +214,7 @@
       "description": "Refresh previous-day margin status after the pre-open margin retry so 09:25 gates do not use stale T+1 margin coverage.",
       "operation": "audit_event_flow",
       "end_date_offset_days": 1,
+      "end_date_mode": "sse_open_on_or_before",
       "lock_wait_seconds": 240,
       "skip_if_already_ok": true
     }

@@ -243,6 +243,13 @@ class ErrorTradeDateClient:
         raise RuntimeError("mock source failure")
 
 
+class RepeatingPagedClient:
+    def query(self, api_name, params=None, fields="", retries=5):
+        result_fields = fields.split(",") if fields else ["trade_date", "ts_code"]
+        row = ["20200102" if field == "trade_date" else "000001.SZ" for field in result_fields]
+        return common.ApiResult(result_fields, [row], common.stable_hash({"fields": result_fields, "items": [row]}))
+
+
 class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -265,6 +272,30 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"trade_date": trade_date, "ts_code": "000002.SZ"},
         ]).to_parquet(path, index=False)
 
+    def test_default_revision_ledger_for_temp_raw_stays_local(self):
+        ledger = common.resolve_revision_ledger(self.raw_dir, common.REVISION_EVENTS_PATH, repo_root=Path.cwd())
+
+        self.assertEqual(ledger, self.root / "revision_events.jsonl")
+
+    def test_load_stock_codes_keeps_only_valid_a_share_codes(self):
+        path = self.raw_dir / "stock_basic" / "list_status=L.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ"},
+                {"ts_code": "T00018.SH"},
+                {"ts_code": "TS0018.SH"},
+                {"ts_code": "920126.BJ"},
+                {"ts_code": "bad"},
+            ]
+        ).to_parquet(path, index=False)
+
+        self.assertEqual(common.load_stock_codes(self.raw_dir), ["000001.SZ", "920126.BJ"])
+
+    def test_query_paged_rejects_repeated_full_pages(self):
+        with self.assertRaisesRegex(RuntimeError, "returned a repeated page"):
+            common.query_paged(RepeatingPagedClient(), "daily", {"trade_date": "20200102"}, "trade_date,ts_code", page_limit=1)
+
     def test_trade_cal_helpers_normalize_date_strings(self):
         path = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -279,6 +310,19 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(common.load_sse_open_dates(self.raw_dir, "20260603", "20260605"), ["20260603", "20260605"])
         self.assertEqual(common.latest_sse_calendar_date(self.raw_dir), "20260605")
         self.assertTrue(download.sse_trade_cal_covers(self.raw_dir, "20260603", "20260605"))
+
+    def test_bak_basic_audit_ignores_trade_cal_lookahead_after_end_date(self):
+        path = self.raw_dir / "bak_basic" / "trade_date=20260618.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"trade_date": "20260618", "ts_code": "000001.SZ"}]).to_parquet(path, index=False)
+        findings = []
+
+        audit.audit_bak_basic(self.raw_dir, {"20260618", "20260622"}, "20260618", lambda *item: findings.append(item))
+
+        partition_finding = next(item for item in findings if item[1] == "bak_basic_partitions")
+        self.assertEqual(partition_finding[0], "info")
+        self.assertEqual(partition_finding[3]["missing_expected_files"], 0)
+        self.assertEqual(partition_finding[3]["missing_sample"], [])
 
     def test_update_intraday_by_date_refuses_zero_row_write_for_nonempty_universe(self):
         self._write_trade_cal()
@@ -648,19 +692,62 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertTrue(all("--start-date 20200101" in text for text in command_text))
         self.assertTrue(all("--raw-dir raw" in text for text in command_text))
 
+    def test_cron_full_audit_can_use_open_date_for_event_flow(self):
+        trade_cal = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"
+        trade_cal.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                {"cal_date": "20260618", "is_open": "1"},
+                {"cal_date": "20260619", "is_open": "0"},
+                {"cal_date": "20260620", "is_open": "0"},
+                {"cal_date": "20260621", "is_open": "0"},
+            ]
+        ).to_parquet(trade_cal, index=False)
+        ctx = cron_update.RunContext(
+            config={"default_raw_dir": "raw"},
+            repo_root=self.root,
+            python="/env/python",
+            job_name="cn_nightly_full_audit",
+            job={"operation": "audit_full", "event_flow_end_date_mode": "sse_open_on_or_before"},
+            start_date="20200101",
+            end_date="20260621",
+            timezone_name="Asia/Shanghai",
+        )
+
+        command_text = [" ".join(command) for command in cron_update.build_job_commands(ctx)]
+
+        self.assertIn("scripts/data/tushare_audit.py event-flow", command_text[3])
+        self.assertIn("--end-date 20260618", command_text[3])
+        self.assertIn("--text-end-date 20260621", command_text[5])
+
     def test_cron_update_job_can_use_rolling_start_lookback(self):
         config_path = self.root / "schedule.json"
+        trade_cal = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"
+        trade_cal.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                {"cal_date": "20260618", "is_open": "1"},
+                {"cal_date": "20260619", "is_open": "0"},
+                {"cal_date": "20260620", "is_open": "0"},
+                {"cal_date": "20260621", "is_open": "0"},
+            ]
+        ).to_parquet(trade_cal, index=False)
         config_path.write_text(json.dumps({
             "timezone": "Asia/Shanghai",
             "repo_root": str(self.root),
             "python": "/env/python",
+            "default_raw_dir": "raw",
             "default_start_date": "20200101",
             "jobs": {
                 "cn_evening_full": {
                     "start_date_lookback_days": 30,
                     "extra_args": ["--refresh-daily-datasets", "daily", "adj_factor"],
                 },
-                "cn_preopen_margin_backfill_0905": {"operation": "download_event_flow", "end_date_offset_days": 1},
+                "cn_preopen_margin_backfill_0905": {
+                    "operation": "download_event_flow",
+                    "end_date_offset_days": 1,
+                    "end_date_mode": "sse_open_on_or_before",
+                },
             },
         }), encoding="utf-8")
 
@@ -671,9 +758,49 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         command = " ".join(cron_update.build_job_commands(ctx)[0])
         self.assertIn("--refresh-daily-datasets daily adj_factor", command)
 
-        margin_args = argparse.Namespace(config=str(config_path), job="cn_preopen_margin_backfill_0905", start_date=None, end_date="20260601", dry_run=False, force_run=False)
+        margin_args = argparse.Namespace(config=str(config_path), job="cn_preopen_margin_backfill_0905", start_date=None, end_date="20260621", dry_run=False, force_run=False)
         margin_ctx = cron_update.build_context(margin_args)
-        self.assertEqual(margin_ctx.start_date, "20260601")
+        self.assertEqual(margin_ctx.start_date, "20260618")
+        self.assertEqual(margin_ctx.end_date, "20260618")
+
+    def test_cron_pit_event_job_aligns_rolling_start_to_month(self):
+        config_path = self.root / "schedule.json"
+        existing = self.root / "pit" / "fundamental_events" / "income_vip"
+        existing.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"dataset": "income_vip", "available_at": "2026-01-01T00:00:00+08:00"}]).to_parquet(
+            existing / "available_month=202601.parquet",
+            index=False,
+        )
+        config_path.write_text(json.dumps({
+            "timezone": "Asia/Shanghai",
+            "repo_root": str(self.root),
+            "python": "/env/python",
+            "default_start_date": "20200101",
+            "default_raw_dir": "raw",
+            "default_pit_root": "pit",
+            "jobs": {
+                "cn_nightly_pit_event_build": {
+                    "operation": "pit_event_pipeline",
+                    "start_date_lookback_days": 120,
+                    "fundamental_events_root": "pit/fundamental_events",
+                },
+            },
+        }), encoding="utf-8")
+
+        args = argparse.Namespace(
+            config=str(config_path),
+            job="cn_nightly_pit_event_build",
+            start_date=None,
+            end_date="20260621",
+            dry_run=False,
+            force_run=False,
+        )
+        ctx = cron_update.build_context(args)
+        commands = cron_update.build_job_commands(ctx)
+
+        self.assertEqual(ctx.start_date, "20260221")
+        self.assertIn("--start-date 20260201", " ".join(commands[0]))
+        self.assertIn("--start-date 20260201", " ".join(commands[1]))
 
     def test_cron_download_tier_job_builds_targeted_command(self):
         ctx = cron_update.RunContext(
@@ -737,17 +864,16 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn("--start-date 20200101 --end-date 20260601", text)
         self.assertIn("--raw-dir raw", text)
 
-    def test_cron_feature_pipeline_builds_fundamental_events_then_daily_alpha(self):
+    def test_cron_pit_event_pipeline_builds_and_audits_fundamental_events(self):
         ctx = cron_update.RunContext(
-            config={"default_raw_dir": "raw", "default_feature_root": "features"},
+            config={"default_raw_dir": "raw", "default_pit_root": "pit"},
             repo_root=self.root,
             python="/env/python",
-            job_name="cn_nightly_feature_build",
+            job_name="cn_nightly_pit_event_build",
             job={
-                "operation": "hl_feature_pipeline",
-                "fundamental_events_root": "features/fundamental_events",
+                "operation": "pit_event_pipeline",
+                "fundamental_events_root": "pit/fundamental_events",
                 "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
-                "daily_alpha_dataset": "daily_alpha",
             },
             start_date="20260201",
             end_date="20260601",
@@ -756,22 +882,20 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         commands = cron_update.build_job_commands(ctx)
 
-        self.assertEqual(len(commands), 3)
-        self.assertIn("scripts/data/build_features.py build-fundamental-events", " ".join(commands[0]))
-        self.assertIn("--raw-dir raw --output-root features/fundamental_events", " ".join(commands[0]))
-        self.assertIn("scripts/data/build_features.py audit-fundamental-events", " ".join(commands[1]))
-        self.assertIn("--events-root features/fundamental_events", " ".join(commands[1]))
+        self.assertEqual(len(commands), 2)
+        self.assertIn("scripts/data/build_pit_events.py build-fundamental-events", " ".join(commands[0]))
+        self.assertIn("--raw-dir raw --output-root pit/fundamental_events", " ".join(commands[0]))
+        self.assertIn("scripts/data/build_pit_events.py audit-fundamental-events", " ".join(commands[1]))
+        self.assertIn("--events-root pit/fundamental_events", " ".join(commands[1]))
         self.assertIn("--require-partitions", " ".join(commands[1]))
-        self.assertIn("scripts/data/build_features.py build-features", " ".join(commands[2]))
-        self.assertIn("--dataset daily_alpha --fundamental-events-dir features/fundamental_events", " ".join(commands[2]))
 
-    def test_cron_feature_pipeline_initializes_missing_event_layer_from_default_start(self):
+    def test_cron_pit_event_pipeline_initializes_missing_event_layer_from_default_start(self):
         ctx = cron_update.RunContext(
-            config={"default_raw_dir": "raw", "default_feature_root": "features", "default_start_date": "20200101"},
+            config={"default_raw_dir": "raw", "default_pit_root": "pit", "default_start_date": "20200101"},
             repo_root=self.root,
             python="/env/python",
-            job_name="cn_nightly_feature_build",
-            job={"operation": "hl_feature_pipeline", "start_date_lookback_days": 120},
+            job_name="cn_nightly_pit_event_build",
+            job={"operation": "pit_event_pipeline", "start_date_lookback_days": 120},
             start_date="20260201",
             end_date="20260601",
             timezone_name="Asia/Shanghai",
@@ -781,18 +905,17 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertIn("--start-date 20200101 --end-date 20260601", " ".join(commands[0]))
         self.assertIn("--start-date 20200101 --end-date 20260601", " ".join(commands[1]))
-        self.assertIn("--start-date 20200101 --end-date 20260601", " ".join(commands[2]))
 
-    def test_cron_feature_pipeline_uses_rolling_window_after_event_layer_exists(self):
-        partition = self.root / "features" / "fundamental_events" / "dividend" / "available_month=202605.parquet"
+    def test_cron_pit_event_pipeline_uses_rolling_window_after_event_layer_exists(self):
+        partition = self.root / "pit" / "fundamental_events" / "dividend" / "available_month=202605.parquet"
         partition.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame([{"ts_code": "000001.SZ"}]).to_parquet(partition, index=False)
         ctx = cron_update.RunContext(
-            config={"default_raw_dir": "raw", "default_feature_root": "features", "default_start_date": "20200101"},
+            config={"default_raw_dir": "raw", "default_pit_root": "pit", "default_start_date": "20200101"},
             repo_root=self.root,
             python="/env/python",
-            job_name="cn_nightly_feature_build",
-            job={"operation": "hl_feature_pipeline", "start_date_lookback_days": 120},
+            job_name="cn_nightly_pit_event_build",
+            job={"operation": "pit_event_pipeline", "start_date_lookback_days": 120},
             start_date="20260201",
             end_date="20260601",
             timezone_name="Asia/Shanghai",
@@ -1122,6 +1245,34 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(income_periods, ["20191231", "20200331"])
         refreshed_ts_code_calls = [(api, params.get("ts_code")) for api, params in calls if api in {"dividend", "fina_audit", "fina_mainbz_vip"}]
         self.assertEqual(refreshed_ts_code_calls, [("dividend", "000001.SZ"), ("fina_audit", "000001.SZ"), ("fina_mainbz_vip", "000001.SZ")])
+
+    def test_fundamental_download_uses_explicit_codes_for_ts_code_datasets(self):
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200601",
+            end_date="20200603",
+            datasets=["dividend", "fina_audit", "fina_mainbz_vip"],
+            force=True,
+            page_limit=None,
+            max_codes=None,
+            codes=["920126.BJ"],
+            fundamental_refresh_period_count=0,
+            fundamental_refresh_ann_month_count=0,
+            fundamental_refresh_ts_code_datasets=[],
+            fundamental_refresh_event_days=0,
+            fundamental_dividend_probe_days=0,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+            revision_ledger=None,
+            allow_empty_revision_overwrite=False,
+        )
+        client = FundamentalClient()
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
+            self.assertEqual(download.download_fundamental(args), 0)
+
+        calls = [(api, params.get("ts_code")) for api, params in client.calls if params.get("offset") == 0]
+        self.assertEqual(calls, [("dividend", "920126.BJ"), ("fina_audit", "920126.BJ"), ("fina_mainbz_vip", "920126.BJ")])
 
     def test_dividend_probe_uses_only_supported_date_params(self):
         client = FundamentalClient()
@@ -1477,6 +1628,41 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         summary = json.loads((self.root / "sentinel_zero_summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["status"], "error")
         self.assertEqual(summary["remote_zero_dates"], 1)
+
+    def test_revision_sentinel_default_ledger_for_temp_raw_stays_local(self):
+        self._write_trade_cal("20200102")
+        path = self.raw_dir / "daily" / "trade_date=20200102.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "open": 99.0}]).to_parquet(path, index=False)
+        args = argparse.Namespace(
+            raw_dir="raw",
+            start_date="20200102",
+            end_date="20200102",
+            datasets=["daily"],
+            sample_size=0,
+            seed=None,
+            page_limit=10000,
+            revision_ledger=common.REVISION_EVENTS_PATH,
+            output=str(self.root / "sentinel_default_ledger_summary.json"),
+            fail_on_revision=False,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+
+        with (
+            patch.object(audit.Path, "cwd", return_value=self.root),
+            patch.object(audit, "load_token", return_value="token"),
+            patch.object(audit, "TuShareClient", return_value=DailyMarketClient()),
+        ):
+            self.assertEqual(audit.audit_revision_sentinel(args), 0)
+
+        local_ledger = self.root / "revision_events.jsonl"
+        formal_ledger = self.root / common.REVISION_EVENTS_PATH
+        self.assertTrue(local_ledger.exists())
+        self.assertFalse(formal_ledger.exists())
+        event = json.loads(local_ledger.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(event["dataset"], "daily")
+        self.assertEqual(event["changed_columns"]["open"], 1)
 
     def test_intraday_by_date_audit_errors_on_zero_row_partition(self):
         self._write_trade_cal()

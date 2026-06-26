@@ -23,10 +23,10 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # window after the evening update has normally finished.
 30 2 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_full_audit >> logs/tushare_cron_dispatch.log 2>&1
 
-# Build the PIT-ready financial event layer and recent daily_alpha features
-# after raw status refresh. The job audits fundamental_events before joining it
-# into daily_alpha.
-35 3 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_feature_build >> logs/tushare_cron_dispatch.log 2>&1
+# Build and audit PIT-ready financial event availability partitions
+# after raw status refresh. Snapshot construction uses this layer to enforce
+# financial statement visibility without precomputing alpha columns.
+35 3 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_pit_event_build >> logs/tushare_cron_dispatch.log 2>&1
 
 # Sample historical daily partitions without overwriting raw data. Differences
 # are appended to the revision ledger for downstream stale-cache review.

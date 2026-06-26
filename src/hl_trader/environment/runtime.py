@@ -8,6 +8,7 @@ never replaces these records.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import threading
 import uuid
@@ -15,18 +16,49 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-SECRET_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]{8,}")
-SENSITIVE_KEYS = {"api_key", "apikey", "authorization", "access_token", "token", "secret", "password"}
+SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer [redacted]"),
+    (re.compile(r"(?i)(authorization\s*[:=]\s*)[^\s,;]+"), r"\1[redacted]"),
+    (re.compile(r"sk-[A-Za-z0-9_-]{8,}"), "sk-[redacted]"),
+    (re.compile(r"hf_[A-Za-z0-9]{8,}"), "hf_[redacted]"),
+    (re.compile(r"github_pat_[A-Za-z0-9_]+"), "github_pat_[redacted]"),
+    (re.compile(r"gh[pousr]_[A-Za-z0-9_]{8,}"), "gh_[redacted]"),
+    (re.compile(r"vless:" + r"//[^\s'\"<>]+"), "vless:" + "//[redacted]"),
+    (
+        re.compile(r"\b((?:https?|socks5h?|socks4)://)[^/\s'\"<>:@]+:[^@\s'\"<>]+@"),
+        r"\1[redacted]@",
+    ),
+)
+SENSITIVE_KEYS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "access_token",
+    "token",
+    "secret",
+    "password",
+    "github_token",
+    "hf_token",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "proxy",
+    "proxy_url",
+}
 
 ARTIFACT_TOP_LEVEL = (
     "run_manifest.json",
+    "runtime_env.json",
+    "data_summary.json",
     "agent_trace.jsonl",
     "parent_output",
+    "parent_models",
     "results",
     "steps",
     "logs",
 )
-AGENT_TOP_LEVEL = ("workspace", "agent_output")
+AGENT_TOP_LEVEL = ("workspace", "output", "models")
 
 
 def utc_now_iso() -> str:
@@ -91,6 +123,19 @@ class SandboxPaths:
         return self.artifacts / "run_manifest.json"
 
     @property
+    def host_run_manifest(self) -> Path:
+        """Host-only full manifest used for audit; never mounted to Agent."""
+        return self.root / "runtime" / "host_run_manifest.json"
+
+    @property
+    def runtime_env(self) -> Path:
+        return self.artifacts / "runtime_env.json"
+
+    @property
+    def data_summary(self) -> Path:
+        return self.artifacts / "data_summary.json"
+
+    @property
     def agent_trace(self) -> Path:
         return self.artifacts / "agent_trace.jsonl"
 
@@ -99,12 +144,42 @@ class SandboxPaths:
         return self.artifacts / "parent_output"
 
     @property
+    def parent_model_artifacts(self) -> Path:
+        return self.artifacts / "parent_models"
+
+    @property
+    def parent_models(self) -> Path:
+        return self.parent_model_artifacts
+
+    @property
     def workspace(self) -> Path:
         return self.agent / "workspace"
 
     @property
     def agent_output(self) -> Path:
-        return self.agent / "agent_output"
+        return self.agent / "output"
+
+    @property
+    def output(self) -> Path:
+        """Agent formal strategy output directory.
+
+        ``agent_output`` remains the internal API name for the strategy
+        artifact concept; the sandbox-visible path is /mnt/agent/output.
+        """
+        return self.agent_output
+
+    @property
+    def model_artifacts(self) -> Path:
+        """Agent model-parameter artifact directory.
+
+        Strategy code lives in ``output``. Optional trained parameters and
+        weights live here and are hashed/frozen separately.
+        """
+        return self.agent / "models"
+
+    @property
+    def models(self) -> Path:
+        return self.model_artifacts
 
     @property
     def results(self) -> Path:
@@ -130,21 +205,26 @@ def sanitize_for_log(value: object) -> object:
     if isinstance(value, (list, tuple)):
         return [sanitize_for_log(item) for item in value]
     if isinstance(value, str):
-        return SECRET_PATTERN.sub("sk-[redacted]", value)
+        text = value
+        for pattern, replacement in SECRET_PATTERNS:
+            text = pattern.sub(replacement, text)
+        return text
     return value
 
 
 @dataclass
 class RunManifest:
-    """The per-run manifest at /mnt/artifacts/run_manifest.json."""
+    """Per-run manifest with an Agent-visible public view and host audit view."""
 
     path: Path
     data: dict[str, object] = field(default_factory=dict)
+    host_path: Path | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     @classmethod
     def create(cls, path: str | Path, initial: dict[str, object]) -> "RunManifest":
-        manifest = cls(path=Path(path), data=dict(initial))
+        path = Path(path)
+        manifest = cls(path=path, host_path=_default_host_manifest_path(path), data=dict(initial))
         manifest.data.setdefault("created_at", utc_now_iso())
         manifest.data.setdefault("backtest_summaries", [])
         manifest.save()
@@ -156,12 +236,9 @@ class RunManifest:
         return cls(path=path, data=json.loads(path.read_text(encoding="utf-8")))
 
     def save(self) -> None:
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(sanitize_for_log(self.data), ensure_ascii=False, indent=2, sort_keys=True, default=str),
-            encoding="utf-8",
-        )
-        tmp.replace(self.path)
+        if self.host_path is not None:
+            _write_json_atomic(self.host_path, sanitize_for_log(self.data))
+        _write_json_atomic(self.path, _agent_visible_manifest(self.data))
 
     def update(self, **fields: object) -> None:
         with self._lock:
@@ -186,6 +263,165 @@ class RunManifest:
         if key not in self.data:
             raise KeyError(f"run manifest missing required key: {key}")
         return self.data[key]
+
+
+def _default_host_manifest_path(public_path: Path) -> Path:
+    if public_path.parent.name == "artifacts":
+        return public_path.parent.parent / "runtime" / "host_run_manifest.json"
+    return public_path.with_name("host_run_manifest.json")
+
+
+def _write_json_atomic(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
+def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
+    """Return the public manifest view mounted at /mnt/artifacts.
+
+    The in-memory and host audit manifest keep the full schedule and frozen
+    test details for orchestration. Agent-visible files only carry training /
+    validation facts so meta learning cannot accidentally consume test feedback.
+    """
+
+    record = json.loads(json.dumps(sanitize_for_log(data), ensure_ascii=False, default=str))
+    if not isinstance(record, dict):
+        return {}
+    public: dict[str, object] = {
+        key: record[key]
+        for key in (
+            "experiment_id",
+            "epoch_id",
+            "run_id",
+            "conversation_id",
+            "kind",
+            "runtime_env_ref",
+            "data_summary_ref",
+            "fold_period",
+            "snapshot_config",
+            "valid_decision_time",
+            "is_initial_artifact",
+            "parent_strategy_artifact_id",
+            "parent_strategy_artifact_hash",
+            "parent_model_artifact_hash",
+            "template_ref",
+            "initial_template_hash",
+            "modification_constraints",
+            "acceptance_rules",
+            "broker_profile",
+            "short_inventory_mode",
+            "nl_failure_policy",
+            "step_tree_enabled",
+            "record_failed_attempts",
+            "epoch_index",
+            "phase",
+            "max_steps",
+            "fold_deadline_at",
+            "finalize_before_deadline_seconds",
+            "per_call_timeout_seconds",
+            "sandbox_spec",
+            "sandbox_runtime",
+            "sandbox_image_update",
+            "taste_prompt",
+            "development_inputs",
+            "taste_output",
+            "meta_learning_directive",
+            "web_search_engines",
+            "created_at",
+            "frozen_strategy_artifact_hash",
+            "frozen_model_artifact_hash",
+        )
+        if key in record
+    }
+    if "fold_id" in record:
+        public["fold_id"] = _agent_visible_ref(record.get("fold_id"), prefix="fold_ref")
+    if isinstance(record.get("fold"), dict):
+        public["fold"] = _agent_visible_fold_record(record["fold"])
+    if isinstance(record.get("meta_learning_visible_fold"), dict):
+        public["meta_learning_visible_fold"] = _agent_visible_fold_record(
+            record["meta_learning_visible_fold"]
+        )
+    if isinstance(record.get("snapshots"), dict):
+        public["snapshots"] = _agent_visible_snapshots(record["snapshots"])
+    if isinstance(record.get("experiment_parameters"), dict):
+        public["experiment_parameters"] = _agent_visible_experiment_parameters(
+            record["experiment_parameters"]
+        )
+    if isinstance(record.get("backtest_summaries"), list):
+        public["backtest_summaries"] = [
+            _agent_visible_backtest_summary(item)
+            for item in record["backtest_summaries"]
+            if isinstance(item, dict) and item.get("mode") == "valid"
+        ]
+    return public
+
+
+def _agent_visible_fold_record(record: dict[str, object]) -> dict[str, object]:
+    public = {
+        key: record[key]
+        for key in ("input_window", "validation_period", "valid_decision_time")
+        if key in record
+    }
+    if "fold_id" in record:
+        public["fold_id"] = _agent_visible_ref(record.get("fold_id"), prefix="fold_ref")
+    return public
+
+
+def _agent_visible_snapshots(record: dict[str, object]) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in record.items()
+        if key not in {"test_decision_input", "test_replay", "heldout_decision_input", "heldout_replay"}
+        and not str(key).startswith("test_")
+        and not str(key).startswith("heldout_")
+    }
+
+
+def _agent_visible_experiment_parameters(record: dict[str, object]) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in record.items()
+        if key != "periods" and not str(key).startswith("heldout_")
+    }
+
+
+def _agent_visible_backtest_summary(record: dict[str, object]) -> dict[str, object]:
+    return {
+        key: record[key]
+        for key in (
+            "result_name",
+            "mode",
+            "status",
+            "complete_validation",
+            "total_return",
+            "long_return",
+            "short_return",
+            "sharpe",
+            "max_drawdown",
+            "margin_secs_reject_count",
+            "order_count",
+            "model_artifact_files",
+            "model_artifact_bytes",
+            "artifact_hash",
+            "model_artifact_hash",
+            "combined_artifact_hash",
+            "result_path",
+            "finished_at",
+            "error",
+            "modification_delta_summary",
+        )
+        if key in record
+    }
+
+
+def _agent_visible_ref(value: object, *, prefix: str) -> str:
+    digest = hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:10]
+    return f"{prefix}_{digest}"
 
 
 class AgentTraceWriter:

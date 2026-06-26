@@ -70,6 +70,6 @@ def default_tushare_contracts() -> dict[str, DatasetContract]:
             partition_key="trade_date",
             available_time=time(17, 30),
             tradable_lag_days=1,
-            pit_notes="Event table starts in 2020 locally; use as next-day feature unless source timing is proven earlier.",
+            pit_notes="Event table starts in 2020 locally; use as next-day event evidence unless source timing is proven earlier.",
         ),
     }

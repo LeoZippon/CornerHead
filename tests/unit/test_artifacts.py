@@ -1,5 +1,4 @@
-import json
-import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,135 +7,219 @@ from hl_trader.environment.artifacts import (
     ArtifactError,
     ModificationConstraints,
     artifact_hash,
+    copy_artifact,
+    copy_model_artifacts,
     init_from_template,
+    load_model_artifacts,
     load_strategy_artifact,
     modification_delta,
+    model_artifact_delta,
+    model_artifact_hash,
 )
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "configs" / "agent_output_template"
 
-VALID_MAIN = '''
-import os
-from pathlib import Path
-import pandas as pd
-
-SNAPSHOT_DIR = Path(os.environ.get("MQ_SNAPSHOT_DIR", "/mnt/snapshot"))
+VALID_MAIN = """
+def run_strategy(context):
+    return {"trade_intents": [{"ts_code": "000001.SZ", "trade_strategy": "example_build_once"}]}
+"""
 
 
-def factor_momentum():
-    return None
-
-
-def generate_candidates() -> pd.DataFrame:
-    return pd.DataFrame(columns=["ts_code", "factor_score", "reason", "source_artifacts"])
-'''
-
-VALID_FACTORS = {
-    "factors": [
-        {"id": "momentum", "function": "factor_momentum", "description": "d", "lookback_days": 20, "direction": "positive", "rationale": "动量在 A 股横截面上有持续溢价"}
-    ]
-}
-VALID_PRIOR = {"rules": [{"id": "r1", "text": "t", "evidence": "e", "effect": "lower_score"}]}
-
-
-def write_artifact(root: Path, *, main: str = VALID_MAIN, factors: dict = VALID_FACTORS, prior: dict = VALID_PRIOR) -> Path:
-    init_from_template(TEMPLATE_DIR, root)
-    (root / "factor" / "main.py").write_text(main, encoding="utf-8")
-    (root / "factor" / "factors.json").write_text(json.dumps(factors), encoding="utf-8")
-    (root / "nl_prior" / "prior.json").write_text(json.dumps(prior), encoding="utf-8")
+def write_artifact(root: Path, *, main: str = VALID_MAIN) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "README.md").write_text("readonly", encoding="utf-8")
+    (root / "main.py").write_text(main, encoding="utf-8")
+    (root / "candidate.py").write_text("def select_candidates(context):\n    return []\n", encoding="utf-8")
+    (root / "trading.py").write_text("def build_trades(context, candidates):\n    return []\n", encoding="utf-8")
+    (root / "nl_prompt.md").write_text("neutral when evidence is thin\n", encoding="utf-8")
     return root
 
 
-class StrategyArtifactTest(unittest.TestCase):
-    def test_loads_valid_artifact_and_hash_is_stable(self):
+class ArtifactContractTest(unittest.TestCase):
+    def test_loads_valid_artifact_directory_and_hashes_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = write_artifact(Path(tmp))
             artifact = load_strategy_artifact(root)
-            self.assertEqual(len(artifact.factors), 1)
-            self.assertEqual(len(artifact.rules), 1)
-            self.assertEqual(artifact.artifact_hash, artifact_hash(root))
+            self.assertIn("main.py", artifact.files)
             self.assertTrue(artifact.artifact_hash.startswith("sha256:"))
+            self.assertEqual(artifact.artifact_hash, artifact_hash(root))
 
-    def test_rejects_missing_registered_function(self):
-        bad = {"factors": [{"id": "x", "function": "missing_fn", "description": "d", "lookback_days": 1, "direction": "p", "rationale": "r"}]}
+    def test_rejects_missing_entrypoint_and_forbidden_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = write_artifact(Path(tmp), factors=bad)
-            with self.assertRaisesRegex(ArtifactError, "missing_fn"):
+            root = write_artifact(Path(tmp), main="x = 1\n")
+            with self.assertRaisesRegex(ArtifactError, "must define"):
                 load_strategy_artifact(root)
 
-    def test_rejects_stage_directory_references_in_formal_code(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = write_artifact(Path(tmp), main=VALID_MAIN + '\nBAD = "/mnt/snapshots/train"\n')
+            root = write_artifact(Path(tmp), main="def main(context):\n    return {'trade_intents': []}\n")
+            with self.assertRaisesRegex(ArtifactError, "run_strategy"):
+                load_strategy_artifact(root)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = write_artifact(Path(tmp), main='def run_strategy(context):\n    return open("/mnt/artifacts/x").read()\n')
             with self.assertRaisesRegex(ArtifactError, "stage directories"):
                 load_strategy_artifact(root)
 
-    def test_rejects_bad_prior_schema(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = write_artifact(Path(tmp), prior={"rules": [{"id": "r1", "text": "", "evidence": "e", "effect": "x"}]})
-            with self.assertRaisesRegex(ArtifactError, "empty text"):
-                load_strategy_artifact(root)
+    def test_forbidden_path_scan_ignores_docstrings(self):
+        main = '''
+"""Documentation may mention /mnt/artifacts without becoming executable access."""
 
-    def test_template_initializes_valid_artifact(self):
+
+def helper():
+    """Function docs may mention /mnt/snapshots/ for user guidance."""
+    return None
+
+
+def run_strategy(context):
+    helper()
+    return {"trade_intents": []}
+'''
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            init_from_template(TEMPLATE_DIR, root)
+            root = write_artifact(Path(tmp), main=main)
             artifact = load_strategy_artifact(root)
-            self.assertEqual(artifact.factors, ())
-            self.assertEqual(artifact.rules, ())
+            self.assertIn("main.py", artifact.files)
 
-    @unittest.skipUnless(hasattr(os, "symlink"), "symlink not available on this platform")
-    def test_rejects_symlinks_inside_artifact_tree(self):
+    def test_init_from_template_skips_runtime_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template = Path(tmp) / "template"
+            shutil.copytree(TEMPLATE_DIR, template)
+            cache_dir = template / "__pycache__"
+            cache_dir.mkdir()
+            (cache_dir / "x.pyc").write_bytes(b"x")
+            dest = Path(tmp) / "dest"
+            init_from_template(template, dest)
+            self.assertTrue((dest / "main.py").exists())
+            self.assertFalse((dest / "__pycache__").exists())
+            load_strategy_artifact(dest)
+
+    def test_allows_subdirectories_and_rejects_unsupported_files_cache_and_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = write_artifact(Path(tmp))
-            (root / "factor" / "linked.py").symlink_to(root / "nl_prior" / "prior.json")
-            with self.assertRaisesRegex(ArtifactError, "symlinks"):
+            helper_dir = root / "helpers"
+            helper_dir.mkdir()
+            (helper_dir / "signals.py").write_text("def score(context):\n    return 0.0\n", encoding="utf-8")
+            artifact = load_strategy_artifact(root)
+            self.assertIn("helpers/signals.py", artifact.files)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = write_artifact(Path(tmp))
+            (root / "lookup.csv").write_text("ts_code,score\n000001.SZ,1\n", encoding="utf-8")
+            with self.assertRaisesRegex(ArtifactError, "unsupported"):
                 load_strategy_artifact(root)
 
+        with tempfile.TemporaryDirectory() as tmp:
+            root = write_artifact(Path(tmp))
+            (root / "helpers").mkdir()
+            (root / "helpers" / "bad.py").write_text(
+                'def leak():\n    return open("/mnt/artifacts/x").read()\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ArtifactError, "stage directories"):
+                load_strategy_artifact(root)
 
-class ModificationDeltaTest(unittest.TestCase):
-    def test_counts_changed_files_and_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = write_artifact(Path(tmp))
+            cache = root / "__pycache__"
+            cache.mkdir()
+            (cache / "x.pyc").write_bytes(b"x")
+            with self.assertRaisesRegex(ArtifactError, "runtime cache"):
+                load_strategy_artifact(root)
+
+        if hasattr(Path, "symlink_to"):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = write_artifact(Path(tmp))
+                (root / "linked.py").symlink_to(root / "main.py")
+                with self.assertRaisesRegex(ArtifactError, "symlinks"):
+                    load_strategy_artifact(root)
+
+    def test_modification_delta_counts_files_and_code_lines_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             parent = write_artifact(Path(tmp) / "parent")
-            work = write_artifact(Path(tmp) / "work")
-            new_factors = {
-                "factors": VALID_FACTORS["factors"]
-                + [{"id": "value", "function": "factor_momentum", "description": "v", "lookback_days": 5, "direction": "negative", "rationale": "估值反转假设"}]
-            }
-            (work / "factor" / "factors.json").write_text(json.dumps(new_factors), encoding="utf-8")
-            (work / "nl_prior" / "prior.json").write_text(json.dumps({"rules": []}), encoding="utf-8")
-            delta = modification_delta(parent, work)
-            self.assertEqual(set(delta.changed_files), {"factor/factors.json", "nl_prior/prior.json"})
-            self.assertEqual(delta.factors_added, ("value",))
-            self.assertEqual(delta.rules_removed, ("r1",))
-            self.assertEqual(delta.total_factors, 2)
-            self.assertEqual(delta.total_rules, 0)
+            work = Path(tmp) / "work"
+            copy_artifact(parent, work)
+            (work / "main.py").write_text(VALID_MAIN + "\n# new condition\n", encoding="utf-8")
+            (work / "nl_prompt.md").write_text("short prompt\nwith detail\n", encoding="utf-8")
 
-    def test_readonly_violation_blocks_even_in_initial_mode(self):
+            delta = modification_delta(parent, work)
+            self.assertEqual(set(delta.changed_files), {"main.py", "nl_prompt.md"})
+            self.assertGreaterEqual(delta.diff_lines, 2)
+            self.assertGreaterEqual(delta.code_diff_lines, 1)
+            self.assertEqual(delta.total_files, 5)
+
+    def test_constraints_ignore_factor_prior_counts_and_tighten_after_early_epochs(self):
         with tempfile.TemporaryDirectory() as tmp:
             parent = write_artifact(Path(tmp) / "parent")
-            work = write_artifact(Path(tmp) / "work")
-            (work / "factor" / "README.md").write_text("tampered", encoding="utf-8")
+            work = Path(tmp) / "work"
+            copy_artifact(parent, work)
+            (work / "README.md").write_text("tampered", encoding="utf-8")
             delta = modification_delta(parent, work)
-            allowed, reasons = ModificationConstraints(is_initial_artifact=True).evaluate(delta)
+            allowed, reasons = ModificationConstraints().evaluate(delta)
             self.assertFalse(allowed)
-            self.assertIn("readonly", reasons[0])
+            self.assertTrue(any("readonly" in reason for reason in reasons))
 
-    def test_constraint_thresholds(self):
+            loose = ModificationConstraints(max_diff_lines=1, early_max_diff_lines=100).for_epoch(1)
+            strict = ModificationConstraints(max_diff_lines=1, early_max_diff_lines=100).for_epoch(3)
+            self.assertEqual(loose.max_diff_lines, 100)
+            self.assertEqual(strict.max_diff_lines, 1)
+
+    def test_model_artifacts_are_separate_hashable_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
-            parent = write_artifact(Path(tmp) / "parent")
-            work = write_artifact(Path(tmp) / "work")
-            many_rules = {
-                "rules": [
-                    {"id": f"r{i}", "text": "t" * 10, "evidence": "e", "effect": "x"} for i in range(6)
-                ]
-            }
-            (work / "nl_prior" / "prior.json").write_text(json.dumps(many_rules), encoding="utf-8")
-            delta = modification_delta(parent, work)
-            allowed, reasons = ModificationConstraints(max_rule_changes=2).evaluate(delta)
-            self.assertFalse(allowed)
-            self.assertTrue(any("rule changes" in reason for reason in reasons))
-            allowed, _ = ModificationConstraints(max_rule_changes=10).evaluate(delta)
-            self.assertTrue(allowed)
+            root = Path(tmp) / "models"
+            (root / "ranker").mkdir(parents=True)
+            (root / "params.json").write_text('{"alpha": 1}\n', encoding="utf-8")
+            (root / "ranker" / "weights.pt").write_bytes(b"weights")
+
+            artifact = load_model_artifacts(root)
+
+            self.assertEqual(set(artifact.files), {"params.json", "ranker/weights.pt"})
+            self.assertEqual(artifact.artifact_hash, model_artifact_hash(root))
+            self.assertGreater(artifact.total_bytes, 0)
+
+            dest = Path(tmp) / "copied"
+            copy_model_artifacts(root, dest)
+            self.assertEqual(model_artifact_hash(dest), artifact.artifact_hash)
+
+            delta = model_artifact_delta(Path(tmp) / "empty_parent", dest)
+            self.assertEqual(delta.total_files, 2)
+            self.assertEqual(set(delta.changed_files), {"params.json", "ranker/weights.pt"})
+
+    def test_model_artifacts_reject_hidden_cache_and_unsupported_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "models"
+            root.mkdir()
+            (root / "data.parquet").write_bytes(b"not a model")
+            with self.assertRaisesRegex(ArtifactError, "unsupported"):
+                load_model_artifacts(root)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "models"
+            root.mkdir()
+            (root / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+            with self.assertRaisesRegex(ArtifactError, "unsupported"):
+                load_model_artifacts(root)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "models"
+            root.mkdir()
+            (root / ".secret.json").write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ArtifactError, "hidden"):
+                load_model_artifacts(root)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "models"
+            hidden_dir = root / ".hidden"
+            hidden_dir.mkdir(parents=True)
+            (hidden_dir / "params.json").write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ArtifactError, "hidden"):
+                load_model_artifacts(root)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "models"
+            cache = root / "nested" / "__pycache__"
+            cache.mkdir(parents=True)
+            (cache / "x.pyc").write_bytes(b"x")
+            with self.assertRaisesRegex(ArtifactError, "runtime cache"):
+                load_model_artifacts(root)
 
 
 if __name__ == "__main__":

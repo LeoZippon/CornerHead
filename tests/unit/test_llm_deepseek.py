@@ -9,6 +9,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 from hl_trader.environment.llm.deepseek import ChatMessage, DeepSeekAPIError, DeepSeekClient, DeepSeekConfig, DeepSeekResponse, load_deepseek_api_key
+from hl_trader.environment.llm.proxy import DeepSeekProxy
 
 
 def test_config(**kwargs):
@@ -30,6 +31,21 @@ class FakeHTTPResponse:
 
     def read(self):
         return json.dumps(self.payload).encode("utf-8")
+
+
+class FakeRawHTTPResponse:
+    def __init__(self, body):
+        self.body = body
+        self.status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self):
+        return self.body.encode("utf-8")
 
 
 class DeepSeekClientTest(unittest.TestCase):
@@ -78,6 +94,22 @@ class DeepSeekClientTest(unittest.TestCase):
         self.assertEqual(payload["reasoning_effort"], "xhigh")
         self.assertEqual(payload["user_id"], "macroquant_user-1")
 
+    def test_proxy_defaults_thinking_reasoning_effort_to_max(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / ".env"
+            path.write_text("DEEPSEEK_API_KEY='secret-value'\n", encoding="utf-8")
+            proxy = DeepSeekProxy.from_env(model="deepseek-v4-pro", env_file=path)
+            self.assertTrue(proxy.client.config.thinking_enabled)
+            self.assertEqual(proxy.client.config.reasoning_effort, "max")
+
+            compact_proxy = DeepSeekProxy.from_env(
+                model="deepseek-v4-flash",
+                env_file=path,
+                thinking_enabled=False,
+            )
+            self.assertFalse(compact_proxy.client.config.thinking_enabled)
+            self.assertIsNone(compact_proxy.client.config.reasoning_effort)
+
     def test_json_mode_requires_prompt_to_mention_json(self):
         client = DeepSeekClient(test_config())
         with self.assertRaises(ValueError):
@@ -97,6 +129,74 @@ class DeepSeekClientTest(unittest.TestCase):
             ])
         self.assertEqual(response.json_content()["action"], "hold")
         self.assertEqual(response.usage["total_tokens"], 12)
+
+    def test_chat_tools_stream_merges_tool_call_chunks(self):
+        body = "\n\n".join(
+            [
+                "data: "
+                + json.dumps(
+                    {
+                        "id": "resp-tools",
+                        "model": "deepseek-v4-pro",
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "type": "function",
+                                            "function": {"name": "grep", "arguments": "{\"pattern\":"},
+                                        }
+                                    ]
+                                }
+                            }
+                        ],
+                    }
+                ),
+                "data: "
+                + json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {"index": 0, "function": {"arguments": "\"alpha\"}"}}
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ),
+                "data: " + json.dumps({"choices": [{"finish_reason": "tool_calls", "delta": {}}], "usage": {"total_tokens": 9}}),
+                "data: [DONE]",
+            ]
+        )
+        client = DeepSeekClient(test_config(model="deepseek-v4-pro"))
+        tools = [{"type": "function", "function": {"name": "grep", "parameters": {"type": "object", "properties": {}}}}]
+        messages = [
+            {"role": "system", "content": "Use tools."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_old", "type": "function", "function": {"name": "grep", "arguments": "{}"}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_old", "content": "{}"},
+        ]
+
+        with patch("hl_trader.environment.llm.deepseek.urlopen", return_value=FakeRawHTTPResponse(body)) as mocked_urlopen:
+            response = client.chat_tools(messages, tools=tools)
+
+        request = mocked_urlopen.call_args[0][0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertTrue(payload["stream"])
+        self.assertEqual(payload["messages"][1]["tool_calls"][0]["id"], "call_old")
+        self.assertEqual(payload["messages"][2]["tool_call_id"], "call_old")
+        self.assertEqual(response.content, "")
+        self.assertEqual(response.usage["total_tokens"], 9)
+        self.assertEqual(response.tool_calls[0]["function"]["arguments"], '{"pattern":"alpha"}')
 
     def test_chat_json_rejects_non_object_content_before_returning(self):
         payload = {
@@ -158,7 +258,7 @@ class DeepSeekClientTest(unittest.TestCase):
         with patch("hl_trader.environment.llm.deepseek.urlopen", side_effect=error):
             with self.assertRaises(DeepSeekAPIError) as ctx:
                 client.chat_json([ChatMessage("user", "json please")])
-        self.assertIn("sk-***", str(ctx.exception))
+        self.assertIn("redacted", str(ctx.exception).lower())
         self.assertNotIn(fake_secret, str(ctx.exception))
 
     def test_chat_json_writes_conversation_log(self):
@@ -190,12 +290,14 @@ class DeepSeekClientTest(unittest.TestCase):
 
     def test_http_error_writes_conversation_log(self):
         fake_secret = "sk-" + "secretvalue123456"
-        body = json.dumps({"error": {"message": "bad key " + fake_secret}}).encode("utf-8")
+        body = json.dumps(
+            {"error": {"message": "bad key " + fake_secret + " Authorization: Bearer plain-bearer-token"}}
+        ).encode("utf-8")
         error = HTTPError("https://api.deepseek.com/chat/completions", 401, "auth", {}, BytesIO(body))
         with tempfile.TemporaryDirectory() as tmpdir:
             client = DeepSeekClient(test_config(api_key=fake_secret, max_retries=0, conversation_log_dir=tmpdir))
             with patch("hl_trader.environment.llm.deepseek.urlopen", side_effect=error):
-                with self.assertRaises(DeepSeekAPIError):
+                with self.assertRaises(DeepSeekAPIError) as raised:
                     client.chat_json([ChatMessage("user", "json please")])
             files = list(Path(tmpdir).rglob("*.jsonl"))
             self.assertEqual(len(files), 1)
@@ -204,8 +306,10 @@ class DeepSeekClientTest(unittest.TestCase):
         self.assertEqual([item["status"] for item in records], ["started", "error"])
         self.assertEqual(record["status"], "error")
         self.assertEqual(record["error"]["status_code"], 401)
-        self.assertIn("sk-***", record["error"]["message"])
+        self.assertIn("redacted", record["error"]["message"].lower())
+        self.assertIn("redacted", str(raised.exception).lower())
         self.assertNotIn(fake_secret, json.dumps(records))
+        self.assertNotIn("plain-bearer-token", json.dumps(records))
 
     def test_conversation_log_redacts_sensitive_dict_keys(self):
         payload = {
@@ -215,6 +319,7 @@ class DeepSeekClientTest(unittest.TestCase):
             "usage": {"total_tokens": 12, "secret": "usage-secret"},
             "api_key": "plain-secret",
             "authorization": "Bearer plain-token",
+            "notes": "provider echoed Authorization: Bearer plain-bearer-token",
             "nested": {"token": "plain-token", "total_tokens": 12},
         }
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -231,8 +336,9 @@ class DeepSeekClientTest(unittest.TestCase):
         self.assertEqual(record["raw_response"]["authorization"], "[REDACTED]")
         self.assertEqual(record["raw_response"]["nested"]["token"], "[REDACTED]")
         self.assertEqual(record["raw_response"]["nested"]["total_tokens"], 12)
-        self.assertEqual(record["response_id"], "resp-sk-***")
+        self.assertIn("redacted", record["response_id"].lower())
         self.assertEqual(record["usage"]["total_tokens"], 12)
+        self.assertNotIn("plain-bearer-token", json.dumps(records))
         self.assertEqual(record["usage"]["secret"], "[REDACTED]")
         self.assertNotIn("plain-secret", json.dumps(records))
         self.assertNotIn("plain-token", json.dumps(records))

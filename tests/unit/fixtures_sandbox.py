@@ -21,27 +21,22 @@ import pandas as pd
 SNAPSHOT_DIR = Path(os.environ.get("MQ_SNAPSHOT_DIR", "/mnt/snapshot"))
 
 
-def factor_fixture_top():
-    return None
+def buy_hold(ctx):
+    if ctx.stock.position == 0:
+        ctx.broker.buy(weight=0.1, reason="fixture_top")
 
 
-def generate_candidates() -> pd.DataFrame:
+def run_strategy(context):
     daily = pd.read_parquet(SNAPSHOT_DIR / "daily.parquet")
     code = sorted(daily["ts_code"].astype(str).unique())[0]
-    return pd.DataFrame(
-        [{"ts_code": code, "factor_score": 1.0, "factor_fixture_top": 1.0,
-          "reason": "fixture_top", "source_artifacts": ["daily_window"]}]
-    )
+    return {
+        "trade_intents": pd.DataFrame(
+            [{"code": code, "trade_strategy": "buy_hold", "reason": "fixture_top",
+              "source_artifacts": ["daily_window"]}]
+        ),
+        "metadata": {"fixture": "flat_agent_output"},
+    }
 '''
-
-STRATEGY_FACTORS = {
-    "factors": [
-        {"id": "fixture_top", "function": "factor_fixture_top", "description": "fixture factor", "lookback_days": 1, "direction": "positive", "rationale": "fixture rationale"}
-    ]
-}
-STRATEGY_PRIOR = {
-    "rules": [{"id": "r1", "text": "negative regulatory news lowers the score", "evidence": "announcements", "effect": "lower_score"}]
-}
 
 # (trade_date, open, close) for the single fixture stock across all periods.
 PRICE_ROWS = [
@@ -60,23 +55,12 @@ PRICE_ROWS = [
 TRADING_DAYS = [row[0] for row in PRICE_ROWS]
 
 
-def nl_score_response(ts_code: str = TS_CODE, nl_score: float = 0.8) -> str:
-    return json.dumps(
-        {
-            "ts_code": ts_code,
-            "nl_score": nl_score,
-            "confidence": 0.9,
-            "risk_tags": [],
-            "applied_prior_ids": ["r1"],
-            "evidence_ids": [],
-        }
-    )
+def nl_subagent_response(ts_code: str = TS_CODE, stance: str = "positive") -> str:
+    return json.dumps({"ts_code": ts_code, "stance": stance, "note": "fixture subagent response"}, ensure_ascii=False)
 
 
 def write_strategy(agent_output: Path) -> None:
-    (agent_output / "factor" / "main.py").write_text(STRATEGY_MAIN, encoding="utf-8")
-    (agent_output / "factor" / "factors.json").write_text(json.dumps(STRATEGY_FACTORS), encoding="utf-8")
-    (agent_output / "nl_prior" / "prior.json").write_text(json.dumps(STRATEGY_PRIOR), encoding="utf-8")
+    (agent_output / "main.py").write_text(STRATEGY_MAIN, encoding="utf-8")
 
 
 def make_snapshot_dir(out_dir: Path, *, decision_date: str, kind: str) -> dict[str, object]:

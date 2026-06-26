@@ -1,12 +1,10 @@
 # 数据文档
 
-整理日期：2026-06-07
-
 本文档只记录数据层：从哪里下载、如何落盘、单位是什么、如何更新、如何审计、有哪些已知风险。
 
 相关边界：
 
-- 特征、决策输入、回放和泄漏检查见 `docs/environment_design.md`。
+- PIT snapshot、决策输入、回放和泄漏检查见 `docs/environment_design.md`。
 - Agent 的证据包和大模型输入见 `docs/agent_design.md`。
 - 完整实验编排见 `docs/pipeline_design.md`。
 - QMT 实盘流程见 `docs/QMT_documentation.md`。
@@ -61,7 +59,7 @@
 - 输出 6 个当前数据质量状态文件。
 - 说明原始数据是否足以支持后续按时间可见性构造。
 
-数据层不负责：构造最终交易特征、选择股票、做回测、生成大模型提示词、判断 Agent 决策是否合理。
+数据层不负责：构造最终交易信号或策略字段、选择股票、做回测、生成大模型提示词、判断 Agent 决策是否合理。
 
 数据在各层之间的流向：
 
@@ -69,9 +67,9 @@
 flowchart LR
     TS[TuShare API] -->|download / update| RAW["data/raw/<dataset>\n(parquet + sidecar, available_at)"]
     RAW -->|audit| STATUS["results/data_quality/\n6 个状态文件"]
-    RAW -->|cn_nightly_feature_build| FEAT["data/features/\nfundamental_events + daily_alpha"]
-    RAW --> SNAP["Environment PIT snapshot\n(daily/minute/events/macro/text)"]
-    FEAT --> SNAP
+    RAW -->|cn_nightly_pit_event_build| PIT["fundamental_events\n财务事件可见性索引"]
+    RAW --> SNAP["Environment PIT snapshot\n裸数据窗口 + 标准单位 + 可见性过滤"]
+    PIT --> SNAP
     SNAP --> AGENT[Agent / backtest_tool]
 ```
 
@@ -139,7 +137,7 @@ flowchart LR
 | 停复牌 | `suspend_d` | 按交易日或日期区间 | 停复牌约束 |
 | 涨跌停/炸板列表 | `limit_list_d` | 按交易日 | 日终涨跌停和炸板标签 |
 
-`daily`、`daily_basic`、`stk_limit` 覆盖口径不同，特征层必须显式处理缺失或连接方式。`limit_list_d` 虽被打板研究复用，但主归属仍是日频交易约束。
+`daily`、`daily_basic`、`stk_limit` 覆盖口径不同，Environment snapshot 必须显式处理缺失或连接方式。`limit_list_d` 虽被打板研究复用，但主归属仍是日频交易约束。
 
 财务与基本面：
 
@@ -160,7 +158,7 @@ flowchart LR
 
 ### 2.3 宏观与全球上下文
 
-宏观/全球数据先作为市场背景和文本证据，不直接替代股票日频特征。
+宏观/全球数据先作为市场背景和文本证据，不直接替代股票日频数据或策略信号。
 
 | 数据 | 接口 | 拉取方式 | 用途 |
 |---|---|---|---|
@@ -189,7 +187,9 @@ flowchart LR
 源层路径：`data/raw/stk_mins_1min/ts_code=<TS_CODE>/year=<YYYY>.parquet`。
 最终层路径：`data/raw/stk_mins_1min_by_date/trade_date=<YYYYMMDD>.parquet`。
 
-最终层字段必须包含 `ts_code, trade_time, open, high, low, close, vol, amount, trade_date, available_at, available_at_rule`。分钟特征使用前要按有效股票池过滤。
+最终层字段必须包含 `ts_code, trade_time, open, high, low, close, vol, amount, trade_date, available_at, available_at_rule`。分钟数据使用前要按有效股票池过滤。
+
+决策输入 snapshot 的分钟样本窗口由 `SnapshotConfig.intraday_trade_days` 控制，默认取最近 21 个交易日（约一个交易月），让 Agent 在决策输入里看到一整月分钟结构；valid/test 回放区间的分钟窗口由各 Fold 周期决定，与该字段无关。
 
 ### 2.5 事件与资金数据
 
@@ -207,30 +207,32 @@ flowchart LR
 
 `share_float_complete` 是解禁最终保留边界。普通 `share_float` 过程文件可归档，但 union 不得静默缩水。触顶分区使用 candidate 级补充；如果最细粒度仍正好 6000 行，只能标记 `source_cap_risk`。
 
-做空券源模式（默认 `proxy_margin_secs`：决策日 `margin_secs` 表内股票全部视为可融）的执行语义由 `docs/environment_design.md` 第 5.3 节定义；数据层只负责 `margin_secs` 表本身的可见性与口径。中信真实券源、费率和信用风控数据当前不可获得，相关数据合同待真实 broker 数据到位后再补充。
+做空券源模式（默认 `proxy_margin_secs`：决策日 `margin_secs` 表内股票全部视为可融）的执行语义由 `docs/environment_design.md` 第 7.5 节（做空模式）定义；数据层只负责 `margin_secs` 表本身的可见性与口径。中信真实券源、费率和信用风控数据当前不可获得，相关数据合同待真实 broker 数据到位后再补充。
 
 ### 2.6 打板专题数据
 
 打板专题数据用于日终标签、情绪和分钟回放。真实盘中打板不能提前使用日终汇总字段。
 
-| 需求 | 接口/数据项 | 主归属 | 用途 |
+| 数据 | 接口 | 拉取方式 | 用途 |
 |---|---|---|---|
-| 涨跌停价格 | `stk_limit` | 基础研究 | 涨跌停交易约束 |
-| 日终涨跌停/炸板标签 | `limit_list_d` | 基础研究 | 涨停、炸板、回封标签 |
-| 开盘啦榜单 | `kpl_list` | 打板专题 | 开盘啦涨停、炸板、跌停、竞价标签 |
-| 连板和概念 | `limit_step`、`limit_cpt_list` | 打板专题 | 连板高度、概念聚类 |
-| 同花顺榜单 | `limit_list_ths` | 打板专题 | 同花顺涨停池、炸板池、跌停池 |
-| 龙虎榜和机构席位 | `top_list`、`top_inst` | 打板专题 | 资金性质和席位 |
-| 游资参考 | `hm_list`、`hm_detail` | 打板专题 | 游资席位映射 |
-| 热榜情绪 | `ths_hot`、`dc_hot` | 打板专题 | 人气、概念和行业热度 |
-| 分钟触板/开板 | `stk_mins_1min_by_date`、`stk_limit` | 分钟线 + 基础研究 | 用已走完分钟 bar 推导 |
+| 涨跌停价格 | `stk_limit` | 按交易日 | 涨跌停交易约束；主归属为基础研究 |
+| 日终涨跌停/炸板标签 | `limit_list_d` | 按交易日 | 涨停、炸板、回封标签；主归属为基础研究 |
+| 开盘啦榜单 | `kpl_list` | 按交易日 + `tag` | 开盘啦涨停、炸板、跌停、竞价标签 |
+| 连板高度 | `limit_step` | 按交易日 | 连板高度 |
+| 连板概念 | `limit_cpt_list` | 按交易日 | 概念聚类和板块强度 |
+| 同花顺榜单 | `limit_list_ths` | 按交易日 + `limit_type`，官方历史从 `20231101` 起 | 同花顺涨停池、炸板池、跌停池 |
+| 龙虎榜 | `top_list` | 按交易日 | 龙虎榜资金性质和上榜原因 |
+| 机构席位 | `top_inst` | 按交易日 | 机构席位买卖和净额 |
+| 游资名单 | `hm_list` | 静态全量 | 游资席位参考表 |
+| 游资明细 | `hm_detail` | 按交易日，官方历史从 `20220801` 起 | 游资席位映射和交易痕迹 |
+| 同花顺热榜 | `ths_hot` | 按交易日 + `market` + `is_new` | 人气、概念和行业热度 |
+| 东方财富热榜 | `dc_hot` | 按交易日 + `market` + `type` + `is_new` | 人气、概念和行业热度 |
+| 分钟触板/开板 | `stk_mins_1min_by_date` + `stk_limit` | 按交易日分钟文件和涨跌停价格联动推导 | 用已走完分钟 bar 推导盘中触板/开板 |
 
 重要边界：
 
 - `kpl_list` 按次日 08:30 可见处理。
 - `top_list/top_inst` 按当日 20:00 可见处理。
-- `limit_list_ths` 官方历史从 `20231101` 开始。
-- `hm_detail` 官方历史从 `20220801` 开始。
 - `limit_list_d` 与 `limit_list_ths` 口径不同，不能互相覆盖。
 - `first_time/open_times/fd_amount/limit_amount` 等日终字段不能用于盘中决策。
 
@@ -324,7 +326,7 @@ TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_sched
 |---|---:|---|
 | `cn_evening_full` | 23:35 | 滚动更新全域 raw 和近期开放窗口 |
 | `cn_nightly_full_audit` | 02:30 | 刷新 6 个顶层状态文件 |
-| `cn_nightly_feature_build` | 03:35 | 构造并审计 `fundamental_events`（特征层任务，状态文件为 `fundamental_events_status.json`，不属于原始数据域审计） |
+| `cn_nightly_pit_event_build` | 03:35 | 构造并审计财务事件 PIT 可见性索引 `fundamental_events`（状态文件为 `fundamental_events_status.json`，不属于 6 个 raw 状态文件） |
 | `cn_daily_revision_sentinel` | 04:00 | 抽样检查历史分区是否被源端回写 |
 | `cn_preopen_board_backfill_0850` | 08:50 | 回补前一日打板专题关键榜单 |
 | `cn_preopen_text_backfill_0855` | 08:55 | 回补短新闻和新闻联播 |
@@ -333,6 +335,8 @@ TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_sched
 | `cn_preopen_event_flow_audit_0920` | 09:20 | 盘前刷新事件/资金状态 |
 
 runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
+
+当前 crontab 必须通过 `ops/cron/install_tushare_cron.py` 安装，使用 `/home/lzp/miniconda3/envs/quant/bin/python` 和 `scripts/data/tushare_cron_update.py`。旧的 `stock` 环境和 `scripts/tushare/cron_update.py` 不再作为正式调度入口。
 
 安装或刷新 cron：
 
@@ -386,7 +390,21 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 
 临时排查产物写入 `results/data_quality/process/`；处理后移到根目录 `archive/` 或删除。
 
-同目录还有两类文件不计入上述 6 个原始数据状态文件：修正账本 `revision_events.jsonl` / `revision_summary.json`（见第 6 章），以及特征层状态 `fundamental_events_status.json`（由 `cn_nightly_feature_build` 生成，属于环境层特征产物）。
+同目录还有两类文件不计入上述 6 个原始数据状态文件：
+
+- 修正账本 `revision_events.jsonl` / `revision_summary.json`，见第 6 章。
+- PIT 事件索引状态 `fundamental_events_status.json`，由 `cn_nightly_pit_event_build` 生成，供 Environment snapshot 做财报版本可见性过滤；启用 fundamentals 时该文件缺失或为 error 会阻断 snapshot 构造。Snapshot 读取财务事件时按决策窗口选择 `available_month` 分区，再用 `available_at` 二次过滤，避免短窗口扫描全历史分区。
+
+正式状态文件应由 cron 编排层生成并保持最新。数据门禁以文件内容为准：`status=ok` 或 `warning` 且没有 error finding 时可继续下游流程；`status=error`、文件缺失、无法解析或审计时间明显滞后时应阻断使用并重新下载/审计。
+
+| 状态文件 | 合格条件 | 常见 warning |
+|---|---|---|
+| `base_research_status.json` | 无 error finding，基础维表、日频行情、约束和财务分区可读 | 单位口径、覆盖差异、重复业务键 |
+| `macro_context_status.json` | 无 error finding，宏观、政策和跨市场上下文分区可读 | 发布时间保守假设、异构事件值 |
+| `intraday_minutes_status.json` | `status=ok`，交易日分钟按日层覆盖可用 | 不应有常态 warning |
+| `event_flow_status.json` | 无 error finding，交易日事件/资金分区覆盖到最近应可见交易日 | 稀疏事件、重复事件键、PIT 语义提示 |
+| `board_trading_status.json` | 无 error finding，打板专题分区覆盖到最近应可见交易日 | 龙虎榜/榜单口径差异 |
+| `text_evidence_status.json` | 无 error finding，文本源覆盖到自然日窗口 | 新闻重复、文本时间语义提示 |
 
 ### 4.2 通用审计规则
 
@@ -440,7 +458,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 
 ### 5.1 原始层原则
 
-- 原始层尽量保留 TuShare 原始字段，不做特征化。
+- 原始层尽量保留 TuShare 原始字段，不派生 alpha 列。
 - 原始层不静默删除多版本财报、重复公告、稀疏事件和源端重复推送。
 - 每个 parquet 必须有旁路元数据，记录接口、请求参数、抓取时间和源数据 hash。
 - 原始审计只说明数据是否足以支持按时点可见，不声明某个策略无泄漏。
@@ -473,20 +491,20 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 
 | 风险项 | 影响 | 当前处理 |
 |---|---|---|
-| 深圳 09:30 分钟条与开盘竞价接口口径不一致 | 历史竞价近似特征 | 原始数据不改写；环境层负责生成派生校正字段并记录规则版本 |
-| 日线和分钟线单位不同 | 横向校验和特征拼接 | `daily.vol=手`、`daily.amount=千元`；分钟 `vol=股`、`amount=元` |
+| 深圳 09:30 分钟条与开盘竞价接口口径不一致 | 历史竞价近似列 | 原始数据不改写；环境层负责生成口径校正列并记录规则版本 |
+| 日线和分钟线单位不同 | 横向校验和 snapshot 拼接 | `daily.vol=手`、`daily.amount=千元`；分钟 `vol=股`、`amount=元` |
 | `share_float_complete` 可能仍有触顶风险 | 解禁供给压力 | 专用入口补全并生成 union；exact-6000 标记 `source_cap_risk` |
 | 历史分钟线与日线股票池不完全一致 | 早期 NEEQ/BSE 迁移、停牌退市 | 正式分钟审计用本地分钟覆盖口径；daily 覆盖对比只做专项 |
-| 日频表覆盖口径不同 | `daily`、`daily_basic`、`stk_limit` 等 join | 特征层显式处理缺失，不默认全集一致 |
+| 日频表覆盖口径不同 | `daily`、`daily_basic`、`stk_limit` 等 join | Environment snapshot 显式处理缺失，不默认全集一致 |
 | 当前公司简介缺少历史可见时间 | 历史文本 Prompt 可能泄露未来业务描述 | 历史回测不直接使用 `stock_company.introduction`；公司上下文由历史名称、行业、主营业务构成和 as-of 文本生成 |
 | TuShare 可能回写历史数据 | 近期和部分历史分区 | 定时任务强刷滚动窗口并写修正账本；旧非空、新空默认不覆盖 |
-| `limit_list_d.limit_amount` 历史不稳定 | 打板和涨停强度字段 | raw 保留，默认不进入冻结交易输入 |
-| 结构性重复业务键 | `block_trade`、`top_list` 等 | raw 保留，审计 warning；进入特征前必须扩展键、聚合或去重 |
+| `limit_list_d.limit_amount` 历史不稳定 | 打板和涨停强度字段 | raw 保留，默认不进入冻结交易输入；sentinel 发现源端会把历史数值回写为空 |
+| 结构性重复业务键 | `block_trade`、`top_list` 等 | raw 保留，审计 warning；进入 snapshot 前必须扩展键、聚合或去重 |
 | `proxy_margin_secs` 只是券源近似 | 融券做空可执行性与成本 | 当前研究把 `margin_secs` 表内股票全部视为可融，费率用 profile 假设值；真实券源/费率/风控数据到位后再切换 `broker_inventory` 模式 |
 | 财务多版本和公告日缺失 | 财务按时点可见 | 原始数据保留多版本；环境层构造 `fundamental_events` 后选择可见版本 |
 | 宏观发布时间不精确 | 月度/季度数据 | 原始数据使用保守可见时间，环境层优先使用发布日程修正 |
 | 文本重复推送和转载 | 大模型证据 | 原始数据保留，证据层按 hash 和时间过滤 |
-| `anns_d.rec_time` / `report_rc.create_time` 对回填历史是 TuShare 采集时间（如 2025），不是发布时间 | 若直接使用会让历史公告/盈利预测在时间墙下不可见 | 已修复：入库按 -1~+3 天合理性检查回退（见 2.7），存量分区已用 `repair-text-available-at` 重写 |
+| `anns_d.rec_time` / `report_rc.create_time` 对回填历史是 TuShare 采集时间（如 2025），不是发布时间 | 若直接使用会让历史公告/盈利预测在时间墙下不可见 | 入库按 -1~+3 天合理性检查回退（见 2.7）；存量分区必须满足该规则 |
 | 打板日终字段有盘中前视风险 | 打板策略 | 日终汇总字段不得用于盘中决策；真实盘中策略需分钟或盘口数据 |
 
 Revision ledger 路径：
@@ -496,7 +514,18 @@ results/data_quality/revision_events.jsonl
 results/data_quality/revision_summary.json
 ```
 
-它记录源端修正，不等于顶层状态文件。默认 `downstream_status=pending_review`，表示下游特征、缓存或实验结果是否需要重建尚未确认。
+它记录源端修正，不等于顶层状态文件。默认 `downstream_status=pending_review`，表示下游 snapshot、缓存或实验结果是否需要重建尚未确认。
+
+当前账本规则：
+
+- 正式 raw 根目录 `data/raw` 的源端修正写入 `results/data_quality/revision_events.jsonl`。
+- 单元测试、临时 raw 目录和过程排查目录只写本地 `revision_events.jsonl`，不得污染正式账本。
+- 正式账本不得出现 `/tmp` 路径；测试污染记录属于无效账本输入。
+- 分页接口若连续返回重复的非空满页，会 fail fast，避免死循环或重复写入。
+- `stock_basic` 代码加载只接受合法 A 股代码模式 `\d{6}.(SH|SZ|BJ)`。
+- `bak_basic` 审计的预期交易日上限必须截到审计 `end_date`，不能把 `trade_cal` 的未来 lookahead 误报为缺失。
+
+Revision sentinel 监控 `daily`、`adj_factor`、`daily_basic`、`stk_limit`、`suspend_d`、`limit_list_d` 的全字段源端差异。抽样发现的字段级回写、空值回写或行键变化必须进入修正账本；其中 `limit_list_d.limit_amount` 属于易回写字段，在进入 snapshot 和冻结回测输入前必须排除、置为仅审计字段，或在未来引入字段级版本化后再使用。
 
 ## 7. 官方文档索引
 

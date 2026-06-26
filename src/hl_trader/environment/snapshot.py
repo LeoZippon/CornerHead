@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,7 @@ from hl_trader.environment.data.contracts import CN_TZ
 from hl_trader.environment.data.pit import yyyymmdd
 from hl_trader.environment.features.auction import apply_open_auction_correction
 from hl_trader.environment.features.fundamental_events import FUNDAMENTAL_EVENT_DATASETS, read_fundamental_events
+from hl_trader.environment.features.units import normalize_daily_units
 from hl_trader.environment.runtime import new_id, utc_now_iso
 
 SNAPSHOT_FILES = (
@@ -40,26 +42,17 @@ SNAPSHOT_FILES = (
     "universe.parquet",
 )
 
-# Percent -> decimal, 手 -> shares, 千元/万元 -> CNY (docs/environment_design.md 2.3).
-DAILY_UNIT_CONVERSIONS: tuple[tuple[str, float, str], ...] = (
-    ("vol", 100.0, "hands->shares"),
-    ("amount", 1000.0, "thousand_cny->cny"),
-    ("pct_chg", 0.01, "percent->decimal"),
-    ("turnover_rate", 0.01, "percent->decimal"),
-    ("turnover_rate_f", 0.01, "percent->decimal"),
-    ("dv_ratio", 0.01, "percent->decimal"),
-    ("total_share", 10_000.0, "ten_thousand_shares->shares"),
-    ("float_share", 10_000.0, "ten_thousand_shares->shares"),
-    ("free_share", 10_000.0, "ten_thousand_shares->shares"),
-    ("total_mv", 10_000.0, "ten_thousand_cny->cny"),
-    ("circ_mv", 10_000.0, "ten_thousand_cny->cny"),
-)
-
-
 @dataclass(frozen=True)
 class SnapshotConfig:
     window_months: int = 21
-    intraday_trade_days: int = 5
+    daily_window_months: int | None = None
+    fundamentals_window_months: int | None = None
+    events_window_months: int | None = None
+    macro_window_months: int | None = None
+    text_window_months: int | None = None
+    # One trading month of decision-input minute bars; valid/test replay minute
+    # windows are sized by the fold periods, not this field.
+    intraday_trade_days: int = 21
     events_datasets: tuple[str, ...] = (
         "margin",
         "margin_detail",
@@ -96,15 +89,70 @@ class SnapshotConfig:
     replay_include_text: bool = True
     replay_include_minutes: bool = True
 
+    def __post_init__(self) -> None:
+        for name, value in self.to_record()["decision_windows"].items():
+            if int(value) <= 0:
+                raise ValueError(f"{name} must be positive")
+        if self.intraday_trade_days <= 0:
+            raise ValueError("intraday_trade_days must be positive")
+
+    def months_for(self, domain: str) -> int:
+        overrides = {
+            "daily": self.daily_window_months,
+            "fundamentals": self.fundamentals_window_months,
+            "events": self.events_window_months,
+            "macro": self.macro_window_months,
+            "text": self.text_window_months,
+        }
+        if domain not in overrides:
+            raise ValueError(f"unknown snapshot window domain: {domain}")
+        return int(overrides[domain] if overrides[domain] is not None else self.window_months)
+
+    def window_start_for(self, decision_time: datetime, domain: str) -> pd.Timestamp:
+        return _window_start(decision_time, self.months_for(domain))
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "decision_windows": {
+                "daily_months": self.months_for("daily"),
+                "fundamentals_months": self.months_for("fundamentals"),
+                "events_months": self.months_for("events"),
+                "macro_months": self.months_for("macro"),
+                "text_months": self.months_for("text"),
+                "intraday_trade_days": self.intraday_trade_days,
+            },
+            "datasets": {
+                "events": list(self.events_datasets),
+                "macro": list(self.macro_datasets),
+                "text": list(self.text_datasets),
+                "fundamentals": list(self.fundamental_datasets),
+            },
+            "include_intraday": self.include_intraday,
+            "include_industry": self.include_industry,
+            "text_body_chars": self.text_body_chars,
+            "replay": {
+                "include_events": self.replay_include_events,
+                "include_text": self.replay_include_text,
+                "include_minutes": self.replay_include_minutes,
+            },
+        }
+
 
 @dataclass
 class SnapshotBuilder:
     raw_dir: Path
     fundamental_events_root: Path
+    fundamental_events_status: Path | None
 
-    def __init__(self, raw_dir: str | Path, fundamental_events_root: str | Path) -> None:
+    def __init__(
+        self,
+        raw_dir: str | Path,
+        fundamental_events_root: str | Path,
+        fundamental_events_status: str | Path | None = None,
+    ) -> None:
         self.raw_dir = Path(raw_dir)
         self.fundamental_events_root = Path(fundamental_events_root)
+        self.fundamental_events_status = Path(fundamental_events_status) if fundamental_events_status is not None else None
         self.contracts = default_tushare_contracts()
         self.store = PITDataStore(self.raw_dir, self.contracts)
 
@@ -116,46 +164,75 @@ class SnapshotBuilder:
         config = config or SnapshotConfig()
         decision_time = decision_time if decision_time.tzinfo else decision_time.replace(tzinfo=CN_TZ)
         decision_time = decision_time.astimezone(CN_TZ)
-        window_start = (pd.Timestamp(decision_time) - pd.DateOffset(months=config.window_months)).tz_localize(None)
-        window_start = window_start.tz_localize(CN_TZ)
+        daily_window_start = config.window_start_for(decision_time, "daily")
+        fundamentals_window_start = config.window_start_for(decision_time, "fundamentals")
+        events_window_start = config.window_start_for(decision_time, "events")
+        macro_window_start = config.window_start_for(decision_time, "macro")
+        text_window_start = config.window_start_for(decision_time, "text")
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         domains: dict[str, dict[str, object]] = {}
+        profiles: dict[str, dict[str, object]] = {}
+        total_started = time.perf_counter()
 
-        daily, daily_meta = self._build_daily(decision_time, window_start)
-        _write(output_dir / "daily.parquet", daily)
+        started = time.perf_counter()
+        daily, daily_meta = self._build_daily(decision_time, daily_window_start)
+        profiles["daily.parquet"] = _write_with_profile(
+            output_dir / "daily.parquet", daily, build_seconds=time.perf_counter() - started
+        )
         domains["daily"] = daily_meta
 
+        started = time.perf_counter()
         if config.include_intraday:
             intraday, intraday_meta = self._build_intraday(decision_time, daily_meta["trade_dates"], config)
         else:
             intraday, intraday_meta = pd.DataFrame(), {"rows": 0, "datasets": [], "skipped": True}
-        _write(output_dir / "intraday_1min.parquet", intraday)
+        profiles["intraday_1min.parquet"] = _write_with_profile(
+            output_dir / "intraday_1min.parquet", intraday, build_seconds=time.perf_counter() - started
+        )
         domains["intraday_1min"] = intraday_meta
 
+        started = time.perf_counter()
+        if config.fundamental_datasets:
+            self._assert_fundamental_event_status_ok()
         fundamentals = read_fundamental_events(
-            self.fundamental_events_root, decision_time.isoformat(), datasets=config.fundamental_datasets
+            self.fundamental_events_root,
+            decision_time.isoformat(),
+            datasets=config.fundamental_datasets,
+            min_available_at=fundamentals_window_start.isoformat(),
+            require_partitions=bool(config.fundamental_datasets),
         )
-        if not fundamentals.empty:
-            parsed = to_cn_timestamps(fundamentals["available_at"])
-            fundamentals = fundamentals[parsed >= window_start].reset_index(drop=True)
-        _write(output_dir / "fundamentals.parquet", fundamentals)
+        profiles["fundamentals.parquet"] = _write_with_profile(
+            output_dir / "fundamentals.parquet", fundamentals, build_seconds=time.perf_counter() - started
+        )
         domains["fundamentals"] = {"rows": int(len(fundamentals)), "datasets": list(config.fundamental_datasets)}
 
-        events, events_meta = self._build_available_at_domain(config.events_datasets, decision_time, window_start)
-        _write(output_dir / "events.parquet", events)
+        started = time.perf_counter()
+        events, events_meta = self._build_available_at_domain(config.events_datasets, decision_time, events_window_start)
+        profiles["events.parquet"] = _write_with_profile(
+            output_dir / "events.parquet", events, build_seconds=time.perf_counter() - started
+        )
         domains["events"] = events_meta
 
-        macro, macro_meta = self._build_available_at_domain(config.macro_datasets, decision_time, window_start)
-        _write(output_dir / "macro.parquet", macro)
+        started = time.perf_counter()
+        macro, macro_meta = self._build_available_at_domain(config.macro_datasets, decision_time, macro_window_start)
+        profiles["macro.parquet"] = _write_with_profile(
+            output_dir / "macro.parquet", macro, build_seconds=time.perf_counter() - started
+        )
         domains["macro"] = macro_meta
 
-        text_index, text_meta = self._build_text(config, decision_time, window_start, output_dir)
-        _write(output_dir / "text_index.parquet", text_index)
+        started = time.perf_counter()
+        text_index, text_meta = self._build_text(config, decision_time, text_window_start, output_dir)
+        profiles["text_index.parquet"] = _write_with_profile(
+            output_dir / "text_index.parquet", text_index, build_seconds=time.perf_counter() - started
+        )
         domains["text"] = text_meta
 
+        started = time.perf_counter()
         universe = self._build_universe(decision_time, config)
-        _write(output_dir / "universe.parquet", universe)
+        profiles["universe.parquet"] = _write_with_profile(
+            output_dir / "universe.parquet", universe, build_seconds=time.perf_counter() - started
+        )
         domains["universe"] = {"rows": int(len(universe))}
 
         manifest = {
@@ -163,14 +240,45 @@ class SnapshotBuilder:
             "kind": "decision_input",
             "created_at": utc_now_iso(),
             "decision_time": decision_time.isoformat(),
-            "window_start": window_start.isoformat(),
-            "window_months": config.window_months,
+            "window_start": daily_window_start.isoformat(),
+            "window_months": config.months_for("daily"),
+            "window_config": config.to_record()["decision_windows"],
+            "domain_windows": {
+                "daily": {"window_start": daily_window_start.isoformat(), "window_months": config.months_for("daily")},
+                "fundamentals": {"window_start": fundamentals_window_start.isoformat(), "window_months": config.months_for("fundamentals")},
+                "events": {"window_start": events_window_start.isoformat(), "window_months": config.months_for("events")},
+                "macro": {"window_start": macro_window_start.isoformat(), "window_months": config.months_for("macro")},
+                "text": {"window_start": text_window_start.isoformat(), "window_months": config.months_for("text")},
+                "intraday_1min": {"trade_days": config.intraday_trade_days},
+            },
             "domains": domains,
+            "build_profile": {
+                "total_seconds": round(time.perf_counter() - total_started, 3),
+                "domains": _profile_timings(profiles),
+            },
+            "data_profile": {"files": profiles},
             "snapshot_hash": "",
         }
         manifest["snapshot_hash"] = _snapshot_hash(output_dir)
         _write_manifest(output_dir, manifest)
         return manifest
+
+    def _assert_fundamental_event_status_ok(self) -> None:
+        if self.fundamental_events_status is None:
+            raise ValueError("PIT fundamental events status is required when fundamental datasets are enabled")
+        if not self.fundamental_events_status.exists():
+            raise FileNotFoundError(f"missing PIT fundamental events status: {self.fundamental_events_status}")
+        try:
+            report = json.loads(self.fundamental_events_status.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid PIT fundamental events status JSON: {self.fundamental_events_status}") from exc
+        errors = int(report.get("errors", 0) or 0)
+        status = str(report.get("status", "")).lower()
+        if status == "error" or errors > 0:
+            raise ValueError(
+                f"PIT fundamental events audit is not usable: "
+                f"status={report.get('status')!r} errors={errors} path={self.fundamental_events_status}"
+            )
 
     # ---- replay slot (valid/test region; not PIT-filtered) ----
 
@@ -192,25 +300,39 @@ class SnapshotBuilder:
         period_start = pd.Timestamp(start_key, tz=CN_TZ)
         period_end = pd.Timestamp(end_key, tz=CN_TZ) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
         domains: dict[str, dict[str, object]] = {}
+        profiles: dict[str, dict[str, object]] = {}
+        total_started = time.perf_counter()
 
+        started = time.perf_counter()
         daily = self._daily_join(start_key, end_key)
         daily, conversions = normalize_daily_units(daily)
-        _write(output_dir / "daily.parquet", daily)
+        profiles["daily.parquet"] = _write_with_profile(
+            output_dir / "daily.parquet", daily, build_seconds=time.perf_counter() - started
+        )
         domains["daily"] = {"rows": int(len(daily)), "unit_conversions": conversions}
 
         if config.replay_include_events:
+            started = time.perf_counter()
             events, events_meta = self._build_available_at_domain(
                 config.events_datasets, period_end, period_start
             )
-            _write(output_dir / "events.parquet", events)
+            profiles["events.parquet"] = _write_with_profile(
+                output_dir / "events.parquet", events, build_seconds=time.perf_counter() - started
+            )
             domains["events"] = events_meta
         if config.replay_include_text:
+            started = time.perf_counter()
             text_index, text_meta = self._build_text(config, period_end, period_start, output_dir)
-            _write(output_dir / "text_index.parquet", text_index)
+            profiles["text_index.parquet"] = _write_with_profile(
+                output_dir / "text_index.parquet", text_index, build_seconds=time.perf_counter() - started
+            )
             domains["text"] = text_meta
         if config.replay_include_minutes:
+            started = time.perf_counter()
             minutes, minutes_meta = self._read_minutes_range(start_key, end_key)
-            _write(output_dir / "intraday_1min.parquet", minutes)
+            profiles["intraday_1min.parquet"] = _write_with_profile(
+                output_dir / "intraday_1min.parquet", minutes, build_seconds=time.perf_counter() - started
+            )
             domains["intraday_1min"] = minutes_meta
 
         manifest = {
@@ -221,6 +343,11 @@ class SnapshotBuilder:
             "period_start": start_key,
             "period_end": end_key,
             "domains": domains,
+            "build_profile": {
+                "total_seconds": round(time.perf_counter() - total_started, 3),
+                "domains": _profile_timings(profiles),
+            },
+            "data_profile": {"files": profiles},
             "snapshot_hash": "",
         }
         manifest["snapshot_hash"] = _snapshot_hash(output_dir)
@@ -242,29 +369,43 @@ class SnapshotBuilder:
     # ---- domain builders ----
 
     def _build_daily(self, decision_time: datetime, window_start: pd.Timestamp) -> tuple[pd.DataFrame, dict[str, object]]:
-        contract = self.contracts["daily"]
-        visible_dates = [
-            key
-            for key in self.store.trade_dates("daily")
-            if contract.available_at(datetime.strptime(key, "%Y%m%d").date()) <= decision_time
-            and pd.Timestamp(key, tz=CN_TZ) >= window_start
-        ]
+        daily_datasets = ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d")
+        visible_by_dataset = {
+            dataset: self._visible_trade_dates(dataset, decision_time, window_start) for dataset in daily_datasets
+        }
+        visible_dates = visible_by_dataset["daily"]
         if not visible_dates:
             raise ValueError(f"no visible daily trade dates before {decision_time.isoformat()}")
-        frame = self._daily_join(visible_dates[0], visible_dates[-1])
+        frame = self._daily_join(visible_dates[0], visible_dates[-1], visible_dates_by_dataset=visible_by_dataset)
         frame, conversions = normalize_daily_units(frame)
         meta = {
             "rows": int(len(frame)),
-            "datasets": ["daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d"],
+            "datasets": list(daily_datasets),
             "coverage_start": visible_dates[0],
             "coverage_end": visible_dates[-1],
             "trade_dates": visible_dates,
+            "visible_trade_dates_by_dataset": visible_by_dataset,
             "unit_conversions": conversions,
-            "availability_rule": "daily close-time contracts; same-day data is not visible at pre-open decisions",
+            "availability_rule": "per-dataset daily contracts; joins include only partitions visible at the decision time",
         }
         return frame, meta
 
-    def _daily_join(self, start: str, end: str) -> pd.DataFrame:
+    def _visible_trade_dates(self, dataset: str, decision_time: datetime, window_start: pd.Timestamp) -> list[str]:
+        contract = self.contracts[dataset]
+        return [
+            key
+            for key in self.store.trade_dates(dataset)
+            if contract.available_at(datetime.strptime(key, "%Y%m%d").date()) <= decision_time
+            and pd.Timestamp(key, tz=CN_TZ) >= window_start
+        ]
+
+    def _daily_join(
+        self,
+        start: str,
+        end: str,
+        *,
+        visible_dates_by_dataset: dict[str, list[str]] | None = None,
+    ) -> pd.DataFrame:
         daily = self.store.read_trade_range("daily", start, end)
         if daily.empty:
             raise ValueError(f"daily raw data empty for {start}..{end}")
@@ -272,6 +413,14 @@ class SnapshotBuilder:
         limits = self.store.read_trade_range("stk_limit", start, end)
         adj = self.store.read_trade_range("adj_factor", start, end)
         suspend = self.store.read_trade_range("suspend_d", start, end, columns=["trade_date", "ts_code"])
+        if visible_dates_by_dataset is not None:
+            daily = _filter_trade_dates(daily, visible_dates_by_dataset.get("daily", []))
+            basic = _filter_trade_dates(basic, visible_dates_by_dataset.get("daily_basic", []))
+            limits = _filter_trade_dates(limits, visible_dates_by_dataset.get("stk_limit", []))
+            adj = _filter_trade_dates(adj, visible_dates_by_dataset.get("adj_factor", []))
+            suspend = _filter_trade_dates(suspend, visible_dates_by_dataset.get("suspend_d", []))
+            if daily.empty:
+                raise ValueError(f"daily raw data empty after PIT filter for {start}..{end}")
         for name, frame in (("daily", daily), ("daily_basic", basic), ("stk_limit", limits)):
             if frame.duplicated(["trade_date", "ts_code"]).any():
                 raise ValueError(f"{name} has duplicate (trade_date, ts_code) keys in {start}..{end}")
@@ -311,7 +460,7 @@ class SnapshotBuilder:
             "auction_correction": {
                 "rule_id": "minute_0930_to_live_stk_auction_by_market_bucket",
                 "factors": {"00*.SZ": 0.76, "30*.SZ": 0.58, "other": 1.0},
-                "applies_to": "09:30 SZ bars as live stk_auction proxy features only",
+                "applies_to": "09:30 SZ bars as live stk_auction proxy columns only",
             },
         }
         return minute, meta
@@ -509,15 +658,17 @@ def to_cn_timestamps(series: pd.Series) -> pd.Series:
     )
 
 
-def normalize_daily_units(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[str, object]]]:
-    """Apply the unit contract to a joined daily frame and record conversions."""
-    frame = frame.copy()
-    conversions: list[dict[str, object]] = []
-    for column, factor, rule in DAILY_UNIT_CONVERSIONS:
-        if column in frame.columns:
-            frame[column] = pd.to_numeric(frame[column], errors="coerce") * factor
-            conversions.append({"column": column, "factor": factor, "rule": rule})
-    return frame, conversions
+def _filter_trade_dates(frame: pd.DataFrame, visible_dates: list[str]) -> pd.DataFrame:
+    if frame.empty or "trade_date" not in frame.columns:
+        return frame.copy()
+    visible = set(visible_dates)
+    out = frame[frame["trade_date"].astype(str).isin(visible)].copy()
+    return out
+
+
+def _window_start(decision_time: datetime, months: int) -> pd.Timestamp:
+    window_start = (pd.Timestamp(decision_time) - pd.DateOffset(months=months)).tz_localize(None)
+    return window_start.tz_localize(CN_TZ)
 
 
 def finalize_snapshot_dir(snapshot_dir: str | Path, **fields: object) -> dict[str, object]:
@@ -567,6 +718,87 @@ def _snapshot_hash(snapshot_dir: Path) -> str:
             digest.update(b"\x00")
             digest.update(path.read_bytes())
     return f"sha256:{digest.hexdigest()}"
+
+
+PROFILE_DATE_COLUMNS = ("trade_date", "date", "available_at", "trade_time", "ann_date", "end_date")
+PROFILE_NULL_COLUMNS = (
+    "ts_code",
+    "trade_date",
+    "available_at",
+    "open",
+    "high",
+    "low",
+    "close",
+    "amount",
+    "vol",
+    "dataset",
+    "text_id",
+)
+
+
+def _write_with_profile(path: Path, frame: pd.DataFrame, *, build_seconds: float) -> dict[str, object]:
+    started = time.perf_counter()
+    _write(path, frame)
+    return _frame_profile(path, frame, build_seconds=build_seconds, write_seconds=time.perf_counter() - started)
+
+
+def _profile_timings(profiles: dict[str, dict[str, object]]) -> dict[str, dict[str, object]]:
+    return {
+        name: {"build_seconds": item["build_seconds"], "write_seconds": item["write_seconds"]}
+        for name, item in profiles.items()
+    }
+
+
+def _frame_profile(
+    path: Path,
+    frame: pd.DataFrame,
+    *,
+    build_seconds: float,
+    write_seconds: float,
+) -> dict[str, object]:
+    profile: dict[str, object] = {
+        "file": path.name,
+        "rows": int(len(frame)),
+        "size_bytes": int(path.stat().st_size) if path.exists() else 0,
+        "column_count": int(len(frame.columns)),
+        "columns": [str(col) for col in frame.columns],
+        "build_seconds": round(float(build_seconds), 3),
+        "write_seconds": round(float(write_seconds), 3),
+    }
+    if not frame.empty:
+        date_ranges = _profile_date_ranges(frame)
+        if date_ranges:
+            profile["date_ranges"] = date_ranges
+        key_nulls = _profile_key_nulls(frame)
+        if key_nulls:
+            profile["key_nulls"] = key_nulls
+        if "dataset" in frame.columns and len(frame) <= 1_000_000:
+            counts = frame["dataset"].fillna("").astype(str).value_counts().head(50)
+            profile["dataset_counts"] = {str(key): int(value) for key, value in counts.items()}
+        elif "dataset" in frame.columns:
+            profile["dataset_counts"] = "skipped_large_frame"
+    return profile
+
+
+def _profile_date_ranges(frame: pd.DataFrame) -> dict[str, dict[str, str]]:
+    ranges: dict[str, dict[str, str]] = {}
+    for column in PROFILE_DATE_COLUMNS:
+        if column not in frame.columns:
+            continue
+        values = frame[column].dropna()
+        if values.empty:
+            continue
+        text = values.astype(str)
+        ranges[column] = {"min": str(text.min()), "max": str(text.max())}
+    return ranges
+
+
+def _profile_key_nulls(frame: pd.DataFrame) -> dict[str, int]:
+    nulls: dict[str, int] = {}
+    for column in PROFILE_NULL_COLUMNS:
+        if column in frame.columns:
+            nulls[column] = int(frame[column].isna().sum())
+    return nulls
 
 
 def _write(path: Path, frame: pd.DataFrame) -> None:

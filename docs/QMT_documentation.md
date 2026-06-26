@@ -1,12 +1,28 @@
 # QMT 文档
 
-整理日期：2026-06-07
+本文档记录 MacroQuant 项目接入阿里云 Windows + MiniQMT 的部署状态、当前日常流程和未来实盘上线门槛。当前阶段模型尚未训练完成，仓库也没有活动的 live 下单脚本，因此 QMT 侧只能作为已部署的执行环境保持 standby、只读检查和 dry-run 准备；不得启动自动实盘交易。
 
-本文档记录 MacroQuant 项目接入阿里云 Windows + MiniQMT 的部署状态、当前日常流程和未来实盘上线门槛。当前阶段模型尚未训练完成，仓库也没有活动的 live 下单脚本，因此 QMT 侧只能作为已部署的执行环境保持 standby、只读检查和 dry-run 准备；不得启动自动实盘交易。研究侧 Pipeline 边界见 `docs/pipeline_design.md`。
+相关边界：
+
+- 数据下载、单位和 raw 审计见 `docs/data_documentation.md`。
+- Agent 工作合同和策略产物格式见 `docs/agent_design.md`。
+- PIT 窗口、Sandbox、Tool 和回测见 `docs/environment_design.md`。
+- 研究侧 Pipeline、冻结和 held-out 流程见 `docs/pipeline_design.md`。
+
+## 术语说明
+
+| 术语 | 含义 |
+|---|---|
+| PIT | 只使用决策时点已经可见的数据，避免未来信息进入订单 |
+| WFO | Walk-Forward 训练和测试流程；只有冻结后的结果可以进入实盘候选 |
+| LLM shadow | 大模型只做影子审计或建议，不直接改订单 |
+| ledger | 研究侧实验账本；不等于券商成交和持仓 |
+| payload | 本机生成并上传给远端执行器的订单 JSON |
+| dry-run | 只检查解析、风控和预算，不向券商发真实委托 |
+| state | 远端记录的策略持仓、待处理委托和已处理订单状态 |
 
 ## 导航
 
-- [术语说明](#术语说明)
 - [1. 当前状态](#1-当前状态)
 - [2. 目标架构](#2-目标架构)
 - [3. 当前日常流程](#3-当前日常流程)
@@ -29,28 +45,16 @@
 - [9. 故障处理](#9-故障处理)
   - [9.1 常见故障](#91-常见故障)
 
-## 术语说明
-
-| 术语 | 含义 |
-|---|---|
-| PIT | 只使用决策时点已经可见的数据，避免未来信息进入订单 |
-| WFO | Walk-Forward 训练和测试流程；只有冻结后的结果可以进入实盘候选 |
-| LLM shadow | 大模型只做影子审计或建议，不直接改订单 |
-| ledger | 研究侧实验账本；不等于券商成交和持仓 |
-| payload | 本机生成并上传给远端执行器的订单 JSON |
-| dry-run | 只检查解析、风控和预算，不向券商发真实委托 |
-| state | 远端记录的策略持仓、待处理委托和已处理订单状态 |
-
 ## 1. 当前状态
 
 - 远端阿里云 Windows 服务器和 QMT/MiniQMT 环境已部署，可作为未来交易执行端。
-- 本项目当前代码重点仍是数据、PIT 特征、WFO/held-out、LLM shadow 和审计链路；尚未形成冻结可交易模型。
+- 本项目当前代码重点仍是数据、PIT snapshot、WFO/held-out、LLM shadow 和审计链路；尚未形成冻结可交易模型。
 - 当前仓库没有 `scripts/live/` 实盘调度入口，也没有已冻结的 MacroQuant 订单生成器。
 - 任何 QMT 操作默认只读或 dry-run。真实委托必须等到模型、策略、订单合约、风控和对账流程全部冻结后，才允许人工双确认执行。
 
 ## 2. 目标架构
 
-- 本机 Linux：负责 TuShare/本地 raw 数据更新、审计、PIT 特征构造、模型推理、信号审计、订单 payload 生成。
+- 本机 Linux：负责 TuShare/本地 raw 数据更新、审计、PIT snapshot 构造、模型推理、信号审计、订单 payload 生成。
 - 远端 Windows：负责 QMT/MiniQMT 连接、账户/持仓/成交查询、订单执行、策略 state、pending 委托和 payload 归档。
 - 通信：本机通过 `scp` 上传 JSON payload，通过 `ssh` 调用远端 Python 执行器。
 - 状态：远端策略 state 是实盘对账的权威来源；本机实验 ledger 只能作为研究和审计记录，不能替代 broker 成交状态。
@@ -67,7 +71,7 @@
    - 确认远端 `pending_orders`、`strategy_positions` 和 `inbox` 没有无法解释的旧状态。
 2. 本机继续维护研究数据。
    - 增量下载和审计 raw 数据。
-   - 构造 PIT 特征和 evidence pack。
+   - 构造 PIT snapshot 和 evidence pack。
    - 运行 development / held-out / LLM shadow pipeline，不生成真实订单。
 3. 仅在需要验证执行链路时，使用人工构造的小额测试 payload 做 dry-run。
    - dry-run 只验证远端解析、账户读取、预算计算和风险检查。
@@ -90,7 +94,7 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
 
 ### 4.1 上线后日常顺序
 
-1. 收盘后或指定决策时点构造 PIT 特征。
+1. 收盘后或指定决策时点构造 PIT snapshot。
    - 默认日频策略只允许使用当时已可见数据。
    - 09:25 盘前决策必须有独立的数据合同，不能使用当日 `daily` / `daily_basic`。
 2. 运行冻结模型或冻结规则。
@@ -208,7 +212,7 @@ setx CQ_MAX_PRINCIPAL "100000"
       "volume": 100,
       "price_type": "LATEST",
       "limit_price": null,
-      "reason": "target_weight_increase",
+      "reason": "budgeted_buy",
       "risk_tags": []
     }
   ]

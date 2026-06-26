@@ -1,4 +1,4 @@
-"""Decision-time company context for NL scoring (docs/environment_design.md 4.4).
+"""Decision-time company context for NL Sub Agent calls.
 
 Answers "what is this company known to do at the decision time" from PIT-safe
 sources only: as-of names and listing info from the snapshot universe, industry

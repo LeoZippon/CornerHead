@@ -264,26 +264,69 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
     return report
 
 
-def read_fundamental_events(events_root: str | Path, max_available_at: str, datasets: tuple[str, ...] = FUNDAMENTAL_EVENT_DATASETS) -> pd.DataFrame:
+def read_fundamental_events(
+    events_root: str | Path,
+    max_available_at: str,
+    datasets: tuple[str, ...] = FUNDAMENTAL_EVENT_DATASETS,
+    *,
+    min_available_at: str | None = None,
+    require_partitions: bool = False,
+) -> pd.DataFrame:
     root = Path(events_root)
+    datasets = tuple(datasets or ())
+    if not datasets:
+        return pd.DataFrame()
+    if require_partitions and not root.exists():
+        raise FileNotFoundError(f"missing PIT fundamental events root: {root}")
     max_ts = pd.Timestamp(max_available_at)
+    min_ts = pd.Timestamp(min_available_at) if min_available_at else None
+    min_month = min_ts.strftime("%Y%m") if min_ts is not None else None
+    max_month = max_ts.strftime("%Y%m")
     frames: list[pd.DataFrame] = []
+    selected_partition_count = 0
+    available_partition_count = 0
+    missing_datasets: list[str] = []
     for dataset in datasets:
         dataset_dir = root / dataset
         if not dataset_dir.exists():
+            if require_partitions:
+                missing_datasets.append(dataset)
             continue
+        dataset_available_partition_count = 0
         for path in sorted(dataset_dir.glob("available_month=*.parquet")):
             month = path.stem.split("=", 1)[1]
-            if month > max_ts.strftime("%Y%m"):
+            if month > max_month:
                 continue
+            dataset_available_partition_count += 1
+            available_partition_count += 1
+            if min_month is not None and month < min_month:
+                continue
+            selected_partition_count += 1
             df = pd.read_parquet(path)
             if not df.empty:
                 frames.append(df)
+        if require_partitions and dataset_available_partition_count == 0:
+            missing_datasets.append(dataset)
+    if require_partitions and missing_datasets:
+        raise FileNotFoundError(
+            f"missing PIT fundamental event partitions at or before {max_month} under {root} "
+            f"for datasets: {', '.join(missing_datasets)}"
+        )
+    if require_partitions and available_partition_count == 0:
+        raise FileNotFoundError(
+            f"no PIT fundamental event partitions at or before {max_month} under {root} "
+            f"for datasets: {', '.join(datasets)}"
+        )
+    if selected_partition_count == 0:
+        return pd.DataFrame()
     if not frames:
         return pd.DataFrame()
     events = pd.concat(frames, ignore_index=True)
     parsed = pd.to_datetime(events["available_at"], errors="coerce")
-    return events[parsed <= max_ts].copy()
+    visible = parsed <= max_ts
+    if min_ts is not None:
+        visible &= parsed >= min_ts
+    return events[visible].copy()
 
 
 def _available_at_for_row(dataset: str, row: dict[str, object], statement_availability: dict[tuple[str, str], str]) -> tuple[str, str]:

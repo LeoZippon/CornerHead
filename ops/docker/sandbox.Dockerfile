@@ -7,7 +7,12 @@ FROM python:3.11-slim
 ARG PIP_INDEX_URL=https://pypi.org/simple
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ripgrep \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        npm \
+        ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
@@ -17,7 +22,12 @@ RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
         duckdb==1.1.3 \
         scikit-learn==1.5.2 \
         statsmodels==0.14.4 \
-        torch==2.5.1
+        torch==2.5.1 \
+        "huggingface_hub[cli]==0.27.1"
+
+RUN if ! command -v hf >/dev/null 2>&1 && command -v huggingface-cli >/dev/null 2>&1; then \
+        ln -s "$(command -v huggingface-cli)" /usr/local/bin/hf; \
+    fi
 
 # Non-root agent user; Runner/root stays root for frozen execution and binds.
 RUN useradd --create-home --uid 61000 agent

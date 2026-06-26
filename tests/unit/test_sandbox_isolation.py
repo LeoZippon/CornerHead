@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from hl_trader.agent import AgentSessionConfig, AgentSessionRunner
 from hl_trader.environment.executor import DockerExecutor, LocalExecutor, docker_available
-from hl_trader.environment.llm.proxy import ScriptedLLM
+from hl_trader.environment.llm.proxy import ScriptedLLM, tool_call, tool_call_response
 from hl_trader.environment.runtime import SandboxPaths
 from hl_trader.environment.sandbox import DockerSandbox, LocalSandbox, SandboxSpec
 from hl_trader.environment.web_search import (
@@ -93,6 +93,111 @@ class SandboxSpecTest(unittest.TestCase):
             self.assertIn(f"{paths.current_snapshot}:/mnt/snapshot:ro", command)
             self.assertNotIn("/mnt/runtime/snapshot_views", command)
 
+    def test_docker_sandbox_env_passthrough_records_names_without_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            sandbox.prepare_layout()
+            spec = SandboxSpec(
+                gpu=None,
+                network="bridge",
+                env_passthrough=("HF_TOKEN", "GITHUB_TOKEN", "MISSING_SECRET"),
+                add_host_gateway=True,
+            )
+            docker = DockerSandbox(sandbox, spec)
+
+            class Completed:
+                returncode = 0
+                stderr = ""
+
+            with patch.dict(os.environ, {"HF_TOKEN": "hf-secret-for-test", "GITHUB_TOKEN": "gh-secret-for-test"}):
+                with patch("subprocess.run", return_value=Completed()) as run:
+                    docker.start()
+            command = run.call_args.args[0]
+            self.assertIn("--network=bridge", command)
+            self.assertIn("--add-host", command)
+            self.assertIn("host.docker.internal:host-gateway", command)
+            self.assertIn("HF_TOKEN", command)
+            self.assertIn("GITHUB_TOKEN", command)
+            self.assertNotIn("MISSING_SECRET", command)
+            self.assertNotIn("hf-secret-for-test", command)
+            self.assertNotIn("gh-secret-for-test", command)
+            allocation = docker.allocation_record()
+            self.assertEqual(allocation["env_passthrough"], ["HF_TOKEN", "GITHUB_TOKEN", "MISSING_SECRET"])
+            self.assertTrue(allocation["add_host_gateway"])
+
+    def test_docker_sandbox_proxy_aliases_are_not_active_standard_envs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            sandbox.prepare_layout()
+            spec = SandboxSpec(
+                gpu=None,
+                network="bridge",
+                env_aliases=(
+                    ("MQ_PROXY_HTTPS", "HTTPS_PROXY"),
+                    ("MQ_PROXY_ALL", "ALL_PROXY"),
+                    ("MQ_PROXY_MISSING", "MISSING_PROXY"),
+                ),
+                add_host_gateway=True,
+            )
+            docker = DockerSandbox(sandbox, spec)
+
+            class Completed:
+                returncode = 0
+                stderr = ""
+
+            with patch.dict(
+                os.environ,
+                {
+                    "HTTPS_PROXY": "http://127.0.0.1:7890",
+                    "ALL_PROXY": "socks5h://localhost:1080",
+                },
+            ):
+                with patch("subprocess.run", return_value=Completed()) as run:
+                    docker.start()
+            command = run.call_args.args[0]
+            run_env = run.call_args.kwargs["env"]
+            self.assertIn("MQ_PROXY_HTTPS", command)
+            self.assertIn("MQ_PROXY_ALL", command)
+            self.assertNotIn("HTTPS_PROXY", command)
+            self.assertNotIn("ALL_PROXY", command)
+            self.assertNotIn("MQ_PROXY_MISSING", command)
+            self.assertNotIn("127.0.0.1:7890", command)
+            self.assertNotIn("localhost:1080", command)
+            self.assertEqual(run_env["MQ_PROXY_HTTPS"], "http://host.docker.internal:7890")
+            self.assertEqual(run_env["MQ_PROXY_ALL"], "socks5h://host.docker.internal:1080")
+            allocation = docker.allocation_record()
+            self.assertEqual(
+                allocation["env_aliases"],
+                [
+                    {"container_env": "MQ_PROXY_HTTPS", "host_env": "HTTPS_PROXY"},
+                    {"container_env": "MQ_PROXY_ALL", "host_env": "ALL_PROXY"},
+                    {"container_env": "MQ_PROXY_MISSING", "host_env": "MISSING_PROXY"},
+                ],
+            )
+
+    def test_runtime_env_artifact_records_local_and_docker_contracts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            paths = sandbox.prepare_layout()
+
+            local = json.loads(paths.runtime_env.read_text(encoding="utf-8"))
+            self.assertEqual(local["mode"], "local")
+            self.assertEqual(local["schema_version"], 1)
+            self.assertIn("python", local)
+            self.assertIn("python_packages", local)
+            self.assertIn("numpy", local["python_packages"])
+
+            sandbox.write_runtime_env(mode="docker", sandbox_spec=SandboxSpec(gpu=None))
+            docker = json.loads(paths.runtime_env.read_text(encoding="utf-8"))
+            self.assertEqual(docker["mode"], "docker")
+            self.assertEqual(docker["network"], "none")
+            self.assertEqual(docker["python"]["version"], "3.11")
+            self.assertEqual(docker["schema_version"], 1)
+            self.assertEqual(docker["python_packages"]["pandas"]["version"], "2.2.3")
+            self.assertIn("git", docker["tools"])
+            self.assertIn("hf", docker["tools"])
+            self.assertFalse(docker["policy"]["install_packages_during_fold"])
+
 
 class FilesystemPermissionTest(unittest.TestCase):
     def test_readonly_enforcement_and_locking(self):
@@ -105,18 +210,38 @@ class FilesystemPermissionTest(unittest.TestCase):
             write_artifact(parent_dir)
             is_initial = sandbox.install_strategy_artifact(parent_dir, TEMPLATE_DIR)
             self.assertFalse(is_initial)
-            readme_mode = (paths.agent_output / "factor" / "README.md").stat().st_mode & 0o777
+            readme_mode = (paths.agent_output / "README.md").stat().st_mode & 0o777
             self.assertEqual(readme_mode, 0o444)
-            parent_main_mode = (paths.parent_output / "factor" / "main.py").stat().st_mode & 0o777
+            parent_main_mode = (paths.parent_output / "main.py").stat().st_mode & 0o777
             self.assertEqual(parent_main_mode, 0o444)
 
             sandbox.lock_agent_output()
-            main_py = paths.agent_output / "factor" / "main.py"
+            main_py = paths.agent_output / "main.py"
             self.assertEqual(main_py.stat().st_mode & 0o222, 0)
             with self.assertRaises(PermissionError):
                 main_py.write_text("tamper", encoding="utf-8")
             sandbox.unlock_agent_output()
             main_py.write_text(main_py.read_text(encoding="utf-8"), encoding="utf-8")
+
+    def test_collect_artifacts_excludes_transient_caches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            paths = sandbox.prepare_layout()
+            paths.workspace.mkdir(parents=True, exist_ok=True)
+            (paths.workspace / "note.txt").write_text("keep me", encoding="utf-8")
+            cache = paths.workspace / ".cache" / "pip" / "wheels"
+            cache.mkdir(parents=True)
+            (cache / "selfcheck.json").write_text("{}", encoding="utf-8")
+            pycache = paths.workspace / "__pycache__"
+            pycache.mkdir()
+            (pycache / "mod.pyc").write_text("x", encoding="utf-8")
+
+            dest = Path(tmp) / "collected"
+            sandbox.collect_artifacts(dest)
+
+            self.assertTrue((dest / "workspace" / "note.txt").exists())
+            self.assertFalse((dest / "workspace" / ".cache").exists())
+            self.assertFalse((dest / "workspace" / "__pycache__").exists())
 
     def test_test_slot_is_owner_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -165,11 +290,12 @@ class MetaLearningSessionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
             write_strategy(ctx.paths.agent_output)
+            (ctx.paths.workspace / "taste.md").write_text("prefer robust meta-learning", encoding="utf-8")
             ctx.extra["allow_backtest"] = False
             responses = [
-                json.dumps({"action": "backtest", "nl_mode": "on"}),
-                json.dumps({"action": "modification_check"}),
-                json.dumps({"action": "done"}),
+                tool_call_response(tool_call("backtest")),
+                tool_call_response(tool_call("modification_check")),
+                tool_call_response(tool_call("done")),
             ]
             proxy = ScriptedLLM(responses)
             runner = AgentSessionRunner(
@@ -190,16 +316,44 @@ class MetaLearningSessionTest(unittest.TestCase):
 
     def test_meta_learning_web_search_action_is_traced(self):
         class FakeSearch(WebSearchProvider):
-            provider = "fake"
+            def __init__(self, provider: str) -> None:
+                self.provider = provider
 
             def search(self, query: str, *, max_results: int = 5, category: str = "general"):
-                return [WebSearchResult(title=f"{category}:{query}", url="https://example.test", content="snippet")]
+                return [WebSearchResult(title=f"{self.provider}:{category}:{query}", url="https://example.test", content="snippet")]
 
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.workspace / "taste.md").write_text("searched taste", encoding="utf-8")
             responses = [
-                json.dumps({"action": "web_search", "category": "finance", "query": "walk forward", "max_results": 1}),
-                json.dumps({"action": "done"}),
+                tool_call_response(
+                    tool_call(
+                        "web_search",
+                        engine="tavily",
+                        perspective="finance_quant_econ",
+                        query="walk forward",
+                        max_results=1,
+                    )
+                ),
+                tool_call_response(
+                    tool_call(
+                        "web_search",
+                        engine="semantic_scholar",
+                        perspective="natural_science_engineering",
+                        query="walk forward optimization finance",
+                        max_results=1,
+                    )
+                ),
+                tool_call_response(
+                    tool_call(
+                        "web_search",
+                        engine="tavily",
+                        perspective="philosophy_methodology",
+                        query="falsification robust trading strategy",
+                        max_results=1,
+                    )
+                ),
+                tool_call_response(tool_call("done")),
             ]
             runner = AgentSessionRunner(
                 ctx,
@@ -208,13 +362,275 @@ class MetaLearningSessionTest(unittest.TestCase):
                 fold_info={"development_history": "workspace/development_history.json"},
                 acceptance_rules={},
                 mode="meta_learning",
-                web_search_provider=FakeSearch(),
+                web_search_providers={
+                    "tavily": FakeSearch("tavily"),
+                    "semantic_scholar": FakeSearch("semantic_scholar"),
+                },
             )
+            self.assertNotIn("# Web Search Engines", runner.system_prompt)
+            self.assertNotIn("# development 摘要", runner.system_prompt)
             summary = runner.run()
             self.assertEqual(summary["finish_status"], "meta_learning_done")
             searches = [event for event in ctx.trace.read_events() if event["event_type"] == "web_search"]
+            self.assertEqual(len(searches), 3)
+            self.assertEqual(searches[0]["engine"], "tavily")
+            self.assertEqual(searches[0]["perspective"], "finance_quant_econ")
+            self.assertEqual(searches[0]["tool_spec"]["schema_version"], 1)
+            self.assertEqual(searches[0]["tool_spec"]["result_policy"], "bounded_by_max_results")
+            self.assertEqual(searches[1]["provider"], "semantic_scholar")
+            self.assertEqual(searches[1]["perspective"], "natural_science_engineering")
+            self.assertEqual(searches[2]["perspective"], "philosophy_methodology")
+
+    def test_meta_learning_failed_web_search_is_traced(self):
+        class ErrorSearch(WebSearchProvider):
+            provider = "fake"
+
+            def search(self, query: str, *, max_results: int = 5, category: str = "general"):
+                raise WebSearchError("provider failed hf_" + "a" * 30)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            responses = [
+                tool_call_response(
+                    tool_call(
+                        "web_search",
+                        engine="fake",
+                        perspective="finance_quant_econ",
+                        query="market microstructure",
+                        max_results=1,
+                    )
+                ),
+                tool_call_response(tool_call("note", text="continue after failure")),
+            ]
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM(responses),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5), max_llm_calls=2),
+                fold_info={"development_history": "workspace/development_history.json"},
+                acceptance_rules={},
+                mode="meta_learning",
+                web_search_providers={"fake": ErrorSearch()},
+            )
+
+            summary = runner.run()
+
+            self.assertNotEqual(summary["finish_status"], "meta_learning_done")
+            searches = [event for event in ctx.trace.read_events() if event["event_type"] == "web_search"]
             self.assertEqual(len(searches), 1)
-            self.assertEqual(searches[0]["provider"], "fake")
+            self.assertEqual(searches[0]["status"], "error")
+            self.assertIn("provider failed", searches[0]["error"])
+            self.assertEqual(searches[0]["engine"], "fake")
+            self.assertEqual(searches[0]["perspective"], "finance_quant_econ")
+            self.assertEqual(searches[0]["query"], "market microstructure")
+            self.assertEqual(searches[0]["tool_spec"]["schema_version"], 1)
+            self.assertNotIn("hf_" + "a" * 30, json.dumps(searches, ensure_ascii=False))
+            self.assertIn("hf_[redacted]", searches[0]["error"])
+            self.assertNotIn("hf_" + "a" * 30, json.dumps(ctx.trace.read_events(), ensure_ascii=False))
+            self.assertNotIn("hf_" + "a" * 30, json.dumps(runner.proxy.calls[-1]["messages"], ensure_ascii=False))
+
+    def test_generic_tool_error_path_redacts_secret(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([]),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5)),
+                fold_info={"development_history": "workspace/development_history.json"},
+                acceptance_rules={},
+                mode="meta_learning",
+            )
+            token = "hf_" + "b" * 30
+
+            def boom(**kwargs):
+                raise RuntimeError("provider exploded " + token)
+
+            runner.search.grep = boom  # type: ignore[method-assign]
+            result = runner._dispatch("grep", {"action": "grep", "pattern": "x", "root": "workspace"})
+
+            self.assertEqual(result["observation"], "error")
+            self.assertNotIn(token, json.dumps(result, ensure_ascii=False))
+            self.assertIn("hf_[redacted]", str(result["error"]))
+            events = ctx.trace.read_events()
+            self.assertNotIn(token, json.dumps(events, ensure_ascii=False))
+            self.assertIn("hf_[redacted]", json.dumps(events, ensure_ascii=False))
+
+    def test_meta_learning_done_requires_nonempty_taste(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([tool_call_response(tool_call("done"))]),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5), max_llm_calls=1),
+                fold_info={"development_history": "workspace/development_history.json"},
+                acceptance_rules={},
+                mode="meta_learning",
+            )
+
+            summary = runner.run()
+
+            self.assertNotEqual(summary["finish_status"], "meta_learning_done")
+            errors = [event for event in ctx.trace.read_events() if event["event_type"] == "llm_call"]
+            self.assertEqual(len(errors), 1)
+
+    def test_meta_learning_prompt_includes_experiment_directive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([tool_call_response(tool_call("done"))]),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5)),
+                fold_info={"development_history": "workspace/development_history.json"},
+                acceptance_rules={},
+                mode="meta_learning",
+                meta_learning_directive="Explore intraday liquidity shock reversal.",
+            )
+
+            self.assertIn("# 实验级探索方向（用户注入）", runner.system_prompt)
+            self.assertIn("Explore intraday liquidity shock reversal.", runner.system_prompt)
+            self.assertIn("不是已验证结论", runner.system_prompt)
+            self.assertIn("用 `shell` 调用 Python", runner.system_prompt)
+            self.assertIn("git", runner.system_prompt)
+            self.assertIn("hf", runner.system_prompt)
+
+    def test_meta_learning_prompt_describes_default_network_without_secret_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([tool_call_response(tool_call("done"))]),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5)),
+                fold_info={"development_history": "workspace/development_history.json"},
+                acceptance_rules={},
+                mode="meta_learning",
+            )
+
+            self.assertIn("## 运行环境、联网与代理", runner.system_prompt)
+            self.assertIn("元学习默认可用 Docker 网络直连互联网", runner.system_prompt)
+            self.assertIn("/mnt/artifacts/runtime_env.json", runner.system_prompt)
+            self.assertIn("GITHUB_TOKEN", runner.system_prompt)
+            self.assertIn("HF_TOKEN", runner.system_prompt)
+            self.assertIn("MQ_PROXY_*", runner.system_prompt)
+            self.assertNotIn("github_pat_", runner.system_prompt)
+            self.assertNotIn("hf_", runner.system_prompt)
+
+    def test_meta_learning_network_policy_is_inside_environment_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([tool_call_response(tool_call("done"))]),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5)),
+                fold_info={"development_history": "workspace/development_history.json"},
+                acceptance_rules={},
+                mode="meta_learning",
+            )
+
+            environment_idx = runner.system_prompt.index("# 环境与配置")
+            action_idx = runner.system_prompt.index("# 动作与流程")
+            network_idx = runner.system_prompt.index("## 运行环境、联网与代理")
+            self.assertGreater(network_idx, environment_idx)
+            self.assertLess(network_idx, action_idx)
+            self.assertIn("默认先使用直连网络", runner.system_prompt)
+            self.assertNotIn("本次没有额外注入联网/代理配置", runner.system_prompt)
+
+    def test_meta_learning_done_requires_configured_search(self):
+        class FakeSearch(WebSearchProvider):
+            provider = "fake"
+
+            def search(self, query: str, *, max_results: int = 5, category: str = "general"):
+                return [WebSearchResult(title=f"{category}:{query}", url="https://example.test", content="snippet")]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            responses = [
+                tool_call_response(tool_call("done")),
+            ]
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM(responses),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5), max_llm_calls=1),
+                fold_info={"development_history": "workspace/development_history.json"},
+                acceptance_rules={},
+                mode="meta_learning",
+                web_search_providers={"fake": FakeSearch()},
+            )
+
+            summary = runner.run()
+
+            self.assertNotEqual(summary["finish_status"], "meta_learning_done")
+            self.assertEqual(summary["finish_status"], "deadline_timeout")
+
+    def test_meta_learning_done_requires_all_search_perspectives(self):
+        class FakeSearch(WebSearchProvider):
+            provider = "fake"
+
+            def search(self, query: str, *, max_results: int = 5, category: str = "general"):
+                return [WebSearchResult(title=f"{category}:{query}", url="https://example.test", content="snippet")]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            responses = [
+                tool_call_response(
+                    tool_call(
+                        "web_search",
+                        engine="fake",
+                        perspective="finance_quant_econ",
+                        query="market microstructure",
+                    )
+                ),
+                tool_call_response(tool_call("done")),
+            ]
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM(responses),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5), max_llm_calls=2),
+                fold_info={"development_history": "workspace/development_history.json"},
+                acceptance_rules={},
+                mode="meta_learning",
+                web_search_providers={"fake": FakeSearch()},
+            )
+
+            summary = runner.run()
+
+            self.assertNotEqual(summary["finish_status"], "meta_learning_done")
+            self.assertEqual(summary["finish_status"], "deadline_timeout")
+
+    def test_meta_learning_empty_web_search_result_does_not_satisfy_perspective(self):
+        class EmptySearch(WebSearchProvider):
+            provider = "fake"
+
+            def search(self, query: str, *, max_results: int = 5, category: str = "general"):
+                return []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.workspace / "taste.md").write_text("empty search should not pass", encoding="utf-8")
+            responses = [
+                tool_call_response(
+                    tool_call(
+                        "web_search",
+                        engine="fake",
+                        perspective="finance_quant_econ",
+                        query="market microstructure",
+                    )
+                ),
+                tool_call_response(tool_call("done")),
+            ]
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM(responses),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5), max_llm_calls=2),
+                fold_info={"development_history": "workspace/development_history.json"},
+                acceptance_rules={},
+                mode="meta_learning",
+                web_search_providers={"fake": EmptySearch()},
+            )
+
+            summary = runner.run()
+
+            self.assertNotEqual(summary["finish_status"], "meta_learning_done")
+            searches = [event for event in ctx.trace.read_events() if event["event_type"] == "web_search"]
+            self.assertEqual(searches[0]["status"], "empty_results")
 
     def test_tavily_http_errors_redact_api_key(self):
         key = "tvly-dev-secret-for-test"
@@ -266,11 +682,33 @@ class MetaLearningSessionTest(unittest.TestCase):
             fp=BytesIO(f"rate limited key {key}".encode("utf-8")),
         )
         with patch("urllib.request.urlopen", side_effect=error):
-            provider = SemanticScholarSearchProvider(key, min_interval_seconds=0)
+            provider = SemanticScholarSearchProvider(key, min_interval_seconds=0, max_retries=0)
             with self.assertRaises(WebSearchError) as caught:
                 provider.search("query", max_results=1)
         self.assertNotIn(key, str(caught.exception))
         self.assertIn("[redacted]", str(caught.exception))
+        self.assertIn("after 1 attempt", str(caught.exception))
+
+    def test_semantic_scholar_retries_rate_limit_then_succeeds(self):
+        error = urllib.error.HTTPError(
+            "https://api.semanticscholar.org/graph/v1/paper/search",
+            429,
+            "Too Many Requests",
+            hdrs=None,
+            fp=BytesIO(b"rate limited"),
+        )
+        payload = {"data": [{"paperId": "paper-1", "title": "A Paper", "year": 2025}]}
+        with patch("urllib.request.urlopen", side_effect=[error, FakeHTTPResponse(payload)]), patch("time.sleep") as sleep:
+            provider = SemanticScholarSearchProvider(
+                "s2-secret",
+                min_interval_seconds=0,
+                max_retries=1,
+                retry_initial_seconds=0.01,
+                retry_max_seconds=0.01,
+            )
+            results = provider.search("query", max_results=1)
+        self.assertEqual([item.title for item in results], ["A Paper"])
+        sleep.assert_called()
 
 
 class ExecutorTest(unittest.TestCase):
@@ -300,7 +738,7 @@ class ExecutorTest(unittest.TestCase):
             executor = DockerExecutor("dummy", paths)
             mapped = executor.map_path(paths.workspace)
             self.assertEqual(mapped, "/mnt/agent/workspace")
-            self.assertEqual(executor.map_path(paths.agent_output), "/mnt/agent/agent_output")
+            self.assertEqual(executor.map_path(paths.agent_output), "/mnt/agent/output")
             self.assertEqual(executor.map_path(paths.run_manifest), "/mnt/artifacts/run_manifest.json")
             with self.assertRaises(Exception):
                 executor.map_path(Path("/etc/passwd"))
