@@ -108,6 +108,18 @@ def _ohlc_replay() -> pd.DataFrame:
     )
 
 
+def _auction_minutes() -> pd.DataFrame:
+    # Day 1 has a 09:30 opening-auction print and a 09:31 first-continuous bar, so
+    # next-bar execution fills a 09:15 order at 09:30 and a 09:25 order at 09:31.
+    return pd.DataFrame(
+        [
+            {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": "09:30", "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0},
+            {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": "09:31", "open": 10.1, "high": 10.3, "low": 10.0, "close": 10.2},
+            {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": "14:57", "open": 10.5, "high": 10.6, "low": 10.4, "close": 10.5},
+        ]
+    )
+
+
 def _replay_daily() -> pd.DataFrame:
     return pd.DataFrame(
         [
@@ -150,7 +162,6 @@ class MainCtxReplayTest(unittest.TestCase):
             return run_main_ctx_replay(
                 _replay_daily(),
                 profile,
-                decision_time_iso="2022-01-04T09:30:00+08:00",
                 shortable_codes=frozenset(),
                 main_policy=policy,
             )
@@ -180,14 +191,13 @@ class MainCtxReplayTest(unittest.TestCase):
             result = run_main_ctx_replay(
                 _ohlc_replay(),
                 BrokerProfile(initial_cash=1_000_000.0),
-                decision_time_iso="2022-01-04T09:30:00+08:00",
                 shortable_codes=frozenset(),
                 main_policy=policy,
             )
         buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
 
-    def _run_with(self, replay: pd.DataFrame) -> object:
+    def _run_with(self, replay: pd.DataFrame, minutes: pd.DataFrame | None = None) -> object:
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
             decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
@@ -195,19 +205,21 @@ class MainCtxReplayTest(unittest.TestCase):
             policy.validate_main()
             return run_main_ctx_replay(
                 replay, BrokerProfile(initial_cash=1_000_000.0),
-                decision_time_iso="2022-01-04T09:25:00+08:00",
                 shortable_codes=frozenset(), main_policy=policy,
+                replay_intraday_1min=minutes,
             )
 
-    def test_auction_entry_fills_at_open(self) -> None:
+    def test_auction_entry_fills_at_first_continuous_bar(self) -> None:
+        # A 09:25 order is decided on the matched open but, under next-bar
+        # execution, fills at the 09:31 open (the first continuous bar) — never
+        # within the bar it was decided on.
         (self.sandbox.paths.agent_output / "main.py").write_text(AUCTION_MAIN, encoding="utf-8")
-        result = self._run_with(_ohlc_replay())
+        result = self._run_with(_ohlc_replay(), _auction_minutes())
         buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "auction")
         self.assertEqual(buys[0]["trade_date"], "20220104")
-        # Filled at the slipped day open (10.0), the call-auction matched price.
-        self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
+        self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.1, is_buy=True))
 
     def test_rolling_asof_view_excludes_today_and_future(self) -> None:
         snap = self.sandbox.paths.snapshot
@@ -234,7 +246,7 @@ class MainCtxReplayTest(unittest.TestCase):
             policy.validate_main()
             result = run_main_ctx_replay(
                 replay, BrokerProfile(initial_cash=1_000_000.0),
-                decision_time_iso="2022-01-04T09:25:00+08:00", shortable_codes=frozenset(),
+                shortable_codes=frozenset(),
                 main_policy=policy, asof_view_enabled=True, snapshot_dir=snap,
             )
         buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
@@ -242,11 +254,12 @@ class MainCtxReplayTest(unittest.TestCase):
 
     def test_preopen_0915_tick_has_no_price_but_fills_at_open(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(PREOPEN_MAIN, encoding="utf-8")
-        result = self._run_with(_ohlc_replay())
+        result = self._run_with(_ohlc_replay(), _auction_minutes())
         buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)  # the 09:15 guard requires ctx.price is None
         self.assertEqual(buys[0]["price_label"], "auction")
         self.assertEqual(buys[0]["trade_date"], "20220104")
+        # The blind 09:15 order fills at the 09:30 opening-auction print (10.0).
         self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
 
     def test_auction_buy_rejected_at_one_sided_limit_up_open(self) -> None:
@@ -260,7 +273,8 @@ class MainCtxReplayTest(unittest.TestCase):
         # No positions remain after the mandatory final-day liquidation.
         self.assertEqual(result.broker.positions, {})
         stats = compute_return_stats(result)
-        # Bought ~day2 open (10.3), liquidated day3 close (12.5): net positive.
+        # Decided day2 09:30, filled next bar (~day2 close 11.0), liquidated day3
+        # close (12.5): net positive.
         self.assertGreater(stats["total_return"], 0.0)
         self.assertGreaterEqual(stats["trade_count"], 1)
 

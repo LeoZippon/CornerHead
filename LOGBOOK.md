@@ -1,3 +1,11 @@
+2026-06-26 Next-bar execution + screen/order split + NL offset reads + audit cleanup
+
+- 审计死代码清理（commit `168908d`，分支 `feat/rolling-asof`）：删除未引用的 `SimBroker.buy/sell/short/cover/close` 便捷封装、`gpu.select_gpu`、`folds.*_quarter`、`audit.json_group_counts`；清理无用 import；修 `price_label="auction"` 仅在 `auction_enabled` 时标注（避免误标 09:15/09:25 真实 bar）。`common.has_pagination_probe` 是 audit.py 复用的 re-export，保留。
+- 次一根 bar 成交（重写 `run_main_ctx_replay`）：用 `_day_tick_plan` 排出每日决策 tick 与各自的成交 bar——真实 bar i 的单成交于 bar i+1 开盘；09:15 信息 tick（空 group、`ctx.price=None`）成交于首根真实 bar（09:30 开盘竞价），09:25 tick（撮合开盘价、清零 vol/amount）成交于次根（09:31 首根连续）。成交价改用成交 bar 的 `open`；删除 `_auction_rows`/`auction_open`/`_fill_price`；删除死参 `decision_time_iso`。`ctx.positions` 只反映已成交持仓 → 入场意图应单 tick 下一次、跨 tick 在途意图由策略在 `ctx.state_dir` 跟踪。
+- 模板按推荐节奏改写：`main` 09:15 调 `screen_targets`（筛选 + NL，目标写 `state_dir/targets.json`），09:25 调 `open_targets`（读目标统一下单，成交于 09:31）；`trading.py` 注明成交滞后、管理规则需幂等。
+- M2 NL 文件按字节偏移增量读：`_serve_nl_requests`（宿主）与驱动 `_read_responses` 都改为只读 offset 之后的完整行、保留尾部半行，消除 O(N²) 重读且不丢数据；Runner 持 `_nl_offset`。
+- 验证：全量单测 289 通过（更新 main_ctx/broker/tools_flow 的成交时点与价格断言为次一根 bar）；同步 environment_design/agent_design/prompt + 重生成 PROMPTS.md。
+
 2026-06-26 09:15 pre-open info tick + WS2 rolling daily as-of view
 
 - 09:15 信息决策 tick（commit `74e75eb`，分支 `feat/rolling-asof`）：盘前两 tick——09:15（竞价未撮合，`ctx.price=None`，~10 分钟决策窗）+ 09:25（撮合开盘价）；两者下单都经 `auction_open` 在开盘价成交。`auction_preopen_time`（默认 `09:15`，None 关闭）。注意：信息 tick 无价时乐观 broker 视图不更新持仓，按持仓条件的多笔下单不会自去重（agent 自行注意）。

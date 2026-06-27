@@ -54,6 +54,8 @@ import pandas as pd
 
 
 def main(ctx):
+    if ctx.cur_time != "09:25":  # decide once pre-open; fills next bar
+        return
     snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
     daily = pd.read_parquet(snapshot_dir / "daily.parquet")
     code = sorted(daily["ts_code"].astype(str).unique())[0]
@@ -72,7 +74,7 @@ def main(ctx):
     snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
     daily = pd.read_parquet(snapshot_dir / "daily.parquet")
     code = sorted(daily["ts_code"].astype(str).unique())[0]
-    if ctx.cur_time >= "14:57" and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+    if ctx.cur_time == "09:31" and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
         ctx.broker.buy(code, weight=0.1, reason="minute_close_buy")
 '''
 
@@ -142,6 +144,8 @@ print("main import noise")
 def main(ctx):
     print("strategy call noise")
     code = "000001.SZ"
+    if ctx.cur_time != "09:25":  # noise prints every tick; order once
+        return
     if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
         ctx.broker.buy(code, weight=0.1, reason="noisy_buy")
 '''
@@ -229,6 +233,8 @@ import pandas as pd
 
 
 def main(ctx):
+    if ctx.cur_time != "09:25":  # decide once pre-open; fills next bar
+        return
     snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
     daily = pd.read_parquet(snapshot_dir / "daily.parquet")
     code = sorted(daily["ts_code"].astype(str).unique())[0]
@@ -425,8 +431,9 @@ class ToolFlowTest(unittest.TestCase):
             detailed = json.loads((result_dir / "detailed_return.json").read_text(encoding="utf-8"))
             self.assertEqual(detailed["replay_granularity"], "minute")
             fill = [event for event in detailed["broker_events"] if event["event_type"] == "order_filled"][0]
+            # Decided on 09:31, the order fills at the next bar (14:57) open (10.1).
             self.assertEqual(fill["price_label"], "minute:14:57")
-            self.assertAlmostEqual(fill["price"], BrokerProfile().slipped_price(10.25, is_buy=True))
+            self.assertAlmostEqual(fill["price"], BrokerProfile().slipped_price(10.1, is_buy=True))
 
     def test_main_persists_model_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -485,7 +492,8 @@ class ToolFlowTest(unittest.TestCase):
             custom_events = [event for event in detailed["broker_events"] if event["event_type"] == "main_actions"]
             self.assertEqual(len(custom_events), 1)
             fill = [event for event in detailed["broker_events"] if event["event_type"] == "order_filled"][0]
-            self.assertEqual(fill["price_label"], "minute:09:31")
+            # The 09:31 dip signal fills at the next bar (09:32) open (10.0).
+            self.assertEqual(fill["price_label"], "minute:09:32")
             self.assertAlmostEqual(fill["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
 
     def test_empty_minute_replay_file_reports_daily_granularity(self):

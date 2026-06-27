@@ -170,7 +170,6 @@ class BacktestTool:
                 replay = run_main_ctx_replay(
                     replay_daily,
                     profile,
-                    decision_time_iso=decision_time,
                     shortable_codes=shortable,
                     main_policy=policy,
                     replay_intraday_1min=replay_minutes,

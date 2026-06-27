@@ -268,19 +268,21 @@ def main(ctx) -> None:
 
 ### 5.2 main(ctx) 与时序
 
-Environment 按回放分钟逐分钟调用一次 `main(ctx)`（一次覆盖全市场），没有 `trade_intents` 映射。`main` 自己决定时序：每分钟管理已有持仓，在选定时点（如盘前或收盘前）筛选并开新仓，从而在任意分钟开/平仓。它直接调用 `ctx.broker` 的 `ts_code` 原语下单；Broker 执行约束并记录成交。建议把横截面筛选/开仓放在 `candidate.py`，把按 `ts_code` 的持仓管理/做T/平仓放在 `trading.py`，由 `main` 在合适时点调用。
+Environment 按回放 tick 逐 tick 调用一次 `main(ctx)`（一次覆盖全市场），没有 `trade_intents` 映射。`main` 自己决定时序：每个 tick 管理已有持仓，在选定时点（如盘前或收盘前）筛选并开新仓，从而在任意时点开/平仓。它直接调用 `ctx.broker` 的 `ts_code` 原语下单；Broker 执行约束并记录成交。建议把横截面筛选/开仓放在 `candidate.py`，把按 `ts_code` 的持仓管理/做T/平仓放在 `trading.py`，由 `main` 在合适时点调用。
 
-成本与频率：`main(ctx)` 每分钟都会被调用，但筛选、模型推理和 `ctx.nl()` 等重操作应只在少数选定时点执行，不要每分钟跑；模型在首个分钟加载/缓存，不每分钟重训。跨分钟暂存（如 `holdings.json`）写入 `ctx.state_dir`；Broker 是持仓真相源，`state_dir` 只存策略自身的规则/目标。
+**次一根 bar 成交**：在某根 bar 上决策的单，于下一根 bar 的开盘价成交（不在同一根 bar 内成交，杜绝 bar 内前视）。`ctx.positions` 只反映已成交持仓，下一根成交前不变，因此每个入场意图应在某个决策 tick 下一次、并在 `ctx.state_dir` 跟踪自己的在途意图，避免跨 tick 重复下单。推荐节奏：09:15 信息 tick（无价）筛选 + NL，把目标写入 `ctx.state_dir`；09:25 tick（已知撮合开盘价）读取目标统一下单，成交于 09:31。
+
+成本与频率：`main(ctx)` 每个 tick 都会被调用，但筛选、模型推理和 `ctx.nl()` 等重操作应只在少数选定时点执行，不要每个 tick 跑；模型在首个 tick 加载/缓存，不每次重训。跨 tick 暂存（如当日目标）写入 `ctx.state_dir`；Broker 是持仓真相源，`state_dir` 只存策略自身的规则/目标。
 
 ### 5.3 ctx 接口
 
-`ctx` 是市场级上下文，每分钟重建，暴露：
+`ctx` 是市场级上下文，每个 tick 重建，暴露：
 
 ```python
 ctx.cur_date          # "YYYYMMDD"
 ctx.cur_time          # "HH:MM"
 ctx.account, ctx.positions, ctx.cash      # 只读账户/持仓快照
-ctx.price(ts_code), ctx.bar(ts_code), ctx.bars   # 仅当前分钟、PIT 可见的 bar
+ctx.price(ts_code), ctx.bar(ts_code), ctx.bars   # 仅当前 tick、PIT 可见的 bar（09:15 无价）
 ctx.broker.buy/sell/short/cover/close(ts_code, amount=None, weight=None)
 ctx.broker.money, ctx.broker.cash, ctx.broker.position(ts_code)
 ctx.nl(ts_code, prompt=...)               # 决策阶段 NL 工具
@@ -291,7 +293,7 @@ ctx.model_dir, ctx.state_dir, ctx.params
 
 横截面日频筛选读 `ctx.asof_dir/daily.parquet`（每个回放日由 Environment 用冻结快照日线历史 ∪ 回放期 `trade_date < D` 的日线滚动构造，当日及未来不可见）；事件/文本/财务等其他域仍读 `ctx.snapshot_dir`（冻结于 Fold 决策时点，不随回放滚动）。
 
-Broker 原语和 `ctx` 完整语义由 `docs/environment_design.md` 第 7 章定义。`ctx.bars` 只含当前分钟、bar close 时点已可见的行情，未来分钟不可见。正式回放进程只读加载 `output/` 中的策略代码，禁止写 `output/`、创建软/硬链接，且按真实路径阻断经链接访问测试槽或 `/mnt/artifacts`。
+Broker 原语和 `ctx` 完整语义由 `docs/environment_design.md` 第 7 章定义。`ctx.bars` 只含当前 tick、bar close 时点已可见的行情，未来 bar 不可见（09:15 信息 tick 无价）。正式回放进程只读加载 `output/` 中的策略代码，禁止写 `output/`、创建软/硬链接，且按真实路径阻断经链接访问测试槽或 `/mnt/artifacts`。
 
 `amount` 是股数（按 100 股，即 1 手，向下对齐），`weight` 是初始权益名义比例。函数只表达意图；现金、做空保证金、T+1 可卖余额、手数、涨跌停、停牌和券源由 Broker 执行。最大持仓数、单票权重上限和仓位集中度默认由 Agent 自行控制；只有 run config 显式设置 Broker 附加风控时才由 Broker 额外拦截。代码应无死循环、网络访问或不可控写入。
 

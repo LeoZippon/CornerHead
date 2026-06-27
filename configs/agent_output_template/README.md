@@ -14,56 +14,64 @@ reproducible model parameters such as `.json`, `.joblib`, `.pkl`, `.npy`,
 `.npz`, `.pt`, `.pth`, `.onnx`, `.safetensors`, `.cbm`, `.ubj`, or `.model`
 files. Temporary training files stay in `/mnt/agent/workspace/`.
 
-## `main(ctx)` is called every replay minute
+## `main(ctx)` is called every replay tick
 
-Formal backtests replay the region minute by minute and call:
+Formal backtests replay the region tick by tick and call:
 
 ```python
 def main(ctx) -> None:
     ...
 ```
 
-once per minute, with a **market-level** `ctx`. `main` owns all timing: it
-manages open positions every minute and screens/opens new positions on the ticks
-it chooses. It drives the Broker primitives by `ts_code` through `ctx.broker`;
-there is no `trade_intents` mapping — positions can open or change at any minute.
+once per tick, with a **market-level** `ctx`. `main` owns all timing: it manages
+open positions every tick and screens/opens new positions on the ticks it
+chooses. It drives the Broker primitives by `ts_code` through `ctx.broker`; there
+is no `trade_intents` mapping — positions can open or change at any tick.
+
+Orders use **next-bar execution**: an order placed on a tick fills at the **next
+bar's open**, never within the same bar. So decide on the data you can see and
+the fill lands one bar later. The recommended daily cadence splits the decision
+from the order, because the 09:15 pre-open info tick has no price yet:
 
 ```python
-from candidate import screen_and_open
+from candidate import open_targets, screen_targets
 from trading import manage_positions
 
 
 def main(ctx):
-    manage_positions(ctx)            # exits / 做T on every minute
-    if ctx.cur_time == "09:30":      # you control the cadence
-        screen_and_open(ctx)         # cross-sectional screening + new entries
+    manage_positions(ctx)             # exits / 做T every tick (fills next bar)
+    if ctx.cur_time == "09:15":       # no price yet: screen + nl(), persist targets
+        screen_targets(ctx)
+    elif ctx.cur_time == "09:25":     # matched open known: submit; fills at 09:31
+        open_targets(ctx)
 ```
 
-`ctx` exposes (rebuilt each minute):
+`ctx` exposes (rebuilt each tick):
 
 - `ctx.cur_date` (`"YYYYMMDD"`), `ctx.cur_time` (`"HH:MM"`).
 - `ctx.account`, `ctx.positions` (read-only snapshots), `ctx.cash`.
-- `ctx.price(ts_code)`, `ctx.bar(ts_code)`, `ctx.bars` — the current minute only
-  (future bars are not visible).
+- `ctx.price(ts_code)`, `ctx.bar(ts_code)`, `ctx.bars` — the current tick only
+  (`None` at the 09:15 info tick; future bars are never visible).
 - `ctx.broker`: `.buy/sell/short/cover/close(ts_code, amount=None, weight=None)`,
   `.money`/`.cash`, `.position(ts_code)`.
 - `ctx.nl(ts_code, prompt="...")` — point-in-time NL Sub Agent (decision stage).
-- `ctx.snapshot_dir` (point-in-time data for screening), `ctx.model_dir`
-  (persisted parameters), `ctx.state_dir` (run-scoped scratch, e.g.
-  `holdings.json`), `ctx.params`.
+- `ctx.asof_dir` (rolling daily as-of view) and `ctx.snapshot_dir` (point-in-time
+  data for screening), `ctx.model_dir` (persisted parameters), `ctx.state_dir`
+  (run-scoped scratch, e.g. the day's targets), `ctx.params`.
 
 `amount` is a share count (lot-aligned to 100); `weight` is a notional fraction
 of initial equity. The Broker enforces cash, short margin, T+1 sellable balance,
 lot size, price limits, suspension, and shortability, and reserves the final
 replay date for mandatory liquidation. The Broker is the source of truth for
-positions; keep your own per-stock rules/targets in `ctx.state_dir`, not as a
-position ledger.
+positions and reflects **filled** positions only, so place each entry once on a
+decision tick and keep your own per-stock rules/targets/intent in `ctx.state_dir`,
+not as a position ledger.
 
 ## Cost discipline
 
-`main(ctx)` runs every minute, but heavy work — cross-sectional screening, model
+`main(ctx)` runs every tick, but heavy work — cross-sectional screening, model
 inference, and `ctx.nl()` — should run only on the few ticks you choose (e.g.
-pre-open or near close), never every minute, or API cost and wall-clock blow up.
+pre-open or near close), never every tick, or API cost and wall-clock blow up.
 Load or cache model parameters from `ctx.model_dir` once; do not retrain every
 minute.
 

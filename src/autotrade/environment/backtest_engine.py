@@ -323,11 +323,27 @@ def _serve_nl_requests(
     responses_path: Path,
     served: set[str],
     nl_service,
-) -> None:
+    offset: int = 0,
+) -> int:
+    """Serve NL requests appended past ``offset``; return the new byte offset.
+
+    Only the bytes after ``offset`` are read, and only whole lines are consumed:
+    a partial trailing line (a request still being flushed) is left in place for
+    the next call, so the incremental read never loses or splits a request. The
+    ``served`` set stays a dedup backstop.
+    """
     if not requests_path.exists():
-        return
-    for line in requests_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if not line.strip():
+        return offset
+    with requests_path.open("rb") as handle:
+        handle.seek(offset)
+        chunk = handle.read()
+    head, sep, _partial = chunk.rpartition(b"\n")
+    if not sep:
+        return offset  # no complete line appended yet
+    new_offset = offset + len(head) + len(sep)
+    for raw in head.splitlines():
+        line = raw.decode("utf-8", "replace").strip()
+        if not line:
             continue
         try:
             request = json.loads(line)
@@ -353,6 +369,7 @@ def _serve_nl_requests(
                 response = {"request_id": request_id, "status": "error", "error": error}
         with responses_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(response, ensure_ascii=False, default=str) + "\n")
+    return new_offset
 
 
 def _jsonable(value):

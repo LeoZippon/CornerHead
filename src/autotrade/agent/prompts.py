@@ -71,21 +71,22 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 ## 正式产物格式（modification_check 按此校验）
 - `main.py`：必须定义唯一正式入口 `main(ctx) -> None`，由 Environment 每个回放分钟调用一次。
 - `candidate.py`：推荐用于横截面筛选与开仓逻辑，可读取 `ctx.snapshot_dir`，可调用 `ctx.nl(code, prompt="...")`；由 `main` 在选定时点调用。
-- `trading.py`：推荐用于按 `ts_code` 管理持仓的交易/做T/平仓函数（`def 名字(ctx, ts_code): ...`）；由 `main` 每分钟调用。Agent 可修改或新增。
+- `trading.py`：推荐用于按 `ts_code` 管理持仓的交易/做T/平仓函数（`def 名字(ctx, ts_code): ...`）；由 `main` 每个 tick 调用。Agent 可修改或新增。
 - `nl_prompt.md`：可选，保存策略复用的 NL 提示片段；也可以直接在 `main.py` 或 `candidate.py` 中传入 prompt。
 - `models/`：可选，保存需要跨 Fold 继承的模型参数、权重或轻量元数据；可按模型/组件分子目录。每次回测重训的临时中间产物留在内存；需要复用或继承的参数写入 `models/`。依赖包不写入 `models/`，应通过 Sandbox 镜像安装。
 - 正式产物不得包含 `__pycache__`、`.pyc`、`.pyo`、临时数据文件、日志、数据 dump、notebook 或密钥；模型权重只能放在 `models/`，不能放进 `output/`。
 
 ## 交易规则（写入回测流程，无法绕过）
-- 入口：Environment 按回放分钟逐分钟调用一次 `main(ctx)`（一次覆盖全市场）。时序完全由你控制：每分钟管理已有持仓、在你选定的时点筛选并开新仓。无需返回 `trade_intents`，直接调用 `ctx.broker` 原语下单即可在任意分钟开/平仓。
-- 盘前竞价：默认每个回放日在常规分钟前有一个集合竞价决策 tick（时点见 run manifest 的 `auction_decision_time`），`ctx.price` 为当日开盘价；在该 tick 下单按当日涨跌停在开盘价成交（一字涨停买单/跌停空单会被拒）。`09:15` 集合竞价尚未撮合、没有可用价格。
-- `ctx`（市场级，每分钟重建）：
+- 入口：Environment 按回放 tick 逐 tick 调用一次 `main(ctx)`（一次覆盖全市场）。时序完全由你控制：每个 tick 管理已有持仓、在你选定的时点筛选并开新仓。无需返回 `trade_intents`，直接调用 `ctx.broker` 原语下单即可在任意时点开/平仓。
+- 次一根 bar 成交：在某根 bar 上决策的单于下一根 bar 的开盘价成交（不在同一根 bar 内成交，杜绝 bar 内前视，如 09:35 触发的单成交于 09:36 开盘）。`ctx.positions` 只反映已成交持仓、下一根成交前不变，因此每个入场意图只在某个决策 tick 下一次、并用 `ctx.state_dir` 跟踪自己的在途意图，避免重复下单。
+- 盘前竞价：默认每个回放日在常规分钟前有两个盘前决策 tick——`09:15` 信息 tick（集合竞价未撮合，`ctx.price` 为 None，用于筛选 + NL）和 `09:25` tick（`ctx.price` 为撮合出的开盘价）。`09:15` 的单成交于 09:30 开盘集合竞价，`09:25` 的单成交于首根连续 bar（09:31），均按当日涨跌停成交（一字涨停买单/跌停空单会被拒）。推荐节奏：09:15 筛选并把目标写入 `ctx.state_dir`，09:25 读取目标统一下单。
+- `ctx`（市场级，每个 tick 重建）：
   - `ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.account`、`ctx.positions`（只读快照）、`ctx.cash`。
-  - `ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`：只含当前分钟、PIT 可见的 bar（未来分钟不可见）。
+  - `ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`：只含当前 tick、PIT 可见的 bar（未来 bar 不可见；09:15 无价）。
   - `ctx.broker`：`.buy/sell/short/cover/close(ts_code, amount=None, weight=None)`、`.money`/`.cash`、`.position(ts_code)`。
-  - `ctx.nl(ts_code, prompt=...)`；`ctx.asof_dir`（滚动日频 as-of 视图：截至当日盘前可见的日线历史，含回放期内已收盘交易日，用于横截面日频筛选）；`ctx.snapshot_dir`（Fold 决策时点冻结全量快照：事件/文本/财务/分钟历史）；`ctx.model_dir`、`ctx.state_dir`（跨分钟暂存，如 holdings.json）、`ctx.params`。
+  - `ctx.nl(ts_code, prompt=...)`；`ctx.asof_dir`（滚动日频 as-of 视图：截至当日盘前可见的日线历史，含回放期内已收盘交易日，用于横截面日频筛选）；`ctx.snapshot_dir`（Fold 决策时点冻结全量快照：事件/文本/财务/分钟历史）；`ctx.model_dir`、`ctx.state_dir`（跨 tick 暂存，如当日目标）、`ctx.params`。
 - 下单口径：`amount` 是股数（按 100 股，即 1 手，向下对齐），`weight` 是初始权益的名义比例。策略只表达意图，Broker 强制现金、做空保证金、T+1 可卖余额、手数、涨跌停、停牌和可融券。最大持仓数、单票权重上限和集中度默认由你控制；回放末日强制清仓剩余持仓。Broker 是持仓真相源，`ctx.state_dir` 只存你自己的规则/目标，不是持仓账本。
-- 成本与频率：`main(ctx)` 每分钟都会被调用，但筛选、模型推理和 `ctx.nl()` 等重操作应只在你选定的少数时点执行（如盘前或收盘前），不要每分钟跑，否则 API 成本和耗时会失控；模型应在首个分钟加载/缓存，不要每分钟重训。`ctx.nl()` 还受 run manifest 的 `nl_max_calls_per_backtest` 硬上限约束，超出后返回 `budget_exhausted` 错误，需自行降级。
+- 成本与频率：`main(ctx)` 每个 tick 都会被调用，但筛选、模型推理和 `ctx.nl()` 等重操作应只在你选定的少数时点执行（如盘前或收盘前），不要每个 tick 跑，否则 API 成本和耗时会失控；模型应在首个 tick 加载/缓存，不要每次重训。`ctx.nl()` 还受 run manifest 的 `nl_max_calls_per_backtest` 硬上限约束，超出后返回 `budget_exhausted` 错误，需自行降级。
 - NL 工具：`ctx.nl(ts_code, prompt=...)`（等价 `from at_tools import nl`）在宿主侧启动可调用 `text_retrieve` 的 Sub Agent，返回 result dict（含 `status`、`content`、`tool_calls`、`evidence`、`error`）；内容不限定格式，需要数值或标签时在 `main`/`candidate`/helper 中自行解析。
 - NL 风险：存在发布时间/入库时间、检索召回、模型常识、自由文本解析和前视泄露风险。使用 NL 时必须按 PIT evidence 降权或过滤证据不足的结论；不要把自由文本当作稳定结构，也不要让 NL 覆盖现金、可交易性、成本和回放约束。
 - 做空：可做空股票由 `/mnt/snapshot/events.parquet` 中 decision-date 的 `margin_secs` 集合决定。默认 `proxy_margin_secs` 只能做空这些股票；`broker_inventory` 在未接入真实券源文件时拒绝做空；`theoretical_short` 是显式研究模式。
@@ -105,7 +106,7 @@ FOLD_ACTION_SECTION = """\
 | `glob` | pattern, root?, path?, head_limit?, offset? | 结构化只读列文件，不访问测试或隐藏路径 |
 | `explore` | task, max_rounds? | 委托只读数据探查 Sub Agent（更便宜模型）调查一个具体问题并返回简洁摘要，把大量 shell/grep 探查移出主上下文 |
 | `modification_check` | （无） | 主动检查正式产物改动是否在约束内；`backtest` 执行前也会自动复核 |
-| `backtest` | replay_window? | 验证回测；Environment 逐分钟回放当前 `output/main.py` 的 `main(ctx)`；可选 `replay_window` 只回放前 N 个交易日做快速调试（标记非完整验证、不可冻结），默认整段回放 |
+| `backtest` | replay_window? | 验证回测；Environment 逐 tick 回放当前 `output/main.py` 的 `main(ctx)`；可选 `replay_window` 只回放前 N 个交易日做快速调试（标记非完整验证、不可冻结），默认整段回放 |
 | `finish_fold` | （无） | 结束本 Fold；调用前先按“提交合同”自检 |
 | `note` | text? | 记录推理，不执行任何操作 |
 
@@ -149,7 +150,7 @@ FOLD_PROHIBITIONS = """\
 - 在 `output/` 写入缓存、日志、数据 dump、notebook、密钥或模型权重（权重只进 `models/`）。
 - 修改只读 `README.md`、父产物、结果目录或 Step 树。
 - 用验证或测试收益硬编码具体股票、月份、题材或行情事件。
-- 在逐分钟交易函数内调用 `nl` 或访问 `model_dir`/`workspace_dir`。\
+- 在逐 tick 交易函数内调用 `nl` 或访问 `model_dir`/`workspace_dir`。\
 """
 
 PROTOCOL_INSTRUCTION = "\n\n".join(

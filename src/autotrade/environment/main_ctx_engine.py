@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -32,7 +33,6 @@ from autotrade.environment.backtest_engine import (
     MarketData,
     MinuteMarketData,
     ReplayResult,
-    _bar_execution_price,
     _empty_minute_rows,
     _executor_pathsep_join,
     _jsonable,
@@ -76,18 +76,30 @@ def _append_jsonl(path, record):
         handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\\n")
 
 
+_RESP_STATE = {"offset": 0, "responses": {}}
+
+
 def _read_responses(path):
-    responses = {}
+    state = _RESP_STATE
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                record = json.loads(line)
-                responses[str(record.get("request_id"))] = record
+        with open(path, "rb") as handle:
+            handle.seek(state["offset"])
+            chunk = handle.read()
     except FileNotFoundError:
-        return responses
-    return responses
+        return state["responses"]
+    head, sep, _partial = chunk.rpartition(b"\\n")
+    if sep:
+        state["offset"] += len(head) + len(sep)
+        for raw in head.splitlines():
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            state["responses"][str(record.get("request_id"))] = record
+    return state["responses"]
 
 
 def _nl(ts_code="", prompt="", *, timeout_seconds=None, content_only=False, **kwargs):
@@ -317,6 +329,7 @@ class MainPolicyRunner:
         self._hide_cm = None
         self._hide_entered = False
         self._served: set[str] = set()
+        self._nl_offset = 0
         # Continuously drained so the persistent driver never blocks on a full
         # stderr pipe (the driver redirects the Agent's stdout to stderr).
         self._stderr_chunks: deque[str] = deque(maxlen=400)
@@ -454,7 +467,9 @@ class MainPolicyRunner:
         if self.nl_service is None or self.requests_path is None or self.responses_path is None:
             return 0
         before = len(self._served)
-        _serve_nl_requests(self.requests_path, self.responses_path, self._served, self.nl_service)
+        self._nl_offset = _serve_nl_requests(
+            self.requests_path, self.responses_path, self._served, self.nl_service, self._nl_offset
+        )
         return len(self._served) - before
 
     def _drain_stderr(self) -> str:
@@ -468,7 +483,6 @@ def run_main_ctx_replay(
     replay_daily: pd.DataFrame,
     profile,
     *,
-    decision_time_iso: str,
     shortable_codes: frozenset[str],
     main_policy: MainPolicyRunner,
     replay_intraday_1min: pd.DataFrame | None = None,
@@ -478,18 +492,19 @@ def run_main_ctx_replay(
     asof_view_enabled: bool = False,
     snapshot_dir: Path | None = None,
 ) -> ReplayResult:
-    """Replay the region minute by minute, calling ``main(ctx)`` once per minute.
+    """Replay the region with next-bar execution, calling ``main(ctx)`` per tick.
 
-    Every minute the Agent's ``main`` receives a market-level ``ctx`` and may
-    open or adjust positions on any ``ts_code`` that trades that minute. The
-    final trade date is reserved for mandatory liquidation of remaining
-    holdings. Minute bars are used when present; otherwise a daily-synthesized
+    The Agent's ``main`` decides on the bar it can see; the resulting orders fill
+    at the NEXT bar's open, so a signal read on a bar can only act one bar later
+    (no within-bar look-ahead). The final trade date is reserved for mandatory
+    liquidation. Minute bars are used when present; otherwise a daily-synthesized
     09:30/15:00 fallback is generated per code.
 
-    When ``auction_enabled``, each day prepends a pre-open call-auction tick at
-    ``auction_decision_time`` (default 09:25, when the open is matched), priced
-    at the day's open; entries placed there fill at the open under the Broker's
-    daily limit rules and are labelled ``price_label="auction"``.
+    With ``auction_enabled`` each day leads with two pre-open decision ticks: a
+    09:15 info tick exposing no price (``ctx.price`` is None — the auction has not
+    matched) whose orders fill at the 09:30 opening auction, and a 09:25 tick
+    showing the matched open whose orders fill at the first continuous bar
+    (09:31). Pre-open-decided fills are labelled ``price_label="auction"``.
     """
     market = MarketData(replay_daily)
     if len(market.trade_dates) < 2:
@@ -513,36 +528,42 @@ def run_main_ctx_replay(
             )
             minute_seed = minute_market.rows_for_date(trade_date) if minute_market is not None else _empty_minute_rows()
             minute_rows = _minute_rows_with_daily_fallback(replay_daily, trade_date, minute_seed)
-            if auction_enabled and not minute_rows.empty:
-                minute_rows = pd.concat(
-                    [_auction_rows(minute_rows, auction_preopen_time, auction_decision_time), minute_rows],
-                    ignore_index=True,
-                ).sort_values(["minute_sort", "ts_code"], kind="stable").reset_index(drop=True)
-            auction_times = {t for t in (auction_preopen_time, auction_decision_time) if t} if auction_enabled else set()
-            for minute_key, minute_group in minute_rows.groupby("minute_key", sort=True):
-                state = _market_state(
-                    broker, trade_date=trade_date, minute_key=str(minute_key), minute_group=minute_group, asof_dir=asof_dir
-                )
-                actions = main_policy.step(state)
-                if not actions:
-                    continue
-                price_label = "auction" if str(minute_key) in auction_times else f"{granularity}:{minute_key}"
-                broker.record_event(
-                    "main_actions",
-                    trade_date=trade_date,
-                    minute_key=str(minute_key),
-                    action_count=len(actions),
-                    actions=_jsonable(actions),
-                )
-                for action in actions:
-                    _execute_main_action(
-                        action,
-                        minute_group,
+            if not minute_rows.empty:
+                plan = _day_tick_plan(minute_rows, auction_enabled, auction_preopen_time, auction_decision_time)
+                fill_groups = {tick.minute_key: tick.group for tick in plan if tick.is_real}
+                pending: dict[str, list[tuple[dict[str, object], str]]] = {}
+                for tick in plan:
+                    # Next-bar execution: orders decided on an earlier tick fill at
+                    # THIS bar's open before the Agent sees the bar again.
+                    if tick.is_real:
+                        for action, label in pending.pop(tick.minute_key, []):
+                            _execute_main_action(
+                                action,
+                                fill_groups[tick.minute_key],
+                                broker,
+                                trade_date=trade_date,
+                                minute_key=tick.minute_key,
+                                price_label=label,
+                            )
+                    state = _market_state(
                         broker,
                         trade_date=trade_date,
-                        minute_key=str(minute_key),
-                        price_label=price_label,
+                        minute_key=tick.minute_key,
+                        minute_group=tick.group,
+                        asof_dir=asof_dir,
                     )
+                    actions = main_policy.step(state)
+                    if actions and tick.fill_key is not None:
+                        label = "auction" if tick.is_auction else f"{granularity}:{tick.fill_key}"
+                        pending.setdefault(tick.fill_key, []).extend((action, label) for action in actions)
+                        broker.record_event(
+                            "main_actions",
+                            trade_date=trade_date,
+                            minute_key=tick.minute_key,
+                            fill_key=tick.fill_key,
+                            action_count=len(actions),
+                            actions=_jsonable(actions),
+                        )
 
         equity = broker.mark_to_market(trade_date)
         if trade_date == exit_date and broker.positions:
@@ -559,37 +580,50 @@ def run_main_ctx_replay(
     )
 
 
-def _auction_rows(minute_rows: pd.DataFrame, preopen_time: str | None, decision_time: str) -> pd.DataFrame:
-    """Pre-open call-auction ticks built from each code's first bar (the day open).
+@dataclass(frozen=True)
+class _Tick:
+    """One decision tick and the bar its orders fill at under next-bar execution."""
 
-    The optional ``preopen_time`` (09:15) info tick exposes no price — the auction
-    has not matched yet, giving a ~10-minute decision window — while the
-    ``decision_time`` (09:25) tick carries the matched open. Both stamp
-    ``auction_open`` so orders fill at the day open under the Broker's daily limit
-    rules, regardless of the tick's visible price.
+    minute_key: str
+    group: pd.DataFrame
+    fill_key: str | None
+    is_real: bool
+    is_auction: bool
+
+
+def _day_tick_plan(
+    minute_rows: pd.DataFrame, auction_enabled: bool, preopen_time: str | None, decision_time: str
+) -> list[_Tick]:
+    """Ordered decision ticks for one day with their next-bar fill targets.
+
+    A decision on real bar *i* fills at real bar *i+1*; the last bar's orders
+    cannot fill and are dropped. With ``auction_enabled`` two pre-open ticks lead
+    the day: a ``preopen_time`` (09:15) info tick with no bars — ``ctx.price`` is
+    None since the auction has not matched — whose orders fill at the first real
+    bar (the 09:30 opening auction); and a ``decision_time`` (09:25) tick showing
+    each code's matched open whose orders fill at the second real bar (09:31, the
+    first continuous minute). This removes within-bar look-ahead: a price read on
+    a bar can only act on the next bar's open.
     """
-    if minute_rows.empty:
-        return _empty_minute_rows()
-    base = minute_rows.sort_values("minute_sort", kind="stable").drop_duplicates("ts_code", keep="first").copy()
-    base["auction_open"] = base["open"]
-    for column in ("vol", "amount"):
-        if column in base.columns:
-            base[column] = float("nan")
-    ticks: list[pd.DataFrame] = []
-    if preopen_time:
-        info = base.copy()
-        for column in ("open", "high", "low", "close"):
-            info[column] = float("nan")  # no matched price yet at 09:15
-        info["minute_key"] = preopen_time
-        ticks.append(info)
-    priced = base.copy()
-    for column in ("high", "low", "close"):
-        priced[column] = priced["open"]
-    priced["minute_key"] = decision_time
-    ticks.append(priced)
-    out = pd.concat(ticks, ignore_index=True)
-    out["minute_sort"] = out["minute_key"].map(_minute_sort)
-    return out.reset_index(drop=True)
+    real_keys = sorted({str(key) for key in minute_rows["minute_key"]}, key=_minute_sort)
+    if not real_keys:
+        return []
+    groups = {str(key): group for key, group in minute_rows.groupby(minute_rows["minute_key"].astype(str), sort=False)}
+    plan: list[_Tick] = []
+    if auction_enabled:
+        first = minute_rows.sort_values("minute_sort", kind="stable").drop_duplicates("ts_code", keep="first").copy()
+        open_group = first.assign(high=first["open"], low=first["open"], close=first["open"])
+        for column in ("vol", "amount"):
+            if column in open_group.columns:
+                open_group[column] = float("nan")  # intraday volume is unknown pre-open
+        if preopen_time:
+            plan.append(_Tick(preopen_time, _empty_minute_rows(), real_keys[0], False, True))
+        second = real_keys[1] if len(real_keys) > 1 else real_keys[-1]
+        plan.append(_Tick(decision_time, open_group, second, False, True))
+    for index, key in enumerate(real_keys):
+        fill_key = real_keys[index + 1] if index + 1 < len(real_keys) else None
+        plan.append(_Tick(key, groups[key], fill_key, True, False))
+    return plan
 
 
 def _write_asof_daily(out_dir: Path, snapshot_dir: Path | None, replay_daily: pd.DataFrame, asof_date: str) -> Path:
@@ -682,7 +716,7 @@ def _execute_main_action(
         ts_code,
         name,
         trade_date=trade_date,
-        raw_price=_fill_price(bar),
+        raw_price=_open_price(bar),
         amount=_int_or_none(action.get("amount")),
         weight=_float_or_none(action.get("weight")),
         time=minute_key,
@@ -691,13 +725,13 @@ def _execute_main_action(
     )
 
 
-def _fill_price(bar: pd.Series) -> float | None:
-    """Auction ticks fill at ``auction_open`` (the day open) even when their
-    visible price is hidden (09:15); regular bars fill at the bar price."""
-    auction_open = bar.get("auction_open")
-    if auction_open is not None and pd.notna(auction_open):
-        return float(auction_open)
-    return _bar_execution_price(bar)
+def _open_price(bar: pd.Series) -> float | None:
+    """Next-bar fill price: the fill bar's open, falling back to its close."""
+    for field in ("open", "close"):
+        value = bar.get(field)
+        if value is not None and pd.notna(value):
+            return float(value)
+    return None
 
 
 def _int_or_none(value: object) -> int | None:

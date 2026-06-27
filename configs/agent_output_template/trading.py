@@ -1,4 +1,4 @@
-"""Per-minute position management, called by ``main(ctx)`` every minute.
+"""Per-tick position management, called by ``main(ctx)`` every tick.
 
 ``manage_positions(ctx)`` iterates the current holdings and applies exit / 做T
 (intraday swing) logic by driving ``ctx.broker`` primitives keyed by ``ts_code``.
@@ -7,6 +7,11 @@ the Environment knows none of these names. Functions are pure trading logic with
 no network access or unbounded loops. The Broker enforces cash, short margin,
 T+1 sellable balance, lot size, price limits, suspension, and shortability, and
 reserves the final replay day for mandatory liquidation.
+
+Orders fill on the NEXT bar, and ``ctx.positions`` reflects FILLED positions only,
+so a just-submitted exit is not visible until it fills: make management rules
+idempotent (band/threshold guards, or track in-flight intent in ``ctx.state_dir``)
+so they do not re-fire the same order on consecutive ticks before it fills.
 """
 
 from __future__ import annotations

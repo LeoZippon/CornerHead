@@ -190,13 +190,16 @@ class BrokerPrimitiveTest(unittest.TestCase):
 
 class ReplayIntegrationTest(unittest.TestCase):
     def test_main_runs_each_bar_and_liquidates_at_exit(self):
+        # Decide once at the 09:25 pre-open tick; next-bar execution fills it, and
+        # the position is force-liquidated on the final replay day.
         def buy_hold(state):
-            return [] if _held(state, "000001.SZ") else [{"action": "buy", "ts_code": "000001.SZ", "weight": 0.1}]
+            if state["cur_time"] != "09:25" or _held(state, "000001.SZ"):
+                return []
+            return [{"action": "buy", "ts_code": "000001.SZ", "weight": 0.1}]
 
         replay = run_main_ctx_replay(
             REPLAY,
             BrokerProfile(),
-            decision_time_iso=DECISION,
             shortable_codes=frozenset(),
             main_policy=FakeMainPolicy(buy_hold),
         )
@@ -207,44 +210,45 @@ class ReplayIntegrationTest(unittest.TestCase):
         self.assertTrue(any(e["event_type"] == "position_closed" for e in replay.broker.events))
 
     def test_minute_replay_uses_minute_bars(self):
-        def close_entry(state):
-            if not _held(state, "000001.SZ") and state["cur_time"] >= "14:57":
+        # Decided on the 09:31 bar, the order fills at the NEXT minute bar (14:57)
+        # open under next-bar execution — proving minute bars drive the fill.
+        def entry(state):
+            if state["cur_time"] == "09:31" and not _held(state, "000001.SZ"):
                 return [{"action": "buy", "ts_code": "000001.SZ", "weight": 0.1}]
             return []
 
         replay = run_main_ctx_replay(
             REPLAY,
             BrokerProfile(),
-            decision_time_iso=DECISION,
             shortable_codes=frozenset(),
             replay_intraday_1min=MINUTE_REPLAY,
-            main_policy=FakeMainPolicy(close_entry),
+            main_policy=FakeMainPolicy(entry),
         )
         self.assertEqual(replay.granularity, "minute")
         fill = [event for event in replay.broker.events if event["event_type"] == "order_filled"][0]
         self.assertEqual(fill["price_label"], "minute:14:57")
-        self.assertAlmostEqual(fill["price"], BrokerProfile().slipped_price(10.25, is_buy=True))
+        self.assertAlmostEqual(fill["price"], BrokerProfile().slipped_price(10.20, is_buy=True))
 
     def test_swing_t_buys_dip_and_sells_rally_next_day(self):
+        # Enter once pre-open; on a later-day rally the swing reduces. Orders fill
+        # on the next bar, so the entry/exit land one bar after each decision.
         def swing(state):
-            if state["cur_time"] >= "14:57":
-                return []
             bar = next((b for b in state["bars"] if str(b["ts_code"]) == "000001.SZ"), None)
             if bar is None or bar.get("close") is None:
                 return []
             price = float(bar["close"])
             pos = _held(state, "000001.SZ")
-            amount = 500
             if pos is None:
-                return [{"action": "buy", "ts_code": "000001.SZ", "amount": amount}]
-            if int(pos["sellable_quantity"]) >= amount and price > float(pos["entry_price"]) * 1.01:
-                return [{"action": "sell", "ts_code": "000001.SZ", "amount": amount}]
+                if state["cur_time"] == "09:25":
+                    return [{"action": "buy", "ts_code": "000001.SZ", "amount": 500}]
+                return []
+            if int(pos["sellable_quantity"]) >= 500 and price > float(pos["entry_price"]) * 1.01:
+                return [{"action": "sell", "ts_code": "000001.SZ", "amount": 500}]
             return []
 
         replay = run_main_ctx_replay(
             REPLAY,
             BrokerProfile(),
-            decision_time_iso=DECISION,
             shortable_codes=frozenset(),
             replay_intraday_1min=MINUTE_REPLAY,
             main_policy=FakeMainPolicy(swing),
@@ -254,12 +258,13 @@ class ReplayIntegrationTest(unittest.TestCase):
 
     def test_unshortable_code_is_rejected_during_replay(self):
         def go_short(state):
-            return [] if _held(state, "000002.SZ") else [{"action": "short", "ts_code": "000002.SZ", "weight": 0.1}]
+            if state["cur_time"] != "09:25" or _held(state, "000002.SZ"):
+                return []
+            return [{"action": "short", "ts_code": "000002.SZ", "weight": 0.1}]
 
         replay = run_main_ctx_replay(
             REPLAY,
             BrokerProfile(),
-            decision_time_iso=DECISION,
             shortable_codes=frozenset(),
             main_policy=FakeMainPolicy(go_short),
         )
