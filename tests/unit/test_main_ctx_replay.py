@@ -40,11 +40,31 @@ def main(ctx):
         ctx.broker.buy(code, weight=0.1, reason="clean_open")
 '''
 
+# Enters at the pre-open call-auction tick (09:25), filled at the day open.
+AUCTION_MAIN = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "09:25" and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+        ctx.broker.buy(code, weight=0.2, reason="auction_entry")
+'''
+
 REPLAY_ROWS = [
     ("20220104", 10.0, 10.2),
     ("20220105", 10.3, 11.0),
     ("20220331", 12.0, 12.5),
 ]
+
+
+def _limit_up_open_replay() -> pd.DataFrame:
+    # Day 1 opens exactly at the upper limit (one-sided limit-up auction).
+    return pd.DataFrame(
+        [
+            {"trade_date": "20220104", "ts_code": TS_CODE, "open": 13.0, "high": 13.0, "low": 13.0,
+             "close": 13.0, "up_limit": 13.0, "down_limit": 8.0, "is_suspended": False},
+            {"trade_date": "20220331", "ts_code": TS_CODE, "open": 12.0, "high": 13.0, "low": 11.0,
+             "close": 12.5, "up_limit": 14.0, "down_limit": 9.0, "is_suspended": False},
+        ]
+    )
 
 
 def _ohlc_replay() -> pd.DataFrame:
@@ -137,6 +157,34 @@ class MainCtxReplayTest(unittest.TestCase):
             )
         buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
+
+    def _run_with(self, replay: pd.DataFrame) -> object:
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=30.0,
+            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
+        ) as policy:
+            policy.validate_main()
+            return run_main_ctx_replay(
+                replay, BrokerProfile(initial_cash=1_000_000.0),
+                decision_time_iso="2022-01-04T09:25:00+08:00",
+                shortable_codes=frozenset(), main_policy=policy,
+            )
+
+    def test_auction_entry_fills_at_open(self) -> None:
+        (self.sandbox.paths.agent_output / "main.py").write_text(AUCTION_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay())
+        buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["price_label"], "auction")
+        self.assertEqual(buys[0]["trade_date"], "20220104")
+        # Filled at the slipped day open (10.0), the call-auction matched price.
+        self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
+
+    def test_auction_buy_rejected_at_one_sided_limit_up_open(self) -> None:
+        (self.sandbox.paths.agent_output / "main.py").write_text(AUCTION_MAIN, encoding="utf-8")
+        result = self._run_with(_limit_up_open_replay())
+        rejects = [o for o in result.broker.query_orders() if o["status"] == "rejected"]
+        self.assertTrue(any(o["reject_reason"] == "limit_up_blocked_buy" for o in rejects))
 
     def test_forced_liquidation_and_profit(self) -> None:
         result = self._run()

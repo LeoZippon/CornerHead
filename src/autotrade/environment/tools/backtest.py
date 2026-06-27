@@ -149,6 +149,8 @@ class BacktestTool:
                     shortable_codes=shortable,
                     main_policy=policy,
                     replay_intraday_1min=replay_minutes,
+                    auction_enabled=bool(manifest.get("auction_enabled", True)),
+                    auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
                 )
             stats = compute_return_stats(replay)
             model_artifacts = load_model_artifacts(self.ctx.paths.model_artifacts)

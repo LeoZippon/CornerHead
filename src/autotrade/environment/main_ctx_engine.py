@@ -37,6 +37,7 @@ from autotrade.environment.backtest_engine import (
     _jsonable,
     _minute_bar_for_code,
     _minute_rows_with_daily_fallback,
+    _minute_sort,
     _serve_nl_requests,
     hide_snapshot_slots_from_agent,
 )
@@ -469,6 +470,8 @@ def run_main_ctx_replay(
     shortable_codes: frozenset[str],
     main_policy: MainPolicyRunner,
     replay_intraday_1min: pd.DataFrame | None = None,
+    auction_enabled: bool = True,
+    auction_decision_time: str = "09:25",
 ) -> ReplayResult:
     """Replay the region minute by minute, calling ``main(ctx)`` once per minute.
 
@@ -477,6 +480,11 @@ def run_main_ctx_replay(
     final trade date is reserved for mandatory liquidation of remaining
     holdings. Minute bars are used when present; otherwise a daily-synthesized
     09:30/15:00 fallback is generated per code.
+
+    When ``auction_enabled``, each day prepends a pre-open call-auction tick at
+    ``auction_decision_time`` (default 09:25, when the open is matched), priced
+    at the day's open; entries placed there fill at the open under the Broker's
+    daily limit rules and are labelled ``price_label="auction"``.
     """
     market = MarketData(replay_daily)
     if len(market.trade_dates) < 2:
@@ -495,11 +503,16 @@ def run_main_ctx_replay(
         if trade_date != exit_date:
             minute_seed = minute_market.rows_for_date(trade_date) if minute_market is not None else _empty_minute_rows()
             minute_rows = _minute_rows_with_daily_fallback(replay_daily, trade_date, minute_seed)
+            if auction_enabled and not minute_rows.empty:
+                minute_rows = pd.concat(
+                    [_auction_rows(minute_rows, auction_decision_time), minute_rows], ignore_index=True
+                ).sort_values(["minute_sort", "ts_code"], kind="stable").reset_index(drop=True)
             for minute_key, minute_group in minute_rows.groupby("minute_key", sort=True):
                 state = _market_state(broker, trade_date=trade_date, minute_key=str(minute_key), minute_group=minute_group)
                 actions = main_policy.step(state)
                 if not actions:
                     continue
+                price_label = "auction" if str(minute_key) == auction_decision_time else f"{granularity}:{minute_key}"
                 broker.record_event(
                     "main_actions",
                     trade_date=trade_date,
@@ -514,7 +527,7 @@ def run_main_ctx_replay(
                         broker,
                         trade_date=trade_date,
                         minute_key=str(minute_key),
-                        price_label=f"{granularity}:{minute_key}",
+                        price_label=price_label,
                     )
 
         equity = broker.mark_to_market(trade_date)
@@ -530,6 +543,26 @@ def run_main_ctx_replay(
         exit_date=exit_date,
         granularity=granularity,
     )
+
+
+def _auction_rows(minute_rows: pd.DataFrame, auction_time: str) -> pd.DataFrame:
+    """Pre-open call-auction tick: each code's opening price only.
+
+    Built from the day's first bar per code, with high/low set to the open and
+    vol/amount cleared (the matched open price is all that is known at 09:25).
+    The Broker fills entries placed here at the open under the daily limit rules.
+    """
+    if minute_rows.empty:
+        return _empty_minute_rows()
+    first = minute_rows.sort_values("minute_sort", kind="stable").drop_duplicates("ts_code", keep="first").copy()
+    for column in ("high", "low", "close"):
+        first[column] = first["open"]
+    for column in ("vol", "amount"):
+        if column in first.columns:
+            first[column] = float("nan")
+    first["minute_key"] = auction_time
+    first["minute_sort"] = _minute_sort(auction_time)
+    return first.reset_index(drop=True)
 
 
 def _market_state(broker: SimBroker, *, trade_date: str, minute_key: str, minute_group: pd.DataFrame) -> dict[str, object]:

@@ -95,6 +95,13 @@ class ExperimentConfig:
     finalize_before_deadline_seconds: int = 300
     per_call_timeout_seconds: int = 300
     max_steps_per_fold: int = 10
+    # Pre-open auction: replay injects one decision tick per day at this time
+    # (priced at the open-auction reference); entries fill at the 09:30 open.
+    auction_enabled: bool = True
+    auction_decision_time: str = "09:25"
+    # Optional hard cap on host NL Sub Agent calls per backtest replay. None keeps
+    # NL frequency prompt-guided only; a positive value is the final cost backstop.
+    nl_max_calls_per_backtest: int | None = None
     snapshot_config: SnapshotConfig | None = None
     # Individual NL Sub Agent failures return audited error results by default
     # so Agent code can decide whether to ignore, retry, or fail closed.
