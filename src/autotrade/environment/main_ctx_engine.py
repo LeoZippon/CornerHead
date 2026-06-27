@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import select
+import shutil
 import sys
 import threading
 import time
@@ -234,6 +235,7 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir):
         params=dict(state.get("params") or {}),
         nl=_nl,
         snapshot_dir=snapshot_dir,
+        asof_dir=(state.get("asof_dir") or snapshot_dir),
         model_dir=model_dir,
         state_dir=state_dir,
     ), broker
@@ -473,6 +475,8 @@ def run_main_ctx_replay(
     auction_enabled: bool = True,
     auction_preopen_time: str | None = "09:15",
     auction_decision_time: str = "09:25",
+    asof_view_enabled: bool = False,
+    snapshot_dir: Path | None = None,
 ) -> ReplayResult:
     """Replay the region minute by minute, calling ``main(ctx)`` once per minute.
 
@@ -502,6 +506,11 @@ def run_main_ctx_replay(
 
     for trade_date in market.trade_dates:
         if trade_date != exit_date:
+            asof_dir = (
+                _resolve_asof_dir(main_policy, snapshot_dir, replay_daily, str(trade_date))
+                if asof_view_enabled
+                else None
+            )
             minute_seed = minute_market.rows_for_date(trade_date) if minute_market is not None else _empty_minute_rows()
             minute_rows = _minute_rows_with_daily_fallback(replay_daily, trade_date, minute_seed)
             if auction_enabled and not minute_rows.empty:
@@ -511,7 +520,9 @@ def run_main_ctx_replay(
                 ).sort_values(["minute_sort", "ts_code"], kind="stable").reset_index(drop=True)
             auction_times = {t for t in (auction_preopen_time, auction_decision_time) if t}
             for minute_key, minute_group in minute_rows.groupby("minute_key", sort=True):
-                state = _market_state(broker, trade_date=trade_date, minute_key=str(minute_key), minute_group=minute_group)
+                state = _market_state(
+                    broker, trade_date=trade_date, minute_key=str(minute_key), minute_group=minute_group, asof_dir=asof_dir
+                )
                 actions = main_policy.step(state)
                 if not actions:
                     continue
@@ -581,7 +592,45 @@ def _auction_rows(minute_rows: pd.DataFrame, preopen_time: str | None, decision_
     return out.reset_index(drop=True)
 
 
-def _market_state(broker: SimBroker, *, trade_date: str, minute_key: str, minute_group: pd.DataFrame) -> dict[str, object]:
+def _write_asof_daily(out_dir: Path, snapshot_dir: Path | None, replay_daily: pd.DataFrame, asof_date: str) -> Path:
+    """Rolling daily as-of view for replay day D.
+
+    The frozen snapshot's daily history plus replay-period daily bars with
+    ``trade_date < D`` (visible after the prior close; the same-day bar stays
+    hidden until close). Universe is copied from the snapshot. Other domains
+    (events/text/fundamentals/intraday) remain on the frozen ``ctx.snapshot_dir``.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    frames: list[pd.DataFrame] = []
+    if snapshot_dir is not None and (snapshot_dir / "daily.parquet").exists():
+        frames.append(pd.read_parquet(snapshot_dir / "daily.parquet"))
+    if replay_daily is not None and not replay_daily.empty:
+        prior = replay_daily[replay_daily["trade_date"].astype(str) < str(asof_date)]
+        if not prior.empty:
+            frames.append(prior)
+    daily = pd.concat(frames, ignore_index=True, sort=False) if frames else replay_daily.iloc[0:0].copy()
+    if not daily.empty and {"trade_date", "ts_code"}.issubset(daily.columns):
+        daily = daily.drop_duplicates(["trade_date", "ts_code"], keep="last").reset_index(drop=True)
+    daily.to_parquet(out_dir / "daily.parquet", index=False)
+    if snapshot_dir is not None and (snapshot_dir / "universe.parquet").exists():
+        shutil.copyfile(snapshot_dir / "universe.parquet", out_dir / "universe.parquet")
+    return out_dir
+
+
+def _resolve_asof_dir(main_policy, snapshot_dir: Path | None, replay_daily: pd.DataFrame, trade_date: str) -> str | None:
+    """Build the day's rolling daily as-of view under workspace/.asof and return
+    its container path; the strategy reads it via ``ctx.asof_dir``."""
+    paths = getattr(main_policy, "paths", None)
+    executor = getattr(main_policy, "executor", None)
+    if paths is None or executor is None:
+        return None
+    host_dir = _write_asof_daily(paths.workspace / ".asof" / trade_date, snapshot_dir, replay_daily, trade_date)
+    return executor.map_path(host_dir)
+
+
+def _market_state(
+    broker: SimBroker, *, trade_date: str, minute_key: str, minute_group: pd.DataFrame, asof_dir: str | None = None
+) -> dict[str, object]:
     bars = [
         {
             "ts_code": str(row.ts_code),
@@ -602,6 +651,7 @@ def _market_state(broker: SimBroker, *, trade_date: str, minute_key: str, minute
         "cash": float(broker.cash),
         "initial_equity": float(broker.initial_equity),
         "bars": bars,
+        "asof_dir": asof_dir,
         "params": {},
     }
 

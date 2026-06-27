@@ -263,6 +263,7 @@ def _link_or_copy(src: str, dst: str) -> None:
 # wrong and a copy failure. Excluded from artifact collection.
 _COLLECT_IGNORE = shutil.ignore_patterns(
     ".cache",
+    ".asof",  # host-written per-day rolling daily as-of views; not Agent artifacts
     "__pycache__",
     "*.pyc",
     "*.pyo",

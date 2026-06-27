@@ -1,3 +1,9 @@
+2026-06-26 09:15 pre-open info tick + WS2 rolling daily as-of view
+
+- 09:15 信息决策 tick（commit `74e75eb`，分支 `feat/rolling-asof`）：盘前两 tick——09:15（竞价未撮合，`ctx.price=None`，~10 分钟决策窗）+ 09:25（撮合开盘价）；两者下单都经 `auction_open` 在开盘价成交。`auction_preopen_time`（默认 `09:15`，None 关闭）。注意：信息 tick 无价时乐观 broker 视图不更新持仓，按持仓条件的多笔下单不会自去重（agent 自行注意）。
+- WS2 滚动日频 as-of：每个回放日 Environment 用冻结快照日线历史 ∪ 回放期 `trade_date < D` 的日线（盘前可见、当日/未来不可见）构造 `daily.parquet`（universe 从快照复制），写入沙箱可读 `workspace/.asof/<date>`，经 `ctx.asof_dir` 暴露供横截面日频筛选；事件/文本/财务/分钟历史仍读冻结 `ctx.snapshot_dir`（v1 不滚动）。`collect_artifacts` 跳过 `.asof`。config `rolling_asof_enabled`（默认开）经 manifest→tool→引擎。
+- 验证：全量单测 288 通过 + 泄露回归（as-of 不含当日/未来）；模板 `candidate.py` 改读 `ctx.asof_dir`；prompt/agent_design/environment_design 同步重生成。待办：closing auction（15:00 收盘竞价对称 tick）、events/text 滚动、M2 NL 文件偏移读。
+
 2026-06-26 PR4: NL hard cap + backtest_tool replay_window
 
 - NL 成本硬上限：`_StrategyNLService` 按 run manifest 的 `nl_max_calls_per_backtest` 限制本次回测 NL 调用次数，超出返回审计 `budget_exhausted` 错误结果（策略自行降级）；backtest summary 记 `nl_calls`。

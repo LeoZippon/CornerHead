@@ -262,6 +262,7 @@ class ExperimentPipeline:
                 "auction_enabled": self.config.auction_enabled,
                 "auction_preopen_time": self.config.auction_preopen_time,
                 "auction_decision_time": self.config.auction_decision_time,
+                "rolling_asof_enabled": self.config.rolling_asof_enabled,
                 "nl_max_calls_per_backtest": self.config.nl_max_calls_per_backtest,
                 "sandbox_spec": self._active_sandbox_spec.to_record(),
                 "taste_prompt": taste_prompt,

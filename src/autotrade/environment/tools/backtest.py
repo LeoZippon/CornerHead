@@ -177,6 +177,8 @@ class BacktestTool:
                     auction_enabled=bool(manifest.get("auction_enabled", True)),
                     auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
                     auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
+                    asof_view_enabled=bool(manifest.get("rolling_asof_enabled", True)),
+                    snapshot_dir=snapshot_dir,
                 )
             stats = compute_return_stats(replay)
             model_artifacts = load_model_artifacts(self.ctx.paths.model_artifacts)

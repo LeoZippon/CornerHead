@@ -56,6 +56,27 @@ def main(ctx):
         ctx.broker.buy(code, weight=0.2, reason="preopen_blind")
 '''
 
+# Asserts the rolling daily as-of view at 20220105 holds history + the prior
+# replay day but never today or the future; raises (failing the run) on a leak.
+ASOF_GUARD_MAIN = '''
+from pathlib import Path
+
+import pandas as pd
+
+
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_date != "20220105" or ctx.cur_time != "09:15":
+        return
+    dates = set(pd.read_parquet(Path(str(ctx.asof_dir)) / "daily.parquet")["trade_date"].astype(str))
+    assert "20211230" in dates, dates           # snapshot history
+    assert "20220104" in dates, dates           # prior replay day (visible after close)
+    assert "20220105" not in dates, "today leaked"
+    assert "20220331" not in dates, "future leaked"
+    if ctx.broker.position(code) == 0:
+        ctx.broker.buy(code, weight=0.1, reason="asof_ok")
+'''
+
 REPLAY_ROWS = [
     ("20220104", 10.0, 10.2),
     ("20220105", 10.3, 11.0),
@@ -187,6 +208,37 @@ class MainCtxReplayTest(unittest.TestCase):
         self.assertEqual(buys[0]["trade_date"], "20220104")
         # Filled at the slipped day open (10.0), the call-auction matched price.
         self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
+
+    def test_rolling_asof_view_excludes_today_and_future(self) -> None:
+        snap = self.sandbox.paths.snapshot
+        snap.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"trade_date": "20211230", "ts_code": TS_CODE, "open": 9.0, "close": 9.5}]).to_parquet(
+            snap / "daily.parquet", index=False
+        )
+        pd.DataFrame([{"ts_code": TS_CODE, "name": "x"}]).to_parquet(snap / "universe.parquet", index=False)
+        (self.sandbox.paths.agent_output / "main.py").write_text(ASOF_GUARD_MAIN, encoding="utf-8")
+        replay = pd.DataFrame(
+            [
+                {"trade_date": "20220104", "ts_code": TS_CODE, "open": 10.0, "close": 10.2,
+                 "up_limit": 12.0, "down_limit": 8.0, "is_suspended": False},
+                {"trade_date": "20220105", "ts_code": TS_CODE, "open": 10.3, "close": 11.0,
+                 "up_limit": 12.0, "down_limit": 8.0, "is_suspended": False},
+                {"trade_date": "20220331", "ts_code": TS_CODE, "open": 12.0, "close": 12.5,
+                 "up_limit": 14.0, "down_limit": 9.0, "is_suspended": False},
+            ]
+        )
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=30.0,
+            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
+        ) as policy:
+            policy.validate_main()
+            result = run_main_ctx_replay(
+                replay, BrokerProfile(initial_cash=1_000_000.0),
+                decision_time_iso="2022-01-04T09:25:00+08:00", shortable_codes=frozenset(),
+                main_policy=policy, asof_view_enabled=True, snapshot_dir=snap,
+            )
+        buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)  # main asserted the as-of view, then bought
 
     def test_preopen_0915_tick_has_no_price_but_fills_at_open(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(PREOPEN_MAIN, encoding="utf-8")
