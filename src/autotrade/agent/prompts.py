@@ -85,7 +85,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
   - `ctx.broker`：`.buy/sell/short/cover/close(ts_code, amount=None, weight=None)`、`.money`/`.cash`、`.position(ts_code)`。
   - `ctx.nl(ts_code, prompt=...)`、`ctx.snapshot_dir`（PIT 数据，用于筛选）、`ctx.model_dir`（模型参数）、`ctx.state_dir`（跨分钟暂存，如 holdings.json）、`ctx.params`。
 - 下单口径：`amount` 是股数（按 100 股，即 1 手，向下对齐），`weight` 是初始权益的名义比例。策略只表达意图，Broker 强制现金、做空保证金、T+1 可卖余额、手数、涨跌停、停牌和可融券。最大持仓数、单票权重上限和集中度默认由你控制；回放末日强制清仓剩余持仓。Broker 是持仓真相源，`ctx.state_dir` 只存你自己的规则/目标，不是持仓账本。
-- 成本与频率：`main(ctx)` 每分钟都会被调用，但筛选、模型推理和 `ctx.nl()` 等重操作应只在你选定的少数时点执行（如盘前或收盘前），不要每分钟跑，否则 API 成本和耗时会失控；模型应在首个分钟加载/缓存，不要每分钟重训。
+- 成本与频率：`main(ctx)` 每分钟都会被调用，但筛选、模型推理和 `ctx.nl()` 等重操作应只在你选定的少数时点执行（如盘前或收盘前），不要每分钟跑，否则 API 成本和耗时会失控；模型应在首个分钟加载/缓存，不要每分钟重训。`ctx.nl()` 还受 run manifest 的 `nl_max_calls_per_backtest` 硬上限约束，超出后返回 `budget_exhausted` 错误，需自行降级。
 - NL 工具：`ctx.nl(ts_code, prompt=...)`（等价 `from at_tools import nl`）在宿主侧启动可调用 `text_retrieve` 的 Sub Agent，返回 result dict（含 `status`、`content`、`tool_calls`、`evidence`、`error`）；内容不限定格式，需要数值或标签时在 `main`/`candidate`/helper 中自行解析。
 - NL 风险：存在发布时间/入库时间、检索召回、模型常识、自由文本解析和前视泄露风险。使用 NL 时必须按 PIT evidence 降权或过滤证据不足的结论；不要把自由文本当作稳定结构，也不要让 NL 覆盖现金、可交易性、成本和回放约束。
 - 做空：可做空股票由 `/mnt/snapshot/events.parquet` 中 decision-date 的 `margin_secs` 集合决定。默认 `proxy_margin_secs` 只能做空这些股票；`broker_inventory` 在未接入真实券源文件时拒绝做空；`theoretical_short` 是显式研究模式。
@@ -105,7 +105,7 @@ FOLD_ACTION_SECTION = """\
 | `glob` | pattern, root?, path?, head_limit?, offset? | 结构化只读列文件，不访问测试或隐藏路径 |
 | `explore` | task, max_rounds? | 委托只读数据探查 Sub Agent（更便宜模型）调查一个具体问题并返回简洁摘要，把大量 shell/grep 探查移出主上下文 |
 | `modification_check` | （无） | 主动检查正式产物改动是否在约束内；`backtest` 执行前也会自动复核 |
-| `backtest` | （无） | 验证回测；Environment 逐分钟回放当前 `output/main.py` 的 `main(ctx)`，策略调用 `ctx.nl()` 才会触发 NL 工具 |
+| `backtest` | replay_window? | 验证回测；Environment 逐分钟回放当前 `output/main.py` 的 `main(ctx)`；可选 `replay_window` 只回放前 N 个交易日做快速调试（标记非完整验证、不可冻结），默认整段回放 |
 | `finish_fold` | （无） | 结束本 Fold；调用前先按“提交合同”自检 |
 | `note` | text? | 记录推理，不执行任何操作 |
 

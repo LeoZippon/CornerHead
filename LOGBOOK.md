@@ -1,3 +1,9 @@
+2026-06-26 PR4: NL hard cap + backtest_tool replay_window
+
+- NL 成本硬上限：`_StrategyNLService` 按 run manifest 的 `nl_max_calls_per_backtest` 限制本次回测 NL 调用次数，超出返回审计 `budget_exhausted` 错误结果（策略自行降级）；backtest summary 记 `nl_calls`。
+- `backtest_tool` 新增可选 Agent 字段 `replay_window`：只回放前 N 个交易日做快速调试，标记 `complete_validation=False`、不记 step tree、不可冻结；默认整段回放，`frozen_eval` 强制整段。经 ActionSpec field + Runner 从 args 透传 `run(mode="valid", replay_window=...)`。
+- 验证：全量单测 287 通过（新增 NL 上限 budget_exhausted + replay_window 非冻结调试 各 1）；分支 `feat/agent-controls`（commit `3e750f7`）。
+
 2026-06-26 Audit fixes + pre-open call-auction (PR3)
 
 - 用 SubAgent 审计 `main(ctx)` 引擎，落地修复（commit `04c8283`，分支 `feat/main-ctx-engine`）：H1 合成 09:30 开盘 bar 泄露当日 high/low/vol（改为只暴露开盘价：high=low=open、vol=amount=NaN，加回归测试）；H2 常驻驱动把 Agent stdout 重定向到 stderr 但宿主只读 stdout → stderr 管道占满死锁 → 伪超时（加守护线程持续排空 stderr，`close()` 不再用 `communicate()` 抢同一 fd）；M1 步超时改为“NL 被服务即重置”的无活动超时，单次慢 `nl()` 不再吃光本分钟预算；L2 Agent `main.py` import 错误改为首个请求返回结构化错误、不崩常驻进程。M2（NL 文件 O(N²) 重读）/L1（乐观 broker 视图）/L3（裸 fd-1 写）评估为受限/设计内，暂不改。
