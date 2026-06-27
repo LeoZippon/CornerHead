@@ -506,8 +506,13 @@ def _synthetic_daily_minutes(replay_daily: pd.DataFrame, trade_date: str) -> pd.
     highs = rows.apply(_daily_high, axis=1)
     open_rows = rows.copy()
     open_rows["close"] = open_rows["open"]
-    open_rows["high"] = highs
-    open_rows["low"] = lows
+    # The 09:30 open bar must expose only the opening price: day high/low and the
+    # full-day vol/amount are post-open information and would leak look-ahead.
+    open_rows["high"] = open_rows["open"]
+    open_rows["low"] = open_rows["open"]
+    for column in ("vol", "amount"):
+        if column in open_rows.columns:
+            open_rows[column] = math.nan
     open_rows["minute_key"] = "09:30"
     close_rows = rows.copy()
     close_rows["open"] = close_rows["close"]

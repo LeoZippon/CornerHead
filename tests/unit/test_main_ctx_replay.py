@@ -24,11 +24,39 @@ def main(ctx):
         ctx.broker.buy(code, weight=0.3, reason="mid_replay_entry")
 '''
 
+# Raises if the synthetic 09:30 open bar leaks end-of-day high/low/vol/amount.
+LEAK_GUARD_MAIN = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time != "09:30":
+        return
+    bar = ctx.bar(code) or {}
+    op = bar.get("open")
+    if bar.get("high") != op or bar.get("low") != op:
+        raise RuntimeError("open bar leaks intraday high/low")
+    if bar.get("vol") is not None or bar.get("amount") is not None:
+        raise RuntimeError("open bar leaks day volume/amount")
+    if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+        ctx.broker.buy(code, weight=0.1, reason="clean_open")
+'''
+
 REPLAY_ROWS = [
     ("20220104", 10.0, 10.2),
     ("20220105", 10.3, 11.0),
     ("20220331", 12.0, 12.5),
 ]
+
+
+def _ohlc_replay() -> pd.DataFrame:
+    # Distinct high/low/vol so any open-bar look-ahead is unambiguous.
+    return pd.DataFrame(
+        [
+            {"trade_date": "20220104", "ts_code": TS_CODE, "open": 10.0, "high": 12.0, "low": 9.0,
+             "close": 11.0, "vol": 5000.0, "amount": 55000.0, "up_limit": 13.0, "down_limit": 8.0, "is_suspended": False},
+            {"trade_date": "20220331", "ts_code": TS_CODE, "open": 11.0, "high": 13.0, "low": 10.5,
+             "close": 12.0, "vol": 6000.0, "amount": 72000.0, "up_limit": 14.0, "down_limit": 9.0, "is_suspended": False},
+        ]
+    )
 
 
 def _replay_daily() -> pd.DataFrame:
@@ -87,6 +115,28 @@ class MainCtxReplayTest(unittest.TestCase):
         self.assertEqual(buys[0]["ts_code"], TS_CODE)
         self.assertEqual(buys[0]["trade_date"], "20220105")
         self.assertGreater(buys[0]["filled_quantity"], 0)
+
+    def test_open_bar_has_no_intraday_lookahead(self) -> None:
+        # Daily-only replay: the synthetic 09:30 bar must show open==high==low and
+        # no vol/amount; LEAK_GUARD_MAIN raises (failing the backtest) otherwise.
+        (self.sandbox.paths.agent_output / "main.py").write_text(LEAK_GUARD_MAIN, encoding="utf-8")
+        with MainPolicyRunner(
+            self.executor,
+            self.sandbox.paths,
+            timeout_seconds=30.0,
+            decision_time="2022-01-04T09:30:00+08:00",
+            replay_granularity="daily",
+        ) as policy:
+            policy.validate_main()
+            result = run_main_ctx_replay(
+                _ohlc_replay(),
+                BrokerProfile(initial_cash=1_000_000.0),
+                decision_time_iso="2022-01-04T09:30:00+08:00",
+                shortable_codes=frozenset(),
+                main_policy=policy,
+            )
+        buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
 
     def test_forced_liquidation_and_profit(self) -> None:
         result = self._run()

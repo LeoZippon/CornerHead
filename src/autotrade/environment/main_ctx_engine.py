@@ -17,8 +17,10 @@ from __future__ import annotations
 import json
 import select
 import sys
+import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 
 import pandas as pd
@@ -250,8 +252,13 @@ main_path = Path(sys.argv[1])
 snapshot_dir = os.environ.get("AT_SNAPSHOT_DIR", "/mnt/snapshot")
 model_dir = os.environ.get("AT_MODEL_DIR", "/mnt/agent/models")
 state_dir = os.environ.get("AT_STATE_DIR", "/mnt/agent/workspace")
+main_module = None
+main_load_error = None
 with contextlib.redirect_stdout(sys.stderr):
-    main_module = _load_module(main_path, "agent_strategy_main")
+    try:
+        main_module = _load_module(main_path, "agent_strategy_main")
+    except Exception as exc:
+        main_load_error = _sanitize_error("%s: %s" % (type(exc).__name__, exc))
 
 main_fn = getattr(main_module, "main", None) if main_module is not None else None
 
@@ -261,6 +268,8 @@ for line in sys.stdin:
     request = json.loads(line)
     request_id = str(request.get("request_id", ""))
     try:
+        if main_load_error is not None:
+            raise RuntimeError("main.py failed to import: " + main_load_error)
         if request.get("op") == "validate":
             if not callable(main_fn):
                 raise AttributeError("main.py must define main(ctx)")
@@ -305,6 +314,10 @@ class MainPolicyRunner:
         self._hide_cm = None
         self._hide_entered = False
         self._served: set[str] = set()
+        # Continuously drained so the persistent driver never blocks on a full
+        # stderr pipe (the driver redirects the Agent's stdout to stderr).
+        self._stderr_chunks: deque[str] = deque(maxlen=400)
+        self._stderr_thread: threading.Thread | None = None
 
     def __enter__(self) -> "MainPolicyRunner":
         try:
@@ -335,10 +348,26 @@ class MainPolicyRunner:
                 cwd=self.paths.agent,
                 user="agent",
             )
+            self._start_stderr_drainer()
         except Exception:
             self.__exit__(*sys.exc_info())
             raise
         return self
+
+    def _start_stderr_drainer(self) -> None:
+        proc = self.proc
+        if proc is None or proc.stderr is None:
+            return
+
+        def _drain() -> None:
+            try:
+                for line in proc.stderr:  # blocks until each line / EOF on process exit
+                    self._stderr_chunks.append(line)
+            except Exception:  # noqa: BLE001 - the pipe closes when the process exits
+                pass
+
+        self._stderr_thread = threading.Thread(target=_drain, daemon=True)
+        self._stderr_thread.start()
 
     def __exit__(self, exc_type, exc, tb) -> None:
         try:
@@ -365,10 +394,20 @@ class MainPolicyRunner:
         if proc.poll() is None:
             proc.terminate()
             try:
-                proc.communicate(timeout=2)
+                proc.wait(timeout=2)
             except Exception:  # noqa: BLE001 - best effort cleanup
                 proc.kill()
-                proc.communicate()
+                proc.wait()
+        # The process is dead, so proc.stderr hits EOF and the daemon drainer
+        # finishes; join it before closing the fd so we never race it.
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=1)
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            try:
+                if pipe is not None:
+                    pipe.close()
+            except Exception:  # noqa: BLE001 - best effort cleanup
+                pass
         self.proc = None
 
     def _request(self, payload: dict[str, object]) -> dict[str, object]:
@@ -382,9 +421,12 @@ class MainPolicyRunner:
             proc.stdin.flush()
         except BrokenPipeError as exc:
             raise BacktestError(f"main policy runner exited early: {self._drain_stderr()}") from exc
+        # Inactivity deadline: a single slow nl() (up to its own timeout) must not
+        # exhaust the per-minute budget, so serving an NL request resets the clock.
         deadline = time.monotonic() + self.timeout_seconds
         while time.monotonic() < deadline:
-            self._pump_nl()
+            if self._pump_nl():
+                deadline = time.monotonic() + self.timeout_seconds
             if proc.poll() is not None:
                 raise BacktestError(f"main policy runner failed: {self._drain_stderr()}")
             ready, _, _ = select.select([proc.stdout], [], [], 0.05)
@@ -405,15 +447,18 @@ class MainPolicyRunner:
         proc.kill()
         raise BacktestError(f"main policy runner timed out after {self.timeout_seconds}s")
 
-    def _pump_nl(self) -> None:
+    def _pump_nl(self) -> int:
         if self.nl_service is None or self.requests_path is None or self.responses_path is None:
-            return
+            return 0
+        before = len(self._served)
         _serve_nl_requests(self.requests_path, self.responses_path, self._served, self.nl_service)
+        return len(self._served) - before
 
     def _drain_stderr(self) -> str:
-        proc = self.proc
-        stderr = proc.stderr.read() if proc is not None and proc.stderr is not None else ""
-        return str(sanitize_for_log(stderr))[-2000:]
+        thread = self._stderr_thread
+        if thread is not None:
+            thread.join(timeout=0.5)  # let the drainer flush the dying process's final stderr
+        return str(sanitize_for_log("".join(self._stderr_chunks)))[-2000:]
 
 
 def run_main_ctx_replay(
