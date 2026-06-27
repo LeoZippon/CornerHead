@@ -39,3 +39,7 @@ check.ipynb
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Vendored references and local scratch (not part of the repo)
+/external_references/
+/check.md

@@ -466,16 +466,6 @@ class MinuteMarketData:
         return self._frame[self._frame["trade_date"] == str(trade_date)].copy()
 
 
-def _bar_execution_price(bar: pd.Series | None) -> float | None:
-    if bar is None:
-        return None
-    for field in ("close", "open"):
-        value = bar.get(field)
-        if pd.notna(value):
-            return float(value)
-    return None
-
-
 def _minute_key(value: object) -> str | None:
     if value is None or pd.isna(value):
         return None
@@ -575,13 +565,6 @@ def _daily_high(bar: pd.Series) -> float:
     values = [bar.get("high"), bar.get("open"), bar.get("close")]
     numeric = [float(value) for value in values if pd.notna(value)]
     return max(numeric) if numeric else math.nan
-
-
-def _minute_bar_for_code(minute_group: pd.DataFrame, ts_code: str) -> pd.Series | None:
-    rows = minute_group[minute_group["ts_code"].astype(str) == str(ts_code)]
-    if rows.empty:
-        return None
-    return rows.iloc[-1]
 
 
 def compute_return_stats(result: ReplayResult) -> dict[str, object]:

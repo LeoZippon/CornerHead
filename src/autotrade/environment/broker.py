@@ -57,6 +57,8 @@ class BrokerProfile:
     # Dividends/rights against short positions are intentionally not modeled yet.
     short_corporate_actions: str = "disabled"
     maintenance_closeout_ratio: float = 1.30
+    # Disclosed CITIC reference lines, recorded for audit only; the engine enforces
+    # just maintenance_closeout_ratio (forced close), not these two.
     maintenance_warning_ratio: float = 1.40
     maintenance_withdraw_ratio: float = 3.00
     max_single_name_weight: float | None = None

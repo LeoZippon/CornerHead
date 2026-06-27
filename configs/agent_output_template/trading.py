@@ -34,6 +34,8 @@ def example_swing_t(ctx, ts_code: str) -> None:
     price = ctx.price(ts_code)
     if price is None or ctx.cur_time >= "14:57":
         return
+    if ctx.broker.pending(ts_code):
+        return  # an order is already working for this code; don't re-fire before it fills
     pos = next((p for p in ctx.positions if str(p.get("ts_code")) == ts_code), None)
     if pos is None:
         return

@@ -1,3 +1,13 @@
+2026-06-27 Opus 审计：执行模型确认正确，落地小修
+
+- 用 Opus 4.8 子代理只读审计全仓代码 + 文档（基线 293 通过）。结论：次一根成交 / 订单簿 / 限价 / 竞价 / 滚动 as-of / pending 去重逻辑正确，无前视或数据完整性 bug，文档与代码一致。落地以下修复：
+- 删两个死函数 `backtest_engine._bar_execution_price`、`_minute_bar_for_code`（全仓仅定义、无调用；后者与 `broker._bar_for_code` 重复）。
+- `_day_tick_plan` 把 lag 收敛为 `max(1, min(execution_lag_bars, n-1))`：修复「日线退化日（仅 09:30/15:00）+ 关闭竞价 + lag≥2 → 整日零成交且无提示」的隐性边界；正常多 bar 日不受影响（全部测试不变）。
+- 模板 `example_swing_t` 加 `if ctx.broker.pending(ts_code): return`，与文档「成交滞后需幂等」一致，示例不再示范跨 tick 重复下单。
+- `BrokerProfile.maintenance_warning_ratio/withdraw_ratio` 注明仅记录用（只有 closeout 被执行）。
+- `.gitignore` 忽略未跟踪的 `external_references/`（~10MB vendored repos）与 `check.md`，防误提交。
+- 验证：全量 293 通过；`git check-ignore` 确认两项已忽略。
+
 2026-06-27 Broker 底层接口对齐 xtquant（订单簿入 SimBroker）
 
 - 把每日订单簿从引擎移入 `SimBroker`，暴露与实盘 xtquant 1:1 的底层接口：`order_stock(order_type, stock_code, order_volume, price_type, price, …) -> order_id`、`cancel_order_stock(order_id)`、`query_stock_orders(cancelable_only)`、`query_stock_trades`、`query_stock_positions`、`query_stock_asset`；`match_bar` 逐 bar 撮合（市价按 open + 滑点；限价触价按限价、做市无滑点；TIF 到期撤单）。`get_account/get_positions/query_orders/trades_for` 重命名为 query_stock_*（更新全部调用方）。
