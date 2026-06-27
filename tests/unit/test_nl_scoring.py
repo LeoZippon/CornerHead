@@ -258,5 +258,36 @@ class NLSubAgentEngineTest(unittest.TestCase):
             self.assertEqual(result.tool_calls[0]["arguments"]["pattern"], "公告|处罚")
 
 
+class NLBudgetTest(unittest.TestCase):
+    def _make_snapshot(self, tmp: Path) -> Path:
+        snap = tmp / "snap"
+        snap.mkdir(parents=True)
+        pd.DataFrame(
+            columns=["text_id", "dataset", "ts_codes", "title", "available_at", "source_hash", "library_file"]
+        ).to_parquet(snap / "text_index.parquet", index=False)
+        (snap / "text_library").mkdir()
+        return snap
+
+    def test_nl_call_budget_returns_budget_exhausted_past_cap(self):
+        from autotrade.environment.tools.backtest import _StrategyNLService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snap = self._make_snapshot(Path(tmp))
+            service = _StrategyNLService(
+                proxy=None,
+                snapshot_dir=snap,
+                log_dir=Path(tmp) / "log",
+                failure_policy="return_error_with_audit",
+                per_call_timeout_seconds=1.0,
+                max_calls=1,
+            )
+            first = service.run("000001.SZ", prompt="x", kwargs={}, request={"request_id": "1"})
+            second = service.run("000001.SZ", prompt="x", kwargs={}, request={"request_id": "2"})
+            self.assertEqual(service.calls, 2)
+            self.assertNotEqual(first["state"], "budget_exhausted")
+            self.assertEqual(second["state"], "budget_exhausted")
+            self.assertEqual(second["status"], "error")
+
+
 if __name__ == "__main__":
     unittest.main()

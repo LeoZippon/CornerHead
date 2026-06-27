@@ -31,7 +31,7 @@ from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.snapshot import load_snapshot_manifest
 from autotrade.environment.step_tree import StepTree
 
-from .base import ActionSpec, PHASE_FROZEN, PHASE_TRAIN_VALID, ToolContext, ToolError
+from .base import ActionField, ActionSpec, PHASE_FROZEN, PHASE_TRAIN_VALID, ToolContext, ToolError
 from .modification_check import ModificationCheckTool
 
 MODES = ("valid", "frozen_eval")
@@ -47,6 +47,18 @@ class BacktestTool:
             "Runner supplies validation mode; the tool auto-verifies the latest modification check "
             "when needed and writes a new results/valid_<idx>/ artifact."
         ),
+        fields=(
+            ActionField(
+                "replay_window",
+                "integer",
+                required=False,
+                min_value=2,
+                description=(
+                    "Optional: replay only the first N trade days of the region for a fast debug "
+                    "check. The default full run is the only result eligible for acceptance/freeze."
+                ),
+            ),
+        ),
         read_only=False,
         destructive=False,
         concurrency_safe=False,
@@ -56,7 +68,9 @@ class BacktestTool:
     def __init__(self, ctx: ToolContext) -> None:
         self.ctx = ctx
 
-    def run(self, *, mode: str, result_name: str | None = None) -> dict[str, object]:
+    def run(
+        self, *, mode: str, result_name: str | None = None, replay_window: int | None = None
+    ) -> dict[str, object]:
         if mode not in MODES:
             raise ToolError(f"unsupported backtest mode: {mode}")
         if not self.ctx.extra.get("allow_backtest", True):
@@ -66,8 +80,9 @@ class BacktestTool:
             self.ctx.require_writable(tool=self.name)
         else:
             self.ctx.require_phase(PHASE_FROZEN, tool=self.name)
+            replay_window = None  # frozen_eval always replays the full region
         try:
-            return self._execute(mode=mode, result_name=result_name)
+            return self._execute(mode=mode, result_name=result_name, replay_window=replay_window)
         except (BacktestError, ArtifactError) as exc:
             self._record_failure(mode, str(exc))
             raise ToolError(str(exc)) from exc
@@ -99,7 +114,7 @@ class BacktestTool:
         self.ctx.trace.emit("tool", summary, step_id=self.ctx.current_step_id)
         return summary
 
-    def _execute(self, *, mode: str, result_name: str | None) -> dict[str, object]:
+    def _execute(self, *, mode: str, result_name: str | None, replay_window: int | None = None) -> dict[str, object]:
         manifest = self.ctx.manifest
         modification_check = self._enforce_modification_check(mode)
         artifact = load_strategy_artifact(self.ctx.paths.agent_output)
@@ -110,6 +125,15 @@ class BacktestTool:
         replay_dir = self.ctx.paths.valid if mode == "valid" else self.ctx.paths.test
         replay_daily = pd.read_parquet(replay_dir / "daily.parquet")
         replay_minutes = _read_replay_minutes(replay_dir)
+        # A short debug window replays only the first N trade days; such a run is
+        # never accept-eligible (complete_validation=False).
+        complete_validation = replay_window is None
+        if replay_window is not None:
+            keep = set(sorted(replay_daily["trade_date"].astype(str).unique())[: max(2, int(replay_window))])
+            replay_daily = replay_daily[replay_daily["trade_date"].astype(str).isin(keep)]
+            if replay_minutes is not None:
+                replay_minutes = replay_minutes[replay_minutes["trade_date"].astype(str).isin(keep)]
+                replay_minutes = None if replay_minutes.empty else replay_minutes
         replay_granularity = "minute" if replay_minutes is not None else "daily"
         result_dir = self._planned_result_dir(mode, result_name)
         if result_dir.exists():
@@ -127,6 +151,7 @@ class BacktestTool:
             log_dir=tmp_nl_dir,
             failure_policy=str(manifest.get("nl_failure_policy", "return_error_with_audit")),
             per_call_timeout_seconds=per_call_timeout,
+            max_calls=_optional_int(manifest.get("nl_max_calls_per_backtest")),
         )
         try:
             profile = BrokerProfile(**_profile_kwargs(dict(manifest.require("broker_profile"))))
@@ -180,7 +205,8 @@ class BacktestTool:
             "artifact_hash": artifact.artifact_hash,
             "model_artifact_hash": model_artifacts.artifact_hash,
             "combined_artifact_hash": combined_artifact_hash(artifact.artifact_hash, model_artifacts.artifact_hash),
-            "complete_validation": True,
+            "complete_validation": complete_validation,
+            "replay_window": replay_window,
             "result_name": result_dir.name,
             "result_path": self.ctx.executor.map_path(result_dir),
             "host_result_path": str(result_dir),
@@ -190,6 +216,8 @@ class BacktestTool:
             "model_artifact_bytes": model_artifacts.total_bytes,
             "replay_granularity": replay.granularity,
             "order_count": int(stats["order_count"]),
+            "nl_calls": int(nl_service.calls),
+            "nl_max_calls_per_backtest": nl_service.max_calls,
             "trade_count": int(stats["trade_count"]),
             "total_return": stats["total_return"],
             "long_return": stats["long_return"],
@@ -207,7 +235,7 @@ class BacktestTool:
         }
         self.ctx.manifest.append_backtest_summary(summary)
         self.ctx.trace.emit("backtest", summary, step_id=self.ctx.current_step_id)
-        if mode == "valid" and self.ctx.manifest.get("step_tree_enabled"):
+        if mode == "valid" and complete_validation and self.ctx.manifest.get("step_tree_enabled"):
             StepTree(self.ctx.paths.steps).record_step(
                 self.ctx.paths.agent_output,
                 epoch_id=str(manifest.get("epoch_id", "")) or None,
@@ -321,12 +349,15 @@ class _StrategyNLService:
         log_dir: Path,
         failure_policy: str,
         per_call_timeout_seconds: float,
+        max_calls: int | None = None,
     ) -> None:
         self.proxy = proxy
         self.snapshot_dir = snapshot_dir
         self.log_dir = log_dir
         self.failure_policy = failure_policy
         self.per_call_timeout_seconds = per_call_timeout_seconds
+        self.max_calls = max_calls
+        self.calls = 0
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.retriever = TextRetriever(snapshot_dir / "text_index.parquet", snapshot_dir / "text_library")
 
@@ -338,6 +369,15 @@ class _StrategyNLService:
         kwargs: dict[str, object],
         request: dict[str, object],
     ) -> dict[str, object]:
+        self.calls += 1
+        if self.max_calls is not None and self.calls > self.max_calls:
+            # Hard backstop on API spend; strategy code sees an audited error and
+            # degrades (the prompt asks it to keep NL frequency low to begin with).
+            result = _error_result(
+                ts_code, state="budget_exhausted", error=f"nl call budget exhausted (max {self.max_calls})"
+            )
+            self._write_result(request, result)
+            return result
         if self.proxy is None:
             if self.failure_policy == "return_error_with_audit":
                 result = _error_result(ts_code, state="failed_with_policy", error="nl proxy is not configured")
@@ -412,6 +452,15 @@ def _read_replay_minutes(replay_dir: Path) -> pd.DataFrame | None:
 
 def _decision_date(decision_time: str) -> str:
     return decision_time[:10].replace("-", "")
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _modification_delta_summary(check: object) -> dict[str, object] | None:

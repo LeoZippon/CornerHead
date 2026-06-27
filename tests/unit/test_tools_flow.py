@@ -636,6 +636,17 @@ class ToolFlowTest(unittest.TestCase):
             BacktestTool(ctx).run(mode="valid")
             self.assertFalse((ctx.paths.steps / "tree.json").exists())
 
+    def test_replay_window_is_a_non_freezable_debug_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            ctx.manifest.update(step_tree_enabled=True)
+            summary = BacktestTool(ctx).run(mode="valid", replay_window=2)
+            self.assertEqual(summary["status"], "ok")
+            self.assertEqual(summary["replay_window"], 2)
+            self.assertFalse(summary["complete_validation"])
+            # A short debug window is not a validated step, so no step-tree node.
+            self.assertFalse((ctx.paths.steps / "tree.json").exists())
+
 
 class ShellToolTest(unittest.TestCase):
     def test_shell_runs_and_logs_and_guards_test_dir(self):

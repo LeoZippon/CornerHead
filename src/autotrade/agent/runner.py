@@ -641,7 +641,7 @@ class AgentSessionRunner:
             if action == "backtest":
                 if self.mode == "meta_learning":
                     return {"observation": "error", "action": action, "error": "backtests are not allowed in this session"}
-                return {"observation": "backtest", **self.backtest.run(mode="valid")}
+                return {"observation": "backtest", **self.backtest.run(mode="valid", replay_window=(args or {}).get("replay_window"))}
             if action == "finish_fold":
                 if self.mode == "meta_learning":
                     return {"observation": "error", "action": action, "error": "use done to end this session"}
