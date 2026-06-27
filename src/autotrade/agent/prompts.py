@@ -78,6 +78,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 
 ## 交易规则（写入回测流程，无法绕过）
 - 入口：Environment 按回放分钟逐分钟调用一次 `main(ctx)`（一次覆盖全市场）。时序完全由你控制：每分钟管理已有持仓、在你选定的时点筛选并开新仓。无需返回 `trade_intents`，直接调用 `ctx.broker` 原语下单即可在任意分钟开/平仓。
+- 盘前竞价：默认每个回放日在常规分钟前有一个集合竞价决策 tick（时点见 run manifest 的 `auction_decision_time`），`ctx.price` 为当日开盘价；在该 tick 下单按当日涨跌停在开盘价成交（一字涨停买单/跌停空单会被拒）。`09:15` 集合竞价尚未撮合、没有可用价格。
 - `ctx`（市场级，每分钟重建）：
   - `ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.account`、`ctx.positions`（只读快照）、`ctx.cash`。
   - `ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`：只含当前分钟、PIT 可见的 bar（未来分钟不可见）。

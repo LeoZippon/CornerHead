@@ -1,3 +1,9 @@
+2026-06-26 Audit fixes + pre-open call-auction (PR3)
+
+- 用 SubAgent 审计 `main(ctx)` 引擎，落地修复（commit `04c8283`，分支 `feat/main-ctx-engine`）：H1 合成 09:30 开盘 bar 泄露当日 high/low/vol（改为只暴露开盘价：high=low=open、vol=amount=NaN，加回归测试）；H2 常驻驱动把 Agent stdout 重定向到 stderr 但宿主只读 stdout → stderr 管道占满死锁 → 伪超时（加守护线程持续排空 stderr，`close()` 不再用 `communicate()` 抢同一 fd）；M1 步超时改为“NL 被服务即重置”的无活动超时，单次慢 `nl()` 不再吃光本分钟预算；L2 Agent `main.py` import 错误改为首个请求返回结构化错误、不崩常驻进程。M2（NL 文件 O(N²) 重读）/L1（乐观 broker 视图）/L3（裸 fd-1 写）评估为受限/设计内，暂不改。
+- 盘前集合竞价（commit `436222c`，分支 `feat/preopen-auction`）：每个回放日在常规分钟前插入 `09:25` 竞价 tick（A 股撮合出开盘价的时点），价=当日开盘价、不含日内 high/low/vol；`main` 可在此筛选下单，Broker 复用当日涨跌停规则在开盘价成交（一字涨停买单/跌停空单被拒），成交 `price_label="auction"`。`09:15` 无撮合价、仅用于实盘/QMT 盘前预提交。config 旋钮 `auction_enabled`/`auction_decision_time`/`nl_max_calls_per_backtest` 经 ExperimentConfig→Fold run manifest→`backtest_tool`→引擎。
+- 验证：全量单测 285 通过（新增 H1 泄露回归 + 竞价成交/一字涨停拒单各 1）。
+
 2026-06-26 PR2: unified per-minute main(ctx) execution model
 
 - 把"decide-once + 每股逐 bar `trade_strategy`"改为单一常驻 `main(ctx)` 引擎：Environment 每个回放分钟调用一次市场级 `main(ctx)`，Agent 用 `ts_code` 原语在任意分钟开/平仓；删除旧 `trade_intents` 一次性映射与第二个驱动。
