@@ -102,7 +102,7 @@ class ExperimentConfig:
     auction_enabled: bool = True
     auction_preopen_time: str | None = "09:15"
     auction_decision_time: str = "09:25"
-    # Rolling daily as-of view (WS2): each replay day, ctx.asof_dir exposes the
+    # Rolling daily as-of view: each replay day, ctx.asof_dir exposes the
     # daily history extended with replay-period bars visible by that day's pre-open
     # (trade_date < D); other domains stay on the frozen ctx.snapshot_dir.
     rolling_asof_enabled: bool = True

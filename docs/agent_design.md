@@ -289,7 +289,7 @@ ctx.snapshot_dir          # Fold 决策时点冻结全量快照（事件/文本/
 ctx.model_dir, ctx.state_dir, ctx.params
 ```
 
-横截面日频筛选读 `ctx.asof_dir/daily.parquet`（每个回放日由 Environment 用冻结快照日线历史 ∪ 回放期 `trade_date < D` 的日线滚动构造，当日及未来不可见）；事件/文本/财务等其他域仍读 `ctx.snapshot_dir`（冻结于 Fold 决策时点，v1 不滚动）。
+横截面日频筛选读 `ctx.asof_dir/daily.parquet`（每个回放日由 Environment 用冻结快照日线历史 ∪ 回放期 `trade_date < D` 的日线滚动构造，当日及未来不可见）；事件/文本/财务等其他域仍读 `ctx.snapshot_dir`（冻结于 Fold 决策时点，不随回放滚动）。
 
 Broker 原语和 `ctx` 完整语义由 `docs/environment_design.md` 第 7 章定义。`ctx.bars` 只含当前分钟、bar close 时点已可见的行情，未来分钟不可见。正式回放进程只读加载 `output/` 中的策略代码，禁止写 `output/`、创建软/硬链接，且按真实路径阻断经链接访问测试槽或 `/mnt/artifacts`。
 
