@@ -1,3 +1,11 @@
+2026-06-27 限价单（FIX_PRICE）+ 每日订单簿，对齐 xtquant
+
+- 据官方 xtquant 文档（dict.thinktrader.net/nativeApi/xttrader.html）确认：`FIX_PRICE` 是挂在交易所的限价单（触价成交、未成挂单、可 `cancel_order_stock`、当日有效），与回测「挂限价、bar high/low 触及成交、到期撤单」完全对应；QMT 缺的是券商侧条件单/止损单，普通限价单是支持的。早前「不上限价单」判断有误，纠正。
+- 引擎把单 bar 的 `pending` 字典重构为每日订单簿（`_Order` + `_make_order`/`_fill_or_rest`/`_fill_price_for`）：决策 bar +`execution_lag_bars` 进入撮合（`activate_index`）。市价单在进入 bar 按 open + 滑点成交；限价单（`limit=P`）自进入 bar 起挂 `valid_bars` 根（默认 1），买/补 `open<=P` 或 `low<=P`、卖/空 `open>=P` 或 `high>=P` 时按 P 成交，窗口内未触及记 `order_cancelled`（expired_unfilled），当日收盘仍挂的也撤。
+- 限价单做市无滑点：`SimBroker.execute(apply_slippage=)` 透传到 `_open`/`_reduce`/`_fill_*`，限价成交用 raw_price 不加滑点（仍收佣金）；市价单照旧加滑点。
+- Agent API：`ctx.broker.buy/sell/short/cover(code, ..., limit=None, valid_bars=1)`（`close` 恒市价）；限价单不更新乐观持仓视图（成交不确定），跨 tick 去重靠 `pending()`。映射：buy/sell/short/cover/close↔STOCK_BUY/STOCK_SELL/CREDIT_SLO_SELL/CREDIT_BUY_SECU_REPAY/市价平仓。
+- 验证：全量单测 292 通过（新增限价成交 + 限价到期撤单 2 测）；同步 environment_design/agent_design/prompt/template，PROMPTS.md 重生成。
+
 2026-06-26 QMT-faithful execution: lag knob + working-order query
 
 - 背景：实盘 QMT 无券商侧条件单/止损单，故回测不引入引擎侧限价/止损单（否则学到实盘无法复现的成交）。改为「市价单 + 可配置成交延迟 + 在途单查询」，与实盘轮询控制器一致。

@@ -1,13 +1,16 @@
 """Formal strategy entrypoint.
 
-The Environment calls ``main(ctx)`` once per replay tick. Orders are market orders
-(parity with the live QMT controller, which has no broker-side conditional
-orders): an order placed on a tick fills at a LATER bar's open — ``execution_lag_bars``
-bars ahead (default 2, modelling submit latency), never within the bar you decided
-on. Query ``ctx.broker.pending(ts_code)`` to skip codes with an order still in
-flight, so the fill lag never produces a duplicate. The Broker enforces cash,
-short margin, T+1, lot size, price limits, suspension, and shortability, and
-records every fill.
+The Environment calls ``main(ctx)`` once per replay tick. Orders map to live QMT
+``order_stock`` types (there is no broker-side stop/conditional order — QMT has
+none). An order placed on a tick reaches the book a LATER bar — ``execution_lag_bars``
+ahead (default 2, modelling submit latency), never within the bar you decided on:
+- a plain call is a **market order**, filling at that bar's open + slippage;
+- ``limit=P`` is a **limit order** (FIX_PRICE) that rests until a bar's [low, high]
+  reaches P (filling at exactly P, no slippage) or auto-cancels after ``valid_bars``
+  bars (default 1).
+Query ``ctx.broker.pending(ts_code)`` to skip codes with an order still in flight,
+so the fill lag never produces a duplicate. The Broker enforces cash, short margin,
+T+1, lot size, price limits, suspension, and shortability, and records every fill.
 
 Recommended daily cadence (illustrated below):
 
@@ -27,8 +30,9 @@ Recommended daily cadence (illustrated below):
 * ``ctx.account`` / ``ctx.positions`` — read-only snapshots; ``ctx.cash``.
 * ``ctx.price(ts_code)`` / ``ctx.bar(ts_code)`` / ``ctx.bars`` — this tick only
   (None at the 09:15 info tick).
-* ``ctx.broker`` — ``.buy/sell/short/cover/close(ts_code, amount=None, weight=None)``,
-  ``.cash``/``.money``, ``.position(ts_code)``, ``.pending(ts_code)`` (working orders).
+* ``ctx.broker`` — ``.buy/sell/short/cover/close(ts_code, amount=None, weight=None,
+  limit=None, valid_bars=1)``, ``.cash``/``.money``, ``.position(ts_code)``,
+  ``.pending(ts_code)`` (working orders). ``limit=P`` makes it a limit order.
 * ``ctx.nl(ts_code, prompt=...)`` — PIT NL sub-agent; use it only in the decision
   stage and keep its frequency low (it is the main API cost).
 * ``ctx.asof_dir`` / ``ctx.snapshot_dir`` — point-in-time data for screening;

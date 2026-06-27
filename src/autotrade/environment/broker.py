@@ -322,12 +322,15 @@ class SimBroker:
         reason: str = "",
         source_artifacts: list[str] | None = None,
         price_label: str = "price",
+        apply_slippage: bool = True,
     ) -> Order:
         """Apply one strategy primitive at the current bar with full constraints.
 
         ``action`` is ``buy``/``sell``/``short``/``cover``/``close``. ``amount``
         is a share count (lot-aligned); ``weight`` is a notional-fraction
-        convenience used when ``amount`` is absent.
+        convenience used when ``amount`` is absent. ``apply_slippage`` is True for
+        marketable (taker) fills and False for limit fills, where ``raw_price`` is
+        already the maker fill price (the limit) and no spread is crossed.
         """
         self._advance_date(trade_date)
         action = str(action).lower().strip()
@@ -353,12 +356,12 @@ class SimBroker:
         raw_price = float(raw_price)
 
         if action in {"buy", "short"}:
-            return self._open(order, bar, raw_price, amount=amount, weight=weight)
+            return self._open(order, bar, raw_price, amount=amount, weight=weight, apply_slippage=apply_slippage)
         if action in {"sell", "cover", "close"}:
-            return self._reduce(order, bar, raw_price, amount=amount)
+            return self._reduce(order, bar, raw_price, amount=amount, apply_slippage=apply_slippage)
         return self._reject(order, f"unsupported_action:{action}")
 
-    def _open(self, order: Order, bar: pd.Series, raw_price: float, *, amount, weight) -> Order:
+    def _open(self, order: Order, bar: pd.Series, raw_price: float, *, amount, weight, apply_slippage: bool = True) -> Order:
         shares = self._resolve_amount(amount, weight, raw_price)
         if shares <= 0:
             return self._reject(order, "amount_below_lot_size")
@@ -380,13 +383,13 @@ class SimBroker:
                 return self._reject(order, inventory_reject)
             if MarketData.limit_down_blocked_at_price(bar, raw_price):
                 return self._reject(order, "limit_down_blocked_short")
-            return self._fill_short_open(order, raw_price, shares)
+            return self._fill_short_open(order, raw_price, shares, apply_slippage)
         if MarketData.limit_up_blocked_at_price(bar, raw_price):
             return self._reject(order, "limit_up_blocked_buy")
-        return self._fill_long_open(order, raw_price, shares)
+        return self._fill_long_open(order, raw_price, shares, apply_slippage)
 
-    def _fill_long_open(self, order: Order, raw_price: float, shares: int) -> Order:
-        price = self.profile.slipped_price(raw_price, is_buy=True)
+    def _fill_long_open(self, order: Order, raw_price: float, shares: int, apply_slippage: bool = True) -> Order:
+        price = self.profile.slipped_price(raw_price, is_buy=True) if apply_slippage else raw_price
         notional = shares * price
         fee = self.profile.commission(notional)
         if notional + fee > self.cash + 1e-6:
@@ -396,8 +399,8 @@ class SimBroker:
         self._add_to_position(order.ts_code, "long", shares, price, notional + fee, order.trade_date)
         return self._fill(order, price, shares, "open")
 
-    def _fill_short_open(self, order: Order, raw_price: float, shares: int) -> Order:
-        price = self.profile.slipped_price(raw_price, is_buy=False)
+    def _fill_short_open(self, order: Order, raw_price: float, shares: int, apply_slippage: bool = True) -> Order:
+        price = self.profile.slipped_price(raw_price, is_buy=False) if apply_slippage else raw_price
         notional = shares * price
         fee = self.profile.commission(notional)
         duty = self.profile.stamp_duty_on_sale(notional, order.trade_date)
@@ -411,7 +414,7 @@ class SimBroker:
         self._add_to_position(order.ts_code, "short", shares, price, notional - fee - duty, order.trade_date)
         return self._fill(order, price, shares, "open")
 
-    def _reduce(self, order: Order, bar: pd.Series, raw_price: float, *, amount) -> Order:
+    def _reduce(self, order: Order, bar: pd.Series, raw_price: float, *, amount, apply_slippage: bool = True) -> Order:
         pos = self.positions.get(order.ts_code)
         want_side = "short" if order.action == "cover" else ("long" if order.action == "sell" else None)
         if pos is None:
@@ -433,7 +436,7 @@ class SimBroker:
             return self._reject(order, "limit_down_blocked_sell")
         if pos.side == "short" and MarketData.limit_up_blocked_at_price(bar, raw_price):
             return self._reject(order, "limit_up_blocked_cover")
-        price = self.profile.slipped_price(raw_price, is_buy=is_buy)
+        price = self.profile.slipped_price(raw_price, is_buy=is_buy) if apply_slippage else raw_price
         self._reduce_position(pos, shares, price, order.trade_date)
         return self._fill(order, price, shares, "close" if order.ts_code not in self.positions else "reduce")
 

@@ -181,17 +181,17 @@ class _Broker:
         working.extend(action for action in self._actions if str(action.get("ts_code")) == code)
         return working
 
-    def buy(self, ts_code, amount=None, weight=None, reason=None, **kwargs):
-        self._order("buy", ts_code, amount, weight, reason, +1)
+    def buy(self, ts_code, amount=None, weight=None, limit=None, valid_bars=None, reason=None, **kwargs):
+        self._order("buy", ts_code, amount, weight, limit, valid_bars, reason, +1)
 
-    def sell(self, ts_code, amount=None, reason=None, **kwargs):
-        self._order("sell", ts_code, amount, None, reason, -1)
+    def sell(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None, **kwargs):
+        self._order("sell", ts_code, amount, None, limit, valid_bars, reason, -1)
 
-    def short(self, ts_code, amount=None, weight=None, reason=None, **kwargs):
-        self._order("short", ts_code, amount, weight, reason, -1)
+    def short(self, ts_code, amount=None, weight=None, limit=None, valid_bars=None, reason=None, **kwargs):
+        self._order("short", ts_code, amount, weight, limit, valid_bars, reason, -1)
 
-    def cover(self, ts_code, amount=None, reason=None, **kwargs):
-        self._order("cover", ts_code, amount, None, reason, +1)
+    def cover(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None, **kwargs):
+        self._order("cover", ts_code, amount, None, limit, valid_bars, reason, +1)
 
     def close(self, ts_code, reason=None, **kwargs):
         code = str(ts_code)
@@ -202,16 +202,22 @@ class _Broker:
             self._cash += held * price
         self._pos[code] = 0
 
-    def _order(self, action, ts_code, amount, weight, reason, sign):
+    def _order(self, action, ts_code, amount, weight, limit, valid_bars, reason, sign):
         code = str(ts_code)
         record = {"action": action, "ts_code": code}
         if amount is not None:
             record["amount"] = amount
         if weight is not None:
             record["weight"] = weight
+        if limit is not None:
+            record["limit"] = limit
+        if valid_bars is not None:
+            record["valid_bars"] = valid_bars
         if reason is not None:
             record["reason"] = reason
         self._actions.append(record)
+        if limit is not None:
+            return  # a resting limit order may not fill; leave the optimistic view unchanged
         price = self._prices.get(code)
         shares = self._resolve_shares(amount, weight, price)
         if shares > 0 and price is not None:
@@ -549,33 +555,31 @@ def run_main_ctx_replay(
                 plan = _day_tick_plan(
                     minute_rows, auction_enabled, auction_preopen_time, auction_decision_time, execution_lag_bars
                 )
-                fill_groups = {tick.minute_key: tick.group for tick in plan if tick.is_real}
-                pending: dict[str, list[tuple[dict[str, object], str]]] = {}
+                real_keys = [tick.minute_key for tick in plan if tick.is_real]
+                real_index = {key: i for i, key in enumerate(real_keys)}
+                live: list[_Order] = []
                 for tick in plan:
-                    # Deferred execution: orders decided on an earlier tick fill at
-                    # THIS bar's open before the Agent sees the bar again.
                     if tick.is_real:
-                        for action, label in pending.pop(tick.minute_key, []):
-                            _execute_main_action(
-                                action,
-                                fill_groups[tick.minute_key],
-                                broker,
-                                trade_date=trade_date,
-                                minute_key=tick.minute_key,
-                                price_label=label,
-                            )
+                        index = real_index[tick.minute_key]
+                        for order in live:
+                            if order.status == "incoming" and order.activate_index == index:
+                                order.status = "working"  # reached the exchange (decision + lag)
+                        live = _fill_or_rest(
+                            live, tick.group, broker, granularity,
+                            trade_date=trade_date, minute_key=tick.minute_key, index=index,
+                        )
                     state = _market_state(
                         broker,
                         trade_date=trade_date,
                         minute_key=tick.minute_key,
                         minute_group=tick.group,
                         asof_dir=asof_dir,
-                        pending=_working_orders(pending),
+                        pending=_working_orders(live),
                     )
                     actions = main_policy.step(state)
                     if not actions:
                         continue
-                    if tick.fill_key is None:
+                    if tick.activate_index is None:
                         # No bar execution_lag_bars ahead (near the close): cannot fill.
                         broker.record_event(
                             "main_actions_unfilled",
@@ -585,15 +589,35 @@ def run_main_ctx_replay(
                             actions=_jsonable(actions),
                         )
                         continue
-                    label = "auction" if tick.is_auction else f"{granularity}:{tick.fill_key}"
-                    pending.setdefault(tick.fill_key, []).extend((action, label) for action in actions)
+                    placed = 0
+                    for action in actions:
+                        order = _make_order(action, tick.activate_index, len(real_keys), tick.is_auction)
+                        if order is None:
+                            broker.record_event(
+                                "main_action_ignored",
+                                trade_date=trade_date,
+                                action=_jsonable(action),
+                                reason="unsupported_or_missing_ts_code",
+                            )
+                            continue
+                        live.append(order)
+                        placed += 1
+                    if placed:
+                        broker.record_event(
+                            "main_actions",
+                            trade_date=trade_date,
+                            minute_key=tick.minute_key,
+                            activate_index=tick.activate_index,
+                            action_count=placed,
+                            actions=_jsonable(actions),
+                        )
+                for order in live:  # day order: unfilled rest auto-voids at the close
                     broker.record_event(
-                        "main_actions",
+                        "order_cancelled",
                         trade_date=trade_date,
-                        minute_key=tick.minute_key,
-                        fill_key=tick.fill_key,
-                        action_count=len(actions),
-                        actions=_jsonable(actions),
+                        ts_code=order.ts_code,
+                        reason="day_end_unfilled",
+                        order=order.summary(),
                     )
 
         equity = broker.mark_to_market(trade_date)
@@ -617,9 +641,34 @@ class _Tick:
 
     minute_key: str
     group: pd.DataFrame
-    fill_key: str | None
+    activate_index: int | None
     is_real: bool
     is_auction: bool
+
+
+@dataclass
+class _Order:
+    """A live order in the per-day book (xtquant ``order_stock`` semantics).
+
+    ``limit_price=None`` is a market order (``MARKET_PEER_PRICE``) that fills at
+    its activation bar's open; a limit order (``FIX_PRICE``) rests from
+    ``activate_index`` through ``expire_index`` and fills at the limit when a bar
+    reaches it, else auto-cancels (the live ``cancel_order_stock`` at bar/day end).
+    """
+
+    name: str
+    ts_code: str
+    amount: int | None
+    weight: float | None
+    limit_price: float | None
+    activate_index: int
+    expire_index: int
+    is_auction: bool
+    reason: str
+    status: str = "incoming"  # incoming -> working -> (filled/cancelled, then dropped)
+
+    def summary(self) -> dict[str, object]:
+        return {"action": self.name, "ts_code": self.ts_code, "amount": self.amount, "weight": self.weight, "limit": self.limit_price}
 
 
 def _day_tick_plan(
@@ -629,16 +678,16 @@ def _day_tick_plan(
     decision_time: str,
     execution_lag_bars: int,
 ) -> list[_Tick]:
-    """Ordered decision ticks for one day with their deferred fill targets.
+    """Ordered decision ticks for one day, each tagged with the real-bar index its
+    orders reach the book at (``activate_index``).
 
-    A decision on real bar *i* fills at real bar *i + execution_lag_bars*; a bar
-    that has no such later bar (near the close) yields ``fill_key=None``. With
-    ``auction_enabled`` two pre-open ticks lead the day: a ``preopen_time``
-    (09:15) info tick with no bars — ``ctx.price`` is None since the auction has
-    not matched — whose orders fill at the first real bar (the 09:30 opening
-    auction); and a ``decision_time`` (09:25) tick showing each code's matched
-    open whose orders fill at the first continuous bar (09:31). The pre-open
-    batch-auction fills are fixed and independent of ``execution_lag_bars``.
+    A decision on real bar *i* activates at *i + execution_lag_bars*; a bar with
+    no such later bar (near the close) yields ``activate_index=None``. With
+    ``auction_enabled`` two pre-open ticks lead the day: a ``preopen_time`` (09:15)
+    info tick with no bars (``ctx.price`` is None) activating at the first real bar
+    (the 09:30 opening auction), and a ``decision_time`` (09:25) tick on the
+    matched open activating at the first continuous bar (09:31). The pre-open
+    activation is fixed and independent of ``execution_lag_bars``.
     """
     real_keys = sorted({str(key) for key in minute_rows["minute_key"]}, key=_minute_sort)
     if not real_keys:
@@ -652,30 +701,22 @@ def _day_tick_plan(
             if column in open_group.columns:
                 open_group[column] = float("nan")  # intraday volume is unknown pre-open
         if preopen_time:
-            plan.append(_Tick(preopen_time, _empty_minute_rows(), real_keys[0], False, True))
-        second = real_keys[1] if len(real_keys) > 1 else real_keys[-1]
-        plan.append(_Tick(decision_time, open_group, second, False, True))
+            plan.append(_Tick(preopen_time, _empty_minute_rows(), 0, False, True))
+        plan.append(_Tick(decision_time, open_group, min(1, len(real_keys) - 1), False, True))
     lag = max(1, execution_lag_bars)
     for index, key in enumerate(real_keys):
-        fill_index = index + lag
-        fill_key = real_keys[fill_index] if fill_index < len(real_keys) else None
-        plan.append(_Tick(key, groups[key], fill_key, True, False))
+        activate_index = index + lag
+        plan.append(_Tick(key, groups[key], activate_index if activate_index < len(real_keys) else None, True, False))
     return plan
 
 
-def _working_orders(
-    pending: dict[str, list[tuple[dict[str, object], str]]],
-) -> dict[str, list[dict[str, object]]]:
-    """Queued-but-unfilled orders grouped by ``ts_code``, surfaced to the Agent as
-    ``ctx.broker.pending(ts_code)`` so its de-dup mirrors the live order query."""
+def _working_orders(live: list[_Order]) -> dict[str, list[dict[str, object]]]:
+    """Still-live orders grouped by ``ts_code``, surfaced to the Agent as
+    ``ctx.broker.pending(ts_code)`` (parity with ``query_stock_orders``) so its
+    de-dup mirrors the live order query."""
     working: dict[str, list[dict[str, object]]] = {}
-    for items in pending.values():
-        for action, _label in items:
-            code = str(action.get("ts_code", ""))
-            if code:
-                working.setdefault(code, []).append(
-                    {"action": str(action.get("action", "")), "amount": action.get("amount"), "weight": action.get("weight")}
-                )
+    for order in live:
+        working.setdefault(order.ts_code, []).append(order.summary())
     return working
 
 
@@ -750,43 +791,104 @@ def _market_state(
     }
 
 
-def _execute_main_action(
-    action: dict[str, object],
-    minute_group: pd.DataFrame,
-    broker: SimBroker,
-    *,
-    trade_date: str,
-    minute_key: str,
-    price_label: str,
-) -> None:
+def _make_order(action: dict[str, object], activate_index: int, n_real: int, is_auction: bool) -> _Order | None:
+    """Build a live order from a ``main()`` action, or None if it is unsupported.
+
+    ``limit`` (a fixed price) makes it a limit order resting for ``valid_bars``
+    bars from activation (default 1: just the activation bar); otherwise it is a
+    market order valid for that one bar. ``close`` is always a market exit.
+    """
     name = _ACTION_ALIASES.get(str(action.get("action", "")).lower().strip(), str(action.get("action", "")).lower().strip())
     ts_code = str(action.get("ts_code", "")).strip()
     if name not in _SUPPORTED_ACTIONS or not ts_code:
-        broker.record_event(
-            "main_action_ignored", trade_date=trade_date, action=_jsonable(action), reason="unsupported_or_missing_ts_code"
-        )
-        return
-    bar = _minute_bar_for_code(minute_group, ts_code)
-    if bar is None:
-        broker.record_event(
-            "main_action_ignored", trade_date=trade_date, ts_code=ts_code, action=_jsonable(action), reason="no_bar_this_minute"
-        )
-        return
-    broker.execute(
-        ts_code,
-        name,
-        trade_date=trade_date,
-        raw_price=_open_price(bar),
+        return None
+    limit = _float_or_none(action.get("limit")) if name != "close" else None
+    if limit is not None and limit <= 0:
+        limit = None
+    valid_bars = max(1, _int_or_none(action.get("valid_bars")) or 1) if limit is not None else 1
+    return _Order(
+        name=name,
+        ts_code=ts_code,
         amount=_int_or_none(action.get("amount")),
         weight=_float_or_none(action.get("weight")),
-        time=minute_key,
+        limit_price=limit,
+        activate_index=activate_index,
+        expire_index=min(activate_index + valid_bars - 1, n_real - 1),
+        is_auction=is_auction,
         reason=str(action.get("reason") or name),
-        price_label=price_label,
     )
 
 
+def _fill_or_rest(
+    live: list[_Order],
+    minute_group: pd.DataFrame,
+    broker: SimBroker,
+    granularity: str,
+    *,
+    trade_date: str,
+    minute_key: str,
+    index: int,
+) -> list[_Order]:
+    """Match each working order against this bar; return the still-live orders.
+
+    A fillable order is sent to ``broker.execute`` (which applies cash, T+1, lot,
+    limit, suspension and short-inventory constraints, so the result may still be
+    a reject); a limit order that this bar did not reach keeps resting until its
+    ``expire_index``, then auto-cancels (the live ``cancel_order_stock``)."""
+    survivors: list[_Order] = []
+    for order in live:
+        if order.status != "working":
+            survivors.append(order)  # not yet active (still inside the submit lag)
+            continue
+        bar = _minute_bar_for_code(minute_group, order.ts_code)
+        price = _fill_price_for(order, bar) if bar is not None else None
+        if price is not None:
+            broker.execute(
+                order.ts_code,
+                order.name,
+                trade_date=trade_date,
+                raw_price=price,
+                amount=order.amount,
+                weight=order.weight,
+                time=minute_key,
+                reason=order.reason,
+                price_label="auction" if order.is_auction else f"{granularity}:{minute_key}",
+                apply_slippage=order.limit_price is None,
+            )
+        elif index >= order.expire_index:
+            broker.record_event(
+                "order_cancelled", trade_date=trade_date, minute_key=minute_key,
+                ts_code=order.ts_code, reason="expired_unfilled", order=order.summary(),
+            )
+        else:
+            survivors.append(order)  # limit order keeps resting
+    return survivors
+
+
+def _fill_price_for(order: _Order, bar: pd.Series) -> float | None:
+    """Fill price for a working order against this bar, or None if not fillable now.
+
+    Market orders fill at the bar open. A limit order fills only when the bar's
+    range reaches the limit: a buy/cover at ``min(open, limit)`` when the bar opens
+    at/below or dips to the limit; a sell/short at ``max(open, limit)`` when it
+    opens at/above or rises to the limit (the maker gets exactly the limit price)."""
+    open_price = _open_price(bar)
+    if order.limit_price is None or open_price is None:
+        return open_price
+    limit = order.limit_price
+    if order.name in ("buy", "cover"):
+        if open_price <= limit:
+            return open_price
+        low = _float_or_none(bar.get("low"))
+        return limit if (low is not None and low <= limit) else None
+    if open_price >= limit:
+        return open_price
+    high = _float_or_none(bar.get("high"))
+    return limit if (high is not None and high >= limit) else None
+
+
 def _open_price(bar: pd.Series) -> float | None:
-    """Next-bar fill price: the fill bar's open, falling back to its close."""
+    """Market fill price: the bar's open, falling back to its close."""
     for field in ("open", "close"):
         value = bar.get(field)
         if value is not None and pd.notna(value):

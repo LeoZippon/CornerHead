@@ -48,6 +48,23 @@ def main(ctx):
         ctx.broker.buy(code, weight=0.2, reason="auction_entry")
 '''
 
+# Places a fixed-price (FIX_PRICE) limit buy; the engine rests it until a bar's
+# low reaches the limit, then fills at the limit price (no maker slippage).
+LIMIT_FILL_MAIN = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
+        ctx.broker.buy(code, weight=0.2, limit=9.80, valid_bars=5, reason="limit_entry")
+'''
+
+# Limit price the market never reaches inside its validity window -> auto-cancelled.
+LIMIT_CANCEL_MAIN = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
+        ctx.broker.buy(code, weight=0.2, limit=9.50, valid_bars=2, reason="limit_miss")
+'''
+
 # Re-evaluates every continuous tick but skips codes with a working order, so the
 # multi-bar execution lag does not produce duplicate entries (live order-query parity).
 PENDING_DEDUP_MAIN = '''
@@ -126,6 +143,23 @@ def _dense_minutes() -> pd.DataFrame:
         [
             {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": t, "open": 10.0, "high": 10.1, "low": 9.95, "close": 10.05}
             for t in ("09:30", "09:31", "09:32", "09:33", "14:57")
+        ]
+    )
+
+
+def _limit_minutes() -> pd.DataFrame:
+    # 09:33 dips to 9.78 (reaches a 9.80 limit) but never to 9.50.
+    rows = [
+        ("09:30", 10.00, 10.05, 9.98, 10.02),
+        ("09:31", 10.02, 10.06, 9.99, 10.03),
+        ("09:32", 10.03, 10.05, 9.95, 10.00),
+        ("09:33", 10.00, 10.02, 9.78, 9.85),
+        ("09:34", 9.85, 9.90, 9.80, 9.88),
+    ]
+    return pd.DataFrame(
+        [
+            {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": t, "open": o, "high": h, "low": low, "close": c}
+            for t, o, h, low, c in rows
         ]
     )
 
@@ -274,6 +308,26 @@ class MainCtxReplayTest(unittest.TestCase):
             )
         buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)  # main asserted the as-of view, then bought
+
+    def test_limit_order_fills_at_limit_when_bar_reaches_it(self) -> None:
+        (self.sandbox.paths.agent_output / "main.py").write_text(LIMIT_FILL_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _limit_minutes())
+        buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["price_label"], "minute:09:33")
+        # Maker fill at exactly the limit price — no taker slippage.
+        self.assertAlmostEqual(buys[0]["price"], 9.80)
+
+    def test_limit_order_auto_cancels_when_unfilled(self) -> None:
+        (self.sandbox.paths.agent_output / "main.py").write_text(LIMIT_CANCEL_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _limit_minutes())
+        buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 0)  # 9.50 never reached
+        cancels = [
+            e for e in result.broker.events
+            if e["event_type"] == "order_cancelled" and e.get("reason") == "expired_unfilled"
+        ]
+        self.assertTrue(cancels)
 
     def test_pending_query_dedups_in_flight_orders(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(PENDING_DEDUP_MAIN, encoding="utf-8")

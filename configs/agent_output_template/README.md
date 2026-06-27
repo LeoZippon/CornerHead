@@ -28,12 +28,15 @@ open positions every tick and screens/opens new positions on the ticks it
 chooses. It drives the Broker primitives by `ts_code` through `ctx.broker`; there
 is no `trade_intents` mapping — positions can open or change at any tick.
 
-Orders are **market orders** (parity with the live QMT controller — no
-broker-side conditional/stop orders): an order placed on a tick fills at a **later
-bar's open**, `execution_lag_bars` ahead (default 2, modelling submit latency),
-never within the bar you decided on. Query `ctx.broker.pending(code)` to skip
-codes with an order still in flight. The recommended daily cadence splits the
-decision from the order, because the 09:15 pre-open info tick has no price yet:
+Orders map to live QMT `order_stock` types (no broker-side stop/conditional
+order). An order reaches the book a **later bar**, `execution_lag_bars` ahead
+(default 2, modelling submit latency), never within the bar you decided on: a
+plain call is a **market order** (fills at that bar's open + slippage); `limit=P`
+is a **limit order** (FIX_PRICE) that rests until a bar's `[low, high]` reaches P
+(fills at P, no slippage) or auto-cancels after `valid_bars` bars. Query
+`ctx.broker.pending(code)` to skip codes with an order still in flight. The
+recommended daily cadence splits the decision from the order, because the 09:15
+pre-open info tick has no price yet:
 
 ```python
 from candidate import open_targets, screen_targets
@@ -54,8 +57,9 @@ def main(ctx):
 - `ctx.account`, `ctx.positions` (read-only snapshots), `ctx.cash`.
 - `ctx.price(ts_code)`, `ctx.bar(ts_code)`, `ctx.bars` — the current tick only
   (`None` at the 09:15 info tick; future bars are never visible).
-- `ctx.broker`: `.buy/sell/short/cover/close(ts_code, amount=None, weight=None)`,
-  `.money`/`.cash`, `.position(ts_code)`, `.pending(ts_code)` (working orders).
+- `ctx.broker`: `.buy/sell/short/cover/close(ts_code, amount=None, weight=None,
+  limit=None, valid_bars=1)`, `.money`/`.cash`, `.position(ts_code)`,
+  `.pending(ts_code)` (working orders). `limit=P` makes it a limit order.
 - `ctx.nl(ts_code, prompt="...")` — point-in-time NL Sub Agent (decision stage).
 - `ctx.asof_dir` (rolling daily as-of view) and `ctx.snapshot_dir` (point-in-time
   data for screening), `ctx.model_dir` (persisted parameters), `ctx.state_dir`
