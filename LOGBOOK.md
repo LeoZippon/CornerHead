@@ -1,3 +1,10 @@
+2026-06-27 Broker 底层接口对齐 xtquant（订单簿入 SimBroker）
+
+- 把每日订单簿从引擎移入 `SimBroker`，暴露与实盘 xtquant 1:1 的底层接口：`order_stock(order_type, stock_code, order_volume, price_type, price, …) -> order_id`、`cancel_order_stock(order_id)`、`query_stock_orders(cancelable_only)`、`query_stock_trades`、`query_stock_positions`、`query_stock_asset`；`match_bar` 逐 bar 撮合（市价按 open + 滑点；限价触价按限价、做市无滑点；TIF 到期撤单）。`get_account/get_positions/query_orders/trades_for` 重命名为 query_stock_*（更新全部调用方）。
+- 常量 `xtconstant`（STOCK_BUY/STOCK_SELL/CREDIT_SLO_SELL/CREDIT_BUY_SECU_REPAY/FIX_PRICE/MARKET_PEER_PRICE_FIRST）+ 内部 action↔order_type 映射；`Order` 复用 `order_id`，`execute(order_id=)` 透传，成交带原委托 id。`TraderProtocol`（typing.Protocol）定义 SimBroker 与未来 live `QMTBroker`（封装 `xt_trader`）共用的契约。
+- 引擎瘦身：删除引擎本地 `_Order`/`_make_order`/`_fill_or_rest`/`_fill_price_for`/`_open_price`/`_working_orders`；改为按 `execution_lag_bars` 调 `broker.order_stock`（lag 内意图存引擎 `incoming`）+ 每 bar `broker.match_bar` + `query_stock_orders(cancelable_only)` 喂 `pending`。`ctx.broker.buy/sell/short/cover/close(limit=, valid_bars=)` 便捷封装不变。
+- 验证：纯重构无行为变化，全量单测 293 通过（新增 order_stock 生命周期测试：下单/撤单/查询/触价成交/到期撤单）；同步 environment_design §7.1 含 xtquant 映射表。
+
 2026-06-27 限价单（FIX_PRICE）+ 每日订单簿，对齐 xtquant
 
 - 据官方 xtquant 文档（dict.thinktrader.net/nativeApi/xttrader.html）确认：`FIX_PRICE` 是挂在交易所的限价单（触价成交、未成挂单、可 `cancel_order_stock`、当日有效），与回测「挂限价、bar high/low 触及成交、到期撤单」完全对应；QMT 缺的是券商侧条件单/止损单，普通限价单是支持的。早前「不上限价单」判断有误，纠正。

@@ -224,7 +224,7 @@ class MainCtxReplayTest(unittest.TestCase):
 
     def test_opens_new_position_mid_replay(self) -> None:
         result = self._run()
-        orders = result.broker.query_orders()
+        orders = result.broker.query_stock_orders()
         buys = [o for o in orders if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1, orders)
         # The entry happens on day 2, proving a position can open after the decision time.
@@ -251,7 +251,7 @@ class MainCtxReplayTest(unittest.TestCase):
                 main_policy=policy,
                 execution_lag_bars=1,  # this test exercises the open-bar synthesis, not the lag
             )
-        buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
 
     def _run_with(self, replay: pd.DataFrame, minutes: pd.DataFrame | None = None) -> object:
@@ -272,7 +272,7 @@ class MainCtxReplayTest(unittest.TestCase):
         # within the bar it was decided on.
         (self.sandbox.paths.agent_output / "main.py").write_text(AUCTION_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _auction_minutes())
-        buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "auction")
         self.assertEqual(buys[0]["trade_date"], "20220104")
@@ -306,13 +306,13 @@ class MainCtxReplayTest(unittest.TestCase):
                 shortable_codes=frozenset(),
                 main_policy=policy, asof_view_enabled=True, snapshot_dir=snap,
             )
-        buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)  # main asserted the as-of view, then bought
 
     def test_limit_order_fills_at_limit_when_bar_reaches_it(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(LIMIT_FILL_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _limit_minutes())
-        buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "minute:09:33")
         # Maker fill at exactly the limit price — no taker slippage.
@@ -321,7 +321,7 @@ class MainCtxReplayTest(unittest.TestCase):
     def test_limit_order_auto_cancels_when_unfilled(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(LIMIT_CANCEL_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _limit_minutes())
-        buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 0)  # 9.50 never reached
         cancels = [
             e for e in result.broker.events
@@ -332,7 +332,7 @@ class MainCtxReplayTest(unittest.TestCase):
     def test_pending_query_dedups_in_flight_orders(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(PENDING_DEDUP_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _dense_minutes())
-        buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         # The 09:30 order fills at 09:32 (execution_lag_bars=2); at 09:31 the real
         # position is still flat, so without ctx.broker.pending() the strategy would
         # submit a duplicate. The working-order query collapses it to a single buy.
@@ -341,7 +341,7 @@ class MainCtxReplayTest(unittest.TestCase):
     def test_preopen_0915_tick_has_no_price_but_fills_at_open(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(PREOPEN_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _auction_minutes())
-        buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)  # the 09:15 guard requires ctx.price is None
         self.assertEqual(buys[0]["price_label"], "auction")
         self.assertEqual(buys[0]["trade_date"], "20220104")
@@ -351,7 +351,7 @@ class MainCtxReplayTest(unittest.TestCase):
     def test_auction_buy_rejected_at_one_sided_limit_up_open(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(AUCTION_MAIN, encoding="utf-8")
         result = self._run_with(_limit_up_open_replay())
-        rejects = [o for o in result.broker.query_orders() if o["status"] == "rejected"]
+        rejects = [o for o in result.broker.query_stock_orders() if o["status"] == "rejected"]
         self.assertTrue(any(o["reject_reason"] == "limit_up_blocked_buy" for o in rejects))
 
     def test_forced_liquidation_and_profit(self) -> None:

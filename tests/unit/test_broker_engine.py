@@ -10,7 +10,7 @@ from autotrade.environment.backtest_engine import (
     compute_return_stats,
     hide_snapshot_slots_from_agent,
 )
-from autotrade.environment.broker import BrokerProfile, MarketData, SimBroker
+from autotrade.environment.broker import BrokerProfile, MarketData, SimBroker, xtconstant
 from autotrade.environment.main_ctx_engine import MainPolicyRunner, run_main_ctx_replay
 from autotrade.environment.runtime import SandboxPaths
 from autotrade.environment.tools.backtest import _profile_kwargs
@@ -119,6 +119,27 @@ class BrokerPrimitiveTest(unittest.TestCase):
         order = broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=500)
         self.assertEqual(order.reject_reason, "broker_inventory_unavailable")
 
+    def test_order_stock_lifecycle_matches_xtquant_verbs(self):
+        broker = self.make_broker(shortable=())
+        group = pd.DataFrame([{"ts_code": "000001.SZ", "open": 10.0, "high": 10.1, "low": 9.8, "close": 9.9}])
+        # FIX_PRICE limit below the bar -> rests, then auto-cancels (valid_bars=1).
+        miss = broker.order_stock(xtconstant.STOCK_BUY, "000001.SZ", 1000, xtconstant.FIX_PRICE, 9.5)
+        working = broker.query_stock_orders(cancelable_only=True)
+        self.assertEqual([o["order_id"] for o in working], [miss])
+        self.assertEqual(working[0]["order_type"], "STOCK_BUY")
+        broker.match_bar("20220104", "09:31", group)
+        self.assertEqual(broker.query_stock_orders(cancelable_only=True), [])  # expired_unfilled
+        self.assertEqual(broker.query_stock_positions(), [])
+        # cancel_order_stock removes a working order by id.
+        cancel_me = broker.order_stock(xtconstant.STOCK_BUY, "000001.SZ", 1000, xtconstant.FIX_PRICE, 9.0)
+        self.assertTrue(broker.cancel_order_stock(cancel_me))
+        self.assertFalse(broker.cancel_order_stock("missing"))
+        # A reachable limit fills at exactly the limit (maker, no slippage).
+        broker.order_stock(xtconstant.STOCK_BUY, "000001.SZ", 1000, xtconstant.FIX_PRICE, 9.85)
+        broker.match_bar("20220104", "09:32", group)
+        self.assertEqual(broker.position_quantity("000001.SZ"), 1000)
+        self.assertEqual(broker.query_stock_trades("000001.SZ")[-1]["price"], 9.85)
+
     def test_max_total_holdings_rejects_new_code(self):
         broker = self.make_broker(shortable=(), max_total_holdings=1)
         broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=100)
@@ -157,7 +178,7 @@ class BrokerPrimitiveTest(unittest.TestCase):
         broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
         broker.mark_to_market("20220105")
         broker.execute("000001.SZ", "sell", trade_date="20220105", raw_price=11.0, amount=500)
-        trades = broker.trades_for("000001.SZ")
+        trades = broker.query_stock_trades("000001.SZ")
         self.assertEqual([t["kind"] for t in trades], ["open", "reduce"])
         self.assertAlmostEqual(trades[0]["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
 

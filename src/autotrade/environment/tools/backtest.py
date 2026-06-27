@@ -194,7 +194,7 @@ class BacktestTool:
             requests_host.unlink(missing_ok=True)
             responses_host.unlink(missing_ok=True)
 
-        orders_path = self._write_orders(result_dir, replay.broker.query_orders())
+        orders_path = self._write_orders(result_dir, replay.broker.query_stock_orders())
         (result_dir / "detailed_return.json").write_text(
             json.dumps(sanitize_for_log(stats), ensure_ascii=False, indent=2, sort_keys=True, default=str),
             encoding="utf-8",

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 import pandas as pd
 
@@ -226,6 +227,68 @@ class Position:
         return max(self.quantity - self.locked_today, 0)
 
 
+class xtconstant:
+    """The subset of live xtquant (miniQMT) order constants the Broker mirrors 1:1,
+    so a live adapter (``order_stock``) maps to the backtest mechanically."""
+
+    STOCK_BUY = "STOCK_BUY"
+    STOCK_SELL = "STOCK_SELL"
+    CREDIT_SLO_SELL = "CREDIT_SLO_SELL"  # 融券卖出 — open a short
+    CREDIT_BUY_SECU_REPAY = "CREDIT_BUY_SECU_REPAY"  # 买券还券 — cover a short
+    FIX_PRICE = "FIX_PRICE"  # resting limit order
+    MARKET_PEER_PRICE_FIRST = "MARKET_PEER_PRICE_FIRST"  # counterparty-best market order
+
+
+# Internal action <-> xtquant order_type. CLOSE_POSITION is a backtest convenience
+# (a market exit of whichever side is held; no single xtquant order_type).
+_ORDER_TYPE_TO_ACTION = {
+    xtconstant.STOCK_BUY: "buy",
+    xtconstant.STOCK_SELL: "sell",
+    xtconstant.CREDIT_SLO_SELL: "short",
+    xtconstant.CREDIT_BUY_SECU_REPAY: "cover",
+    "CLOSE_POSITION": "close",
+}
+_ACTION_TO_ORDER_TYPE = {action: order_type for order_type, action in _ORDER_TYPE_TO_ACTION.items()}
+
+
+@dataclass
+class WorkingOrder:
+    """A resting order in the day's book (xtquant ``order_stock`` semantics).
+
+    A ``FIX_PRICE`` order fills at ``price`` when a bar's range reaches it; a
+    ``MARKET_PEER_PRICE_FIRST`` order fills at the bar open. ``remaining_bars`` is
+    the time-in-force countdown; at expiry the order auto-cancels.
+    """
+
+    order_id: str
+    action: str
+    ts_code: str
+    volume: int | None
+    weight: float | None
+    price_type: str
+    price: float | None
+    remaining_bars: int
+    is_auction: bool
+    reason: str
+
+    @property
+    def is_limit(self) -> bool:
+        return self.price_type == xtconstant.FIX_PRICE
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "order_id": self.order_id,
+            "order_type": _ACTION_TO_ORDER_TYPE.get(self.action, self.action),
+            "action": self.action,
+            "ts_code": self.ts_code,
+            "order_volume": self.volume,
+            "weight": self.weight,
+            "price_type": self.price_type,
+            "price": self.price,
+            "status": "working",
+        }
+
+
 class SimBroker:
     """Order/fill/position accounting driven only by structured primitives.
 
@@ -249,6 +312,8 @@ class SimBroker:
         self.initial_equity = self.cash
         self.positions: dict[str, Position] = {}
         self.orders: list[Order] = []
+        self._book: list[WorkingOrder] = []  # resting (working) orders for the day
+        self._order_seq = 0
         self.events: list[dict[str, object]] = []
         self.trade_ledger: dict[str, list[dict[str, object]]] = {}
         self.fees_paid = 0.0
@@ -260,7 +325,8 @@ class SimBroker:
 
     # ---- broker queries (docs/environment_design.md 7.1) ----
 
-    def get_account(self) -> dict[str, object]:
+    def query_stock_asset(self) -> dict[str, object]:
+        """Account snapshot (xtquant ``query_stock_asset``)."""
         return {
             "cash": self.cash,
             "total_assets": self.equity(),
@@ -274,7 +340,8 @@ class SimBroker:
             },
         }
 
-    def get_positions(self) -> list[dict[str, object]]:
+    def query_stock_positions(self) -> list[dict[str, object]]:
+        """Holdings snapshot (xtquant ``query_stock_positions``)."""
         return [
             {
                 "ts_code": pos.ts_code,
@@ -289,12 +356,103 @@ class SimBroker:
             for pos in self.positions.values()
         ]
 
-    def query_orders(self) -> list[dict[str, object]]:
-        return [order.to_record() for order in self.orders]
+    def query_stock_orders(self, cancelable_only: bool = False) -> list[dict[str, object]]:
+        """Day's orders (xtquant ``query_stock_orders``): working (cancelable) orders,
+        plus settled/rejected ones unless ``cancelable_only``."""
+        working = [order.to_record() for order in self._book]
+        if cancelable_only:
+            return working
+        return working + [order.to_record() for order in self.orders]
 
-    def trades_for(self, ts_code: str) -> list[dict[str, object]]:
-        """Per-code executed-trade history from the broker ledger."""
-        return list(self.trade_ledger.get(str(ts_code), []))
+    def query_stock_trades(self, ts_code: str | None = None) -> list[dict[str, object]]:
+        """Executed trades (xtquant ``query_stock_trades``), optionally for one code."""
+        if ts_code is not None:
+            return list(self.trade_ledger.get(str(ts_code), []))
+        return [trade for trades in self.trade_ledger.values() for trade in trades]
+
+    # ---- order book (xtquant order_stock lifecycle) ----
+
+    def order_stock(
+        self,
+        order_type: str,
+        stock_code: str,
+        order_volume: int | None,
+        price_type: str,
+        price: float | None,
+        *,
+        weight: float | None = None,
+        valid_bars: int = 1,
+        is_auction: bool = False,
+        reason: str = "",
+    ) -> str:
+        """Submit an order to the day's book and return its ``order_id``.
+
+        Mirrors the live ``order_stock``; the order is matched against subsequent
+        bars by :meth:`match_bar`. ``weight`` is a backtest sizing convenience used
+        when ``order_volume`` is absent (a live adapter resolves it to a share count
+        before calling ``order_stock``)."""
+        action = _ORDER_TYPE_TO_ACTION.get(order_type, str(order_type))
+        self._order_seq += 1
+        order_id = "O%06d" % self._order_seq
+        is_limit = str(price_type) == xtconstant.FIX_PRICE
+        self._book.append(
+            WorkingOrder(
+                order_id=order_id,
+                action=action,
+                ts_code=str(stock_code),
+                volume=int(order_volume) if order_volume else None,
+                weight=weight,
+                price_type=str(price_type),
+                price=float(price) if (is_limit and price) else None,
+                remaining_bars=max(1, int(valid_bars or 1)),
+                is_auction=bool(is_auction),
+                reason=str(reason or action),
+            )
+        )
+        return order_id
+
+    def cancel_order_stock(self, order_id: str, *, reason: str = "cancelled") -> bool:
+        """Cancel a working order by id (xtquant ``cancel_order_stock``)."""
+        for index, order in enumerate(self._book):
+            if order.order_id == order_id:
+                self._book.pop(index)
+                self._event("order_cancelled", trade_date=self.current_date, ts_code=order.ts_code, order_id=order_id, reason=reason)
+                return True
+        return False
+
+    def match_bar(self, trade_date: str, minute_key: str, minute_group: pd.DataFrame, granularity: str = "minute") -> None:
+        """Match working orders against this bar (the simulated exchange).
+
+        Fillable orders settle via :meth:`execute` (still subject to cash, T+1, lot,
+        price-limit, suspension and short-inventory rejects); a limit order the bar
+        did not reach decrements its time-in-force and rests, then auto-cancels."""
+        survivors: list[WorkingOrder] = []
+        for order in self._book:
+            bar = _bar_for_code(minute_group, order.ts_code)
+            price = _limit_fill_price(order, bar) if bar is not None else None
+            if price is not None:
+                self.execute(
+                    order.ts_code,
+                    order.action,
+                    trade_date=trade_date,
+                    raw_price=price,
+                    amount=order.volume,
+                    weight=order.weight,
+                    time=minute_key,
+                    reason=order.reason,
+                    price_label="auction" if order.is_auction else f"{granularity}:{minute_key}",
+                    apply_slippage=not order.is_limit,
+                    order_id=order.order_id,
+                )
+            elif order.remaining_bars <= 1:
+                self._event(
+                    "order_cancelled", trade_date=trade_date, minute_key=minute_key,
+                    ts_code=order.ts_code, order_id=order.order_id, reason="expired_unfilled",
+                )
+            else:
+                order.remaining_bars -= 1
+                survivors.append(order)
+        self._book = survivors
 
     def position_quantity(self, ts_code: str) -> int:
         """Signed share count: long positive, short negative, flat zero."""
@@ -323,6 +481,7 @@ class SimBroker:
         source_artifacts: list[str] | None = None,
         price_label: str = "price",
         apply_slippage: bool = True,
+        order_id: str | None = None,
     ) -> Order:
         """Apply one strategy primitive at the current bar with full constraints.
 
@@ -331,6 +490,7 @@ class SimBroker:
         convenience used when ``amount`` is absent. ``apply_slippage`` is True for
         marketable (taker) fills and False for limit fills, where ``raw_price`` is
         already the maker fill price (the limit) and no spread is crossed.
+        ``order_id`` carries the originating working order's id onto the fill.
         """
         self._advance_date(trade_date)
         action = str(action).lower().strip()
@@ -343,6 +503,7 @@ class SimBroker:
             trade_date=str(trade_date),
             decision_time=str(time),
             reason=str(reason or action),
+            **({"order_id": order_id} if order_id else {}),
             source_artifacts=list(source_artifacts or []),
             price_label=price_label,
         )
@@ -716,3 +877,52 @@ def load_shortable_codes(snapshot_dir: str | Path, decision_date: str) -> frozen
     if "trade_date" in rows.columns:
         rows = rows[rows["trade_date"].astype(str) == str(decision_date)]
     return frozenset(rows["ts_code"].astype(str)) if "ts_code" in rows.columns else frozenset()
+
+
+def _bar_for_code(minute_group: pd.DataFrame, ts_code: str) -> pd.Series | None:
+    rows = minute_group[minute_group["ts_code"].astype(str) == str(ts_code)]
+    return None if rows.empty else rows.iloc[-1]
+
+
+def _open_price(bar: pd.Series) -> float | None:
+    """Market fill price: the bar's open, falling back to its close."""
+    for field_name in ("open", "close"):
+        value = bar.get(field_name)
+        if value is not None and pd.notna(value):
+            return float(value)
+    return None
+
+
+def _limit_fill_price(order: WorkingOrder, bar: pd.Series) -> float | None:
+    """Fill price for a working order against this bar, or None if not fillable now.
+
+    Market orders fill at the bar open. A limit order fills only when the bar's
+    range reaches the limit: a buy/cover at ``min(open, limit)`` when the bar opens
+    at/below or dips to the limit; a sell/short at ``max(open, limit)`` when it
+    opens at/above or rises to the limit (the maker gets exactly the limit price)."""
+    open_price = _open_price(bar)
+    if order.price is None or open_price is None:
+        return open_price
+    limit = order.price
+    if order.action in ("buy", "cover"):
+        if open_price <= limit:
+            return open_price
+        low = bar.get("low")
+        return limit if (low is not None and pd.notna(low) and float(low) <= limit) else None
+    if open_price >= limit:
+        return open_price
+    high = bar.get("high")
+    return limit if (high is not None and pd.notna(high) and float(high) >= limit) else None
+
+
+class TraderProtocol(Protocol):
+    """The xtquant-aligned surface that the backtest ``SimBroker`` and a live
+    adapter (a ``QMTBroker`` wrapping ``xt_trader``) both expose, so order plumbing
+    is backend-agnostic. Names and parameters mirror miniQMT ``order_stock`` etc."""
+
+    def order_stock(self, order_type: str, stock_code: str, order_volume: int | None, price_type: str, price: float | None, **kwargs: object) -> str: ...
+    def cancel_order_stock(self, order_id: str) -> bool: ...
+    def query_stock_orders(self, cancelable_only: bool = False) -> list[dict[str, object]]: ...
+    def query_stock_trades(self, ts_code: str | None = None) -> list[dict[str, object]]: ...
+    def query_stock_positions(self) -> list[dict[str, object]]: ...
+    def query_stock_asset(self) -> dict[str, object]: ...
