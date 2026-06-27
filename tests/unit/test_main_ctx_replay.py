@@ -16,11 +16,11 @@ from autotrade.environment.sandbox import LocalSandbox
 
 TS_CODE = "000001.SZ"
 
-# Open a brand-new long mid-replay (day 2, 09:30), not at the fold decision time.
+# Open a brand-new long mid-replay (day 2, pre-open), not at the fold decision time.
 MAIN_PY = '''
 def main(ctx):
     code = "000001.SZ"
-    if ctx.cur_date == "20220105" and ctx.cur_time == "09:30" and ctx.broker.position(code) == 0:
+    if ctx.cur_date == "20220105" and ctx.cur_time == "09:25" and ctx.broker.position(code) == 0:
         ctx.broker.buy(code, weight=0.3, reason="mid_replay_entry")
 '''
 
@@ -46,6 +46,17 @@ def main(ctx):
     code = "000001.SZ"
     if ctx.cur_time == "09:25" and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
         ctx.broker.buy(code, weight=0.2, reason="auction_entry")
+'''
+
+# Re-evaluates every continuous tick but skips codes with a working order, so the
+# multi-bar execution lag does not produce duplicate entries (live order-query parity).
+PENDING_DEDUP_MAIN = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time < "09:30" or ctx.price(code) is None:
+        return  # continuous session only
+    if ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
+        ctx.broker.buy(code, weight=0.2, reason="dedup_entry")
 '''
 
 # Submits at 09:15 with no matched price yet (ctx.price is None); fills at the open.
@@ -104,6 +115,17 @@ def _ohlc_replay() -> pd.DataFrame:
              "close": 11.0, "vol": 5000.0, "amount": 55000.0, "up_limit": 13.0, "down_limit": 8.0, "is_suspended": False},
             {"trade_date": "20220331", "ts_code": TS_CODE, "open": 11.0, "high": 13.0, "low": 10.5,
              "close": 12.0, "vol": 6000.0, "amount": 72000.0, "up_limit": 14.0, "down_limit": 9.0, "is_suspended": False},
+        ]
+    )
+
+
+def _dense_minutes() -> pd.DataFrame:
+    # Several continuous bars so a decision has bars both before and after its
+    # execution_lag_bars=2 fill bar (used to exercise the in-flight order window).
+    return pd.DataFrame(
+        [
+            {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": t, "open": 10.0, "high": 10.1, "low": 9.95, "close": 10.05}
+            for t in ("09:30", "09:31", "09:32", "09:33", "14:57")
         ]
     )
 
@@ -193,6 +215,7 @@ class MainCtxReplayTest(unittest.TestCase):
                 BrokerProfile(initial_cash=1_000_000.0),
                 shortable_codes=frozenset(),
                 main_policy=policy,
+                execution_lag_bars=1,  # this test exercises the open-bar synthesis, not the lag
             )
         buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
@@ -251,6 +274,15 @@ class MainCtxReplayTest(unittest.TestCase):
             )
         buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)  # main asserted the as-of view, then bought
+
+    def test_pending_query_dedups_in_flight_orders(self) -> None:
+        (self.sandbox.paths.agent_output / "main.py").write_text(PENDING_DEDUP_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _dense_minutes())
+        buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        # The 09:30 order fills at 09:32 (execution_lag_bars=2); at 09:31 the real
+        # position is still flat, so without ctx.broker.pending() the strategy would
+        # submit a duplicate. The working-order query collapses it to a single buy.
+        self.assertEqual(len(buys), 1)
 
     def test_preopen_0915_tick_has_no_price_but_fills_at_open(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(PREOPEN_MAIN, encoding="utf-8")

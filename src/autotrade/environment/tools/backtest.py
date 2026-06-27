@@ -176,6 +176,7 @@ class BacktestTool:
                     auction_enabled=bool(manifest.get("auction_enabled", True)),
                     auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
                     auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
+                    execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
                     asof_view_enabled=bool(manifest.get("rolling_asof_enabled", True)),
                     snapshot_dir=snapshot_dir,
                 )

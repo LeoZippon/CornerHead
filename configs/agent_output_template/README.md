@@ -28,10 +28,12 @@ open positions every tick and screens/opens new positions on the ticks it
 chooses. It drives the Broker primitives by `ts_code` through `ctx.broker`; there
 is no `trade_intents` mapping — positions can open or change at any tick.
 
-Orders use **next-bar execution**: an order placed on a tick fills at the **next
-bar's open**, never within the same bar. So decide on the data you can see and
-the fill lands one bar later. The recommended daily cadence splits the decision
-from the order, because the 09:15 pre-open info tick has no price yet:
+Orders are **market orders** (parity with the live QMT controller — no
+broker-side conditional/stop orders): an order placed on a tick fills at a **later
+bar's open**, `execution_lag_bars` ahead (default 2, modelling submit latency),
+never within the bar you decided on. Query `ctx.broker.pending(code)` to skip
+codes with an order still in flight. The recommended daily cadence splits the
+decision from the order, because the 09:15 pre-open info tick has no price yet:
 
 ```python
 from candidate import open_targets, screen_targets
@@ -53,7 +55,7 @@ def main(ctx):
 - `ctx.price(ts_code)`, `ctx.bar(ts_code)`, `ctx.bars` — the current tick only
   (`None` at the 09:15 info tick; future bars are never visible).
 - `ctx.broker`: `.buy/sell/short/cover/close(ts_code, amount=None, weight=None)`,
-  `.money`/`.cash`, `.position(ts_code)`.
+  `.money`/`.cash`, `.position(ts_code)`, `.pending(ts_code)` (working orders).
 - `ctx.nl(ts_code, prompt="...")` — point-in-time NL Sub Agent (decision stage).
 - `ctx.asof_dir` (rolling daily as-of view) and `ctx.snapshot_dir` (point-in-time
   data for screening), `ctx.model_dir` (persisted parameters), `ctx.state_dir`
@@ -63,9 +65,10 @@ def main(ctx):
 of initial equity. The Broker enforces cash, short margin, T+1 sellable balance,
 lot size, price limits, suspension, and shortability, and reserves the final
 replay date for mandatory liquidation. The Broker is the source of truth for
-positions and reflects **filled** positions only, so place each entry once on a
-decision tick and keep your own per-stock rules/targets/intent in `ctx.state_dir`,
-not as a position ledger.
+positions and reflects **filled** positions only; `ctx.broker.pending(code)`
+exposes orders still working between decision and fill, so gate re-entry/exit on
+both. `ctx.state_dir` is for your own scratch (e.g. the day's targets), not a
+position or order ledger.
 
 ## Cost discipline
 

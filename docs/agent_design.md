@@ -270,7 +270,7 @@ def main(ctx) -> None:
 
 Environment 按回放 tick 逐 tick 调用一次 `main(ctx)`（一次覆盖全市场），没有 `trade_intents` 映射。`main` 自己决定时序：每个 tick 管理已有持仓，在选定时点（如盘前或收盘前）筛选并开新仓，从而在任意时点开/平仓。它直接调用 `ctx.broker` 的 `ts_code` 原语下单；Broker 执行约束并记录成交。建议把横截面筛选/开仓放在 `candidate.py`，把按 `ts_code` 的持仓管理/做T/平仓放在 `trading.py`，由 `main` 在合适时点调用。
 
-**次一根 bar 成交**：在某根 bar 上决策的单，于下一根 bar 的开盘价成交（不在同一根 bar 内成交，杜绝 bar 内前视）。`ctx.positions` 只反映已成交持仓，下一根成交前不变，因此每个入场意图应在某个决策 tick 下一次、并在 `ctx.state_dir` 跟踪自己的在途意图，避免跨 tick 重复下单。推荐节奏：09:15 信息 tick（无价）筛选 + NL，把目标写入 `ctx.state_dir`；09:25 tick（已知撮合开盘价）读取目标统一下单，成交于 09:31。
+**市价单 + 延迟成交**（与实盘 QMT 对齐，无券商侧条件单）：在某根 bar 决策的单，于其后第 `execution_lag_bars`（默认 2）根 bar 的开盘价成交，不在决策 bar 内成交，杜绝 bar 内前视。`ctx.positions` 只反映已成交持仓；已报未成的在途单经 `ctx.broker.pending(ts_code)` 查询（与实盘委托查询一致），对在途代码跳过重复下单即可，无需用 `ctx.state_dir` 记账。推荐节奏：09:15 信息 tick（无价）筛选 + NL，把目标写入 `ctx.state_dir`；09:25 tick（已知撮合开盘价）读取目标统一下单，成交于 09:31（盘前竞价不受 lag 影响）。
 
 成本与频率：`main(ctx)` 每个 tick 都会被调用，但筛选、模型推理和 `ctx.nl()` 等重操作应只在少数选定时点执行，不要每个 tick 跑；模型在首个 tick 加载/缓存，不每次重训。跨 tick 暂存（如当日目标）写入 `ctx.state_dir`；Broker 是持仓真相源，`state_dir` 只存策略自身的规则/目标。
 
@@ -285,6 +285,7 @@ ctx.account, ctx.positions, ctx.cash      # 只读账户/持仓快照
 ctx.price(ts_code), ctx.bar(ts_code), ctx.bars   # 仅当前 tick、PIT 可见的 bar（09:15 无价）
 ctx.broker.buy/sell/short/cover/close(ts_code, amount=None, weight=None)
 ctx.broker.money, ctx.broker.cash, ctx.broker.position(ts_code)
+ctx.broker.pending(ts_code)               # 已报未成的在途单（实盘委托查询口径）
 ctx.nl(ts_code, prompt=...)               # 决策阶段 NL 工具
 ctx.asof_dir              # 滚动日频 as-of 视图（截至当日盘前可见的日线历史，含回放期已收盘交易日）
 ctx.snapshot_dir          # Fold 决策时点冻结全量快照（事件/文本/财务/分钟历史）

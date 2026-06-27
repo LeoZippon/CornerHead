@@ -1,3 +1,11 @@
+2026-06-26 QMT-faithful execution: lag knob + working-order query
+
+- 背景：实盘 QMT 无券商侧条件单/止损单，故回测不引入引擎侧限价/止损单（否则学到实盘无法复现的成交）。改为「市价单 + 可配置成交延迟 + 在途单查询」，与实盘轮询控制器一致。
+- `execution_lag_bars`（默认 2）：决策 bar 到成交 bar 的间隔，`_day_tick_plan` 连续 bar 用 `index + lag`（auction 两 tick 固定 09:15→开盘竞价、09:25→09:31，不受 lag 影响）；末尾无第 lag 根 bar 的决策记 `main_actions_unfilled`。成交价仍取成交 bar 的 open。经 ExperimentConfig→manifest→backtest_tool→引擎。
+- `ctx.broker.pending(ts_code)`：暴露已报未成的在途单（与实盘委托查询一致）。引擎每 tick 把 `pending` 按 ts_code 聚合（`_working_orders`）放入 `state["pending"]`，驱动 `_Broker.pending()` 返回该码的在途单 + 本 tick 已提交动作；策略 `if not pending and position==0` 即可跨 tick 去重，替代 state_dir 记账（state_dir 仅存当日筛选目标）。
+- 模板/文档同步：candidate/main/trading/README 用 pending 去重；environment_design/agent_design/prompt 改为「市价单 + lag + pending」，PROMPTS.md 重生成。
+- 验证：全量单测 290 通过（新增 pending 去重测试；连续决策类测试改用更密分钟 fixture 或 auction tick 以适配 lag=2；开盘 bar 泄露测试显式用 lag=1）。
+
 2026-06-26 Next-bar execution + screen/order split + NL offset reads + audit cleanup
 
 - 审计死代码清理（commit `168908d`，分支 `feat/rolling-asof`）：删除未引用的 `SimBroker.buy/sell/short/cover/close` 便捷封装、`gpu.select_gpu`、`folds.*_quarter`、`audit.json_group_counts`；清理无用 import；修 `price_label="auction"` 仅在 `auction_enabled` 时标注（避免误标 09:15/09:25 真实 bar）。`common.has_pagination_probe` 是 audit.py 复用的 re-export，保留。

@@ -8,10 +8,11 @@ no network access or unbounded loops. The Broker enforces cash, short margin,
 T+1 sellable balance, lot size, price limits, suspension, and shortability, and
 reserves the final replay day for mandatory liquidation.
 
-Orders fill on the NEXT bar, and ``ctx.positions`` reflects FILLED positions only,
-so a just-submitted exit is not visible until it fills: make management rules
-idempotent (band/threshold guards, or track in-flight intent in ``ctx.state_dir``)
-so they do not re-fire the same order on consecutive ticks before it fills.
+Orders fill a few bars later (``execution_lag_bars``), and ``ctx.positions``
+reflects FILLED positions only, so a just-submitted exit is not visible there until
+it fills. Gate management on ``ctx.broker.pending(ts_code)`` (the working-order
+query) — and/or band/threshold guards — so a rule does not re-fire the same order
+on consecutive ticks before it fills.
 """
 
 from __future__ import annotations

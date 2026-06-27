@@ -52,5 +52,7 @@ def open_targets(ctx) -> None:
         return
     targets = json.loads(path.read_text(encoding="utf-8"))
     for code, weight in targets.items():
-        if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+        # Skip codes already held or with an order still working (mirrors the live
+        # order query), so the multi-bar fill lag cannot create a duplicate entry.
+        if ctx.broker.position(code) == 0 and not ctx.broker.pending(code) and ctx.price(code) is not None:
             ctx.broker.buy(code, weight=float(weight), reason="screen_target")

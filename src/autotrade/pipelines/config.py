@@ -102,6 +102,10 @@ class ExperimentConfig:
     auction_enabled: bool = True
     auction_preopen_time: str | None = "09:15"
     auction_decision_time: str = "09:25"
+    # Bars between an order's decision tick and its fill bar (market orders fill at
+    # the fill bar's open), modelling the live submit latency: 1 = the immediate
+    # next bar, 2 = one bar to compute/submit then fill on the following bar.
+    execution_lag_bars: int = 2
     # Rolling daily as-of view: each replay day, ctx.asof_dir exposes the
     # daily history extended with replay-period bars visible by that day's pre-open
     # (trade_date < D); other domains stay on the frozen ctx.snapshot_dir.

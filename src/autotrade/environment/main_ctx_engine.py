@@ -154,6 +154,7 @@ class _Broker:
         self._cash = float(state.get("cash", account.get("cash", 0.0)) or 0.0)
         self._initial_equity = float(state.get("initial_equity", 0.0) or 0.0)
         self._prices = prices
+        self._working = state.get("pending") or {}
         self._pos = {}
         for item in self.positions:
             qty = int(item.get("quantity", 0) or 0)
@@ -170,6 +171,15 @@ class _Broker:
 
     def position(self, ts_code):
         return self._pos.get(str(ts_code), 0)
+
+    def pending(self, ts_code):
+        \"\"\"Still-working orders for ``ts_code`` — those queued on earlier ticks and
+        not yet filled, plus any submitted this tick. Mirrors the live order query
+        so re-entry/exit logic can skip codes with an order already in flight.\"\"\"
+        code = str(ts_code)
+        working = list(self._working.get(code, []))
+        working.extend(action for action in self._actions if str(action.get("ts_code")) == code)
+        return working
 
     def buy(self, ts_code, amount=None, weight=None, reason=None, **kwargs):
         self._order("buy", ts_code, amount, weight, reason, +1)
@@ -489,22 +499,29 @@ def run_main_ctx_replay(
     auction_enabled: bool = True,
     auction_preopen_time: str | None = "09:15",
     auction_decision_time: str = "09:25",
+    execution_lag_bars: int = 2,
     asof_view_enabled: bool = False,
     snapshot_dir: Path | None = None,
 ) -> ReplayResult:
-    """Replay the region with next-bar execution, calling ``main(ctx)`` per tick.
+    """Replay the region tick by tick, calling ``main(ctx)`` per tick.
 
-    The Agent's ``main`` decides on the bar it can see; the resulting orders fill
-    at the NEXT bar's open, so a signal read on a bar can only act one bar later
-    (no within-bar look-ahead). The final trade date is reserved for mandatory
-    liquidation. Minute bars are used when present; otherwise a daily-synthesized
-    09:30/15:00 fallback is generated per code.
+    Market orders only, mirroring the live QMT controller (which has no
+    broker-side conditional orders): the Agent decides on the bar it can see and
+    each order fills at a LATER bar's open. ``execution_lag_bars`` (default 2)
+    sets the gap from the decision bar to the fill bar — 1 = the immediate next
+    bar, 2 = one bar of submit latency then a fill on the following bar — which
+    removes within-bar look-ahead. A decision with no bar ``execution_lag_bars``
+    ahead (near the close) cannot fill and is recorded ``main_actions_unfilled``.
+    The final trade date is reserved for mandatory liquidation; minute bars drive
+    the replay when present, else a daily 09:30/15:00 fallback is synthesized.
 
     With ``auction_enabled`` each day leads with two pre-open decision ticks: a
-    09:15 info tick exposing no price (``ctx.price`` is None — the auction has not
-    matched) whose orders fill at the 09:30 opening auction, and a 09:25 tick
-    showing the matched open whose orders fill at the first continuous bar
-    (09:31). Pre-open-decided fills are labelled ``price_label="auction"``.
+    09:15 info tick with no price (``ctx.price`` is None) filling at the 09:30
+    opening auction, and a 09:25 tick on the matched open filling at the first
+    continuous bar (09:31). These batch-auction fills are independent of
+    ``execution_lag_bars`` and labelled ``price_label="auction"``. The Agent can
+    query still-working orders via ``ctx.broker.pending(ts_code)`` to avoid
+    re-submitting before a fill (parity with the live order query).
     """
     market = MarketData(replay_daily)
     if len(market.trade_dates) < 2:
@@ -529,11 +546,13 @@ def run_main_ctx_replay(
             minute_seed = minute_market.rows_for_date(trade_date) if minute_market is not None else _empty_minute_rows()
             minute_rows = _minute_rows_with_daily_fallback(replay_daily, trade_date, minute_seed)
             if not minute_rows.empty:
-                plan = _day_tick_plan(minute_rows, auction_enabled, auction_preopen_time, auction_decision_time)
+                plan = _day_tick_plan(
+                    minute_rows, auction_enabled, auction_preopen_time, auction_decision_time, execution_lag_bars
+                )
                 fill_groups = {tick.minute_key: tick.group for tick in plan if tick.is_real}
                 pending: dict[str, list[tuple[dict[str, object], str]]] = {}
                 for tick in plan:
-                    # Next-bar execution: orders decided on an earlier tick fill at
+                    # Deferred execution: orders decided on an earlier tick fill at
                     # THIS bar's open before the Agent sees the bar again.
                     if tick.is_real:
                         for action, label in pending.pop(tick.minute_key, []):
@@ -551,19 +570,31 @@ def run_main_ctx_replay(
                         minute_key=tick.minute_key,
                         minute_group=tick.group,
                         asof_dir=asof_dir,
+                        pending=_working_orders(pending),
                     )
                     actions = main_policy.step(state)
-                    if actions and tick.fill_key is not None:
-                        label = "auction" if tick.is_auction else f"{granularity}:{tick.fill_key}"
-                        pending.setdefault(tick.fill_key, []).extend((action, label) for action in actions)
+                    if not actions:
+                        continue
+                    if tick.fill_key is None:
+                        # No bar execution_lag_bars ahead (near the close): cannot fill.
                         broker.record_event(
-                            "main_actions",
+                            "main_actions_unfilled",
                             trade_date=trade_date,
                             minute_key=tick.minute_key,
-                            fill_key=tick.fill_key,
                             action_count=len(actions),
                             actions=_jsonable(actions),
                         )
+                        continue
+                    label = "auction" if tick.is_auction else f"{granularity}:{tick.fill_key}"
+                    pending.setdefault(tick.fill_key, []).extend((action, label) for action in actions)
+                    broker.record_event(
+                        "main_actions",
+                        trade_date=trade_date,
+                        minute_key=tick.minute_key,
+                        fill_key=tick.fill_key,
+                        action_count=len(actions),
+                        actions=_jsonable(actions),
+                    )
 
         equity = broker.mark_to_market(trade_date)
         if trade_date == exit_date and broker.positions:
@@ -592,18 +623,22 @@ class _Tick:
 
 
 def _day_tick_plan(
-    minute_rows: pd.DataFrame, auction_enabled: bool, preopen_time: str | None, decision_time: str
+    minute_rows: pd.DataFrame,
+    auction_enabled: bool,
+    preopen_time: str | None,
+    decision_time: str,
+    execution_lag_bars: int,
 ) -> list[_Tick]:
-    """Ordered decision ticks for one day with their next-bar fill targets.
+    """Ordered decision ticks for one day with their deferred fill targets.
 
-    A decision on real bar *i* fills at real bar *i+1*; the last bar's orders
-    cannot fill and are dropped. With ``auction_enabled`` two pre-open ticks lead
-    the day: a ``preopen_time`` (09:15) info tick with no bars — ``ctx.price`` is
-    None since the auction has not matched — whose orders fill at the first real
-    bar (the 09:30 opening auction); and a ``decision_time`` (09:25) tick showing
-    each code's matched open whose orders fill at the second real bar (09:31, the
-    first continuous minute). This removes within-bar look-ahead: a price read on
-    a bar can only act on the next bar's open.
+    A decision on real bar *i* fills at real bar *i + execution_lag_bars*; a bar
+    that has no such later bar (near the close) yields ``fill_key=None``. With
+    ``auction_enabled`` two pre-open ticks lead the day: a ``preopen_time``
+    (09:15) info tick with no bars — ``ctx.price`` is None since the auction has
+    not matched — whose orders fill at the first real bar (the 09:30 opening
+    auction); and a ``decision_time`` (09:25) tick showing each code's matched
+    open whose orders fill at the first continuous bar (09:31). The pre-open
+    batch-auction fills are fixed and independent of ``execution_lag_bars``.
     """
     real_keys = sorted({str(key) for key in minute_rows["minute_key"]}, key=_minute_sort)
     if not real_keys:
@@ -620,10 +655,28 @@ def _day_tick_plan(
             plan.append(_Tick(preopen_time, _empty_minute_rows(), real_keys[0], False, True))
         second = real_keys[1] if len(real_keys) > 1 else real_keys[-1]
         plan.append(_Tick(decision_time, open_group, second, False, True))
+    lag = max(1, execution_lag_bars)
     for index, key in enumerate(real_keys):
-        fill_key = real_keys[index + 1] if index + 1 < len(real_keys) else None
+        fill_index = index + lag
+        fill_key = real_keys[fill_index] if fill_index < len(real_keys) else None
         plan.append(_Tick(key, groups[key], fill_key, True, False))
     return plan
+
+
+def _working_orders(
+    pending: dict[str, list[tuple[dict[str, object], str]]],
+) -> dict[str, list[dict[str, object]]]:
+    """Queued-but-unfilled orders grouped by ``ts_code``, surfaced to the Agent as
+    ``ctx.broker.pending(ts_code)`` so its de-dup mirrors the live order query."""
+    working: dict[str, list[dict[str, object]]] = {}
+    for items in pending.values():
+        for action, _label in items:
+            code = str(action.get("ts_code", ""))
+            if code:
+                working.setdefault(code, []).append(
+                    {"action": str(action.get("action", "")), "amount": action.get("amount"), "weight": action.get("weight")}
+                )
+    return working
 
 
 def _write_asof_daily(out_dir: Path, snapshot_dir: Path | None, replay_daily: pd.DataFrame, asof_date: str) -> Path:
@@ -663,7 +716,13 @@ def _resolve_asof_dir(main_policy, snapshot_dir: Path | None, replay_daily: pd.D
 
 
 def _market_state(
-    broker: SimBroker, *, trade_date: str, minute_key: str, minute_group: pd.DataFrame, asof_dir: str | None = None
+    broker: SimBroker,
+    *,
+    trade_date: str,
+    minute_key: str,
+    minute_group: pd.DataFrame,
+    asof_dir: str | None = None,
+    pending: dict[str, list[dict[str, object]]] | None = None,
 ) -> dict[str, object]:
     bars = [
         {
@@ -686,6 +745,7 @@ def _market_state(
         "initial_equity": float(broker.initial_equity),
         "bars": bars,
         "asof_dir": asof_dir,
+        "pending": pending or {},
         "params": {},
     }
 

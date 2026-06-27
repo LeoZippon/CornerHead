@@ -40,6 +40,7 @@ REPLAY = make_daily(
 MINUTE_REPLAY = pd.DataFrame(
     [
         {"trade_date": "20220104", "ts_code": "000001.SZ", "trade_time": "09:31", "open": 10.0, "high": 10.20, "low": 10.05, "close": 10.20},
+        {"trade_date": "20220104", "ts_code": "000001.SZ", "trade_time": "09:32", "open": 10.20, "high": 10.25, "low": 10.10, "close": 10.18},
         {"trade_date": "20220104", "ts_code": "000001.SZ", "trade_time": "14:57", "open": 10.20, "high": 10.30, "low": 10.15, "close": 10.25},
         {"trade_date": "20220105", "ts_code": "000001.SZ", "trade_time": "09:31", "open": 10.50, "high": 10.60, "low": 10.40, "close": 10.60},
         {"trade_date": "20220105", "ts_code": "000001.SZ", "trade_time": "10:30", "open": 10.60, "high": 10.90, "low": 10.55, "close": 10.85},

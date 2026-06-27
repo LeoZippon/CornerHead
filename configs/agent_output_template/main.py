@@ -1,10 +1,13 @@
 """Formal strategy entrypoint.
 
-The Environment calls ``main(ctx)`` once per replay tick. Orders use NEXT-BAR
-execution: an order placed on a tick fills at the NEXT bar's open, so you decide
-on the data you can see and the fill happens one bar later, never within the same
-bar. The Broker enforces cash, short margin, T+1, lot size, price limits,
-suspension, and shortability, and records every fill.
+The Environment calls ``main(ctx)`` once per replay tick. Orders are market orders
+(parity with the live QMT controller, which has no broker-side conditional
+orders): an order placed on a tick fills at a LATER bar's open — ``execution_lag_bars``
+bars ahead (default 2, modelling submit latency), never within the bar you decided
+on. Query ``ctx.broker.pending(ts_code)`` to skip codes with an order still in
+flight, so the fill lag never produces a duplicate. The Broker enforces cash,
+short margin, T+1, lot size, price limits, suspension, and shortability, and
+records every fill.
 
 Recommended daily cadence (illustrated below):
 
@@ -25,17 +28,18 @@ Recommended daily cadence (illustrated below):
 * ``ctx.price(ts_code)`` / ``ctx.bar(ts_code)`` / ``ctx.bars`` — this tick only
   (None at the 09:15 info tick).
 * ``ctx.broker`` — ``.buy/sell/short/cover/close(ts_code, amount=None, weight=None)``,
-  ``.cash``/``.money``, ``.position(ts_code)``.
+  ``.cash``/``.money``, ``.position(ts_code)``, ``.pending(ts_code)`` (working orders).
 * ``ctx.nl(ts_code, prompt=...)`` — PIT NL sub-agent; use it only in the decision
   stage and keep its frequency low (it is the main API cost).
 * ``ctx.asof_dir`` / ``ctx.snapshot_dir`` — point-in-time data for screening;
   ``ctx.model_dir`` — persisted parameters; ``ctx.state_dir`` — run-scoped scratch
   (e.g. the day's targets); ``ctx.params``.
 
-The position view reflects FILLED positions only (orders fill next bar), so place
-each entry once on a decision tick and track your own intent in ``ctx.state_dir``
-rather than re-deciding every tick. ``amount`` is a lot-aligned share count (100);
-``weight`` is a notional fraction of initial equity.
+``ctx.positions`` reflects FILLED positions only; use ``ctx.broker.pending(code)``
+to see orders still working between decision and fill, and gate re-entry/exit on
+both. ``ctx.state_dir`` is for your own scratch (e.g. the day's screening targets),
+not the order ledger. ``amount`` is a lot-aligned share count (100); ``weight`` is
+a notional fraction of initial equity.
 """
 
 from __future__ import annotations

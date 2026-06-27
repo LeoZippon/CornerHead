@@ -129,7 +129,7 @@ def buy_if_dip(ctx):
 INTRA_MINUTE_MAIN = '''
 def main(ctx):
     code = "000001.SZ"
-    if ctx.cur_time != "09:30":  # optimistic dedup needs a priced tick
+    if ctx.cur_time != "09:25":  # optimistic dedup needs a priced tick
         return
     if ctx.broker.position(code) == 0:
         ctx.broker.buy(code, weight=0.1, reason="first_weight_buy")
@@ -413,6 +413,15 @@ class ToolFlowTest(unittest.TestCase):
                     {
                         "trade_date": "20211008",
                         "ts_code": "000001.SZ",
+                        "trade_time": "09:32",
+                        "open": 10.05,
+                        "high": 10.15,
+                        "low": 10.0,
+                        "close": 10.1,
+                    },
+                    {
+                        "trade_date": "20211008",
+                        "ts_code": "000001.SZ",
                         "trade_time": "14:57",
                         "open": 10.1,
                         "high": 10.3,
@@ -478,6 +487,15 @@ class ToolFlowTest(unittest.TestCase):
                         "low": 10.0,
                         "close": 10.1,
                     },
+                    {
+                        "trade_date": "20211008",
+                        "ts_code": "000001.SZ",
+                        "trade_time": "09:33",
+                        "open": 10.0,
+                        "high": 10.2,
+                        "low": 10.0,
+                        "close": 10.1,
+                    },
                 ]
             ).to_parquet(ctx.paths.valid / "intraday_1min.parquet", index=False)
             (ctx.paths.agent_output / "main.py").write_text(CUSTOM_POLICY_MAIN, encoding="utf-8")
@@ -492,8 +510,8 @@ class ToolFlowTest(unittest.TestCase):
             custom_events = [event for event in detailed["broker_events"] if event["event_type"] == "main_actions"]
             self.assertEqual(len(custom_events), 1)
             fill = [event for event in detailed["broker_events"] if event["event_type"] == "order_filled"][0]
-            # The 09:31 dip signal fills at the next bar (09:32) open (10.0).
-            self.assertEqual(fill["price_label"], "minute:09:32")
+            # The 09:31 dip signal fills 2 bars later (execution_lag_bars=2) at 09:33 open (10.0).
+            self.assertEqual(fill["price_label"], "minute:09:33")
             self.assertAlmostEqual(fill["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
 
     def test_empty_minute_replay_file_reports_daily_granularity(self):

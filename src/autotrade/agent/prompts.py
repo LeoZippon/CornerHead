@@ -78,12 +78,12 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 
 ## 交易规则（写入回测流程，无法绕过）
 - 入口：Environment 按回放 tick 逐 tick 调用一次 `main(ctx)`（一次覆盖全市场）。时序完全由你控制：每个 tick 管理已有持仓、在你选定的时点筛选并开新仓。无需返回 `trade_intents`，直接调用 `ctx.broker` 原语下单即可在任意时点开/平仓。
-- 次一根 bar 成交：在某根 bar 上决策的单于下一根 bar 的开盘价成交（不在同一根 bar 内成交，杜绝 bar 内前视，如 09:35 触发的单成交于 09:36 开盘）。`ctx.positions` 只反映已成交持仓、下一根成交前不变，因此每个入场意图只在某个决策 tick 下一次、并用 `ctx.state_dir` 跟踪自己的在途意图，避免重复下单。
+- 市价单 + 延迟成交（与实盘 QMT 对齐，无券商侧条件单/止损单）：在某根 bar 决策的单于其后第 `execution_lag_bars`（默认 2）根 bar 的开盘价成交，不在决策 bar 内成交，杜绝 bar 内前视（如 09:35 决策、09:37 开盘成交）。`ctx.positions` 只反映已成交持仓；已报未成的在途单用 `ctx.broker.pending(ts_code)` 查询（与实盘委托查询一致），对在途代码跳过重复下单即可，不必用 `ctx.state_dir` 记账。临近收盘、其后无第 `execution_lag_bars` 根 bar 的决策无法成交。
 - 盘前竞价：默认每个回放日在常规分钟前有两个盘前决策 tick——`09:15` 信息 tick（集合竞价未撮合，`ctx.price` 为 None，用于筛选 + NL）和 `09:25` tick（`ctx.price` 为撮合出的开盘价）。`09:15` 的单成交于 09:30 开盘集合竞价，`09:25` 的单成交于首根连续 bar（09:31），均按当日涨跌停成交（一字涨停买单/跌停空单会被拒）。推荐节奏：09:15 筛选并把目标写入 `ctx.state_dir`，09:25 读取目标统一下单。
 - `ctx`（市场级，每个 tick 重建）：
   - `ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.account`、`ctx.positions`（只读快照）、`ctx.cash`。
   - `ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`：只含当前 tick、PIT 可见的 bar（未来 bar 不可见；09:15 无价）。
-  - `ctx.broker`：`.buy/sell/short/cover/close(ts_code, amount=None, weight=None)`、`.money`/`.cash`、`.position(ts_code)`。
+  - `ctx.broker`：`.buy/sell/short/cover/close(ts_code, amount=None, weight=None)`、`.money`/`.cash`、`.position(ts_code)`、`.pending(ts_code)`（在途已报未成单，用于跨 tick 去重）。
   - `ctx.nl(ts_code, prompt=...)`；`ctx.asof_dir`（滚动日频 as-of 视图：截至当日盘前可见的日线历史，含回放期内已收盘交易日，用于横截面日频筛选）；`ctx.snapshot_dir`（Fold 决策时点冻结全量快照：事件/文本/财务/分钟历史）；`ctx.model_dir`、`ctx.state_dir`（跨 tick 暂存，如当日目标）、`ctx.params`。
 - 下单口径：`amount` 是股数（按 100 股，即 1 手，向下对齐），`weight` 是初始权益的名义比例。策略只表达意图，Broker 强制现金、做空保证金、T+1 可卖余额、手数、涨跌停、停牌和可融券。最大持仓数、单票权重上限和集中度默认由你控制；回放末日强制清仓剩余持仓。Broker 是持仓真相源，`ctx.state_dir` 只存你自己的规则/目标，不是持仓账本。
 - 成本与频率：`main(ctx)` 每个 tick 都会被调用，但筛选、模型推理和 `ctx.nl()` 等重操作应只在你选定的少数时点执行（如盘前或收盘前），不要每个 tick 跑，否则 API 成本和耗时会失控；模型应在首个 tick 加载/缓存，不要每次重训。`ctx.nl()` 还受 run manifest 的 `nl_max_calls_per_backtest` 硬上限约束，超出后返回 `budget_exhausted` 错误，需自行降级。
