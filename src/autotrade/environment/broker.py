@@ -293,7 +293,7 @@ class SimBroker:
         return [order.to_record() for order in self.orders]
 
     def trades_for(self, ts_code: str) -> list[dict[str, object]]:
-        """Per-code executed-trade history feeding ``ctx.stock.trades``."""
+        """Per-code executed-trade history from the broker ledger."""
         return list(self.trade_ledger.get(str(ts_code), []))
 
     def position_quantity(self, ts_code: str) -> int:
@@ -357,22 +357,6 @@ class SimBroker:
         if action in {"sell", "cover", "close"}:
             return self._reduce(order, bar, raw_price, amount=amount)
         return self._reject(order, f"unsupported_action:{action}")
-
-    # convenience wrappers mirroring the sandbox-facing primitive names
-    def buy(self, ts_code, *, trade_date, raw_price, amount=None, weight=None, **kw) -> Order:
-        return self.execute(ts_code, "buy", trade_date=trade_date, raw_price=raw_price, amount=amount, weight=weight, **kw)
-
-    def sell(self, ts_code, *, trade_date, raw_price, amount=None, **kw) -> Order:
-        return self.execute(ts_code, "sell", trade_date=trade_date, raw_price=raw_price, amount=amount, **kw)
-
-    def short(self, ts_code, *, trade_date, raw_price, amount=None, weight=None, **kw) -> Order:
-        return self.execute(ts_code, "short", trade_date=trade_date, raw_price=raw_price, amount=amount, weight=weight, **kw)
-
-    def cover(self, ts_code, *, trade_date, raw_price, amount=None, **kw) -> Order:
-        return self.execute(ts_code, "cover", trade_date=trade_date, raw_price=raw_price, amount=amount, **kw)
-
-    def close(self, ts_code, *, trade_date, raw_price, **kw) -> Order:
-        return self.execute(ts_code, "close", trade_date=trade_date, raw_price=raw_price, **kw)
 
     def _open(self, order: Order, bar: pd.Series, raw_price: float, *, amount, weight) -> Order:
         shares = self._resolve_amount(amount, weight, raw_price)

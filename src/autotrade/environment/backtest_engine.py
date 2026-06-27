@@ -1,11 +1,10 @@
-"""backtest_tool internals: strategy execution, intent validation, replay, stats.
+"""Shared minute-replay market data, fallbacks, and return statistics.
 
-The orchestration order lives in tools/backtest.py. Formal backtests execute the
-root ``output/main.py`` contract to obtain candidate-to-strategy mappings,
-then replay them minute-by-minute. Each mapped stock's ``trade_strategy`` is an
-Agent-defined function that receives a per-bar ``ctx`` and drives the Broker's
-fundamental primitives (``ctx.broker.buy/sell/short/cover/close``). The Broker
-owns no strategy logic; it only enforces market rules and records fills.
+Holds the pieces the per-minute ``main(ctx)`` engine (``main_ctx_engine.py``)
+builds on: daily/minute replay market data, the daily-synthesized 09:30/15:00
+fallback, the formal-strategy path guard, the NL request pump, and
+``compute_return_stats``. The Broker owns no strategy logic; it only enforces
+market rules and records fills.
 """
 
 from __future__ import annotations
@@ -14,11 +13,7 @@ import json
 import math
 import os
 import re
-import select
 import stat
-import sys
-import time
-import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,8 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from autotrade.environment.broker import BrokerProfile, MarketData, SimBroker
-from autotrade.environment.executor import ExecResult
+from autotrade.environment.broker import MarketData, SimBroker
 from autotrade.environment.runtime import sanitize_for_log
 
 TRADING_DAYS_PER_YEAR = 252

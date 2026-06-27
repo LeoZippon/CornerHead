@@ -54,8 +54,3 @@ def select_gpus(count: int = 1, *, require_name: str | None = "L20") -> list[int
         raise GpuUnavailableError(f"requested {count} GPU(s), available matching GPUs: {names}")
     selected = sorted(gpus, key=lambda gpu: int(gpu["memory_free_mib"]), reverse=True)[:count]
     return [int(gpu["index"]) for gpu in selected]
-
-
-def select_gpu(*, require_name: str | None = "L20") -> int:
-    """Index of the matching GPU with the most free memory."""
-    return select_gpus(1, require_name=require_name)[0]

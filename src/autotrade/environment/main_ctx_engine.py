@@ -518,7 +518,7 @@ def run_main_ctx_replay(
                     [_auction_rows(minute_rows, auction_preopen_time, auction_decision_time), minute_rows],
                     ignore_index=True,
                 ).sort_values(["minute_sort", "ts_code"], kind="stable").reset_index(drop=True)
-            auction_times = {t for t in (auction_preopen_time, auction_decision_time) if t}
+            auction_times = {t for t in (auction_preopen_time, auction_decision_time) if t} if auction_enabled else set()
             for minute_key, minute_group in minute_rows.groupby("minute_key", sort=True):
                 state = _market_state(
                     broker, trade_date=trade_date, minute_key=str(minute_key), minute_group=minute_group, asof_dir=asof_dir

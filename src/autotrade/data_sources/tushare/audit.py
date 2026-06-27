@@ -1342,12 +1342,6 @@ def status_severity(counts: dict[str, int]) -> str:
 def json_count_dict(series: pd.Series) -> dict[str, int]:
     return {str(key): int(value) for key, value in series.value_counts(dropna=False).items()}
 
-def json_group_counts(df: pd.DataFrame, columns: list[str]) -> dict[str, int]:
-    if df.empty:
-        return {}
-    grouped = df.groupby(columns, dropna=False).size()
-    return {"|".join(str(part) for part in key if str(part) != "nan"): int(value) for key, value in grouped.items()}
-
 def first_parquet_schema(raw_dir: Path, dataset: str) -> list[str]:
     files = sorted((raw_dir / dataset).rglob("*.parquet"))
     if not files:

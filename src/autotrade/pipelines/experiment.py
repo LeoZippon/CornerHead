@@ -29,7 +29,7 @@ from autotrade.environment.data_summary import write_agent_data_summary
 from autotrade.environment.executor import DockerExecutor
 from autotrade.environment.llm.proxy import LLMProxy
 from autotrade.environment.runtime import AgentTraceWriter, RunManifest, new_id, utc_now_iso
-from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, SandboxSpec, link_copytree
+from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import PHASE_FROZEN, BacktestTool, ModificationCheckTool, ToolContext
 

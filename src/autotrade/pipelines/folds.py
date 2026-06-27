@@ -60,20 +60,6 @@ def quarter_bounds(label: str) -> tuple[str, str]:
     return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
 
-def previous_quarter(label: str) -> str:
-    year, quarter = parse_quarter(label)
-    return f"{year - 1}Q4" if quarter == 1 else f"{year}Q{quarter - 1}"
-
-
-def next_quarter(label: str) -> str:
-    year, quarter = parse_quarter(label)
-    return f"{year + 1}Q1" if quarter == 4 else f"{year}Q{quarter + 1}"
-
-
-def quarter_range(first: str, last: str) -> list[str]:
-    return period_range(first, last, period="quarter")
-
-
 def period_range(first: str, last: str, *, period: str = "quarter") -> list[str]:
     period = _normalize_period(period)
     first_start, _ = period_bounds(first, period=period)
