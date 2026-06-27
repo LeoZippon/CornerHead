@@ -260,6 +260,7 @@ class ExperimentPipeline:
                 "finalize_before_deadline_seconds": self.config.finalize_before_deadline_seconds,
                 "per_call_timeout_seconds": self.config.per_call_timeout_seconds,
                 "auction_enabled": self.config.auction_enabled,
+                "auction_preopen_time": self.config.auction_preopen_time,
                 "auction_decision_time": self.config.auction_decision_time,
                 "nl_max_calls_per_backtest": self.config.nl_max_calls_per_backtest,
                 "sandbox_spec": self._active_sandbox_spec.to_record(),

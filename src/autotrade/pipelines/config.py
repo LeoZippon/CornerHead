@@ -95,9 +95,12 @@ class ExperimentConfig:
     finalize_before_deadline_seconds: int = 300
     per_call_timeout_seconds: int = 300
     max_steps_per_fold: int = 10
-    # Pre-open auction: replay injects one decision tick per day at this time
-    # (priced at the open-auction reference); entries fill at the 09:30 open.
+    # Pre-open auction: replay injects pre-open decision ticks per day. The 09:15
+    # info tick exposes no price (auction not yet matched) and gives a ~10-minute
+    # decision window; the 09:25 tick carries the matched open price. Orders placed
+    # at either fill at the day open. Set auction_preopen_time=None to drop 09:15.
     auction_enabled: bool = True
+    auction_preopen_time: str | None = "09:15"
     auction_decision_time: str = "09:25"
     # Optional hard cap on host NL Sub Agent calls per backtest replay. None keeps
     # NL frequency prompt-guided only; a positive value is the final cost backstop.

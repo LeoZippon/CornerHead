@@ -127,6 +127,8 @@ def buy_if_dip(ctx):
 INTRA_MINUTE_MAIN = '''
 def main(ctx):
     code = "000001.SZ"
+    if ctx.cur_time != "09:30":  # optimistic dedup needs a priced tick
+        return
     if ctx.broker.position(code) == 0:
         ctx.broker.buy(code, weight=0.1, reason="first_weight_buy")
     if ctx.broker.position(code) == 0:

@@ -175,6 +175,7 @@ class BacktestTool:
                     main_policy=policy,
                     replay_intraday_1min=replay_minutes,
                     auction_enabled=bool(manifest.get("auction_enabled", True)),
+                    auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
                     auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
                 )
             stats = compute_return_stats(replay)

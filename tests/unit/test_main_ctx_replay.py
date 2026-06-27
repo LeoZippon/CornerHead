@@ -48,6 +48,14 @@ def main(ctx):
         ctx.broker.buy(code, weight=0.2, reason="auction_entry")
 '''
 
+# Submits at 09:15 with no matched price yet (ctx.price is None); fills at the open.
+PREOPEN_MAIN = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "09:15" and ctx.broker.position(code) == 0 and ctx.price(code) is None:
+        ctx.broker.buy(code, weight=0.2, reason="preopen_blind")
+'''
+
 REPLAY_ROWS = [
     ("20220104", 10.0, 10.2),
     ("20220105", 10.3, 11.0),
@@ -178,6 +186,15 @@ class MainCtxReplayTest(unittest.TestCase):
         self.assertEqual(buys[0]["price_label"], "auction")
         self.assertEqual(buys[0]["trade_date"], "20220104")
         # Filled at the slipped day open (10.0), the call-auction matched price.
+        self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
+
+    def test_preopen_0915_tick_has_no_price_but_fills_at_open(self) -> None:
+        (self.sandbox.paths.agent_output / "main.py").write_text(PREOPEN_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay())
+        buys = [o for o in result.broker.query_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)  # the 09:15 guard requires ctx.price is None
+        self.assertEqual(buys[0]["price_label"], "auction")
+        self.assertEqual(buys[0]["trade_date"], "20220104")
         self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
 
     def test_auction_buy_rejected_at_one_sided_limit_up_open(self) -> None:

@@ -471,6 +471,7 @@ def run_main_ctx_replay(
     main_policy: MainPolicyRunner,
     replay_intraday_1min: pd.DataFrame | None = None,
     auction_enabled: bool = True,
+    auction_preopen_time: str | None = "09:15",
     auction_decision_time: str = "09:25",
 ) -> ReplayResult:
     """Replay the region minute by minute, calling ``main(ctx)`` once per minute.
@@ -505,14 +506,16 @@ def run_main_ctx_replay(
             minute_rows = _minute_rows_with_daily_fallback(replay_daily, trade_date, minute_seed)
             if auction_enabled and not minute_rows.empty:
                 minute_rows = pd.concat(
-                    [_auction_rows(minute_rows, auction_decision_time), minute_rows], ignore_index=True
+                    [_auction_rows(minute_rows, auction_preopen_time, auction_decision_time), minute_rows],
+                    ignore_index=True,
                 ).sort_values(["minute_sort", "ts_code"], kind="stable").reset_index(drop=True)
+            auction_times = {t for t in (auction_preopen_time, auction_decision_time) if t}
             for minute_key, minute_group in minute_rows.groupby("minute_key", sort=True):
                 state = _market_state(broker, trade_date=trade_date, minute_key=str(minute_key), minute_group=minute_group)
                 actions = main_policy.step(state)
                 if not actions:
                     continue
-                price_label = "auction" if str(minute_key) == auction_decision_time else f"{granularity}:{minute_key}"
+                price_label = "auction" if str(minute_key) in auction_times else f"{granularity}:{minute_key}"
                 broker.record_event(
                     "main_actions",
                     trade_date=trade_date,
@@ -545,24 +548,37 @@ def run_main_ctx_replay(
     )
 
 
-def _auction_rows(minute_rows: pd.DataFrame, auction_time: str) -> pd.DataFrame:
-    """Pre-open call-auction tick: each code's opening price only.
+def _auction_rows(minute_rows: pd.DataFrame, preopen_time: str | None, decision_time: str) -> pd.DataFrame:
+    """Pre-open call-auction ticks built from each code's first bar (the day open).
 
-    Built from the day's first bar per code, with high/low set to the open and
-    vol/amount cleared (the matched open price is all that is known at 09:25).
-    The Broker fills entries placed here at the open under the daily limit rules.
+    The optional ``preopen_time`` (09:15) info tick exposes no price — the auction
+    has not matched yet, giving a ~10-minute decision window — while the
+    ``decision_time`` (09:25) tick carries the matched open. Both stamp
+    ``auction_open`` so orders fill at the day open under the Broker's daily limit
+    rules, regardless of the tick's visible price.
     """
     if minute_rows.empty:
         return _empty_minute_rows()
-    first = minute_rows.sort_values("minute_sort", kind="stable").drop_duplicates("ts_code", keep="first").copy()
-    for column in ("high", "low", "close"):
-        first[column] = first["open"]
+    base = minute_rows.sort_values("minute_sort", kind="stable").drop_duplicates("ts_code", keep="first").copy()
+    base["auction_open"] = base["open"]
     for column in ("vol", "amount"):
-        if column in first.columns:
-            first[column] = float("nan")
-    first["minute_key"] = auction_time
-    first["minute_sort"] = _minute_sort(auction_time)
-    return first.reset_index(drop=True)
+        if column in base.columns:
+            base[column] = float("nan")
+    ticks: list[pd.DataFrame] = []
+    if preopen_time:
+        info = base.copy()
+        for column in ("open", "high", "low", "close"):
+            info[column] = float("nan")  # no matched price yet at 09:15
+        info["minute_key"] = preopen_time
+        ticks.append(info)
+    priced = base.copy()
+    for column in ("high", "low", "close"):
+        priced[column] = priced["open"]
+    priced["minute_key"] = decision_time
+    ticks.append(priced)
+    out = pd.concat(ticks, ignore_index=True)
+    out["minute_sort"] = out["minute_key"].map(_minute_sort)
+    return out.reset_index(drop=True)
 
 
 def _market_state(broker: SimBroker, *, trade_date: str, minute_key: str, minute_group: pd.DataFrame) -> dict[str, object]:
@@ -616,13 +632,22 @@ def _execute_main_action(
         ts_code,
         name,
         trade_date=trade_date,
-        raw_price=_bar_execution_price(bar),
+        raw_price=_fill_price(bar),
         amount=_int_or_none(action.get("amount")),
         weight=_float_or_none(action.get("weight")),
         time=minute_key,
         reason=str(action.get("reason") or name),
         price_label=price_label,
     )
+
+
+def _fill_price(bar: pd.Series) -> float | None:
+    """Auction ticks fill at ``auction_open`` (the day open) even when their
+    visible price is hidden (09:15); regular bars fill at the bar price."""
+    auction_open = bar.get("auction_open")
+    if auction_open is not None and pd.notna(auction_open):
+        return float(auction_open)
+    return _bar_execution_price(bar)
 
 
 def _int_or_none(value: object) -> int | None:
