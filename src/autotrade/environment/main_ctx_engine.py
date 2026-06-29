@@ -15,7 +15,6 @@ positions at any minute, not only at the fold decision time.
 from __future__ import annotations
 
 import json
-import math
 import select
 import shutil
 import sys
@@ -44,6 +43,7 @@ from autotrade.environment.backtest_engine import (
     hide_snapshot_slots_from_agent,
 )
 from autotrade.environment.broker import _ACTION_TO_ORDER_TYPE, SimBroker, xtconstant
+from autotrade.environment.data.contracts import sim_datetime
 from autotrade.environment.runtime import sanitize_for_log
 
 _ACTION_ALIASES = {"long": "buy", "sell_short": "short", "close_long": "sell", "close_short": "cover", "exit": "close"}
@@ -257,11 +257,13 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir):
 
     @contextlib.contextmanager
     def substep(name, budget_minutes=None):
-        # Declared latency budget (minutes): orders placed inside fill budget_minutes
-        # later, and the host aborts the backtest if this block's real wall-time
-        # exceeds it. A wrapped block MUST declare a positive budget — wrapping with 0
-        # would be identical to not wrapping (no delay, no ceiling), so it is rejected
-        # to keep the contract honest. Leave trivial per-tick code unwrapped instead.
+        # Declared compute duration (minutes) for a heavy block. B is the block's
+        # real-time ceiling (the host aborts the backtest if real wall-time exceeds B),
+        # it is bounded by decision_max_sim_minutes, and it gates when in-block writes
+        # to ctx.state_dir become visible (ready_at = tick + B). It does NOT move the
+        # order fill bar: orders fill at the normal decision-bar lag regardless of B.
+        # A wrapped block MUST declare B > 0; wrapping with 0 is identical to not
+        # wrapping, so it is rejected. Leave trivial per-tick code unwrapped.
         try:
             budget = float(budget_minutes) if budget_minutes is not None else 0.0
         except (TypeError, ValueError):
@@ -272,6 +274,17 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir):
                 "block may take, which is also its real-time ceiling); use a small value such "
                 "as 0.5 for light work. Leave trivial per-tick code unwrapped for the default lag."
             )
+        _cap = os.environ.get("AT_DECISION_MAX_SIM_MINUTES", "")
+        if _cap:
+            try:
+                _cap_val = float(_cap)
+            except ValueError:
+                _cap_val = None
+            if _cap_val is not None and budget > _cap_val:
+                raise ValueError(
+                    "ctx.substep budget_minutes=%.4g exceeds the decision_max_sim_minutes cap "
+                    "(%.4g); split the work or declare a smaller budget" % (budget, _cap_val)
+                )
         step_name = str(name)
         if step_name in broker._substep_names:
             raise ValueError(
@@ -303,6 +316,7 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir):
         cur_price=price,
         cur_date=str(state.get("cur_date", "") or ""),
         cur_time=str(state.get("cur_time", "") or ""),
+        cur_datetime=str(state.get("cur_datetime", "") or ""),
         params=dict(state.get("params") or {}),
         nl=_nl,
         snapshot_dir=snapshot_dir,
@@ -388,12 +402,14 @@ class MainPolicyRunner:
         nl_service=None,
         requests_path: Path | None = None,
         responses_path: Path | None = None,
+        decision_max_sim_minutes: float | None = None,
     ) -> None:
         self.executor = executor
         self.paths = paths
         self.timeout_seconds = timeout_seconds
         self.decision_time = decision_time
         self.replay_granularity = replay_granularity
+        self.decision_max_sim_minutes = decision_max_sim_minutes
         self.nl_service = nl_service
         self.requests_path = requests_path
         self.responses_path = responses_path
@@ -426,6 +442,8 @@ class MainPolicyRunner:
                 "AT_WRITE_FORBIDDEN_PATHS": self.executor.map_path(self.paths.agent_output),
                 "AT_DISABLE_LINKS": "1",
             }
+            if self.decision_max_sim_minutes is not None:
+                env["AT_DECISION_MAX_SIM_MINUTES"] = str(self.decision_max_sim_minutes)
             if self.requests_path is not None and self.responses_path is not None:
                 env["AT_NL_REQUESTS_PATH"] = self.executor.map_path(self.requests_path)
                 env["AT_NL_RESPONSES_PATH"] = self.executor.map_path(self.responses_path)
@@ -573,8 +591,9 @@ def run_main_ctx_replay(
     auction_enabled: bool = True,
     auction_preopen_time: str | None = "09:15",
     auction_decision_time: str = "09:25",
+    auction_close_time: str | None = None,
     execution_lag_bars: int = 2,
-    decision_max_sim_minutes: float | None = None,
+    offsession_tick_minutes: int = 0,
     max_seconds_per_trading_day: float | None = None,
     asof_view_enabled: bool = False,
     snapshot_dir: Path | None = None,
@@ -587,18 +606,23 @@ def run_main_ctx_replay(
     for matching. ``execution_lag_bars`` (default 2) sets the gap from the
     decision bar to the activation bar — 1 = the immediate next bar, 2 = one bar
     of submit latency then matching on the following bar — which removes
-    within-bar look-ahead. A decision with no bar ``execution_lag_bars`` ahead
-    (near the close) cannot fill and is recorded ``main_actions_unfilled``.
-    The final trade date is reserved for mandatory liquidation; minute bars drive
-    the replay when present, else a daily 09:30/15:00 fallback is synthesized.
+    within-bar look-ahead. A sub-step's declared budget no longer moves the fill bar
+    (orders fill at this lag regardless of ``budget_minutes``). A decision with no bar
+    ``execution_lag_bars`` ahead (near the close) cannot fill and is recorded
+    ``main_actions_unfilled``. The final trade date is reserved for mandatory
+    liquidation; minute bars drive the replay when present, else a daily 09:30/15:00
+    fallback is synthesized.
 
-    With ``auction_enabled`` each day leads with two pre-open decision ticks: a
-    09:15 info tick with no price (``ctx.price`` is None) filling at the 09:30
-    opening auction, and a 09:25 tick on the matched open filling at the first
-    continuous bar (09:31). These batch-auction fills are independent of
-    ``execution_lag_bars`` and labelled ``price_label="auction"``. The Agent can
-    query still-working orders via ``ctx.broker.pending(ts_code)`` to avoid
-    re-submitting before a fill (parity with the live order query).
+    The tick grid spans the whole day on the same ``main(ctx)`` entry, so the loop
+    drives both backtest and live. ``auction_enabled`` leads each day with a 09:15
+    info tick (no price, fills at the 09:30 opening auction) and a 09:25 tick (on the
+    matched open, fills at the first continuous bar); ``auction_close_time`` (e.g.
+    14:57) makes that bar's decision fill at the day's final bar (the 15:00 close
+    auction). These batch-auction fills are labelled ``price_label="auction"``.
+    ``offsession_tick_minutes`` (0 = off) adds a research-only tick grid outside the
+    session: pre-open off-session orders fill at the opening auction, post-close ones
+    do not fill. ``ctx.broker.pending(ts_code)`` exposes still-working orders so the
+    Agent can avoid re-submitting before a fill (parity with the live order query).
     """
     market = MarketData(replay_daily)
     if len(market.trade_dates) < 2:
@@ -614,6 +638,7 @@ def run_main_ctx_replay(
     equity_by_date: dict[str, float] = {}
     replay_start = time.monotonic()  # wall-clock start, reported as replay_wall_seconds
     substep_runtime: dict[str, dict[str, float]] = {}
+    tick_counts = {"total": 0, "intraday": 0, "offsession": 0}
     total_days = len(market.trade_dates)
     last_progress_idx = 0
     last_progress_time = replay_start
@@ -637,16 +662,19 @@ def run_main_ctx_replay(
             minute_rows = _minute_rows_with_daily_fallback(replay_daily, trade_date, minute_seed)
             if not minute_rows.empty:
                 plan = _day_tick_plan(
-                    minute_rows, auction_enabled, auction_preopen_time, auction_decision_time, execution_lag_bars
+                    minute_rows, auction_enabled, auction_preopen_time, auction_decision_time,
+                    execution_lag_bars, offsession_tick_minutes=offsession_tick_minutes,
+                    close_auction_time=auction_close_time,
                 )
                 real_index = {tick.minute_key: i for i, tick in enumerate(t for t in plan if t.is_real)}
                 n_real = len(real_index)
-                lag_floor = max(1, min(execution_lag_bars, n_real - 1))
-                # Decisions wait out the submit lag here, then enter the Broker's
-                # order book (order_stock) at their activation bar; a sub-step's
-                # declared budget delays its fill bar further.
+                # Decisions wait out the submit lag, then enter the Broker's order book
+                # (order_stock) at their activation bar. The sub-step budget no longer
+                # shifts that bar: orders fill at the decision's activation bar.
                 incoming: dict[int, list[tuple[dict[str, object], bool]]] = {}
                 for tick in plan:
+                    tick_counts["total"] += 1
+                    tick_counts["offsession" if tick.is_offsession else "intraday"] += 1
                     if tick.is_real:
                         index = real_index[tick.minute_key]
                         for action, is_auction in incoming.pop(index, []):
@@ -663,6 +691,7 @@ def run_main_ctx_replay(
                         minute_group=tick.group,
                         asof_dir=asof_dir,
                         pending=_pending_view(broker, incoming),
+                        cur_datetime=sim_datetime(trade_date, tick.minute_key).isoformat(),
                     )
                     # A single decision (one main(ctx) tick) over the per-decision real
                     # wall cap is killed inside MainPolicyRunner.step. Here we accumulate
@@ -681,7 +710,6 @@ def run_main_ctx_replay(
                     # wall-time over the claimed B invalidates the rest of the replay
                     # (under-declaring is non-exploitable). Unwrapped orders carry no
                     # sub-step and fill at the default lag with no per-block ceiling.
-                    budget_by_name: dict[str, float] = {}
                     for sub in substeps:
                         budget_min = float(sub.get("budget_minutes", 0.0) or 0.0)
                         if float(sub.get("real_wall_s", 0.0) or 0.0) > budget_min * 60.0:
@@ -689,7 +717,6 @@ def run_main_ctx_replay(
                                 f"sub-step {str(sub.get('name'))!r} at {trade_date} {tick.minute_key} exceeded its "
                                 f"declared budget: real {float(sub.get('real_wall_s', 0.0)):.1f}s > {budget_min:.1f}min"
                             )
-                        budget_by_name[str(sub.get("name"))] = budget_min
                         agg = substep_runtime.setdefault(
                             str(sub.get("name")),
                             {"count": 0.0, "total_real_wall_s": 0.0, "max_real_wall_s": 0.0, "budget_minutes": budget_min},
@@ -701,23 +728,10 @@ def run_main_ctx_replay(
                         agg["budget_minutes"] = budget_min
                     placed = 0
                     for action in actions:
-                        # _substep is an internal routing tag — consume it (keep the
-                        # recorded/submitted order clean) and map it to its budget. An
-                        # unwrapped order carries None and gets the default (no) budget,
-                        # never colliding with a sub-step literally named "None".
-                        substep_name = action.pop("_substep", None)
-                        budget_min = budget_by_name.get(substep_name, 0.0) if substep_name is not None else 0.0
-                        if decision_max_sim_minutes is not None and budget_min > decision_max_sim_minutes:
-                            broker.record_event(
-                                "decision_too_slow", trade_date=trade_date, minute_key=tick.minute_key,
-                                action=_jsonable(action), budget_minutes=budget_min, limit=decision_max_sim_minutes,
-                            )
-                            continue
-                        fill_index = (
-                            tick.activate_index + max(0, math.ceil(budget_min) - lag_floor)
-                            if tick.activate_index is not None
-                            else None
-                        )
+                        # _substep is an internal routing tag; drop it so the recorded
+                        # order stays clean (its budget is enforced above, not here).
+                        action.pop("_substep", None)
+                        fill_index = tick.activate_index
                         if fill_index is None or fill_index >= n_real:
                             broker.record_event(
                                 "main_actions_unfilled", trade_date=trade_date, minute_key=tick.minute_key,
@@ -751,6 +765,9 @@ def run_main_ctx_replay(
         substep_runtime=substep_runtime or None,
         replay_wall_seconds=time.monotonic() - replay_start,
         replayed_trade_days=total_days,
+        total_ticks=tick_counts["total"],
+        intraday_ticks=tick_counts["intraday"],
+        offsession_ticks=tick_counts["offsession"],
     )
 
 
@@ -763,6 +780,20 @@ class _Tick:
     activate_index: int | None
     is_real: bool
     is_auction: bool
+    is_offsession: bool = False
+
+
+def _offsession_keys(start_min: int, end_min: int, step_minutes: int) -> list[str]:
+    """``HH:MM`` keys at ``step_minutes`` spacing over ``[start_min, end_min)``;
+    empty when off-session ticks are disabled (``step_minutes <= 0``)."""
+    if step_minutes <= 0:
+        return []
+    keys: list[str] = []
+    minute = max(0, int(start_min))
+    while minute < end_min:
+        keys.append(f"{minute // 60:02d}:{minute % 60:02d}")
+        minute += step_minutes
+    return keys
 
 
 def _day_tick_plan(
@@ -771,23 +802,39 @@ def _day_tick_plan(
     preopen_time: str | None,
     decision_time: str,
     execution_lag_bars: int,
+    *,
+    offsession_tick_minutes: int = 0,
+    close_auction_time: str | None = None,
 ) -> list[_Tick]:
     """Ordered decision ticks for one day, each tagged with the real-bar index its
     orders reach the book at (``activate_index``).
 
-    A decision on real bar *i* activates at *i + execution_lag_bars*; a bar with
-    no such later bar (near the close) yields ``activate_index=None``. With
+    A decision on real bar *i* activates at *i + execution_lag_bars*; a bar with no
+    such later bar (near the close) yields ``activate_index=None``. With
     ``auction_enabled`` two pre-open ticks lead the day: a ``preopen_time`` (09:15)
     info tick with no bars (``ctx.price`` is None) activating at the first real bar
-    (the 09:30 opening auction), and a ``decision_time`` (09:25) tick on the
-    matched open activating at the first continuous bar (09:31). The pre-open
-    activation is fixed and independent of ``execution_lag_bars``.
+    (the 09:30 opening auction), and a ``decision_time`` (09:25) tick on the matched
+    open activating at the first continuous bar (09:31). ``close_auction_time`` (e.g.
+    14:57) makes that bar's decision activate at the day's final bar (the 15:00 close
+    auction) instead of the default lag. ``offsession_tick_minutes`` (0 = off) adds a
+    research-only grid outside the session: pre-open off-session ticks activate at the
+    opening auction (no price), post-close ones never fill. Pre-open and close-auction
+    activations are fixed and independent of ``execution_lag_bars``.
     """
     real_keys = sorted({str(key) for key in minute_rows["minute_key"]}, key=_minute_sort)
     if not real_keys:
         return []
     groups = {str(key): group for key, group in minute_rows.groupby(minute_rows["minute_key"].astype(str), sort=False)}
+    n = len(real_keys)
     plan: list[_Tick] = []
+    # Off-session grid frame: the session starts at the earliest pre-open tick and
+    # ends at the last real bar; ticks outside [open, close] are research-only.
+    session_open = preopen_time if (auction_enabled and preopen_time) else (decision_time if auction_enabled else real_keys[0])
+    open_min, close_min = _minute_sort(session_open), _minute_sort(real_keys[-1])
+    # Pre-open off-session ticks: no price, orders fill at the first real bar (the
+    # opening auction when auctions are on, else a plain market-on-open).
+    for key in _offsession_keys(0, open_min, offsession_tick_minutes):
+        plan.append(_Tick(key, _empty_minute_rows(), 0, False, auction_enabled, True))
     if auction_enabled:
         first = minute_rows.sort_values("minute_sort", kind="stable").drop_duplicates("ts_code", keep="first").copy()
         open_group = first.assign(high=first["open"], low=first["open"], close=first["open"])
@@ -796,14 +843,22 @@ def _day_tick_plan(
                 open_group[column] = float("nan")  # intraday volume is unknown pre-open
         if preopen_time:
             plan.append(_Tick(preopen_time, _empty_minute_rows(), 0, False, True))
-        plan.append(_Tick(decision_time, open_group, min(1, len(real_keys) - 1), False, True))
+        plan.append(_Tick(decision_time, open_group, min(1, n - 1), False, True))
     # Clamp the lag to the day's bar count so short/daily-fallback days (e.g. the
     # 09:30+15:00 synthesis) still trade even with auctions disabled: >=1 preserves
     # next-bar execution; <=n-1 lets the first decision reach the last bar.
-    lag = max(1, min(execution_lag_bars, len(real_keys) - 1))
+    lag = max(1, min(execution_lag_bars, n - 1))
     for index, key in enumerate(real_keys):
-        activate_index = index + lag
-        plan.append(_Tick(key, groups[key], activate_index if activate_index < len(real_keys) else None, True, False))
+        if close_auction_time and key == str(close_auction_time) and index < n - 1:
+            # Close call auction: this bar's decision fills at the day's final bar.
+            plan.append(_Tick(key, groups[key], n - 1, True, True))
+        else:
+            activate_index = index + lag
+            plan.append(_Tick(key, groups[key], activate_index if activate_index < n else None, True, False))
+    # Post-close off-session ticks: research/state only, orders never fill.
+    after_start = ((close_min // offsession_tick_minutes) + 1) * offsession_tick_minutes if offsession_tick_minutes > 0 else 0
+    for key in _offsession_keys(after_start, 24 * 60, offsession_tick_minutes):
+        plan.append(_Tick(key, _empty_minute_rows(), None, False, False, True))
     return plan
 
 
@@ -909,6 +964,7 @@ def _market_state(
     minute_group: pd.DataFrame,
     asof_dir: str | None = None,
     pending: dict[str, list[dict[str, object]]] | None = None,
+    cur_datetime: str = "",
 ) -> dict[str, object]:
     bars = [
         {
@@ -925,6 +981,7 @@ def _market_state(
     return {
         "cur_date": str(trade_date),
         "cur_time": str(minute_key or ""),
+        "cur_datetime": str(cur_datetime or ""),
         "account": _jsonable(broker.query_stock_asset()),
         "positions": _jsonable(broker.query_stock_positions()),
         "cash": float(broker.cash),

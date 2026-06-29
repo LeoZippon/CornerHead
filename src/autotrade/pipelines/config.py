@@ -106,13 +106,22 @@ class ExperimentConfig:
     auction_enabled: bool = True
     auction_preopen_time: str | None = "09:15"
     auction_decision_time: str = "09:25"
+    # Close call-auction decision tick: a decision at this time fills at the day's
+    # final bar (15:00 close auction). Set None to drop it.
+    auction_close_time: str | None = "14:57"
+    # 24h tick grid: outside the 09:15-15:00 session the replay still calls main(ctx)
+    # on this minute spacing (research/state only — off-session ticks place no fills),
+    # so the same loop drives backtest and live. 0 disables off-session ticks.
+    offsession_tick_minutes: int = 15
     # Bars between an order's decision tick and its fill bar (market orders fill at
     # the fill bar's open), modelling the live submit latency: 1 = the immediate
     # next bar, 2 = one bar to compute/submit then fill on the following bar.
     execution_lag_bars: int = 2
-    # Latency budgets. A ctx.substep(name, budget_minutes=B) delays its orders' fill
-    # bar by B and is aborted if its real wall-time exceeds B (the Agent's declared
-    # model); decision_max_sim_minutes caps that declared B (a slower decision misses).
+    # Latency budgets. A ctx.substep(name, budget_minutes=B) is the block's real-wall
+    # ceiling (the backtest aborts if real wall-time exceeds B) and the ctx.state_dir
+    # write-visibility gate (ready_at = tick + B); it does NOT move the order fill bar
+    # (orders fill at the default execution_lag_bars lag regardless of B). A declared
+    # B over decision_max_sim_minutes is rejected at ctx.substep() init (BacktestError).
     # The two real-wall caps below are SYSTEM fail-fasts that scale with the replay
     # length instead of a fixed total: any single decision (one main(ctx) tick) over
     # backtest_max_seconds_per_decision is killed immediately, and a trade day whose

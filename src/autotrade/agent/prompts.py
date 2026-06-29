@@ -677,6 +677,8 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             "price_limit_enforced": True,
             "suspension_enforced": True,
             "execution_lag_bars": manifest.get("execution_lag_bars"),
+            "auction_close_time": manifest.get("auction_close_time"),
+            "offsession_tick_minutes": manifest.get("offsession_tick_minutes"),
             "decision_max_sim_minutes": manifest.get("decision_max_sim_minutes"),
             "backtest_max_seconds_per_decision": manifest.get("backtest_max_seconds_per_decision"),
             "backtest_max_seconds_per_trading_day": manifest.get("backtest_max_seconds_per_trading_day"),

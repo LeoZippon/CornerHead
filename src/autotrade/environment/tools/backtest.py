@@ -232,6 +232,7 @@ class BacktestTool:
                 nl_service=nl_service,
                 requests_path=requests_host,
                 responses_path=responses_host,
+                decision_max_sim_minutes=_optional_float(manifest.get("decision_max_sim_minutes")),
             ) as policy:
                 policy.validate_main()
                 replay = run_main_ctx_replay(
@@ -244,8 +245,9 @@ class BacktestTool:
                     auction_enabled=bool(manifest.get("auction_enabled", True)),
                     auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
                     auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
+                    auction_close_time=(manifest.get("auction_close_time") or None),
                     execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
-                    decision_max_sim_minutes=_optional_float(manifest.get("decision_max_sim_minutes")),
+                    offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 0) or 0),
                     max_seconds_per_trading_day=per_day_cap,
                     asof_view_enabled=bool(manifest.get("rolling_asof_enabled", True)),
                     snapshot_dir=snapshot_dir,

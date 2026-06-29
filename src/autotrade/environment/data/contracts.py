@@ -73,3 +73,19 @@ def default_tushare_contracts() -> dict[str, DatasetContract]:
             pit_notes="Event table starts in 2020 locally; use as next-day event evidence unless source timing is proven earlier.",
         ),
     }
+
+
+def sim_datetime(trade_date: str, minute_key: str) -> datetime:
+    """Beijing-time simulation clock for one replay tick.
+
+    ``trade_date`` is ``YYYYMMDD`` and ``minute_key`` is ``HH:MM`` (24h). Every
+    replay tick -- intraday bar, pre-open/close auction, and off-session -- binds to
+    this clock. It is the single basis for off-session grid spacing, auction/fill
+    mapping, ``available_at`` visibility in the Timeview, staged-write ``ready_at``,
+    and the daily post-close refresh. The live loop reuses ``main(ctx)`` against the
+    real Asia/Shanghai system clock, so the semantics carry over unchanged.
+    """
+    hour_text, _, minute_text = str(minute_key).partition(":")
+    return datetime.strptime(str(trade_date), "%Y%m%d").replace(
+        hour=int(hour_text or 0), minute=int(minute_text or 0), tzinfo=CN_TZ
+    )

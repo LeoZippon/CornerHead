@@ -113,8 +113,8 @@ def main(ctx):
         ctx.broker.buy(code, weight=0.1, reason="asof_ok")
 '''
 
-# Declares a heavy screening sub-step (budget_minutes=3 > execution_lag_bars=2):
-# its fill bar is pushed one bar past the default 09:32 to 09:33.
+# Declares a heavy screening sub-step (budget_minutes=3): the budget is a real-time
+# ceiling and state-staging gate, not a fill delay, so the order fills at the default 09:32.
 SUBSTEP_LATENCY_MAIN = '''
 def main(ctx):
     code = "000001.SZ"
@@ -163,8 +163,8 @@ def main(ctx):
     return
 '''
 
-# A small substep budget (ceil(B) <= lag_floor) on a 09:25 auction order does NOT
-# change its auction fill; a larger budget delays the fill bar (still "auction").
+# A substep budget on a 09:25 auction order does NOT change its auction fill: the
+# budget never moves the fill bar, whether small or large.
 SUBSTEP_AUCTION_SMALL_MAIN = '''
 def main(ctx):
     code = "000001.SZ"
@@ -434,14 +434,15 @@ class MainCtxReplayTest(unittest.TestCase):
         # submit a duplicate. The working-order query collapses it to a single buy.
         self.assertEqual(len(buys), 1)
 
-    def test_substep_budget_delays_fill_bar(self) -> None:
-        # A declared budget_minutes=3 (> execution_lag_bars=2) pushes the 09:30
-        # decision's fill from the default 09:32 to 09:33 (deterministic latency).
+    def test_substep_budget_does_not_move_fill_bar(self) -> None:
+        # The sub-step budget is a real-time ceiling and state-staging gate, not a
+        # fill delay: a budget_minutes=3 decision at 09:30 still fills at the default
+        # 09:32 (execution_lag_bars=2), exactly like an unwrapped decision.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_LATENCY_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _dense_minutes())
         buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
-        self.assertEqual(buys[0]["price_label"], "minute:09:33")
+        self.assertEqual(buys[0]["price_label"], "minute:09:32")
 
     def test_substep_overrun_aborts_replay(self) -> None:
         # The sub-step's real wall-time exceeds its small positive declared budget,
@@ -476,15 +477,16 @@ class MainCtxReplayTest(unittest.TestCase):
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "auction")
 
-    def test_substep_large_budget_delays_auction_fill(self) -> None:
-        # A larger budget (ceil(4) > lag_floor=2) delays the 09:25 order's fill bar
-        # like a continuous order — it keeps the "auction" label but fills at a later
-        # bar (a price clearly past the ~10.1 09:31 auction print) instead of 09:31.
+    def test_substep_large_budget_keeps_auction_fill(self) -> None:
+        # A large budget no longer delays the fill bar: a 09:25 order in a
+        # budget_minutes=4 substep still fills at the 09:31 auction print (~10.1,
+        # price_label "auction"), identical to a small-budget or unwrapped order.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_AUCTION_LARGE_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _auction_minutes())
         buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
-        self.assertGreater(buys[0]["price"], 10.5)  # delayed past the 09:31 auction fill (~10.1)
+        self.assertEqual(buys[0]["price_label"], "auction")
+        self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.1, is_buy=True))
 
     def test_substep_runtime_and_replay_metrics_in_result(self) -> None:
         # The replay aggregates per-sub-step wall-time and reports total runtime +
@@ -594,6 +596,100 @@ class MainCtxReplayTest(unittest.TestCase):
         # close (12.5): net positive.
         self.assertGreater(stats["total_return"], 0.0)
         self.assertGreaterEqual(stats["trade_count"], 1)
+
+    def test_substep_budget_over_decision_cap_is_rejected(self) -> None:
+        # decision_max_sim_minutes caps the declared budget at substep init: a larger
+        # B is rejected in-sandbox, failing the run (the agent must split the work).
+        main = (
+            "def main(ctx):\n"
+            "    if ctx.cur_time == '09:30':\n"
+            "        with ctx.substep('screen', budget_minutes=50):\n"
+            "            ctx.broker.buy('000001.SZ', weight=0.1)\n"
+        )
+        (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=30.0,
+            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
+            decision_max_sim_minutes=10.0,
+        ) as policy:
+            policy.validate_main()
+            with self.assertRaisesRegex(BacktestError, "decision_max_sim_minutes"):
+                run_main_ctx_replay(
+                    _ohlc_replay(), BrokerProfile(initial_cash=1_000_000.0),
+                    shortable_codes=frozenset(), main_policy=policy,
+                    replay_intraday_1min=_dense_minutes(),
+                )
+
+    def test_offsession_grid_adds_research_only_ticks(self) -> None:
+        # An off-session grid wakes main(ctx) outside the session for research/state;
+        # those ticks never fill orders. A 21:00 (post-close) buy is recorded unfilled.
+        main = (
+            "def main(ctx):\n"
+            "    if ctx.cur_time == '21:00' and ctx.broker.position('000001.SZ') == 0:\n"
+            "        ctx.broker.buy('000001.SZ', weight=0.1, reason='offsession')\n"
+        )
+        (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=30.0,
+            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
+        ) as policy:
+            policy.validate_main()
+            result = run_main_ctx_replay(
+                _ohlc_replay(), BrokerProfile(initial_cash=1_000_000.0),
+                shortable_codes=frozenset(), main_policy=policy,
+                replay_intraday_1min=_dense_minutes(), offsession_tick_minutes=180,
+            )
+        self.assertGreater(result.offsession_ticks, 0)
+        self.assertGreater(result.intraday_ticks, 0)
+        self.assertEqual(result.total_ticks, result.intraday_ticks + result.offsession_ticks)
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 0)  # the post-close 21:00 order never fills
+        self.assertTrue(any(e["event_type"] == "main_actions_unfilled" for e in result.broker.events))
+
+    def test_close_auction_fills_decision_at_final_bar(self) -> None:
+        # With auction_close_time=14:57, the 14:57 bar's decision fills at the day's
+        # final 15:00 bar (the close auction), labelled "auction".
+        main = (
+            "def main(ctx):\n"
+            "    if ctx.cur_time == '14:57' and ctx.broker.position('000001.SZ') == 0 "
+            "and not ctx.broker.pending('000001.SZ'):\n"
+            "        ctx.broker.buy('000001.SZ', weight=0.2, reason='close_auction')\n"
+        )
+        (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+        minutes = pd.DataFrame(
+            [
+                {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": t, "open": o, "high": o, "low": o, "close": o}
+                for t, o in (("09:31", 10.0), ("14:57", 10.4), ("15:00", 10.6))
+            ]
+        )
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=30.0,
+            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="minute",
+        ) as policy:
+            policy.validate_main()
+            result = run_main_ctx_replay(
+                _ohlc_replay(), BrokerProfile(initial_cash=1_000_000.0),
+                shortable_codes=frozenset(), main_policy=policy,
+                replay_intraday_1min=minutes, auction_close_time="14:57",
+            )
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["price_label"], "auction")
+        self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.6, is_buy=True))
+
+    def test_cur_datetime_is_exposed(self) -> None:
+        # ctx.cur_datetime carries the Beijing-time sim clock for the tick.
+        main = (
+            "def main(ctx):\n"
+            "    if ctx.cur_time == '09:25':\n"
+            "        assert ctx.cur_datetime == '2022-01-04T09:25:00+08:00', ctx.cur_datetime\n"
+            "        if ctx.broker.position('000001.SZ') == 0 and ctx.price('000001.SZ') is not None:\n"
+            "            ctx.broker.buy('000001.SZ', weight=0.1)\n"
+        )
+        (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _auction_minutes())
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)  # the cur_datetime assert passed, then it bought
 
 
 if __name__ == "__main__":

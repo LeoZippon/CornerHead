@@ -427,6 +427,12 @@ class ReplayResult:
     substep_runtime: dict[str, dict[str, float]] | None = None
     replay_wall_seconds: float | None = None
     replayed_trade_days: int | None = None
+    # 24h tick-grid breakdown: total main(ctx) ticks and how many were intraday
+    # (matchable session/auction bars) vs off-session (research/state only), so the
+    # Agent can see the extra cost the off-session grid adds.
+    total_ticks: int | None = None
+    intraday_ticks: int | None = None
+    offsession_ticks: int | None = None
 
 
 class MinuteMarketData:
