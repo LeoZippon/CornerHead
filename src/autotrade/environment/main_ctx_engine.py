@@ -15,12 +15,14 @@ positions at any minute, not only at the fold decision time.
 from __future__ import annotations
 
 import json
+import math
 import select
 import shutil
 import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -159,6 +161,9 @@ class _Broker:
             qty = int(item.get("quantity", 0) or 0)
             self._pos[str(item.get("ts_code"))] = qty if str(item.get("side", "long")) == "long" else -qty
         self._actions = []
+        self._substeps = []      # [{name, budget_minutes, real_wall_s}] declared this tick
+        self._substep_names = set()
+        self._cur_substep = None  # name of the open ctx.substep, tagged onto each order
 
     @property
     def cash(self):
@@ -194,7 +199,7 @@ class _Broker:
 
     def close(self, ts_code, reason=None, **kwargs):
         code = str(ts_code)
-        self._actions.append({"action": "close", "ts_code": code, "reason": reason})
+        self._actions.append({"action": "close", "ts_code": code, "reason": reason, "_substep": self._cur_substep})
         price = self._prices.get(code)
         held = self._pos.get(code, 0)
         if price is not None:
@@ -214,6 +219,7 @@ class _Broker:
             record["valid_bars"] = valid_bars
         if reason is not None:
             record["reason"] = reason
+        record["_substep"] = self._cur_substep
         self._actions.append(record)
         if limit is not None:
             return  # a resting limit order may not fill; leave the optimistic view unchanged
@@ -249,12 +255,50 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir):
     def bar(ts_code):
         return bars.get(str(ts_code))
 
+    @contextlib.contextmanager
+    def substep(name, budget_minutes=None):
+        # Declared latency budget (minutes): orders placed inside fill budget_minutes
+        # later, and the host aborts the backtest if this block's real wall-time
+        # exceeds it. A wrapped block MUST declare a positive budget — wrapping with 0
+        # would be identical to not wrapping (no delay, no ceiling), so it is rejected
+        # to keep the contract honest. Leave trivial per-tick code unwrapped instead.
+        try:
+            budget = float(budget_minutes) if budget_minutes is not None else 0.0
+        except (TypeError, ValueError):
+            budget = 0.0
+        if budget <= 0:
+            raise ValueError(
+                "ctx.substep(name, budget_minutes=B) requires B > 0 minutes (the time this "
+                "block may take, which is also its real-time ceiling); use a small value such "
+                "as 0.5 for light work. Leave trivial per-tick code unwrapped for the default lag."
+            )
+        step_name = str(name)
+        if step_name in broker._substep_names:
+            raise ValueError(
+                f"ctx.substep name {step_name!r} was already used in this tick; use a unique name "
+                "for each decision block so its latency budget maps unambiguously to orders."
+            )
+        broker._substep_names.add(step_name)
+        prev = broker._cur_substep
+        broker._cur_substep = step_name
+        start = time.monotonic()
+        try:
+            yield
+        finally:
+            broker._substeps.append({
+                "name": step_name,
+                "budget_minutes": budget,
+                "real_wall_s": time.monotonic() - start,
+            })
+            broker._cur_substep = prev
+
     return types.SimpleNamespace(
         broker=broker,
         account=broker.account,
         positions=broker.positions,
         bars=bars,
         bar=bar,
+        substep=substep,
         price=price,
         cur_price=price,
         cur_date=str(state.get("cur_date", "") or ""),
@@ -310,11 +354,24 @@ for line in sys.stdin:
             ctx, broker = _build_ctx(request.get("state") or {}, snapshot_dir, model_dir, state_dir)
             with contextlib.redirect_stdout(sys.stderr):
                 main_fn(ctx)
-            response = {"request_id": request_id, "status": "ok", "actions": broker._actions}
+            response = {
+                "request_id": request_id,
+                "status": "ok",
+                "actions": broker._actions,
+                "substeps": broker._substeps,
+            }
     except Exception as exc:
         response = {"request_id": request_id, "status": "error", "error": _sanitize_error("%s: %s" % (type(exc).__name__, exc))}
     print(json.dumps(response, ensure_ascii=False, default=str), file=_PROTOCOL_STDOUT, flush=True)
 """
+
+
+@dataclass(frozen=True)
+class _TickResult:
+    """One ``main(ctx)`` tick: its orders and declared latency sub-steps."""
+
+    actions: list[dict[str, object]]
+    substeps: list[dict[str, object]]
 
 
 class MainPolicyRunner:
@@ -341,6 +398,9 @@ class MainPolicyRunner:
         self.requests_path = requests_path
         self.responses_path = responses_path
         self.proc = None
+        # Unique cmdline marker so the in-container driver tree can be reaped on
+        # timeout/teardown (killing the host docker exec client does not signal it).
+        self._run_marker = "at_driver_" + uuid.uuid4().hex
         self._hide_cm = None
         self._hide_entered = False
         self._served: set[str] = set()
@@ -374,7 +434,7 @@ class MainPolicyRunner:
             self._hide_cm.__enter__()
             self._hide_entered = True
             self.proc = self.executor.popen(
-                [self.executor.python, "-c", _MAIN_DRIVER, self.executor.map_path(main_py)],
+                [self.executor.python, "-c", _MAIN_DRIVER, self.executor.map_path(main_py), self._run_marker],
                 env=env,
                 cwd=self.paths.agent,
                 user="agent",
@@ -411,12 +471,16 @@ class MainPolicyRunner:
     def validate_main(self) -> None:
         self._request({"op": "validate"})
 
-    def step(self, state: dict[str, object]) -> list[dict[str, object]]:
+    def step(self, state: dict[str, object]) -> "_TickResult":
         response = self._request({"op": "call", "state": state})
         actions = response.get("actions") or []
         if not isinstance(actions, list):
             raise BacktestError("main(ctx) returned non-list actions")
-        return [dict(action) for action in actions if isinstance(action, dict)]
+        substeps = response.get("substeps") or []
+        return _TickResult(
+            actions=[dict(action) for action in actions if isinstance(action, dict)],
+            substeps=[dict(s) for s in substeps if isinstance(s, dict)],
+        )
 
     def close(self) -> None:
         proc = self.proc
@@ -429,6 +493,8 @@ class MainPolicyRunner:
             except Exception:  # noqa: BLE001 - best effort cleanup
                 proc.kill()
                 proc.wait()
+            # Killing the host client may leave the in-container driver alive; reap it.
+            self.executor.kill_marker(self._run_marker)
         # The process is dead, so proc.stderr hits EOF and the daemon drainer
         # finishes; join it before closing the fd so we never race it.
         if self._stderr_thread is not None:
@@ -452,12 +518,13 @@ class MainPolicyRunner:
             proc.stdin.flush()
         except BrokenPipeError as exc:
             raise BacktestError(f"main policy runner exited early: {self._drain_stderr()}") from exc
-        # Inactivity deadline: a single slow nl() (up to its own timeout) must not
-        # exhaust the per-minute budget, so serving an NL request resets the clock.
+        # Hard per-decision wall cap: the whole main(ctx) tick — its compute AND any
+        # nl() calls it makes — must finish within timeout_seconds, else the decision is
+        # killed immediately and the backtest fails. No inactivity reset: a decision that
+        # leans on slow/serial NL is what the cap is meant to catch.
         deadline = time.monotonic() + self.timeout_seconds
         while time.monotonic() < deadline:
-            if self._pump_nl():
-                deadline = time.monotonic() + self.timeout_seconds
+            self._pump_nl()
             if proc.poll() is not None:
                 raise BacktestError(f"main policy runner failed: {self._drain_stderr()}")
             ready, _, _ = select.select([proc.stdout], [], [], 0.05)
@@ -476,7 +543,8 @@ class MainPolicyRunner:
                 raise BacktestError(str(sanitize_for_log(str(response.get("error", "main(ctx) failed")))))
             return response
         proc.kill()
-        raise BacktestError(f"main policy runner timed out after {self.timeout_seconds}s")
+        self.executor.kill_marker(self._run_marker)
+        raise BacktestError(f"main(ctx) decision exceeded its {self.timeout_seconds:.0f}s wall-clock cap")
 
     def _pump_nl(self) -> int:
         if self.nl_service is None or self.requests_path is None or self.responses_path is None:
@@ -505,18 +573,21 @@ def run_main_ctx_replay(
     auction_preopen_time: str | None = "09:15",
     auction_decision_time: str = "09:25",
     execution_lag_bars: int = 2,
+    decision_max_sim_minutes: float | None = None,
+    max_seconds_per_trading_day: float | None = None,
     asof_view_enabled: bool = False,
     snapshot_dir: Path | None = None,
+    on_progress: "Callable[[str, int, int, float, int], None] | None" = None,
 ) -> ReplayResult:
     """Replay the region tick by tick, calling ``main(ctx)`` per tick.
 
-    Market orders only, mirroring the live QMT controller (which has no
-    broker-side conditional orders): the Agent decides on the bar it can see and
-    each order fills at a LATER bar's open. ``execution_lag_bars`` (default 2)
-    sets the gap from the decision bar to the fill bar — 1 = the immediate next
-    bar, 2 = one bar of submit latency then a fill on the following bar — which
-    removes within-bar look-ahead. A decision with no bar ``execution_lag_bars``
-    ahead (near the close) cannot fill and is recorded ``main_actions_unfilled``.
+    Market and FIX_PRICE limit orders go through the Broker's day order book:
+    the Agent decides on the bar it can see, then each order reaches a LATER bar
+    for matching. ``execution_lag_bars`` (default 2) sets the gap from the
+    decision bar to the activation bar — 1 = the immediate next bar, 2 = one bar
+    of submit latency then matching on the following bar — which removes
+    within-bar look-ahead. A decision with no bar ``execution_lag_bars`` ahead
+    (near the close) cannot fill and is recorded ``main_actions_unfilled``.
     The final trade date is reserved for mandatory liquidation; minute bars drive
     the replay when present, else a daily 09:30/15:00 fallback is synthesized.
 
@@ -540,8 +611,21 @@ def run_main_ctx_replay(
     entry_date, exit_date = market.trade_dates[0], market.trade_dates[-1]
     broker = SimBroker(profile, market, shortable_codes=shortable_codes)
     equity_by_date: dict[str, float] = {}
+    replay_start = time.monotonic()  # wall-clock start, reported as replay_wall_seconds
+    substep_runtime: dict[str, dict[str, float]] = {}
+    total_days = len(market.trade_dates)
+    last_progress_idx = 0
+    last_progress_time = replay_start
 
-    for trade_date in market.trade_dates:
+    for day_idx, trade_date in enumerate(market.trade_dates):
+        day_compute_wall = 0.0  # cumulative real main(ctx) wall-time for this trade day
+        now = time.monotonic()
+        # Throttled heartbeat so a long replay is auditable: at most every N days or M seconds.
+        if on_progress is not None and (
+            day_idx - last_progress_idx >= 30 or now - last_progress_time >= 30.0
+        ):
+            on_progress(str(trade_date), day_idx, total_days, now - replay_start, len(broker.query_stock_orders()))
+            last_progress_idx, last_progress_time = day_idx, now
         if trade_date != exit_date:
             asof_dir = (
                 _resolve_asof_dir(main_policy, snapshot_dir, replay_daily, str(trade_date))
@@ -555,8 +639,11 @@ def run_main_ctx_replay(
                     minute_rows, auction_enabled, auction_preopen_time, auction_decision_time, execution_lag_bars
                 )
                 real_index = {tick.minute_key: i for i, tick in enumerate(t for t in plan if t.is_real)}
+                n_real = len(real_index)
+                lag_floor = max(1, min(execution_lag_bars, n_real - 1))
                 # Decisions wait out the submit lag here, then enter the Broker's
-                # order book (order_stock) at their activation bar.
+                # order book (order_stock) at their activation bar; a sub-step's
+                # declared budget delays its fill bar further.
                 incoming: dict[int, list[tuple[dict[str, object], bool]]] = {}
                 for tick in plan:
                     if tick.is_real:
@@ -576,30 +663,77 @@ def run_main_ctx_replay(
                         asof_dir=asof_dir,
                         pending=_pending_view(broker, incoming),
                     )
-                    actions = main_policy.step(state)
-                    if not actions:
-                        continue
-                    if tick.activate_index is None:
-                        # No bar execution_lag_bars ahead (near the close): cannot fill.
-                        broker.record_event(
-                            "main_actions_unfilled",
-                            trade_date=trade_date,
-                            minute_key=tick.minute_key,
-                            action_count=len(actions),
-                            actions=_jsonable(actions),
+                    # A single decision (one main(ctx) tick) over the per-decision real
+                    # wall cap is killed inside MainPolicyRunner.step. Here we accumulate
+                    # the day's compute and fail-fast when it exceeds the per-day budget
+                    # (scales with replay length, unlike a fixed total cap).
+                    _tick_t0 = time.monotonic()
+                    actions, substeps = _normalize_tick(main_policy.step(state))
+                    day_compute_wall += time.monotonic() - _tick_t0
+                    if max_seconds_per_trading_day is not None and day_compute_wall > max_seconds_per_trading_day:
+                        raise BacktestError(
+                            f"trade day {trade_date} exceeded its compute budget "
+                            f"({max_seconds_per_trading_day:.0f}s) at {tick.minute_key}; cache heavy "
+                            "recompute and bound rebalance/graph cost"
                         )
-                        continue
-                    incoming.setdefault(tick.activate_index, []).extend((action, tick.is_auction) for action in actions)
-                    broker.record_event(
-                        "main_actions",
-                        trade_date=trade_date,
-                        minute_key=tick.minute_key,
-                        activate_index=tick.activate_index,
-                        action_count=len(actions),
-                        actions=_jsonable(actions),
-                    )
+                    # Fail-fast: ctx.substep enforces a positive declared budget, so real
+                    # wall-time over the claimed B invalidates the rest of the replay
+                    # (under-declaring is non-exploitable). Unwrapped orders carry no
+                    # sub-step and fill at the default lag with no per-block ceiling.
+                    budget_by_name: dict[str, float] = {}
+                    for sub in substeps:
+                        budget_min = float(sub.get("budget_minutes", 0.0) or 0.0)
+                        if float(sub.get("real_wall_s", 0.0) or 0.0) > budget_min * 60.0:
+                            raise BacktestError(
+                                f"sub-step {str(sub.get('name'))!r} at {trade_date} {tick.minute_key} exceeded its "
+                                f"declared budget: real {float(sub.get('real_wall_s', 0.0)):.1f}s > {budget_min:.1f}min"
+                            )
+                        budget_by_name[str(sub.get("name"))] = budget_min
+                        agg = substep_runtime.setdefault(
+                            str(sub.get("name")),
+                            {"count": 0.0, "total_real_wall_s": 0.0, "max_real_wall_s": 0.0, "budget_minutes": budget_min},
+                        )
+                        real_wall = float(sub.get("real_wall_s", 0.0) or 0.0)
+                        agg["count"] += 1
+                        agg["total_real_wall_s"] += real_wall
+                        agg["max_real_wall_s"] = max(agg["max_real_wall_s"], real_wall)
+                        agg["budget_minutes"] = budget_min
+                    placed = 0
+                    for action in actions:
+                        # _substep is an internal routing tag — consume it (keep the
+                        # recorded/submitted order clean) and map it to its budget. An
+                        # unwrapped order carries None and gets the default (no) budget,
+                        # never colliding with a sub-step literally named "None".
+                        substep_name = action.pop("_substep", None)
+                        budget_min = budget_by_name.get(substep_name, 0.0) if substep_name is not None else 0.0
+                        if decision_max_sim_minutes is not None and budget_min > decision_max_sim_minutes:
+                            broker.record_event(
+                                "decision_too_slow", trade_date=trade_date, minute_key=tick.minute_key,
+                                action=_jsonable(action), budget_minutes=budget_min, limit=decision_max_sim_minutes,
+                            )
+                            continue
+                        fill_index = (
+                            tick.activate_index + max(0, math.ceil(budget_min) - lag_floor)
+                            if tick.activate_index is not None
+                            else None
+                        )
+                        if fill_index is None or fill_index >= n_real:
+                            broker.record_event(
+                                "main_actions_unfilled", trade_date=trade_date, minute_key=tick.minute_key,
+                                action=_jsonable(action), reason="no_fill_bar_ahead",
+                            )
+                            continue
+                        incoming.setdefault(fill_index, []).append((action, tick.is_auction))
+                        placed += 1
+                    if placed:
+                        broker.record_event(
+                            "main_actions", trade_date=trade_date, minute_key=tick.minute_key,
+                            action_count=placed, actions=_jsonable(actions),
+                        )
                 for order in broker.query_stock_orders(cancelable_only=True):  # day order auto-voids at the close
-                    broker.cancel_order_stock(str(order["order_id"]), reason="day_end_unfilled")
+                    broker.cancel_order_stock(
+                        str(order["order_id"]), reason="day_end_unfilled", trade_date=trade_date
+                    )
 
         equity = broker.mark_to_market(trade_date)
         if trade_date == exit_date and broker.positions:
@@ -613,6 +747,9 @@ def run_main_ctx_replay(
         decision_date=entry_date,
         exit_date=exit_date,
         granularity=granularity,
+        substep_runtime=substep_runtime or None,
+        replay_wall_seconds=time.monotonic() - replay_start,
+        replayed_trade_days=total_days,
     )
 
 
@@ -667,6 +804,15 @@ def _day_tick_plan(
         activate_index = index + lag
         plan.append(_Tick(key, groups[key], activate_index if activate_index < len(real_keys) else None, True, False))
     return plan
+
+
+def _normalize_tick(result: object) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """A ``MainPolicyRunner`` step returns a ``_TickResult``; test fakes return a
+    plain action list (no sub-steps = current next-bar behavior)."""
+    if isinstance(result, _TickResult):
+        return result.actions, result.substeps
+    actions = [dict(a) for a in (result or []) if isinstance(a, dict)]
+    return actions, []
 
 
 def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool) -> bool:

@@ -33,10 +33,27 @@ order). An order reaches the book a **later bar**, `execution_lag_bars` ahead
 (default 2, modelling submit latency), never within the bar you decided on: a
 plain call is a **market order** (fills at that bar's open + slippage); `limit=P`
 is a **limit order** (FIX_PRICE) that rests until a bar's `[low, high]` reaches P
-(fills at P, no slippage) or auto-cancels after `valid_bars` bars. Query
-`ctx.broker.pending(code)` to skip codes with an order still in flight. The
-recommended daily cadence splits the decision from the order, because the 09:15
-pre-open info tick has no price yet:
+and fills without slippage: at a favorable open if the bar opens through P,
+otherwise at P after an intrabar touch. It auto-cancels after `valid_bars` bars. Query
+`ctx.broker.pending(code)` to skip codes with an order still in flight.
+
+The default `main.py` is a deliberately minimal **working** baseline — while flat,
+buy an equal-weight basket and hold to the final-day liquidation:
+
+```python
+def main(ctx):
+    if ctx.positions:                 # already holding — hold to final-day liquidation
+        return
+    daily = pd.read_parquet(Path(str(ctx.asof_dir)) / "daily.parquet")
+    codes = sorted(daily["ts_code"].astype(str).unique())[:10]  # placeholder signal
+    for code in codes:
+        if ctx.price(code) is not None and not ctx.broker.pending(code):
+            ctx.broker.buy(code, weight=0.1)
+```
+
+For finer control, the **optional** recommended cadence (in `candidate.py` /
+`trading.py`) splits the decision from the order, because the 09:15 pre-open info
+tick has no price yet:
 
 ```python
 from candidate import open_targets, screen_targets

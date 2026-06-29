@@ -1,4 +1,6 @@
-"""Per-tick position management, called by ``main(ctx)`` every tick.
+"""Optional advanced helper — the minimal default ``main.py`` does not import this.
+
+Per-tick position management, for a ``main(ctx)`` that opts into the cadence.
 
 ``manage_positions(ctx)`` iterates the current holdings and applies exit / 做T
 (intraday swing) logic by driving ``ctx.broker`` primitives keyed by ``ts_code``.

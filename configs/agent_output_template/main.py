@@ -1,62 +1,62 @@
-"""Formal strategy entrypoint.
+"""Formal strategy entrypoint — minimal working default.
 
-The Environment calls ``main(ctx)`` once per replay tick. Orders map to live QMT
-``order_stock`` types (there is no broker-side stop/conditional order — QMT has
-none). An order placed on a tick reaches the book a LATER bar — ``execution_lag_bars``
-ahead (default 2, modelling submit latency), never within the bar you decided on:
-- a plain call is a **market order**, filling at that bar's open + slippage;
-- ``limit=P`` is a **limit order** (FIX_PRICE) that rests until a bar's [low, high]
-  reaches P (filling at exactly P, no slippage) or auto-cancels after ``valid_bars``
-  bars (default 1).
-Query ``ctx.broker.pending(ts_code)`` to skip codes with an order still in flight,
-so the fill lag never produces a duplicate. The Broker enforces cash, short margin,
-T+1, lot size, price limits, suspension, and shortability, and records every fill.
+The Environment calls ``main(ctx)`` once per replay tick (a market-level ``ctx``).
+This default is intentionally small but complete: while flat it buys an
+equal-weight basket from the visible cross-section (screened once per trading day)
+and holds it to the mandatory final-day liquidation. Replace the placeholder
+screen in ``_screen`` with your own signal.
 
-Recommended daily cadence (illustrated below):
+Key ``ctx`` surface (advanced helpers in ``candidate.py`` / ``trading.py`` + ``README.md``):
+  ``ctx.positions`` / ``ctx.account`` / ``ctx.cash``   current holdings and account state
+  ``ctx.price(code)`` / ``ctx.bar(code)``              this tick's price/bar (None pre-auction)
+  ``ctx.broker.buy/sell/short/cover/close(code, weight=...|amount=...)``  place orders
+  ``ctx.broker.pending(code)``                         still-working orders for a code
+  ``ctx.asof_dir``                                     rolling daily history for screening (rolls each day)
+  ``ctx.snapshot_dir`` / ``ctx.model_dir``             frozen decision snapshot / model artifacts
+  ``ctx.substep(name, budget_minutes=B)``              declare a heavy block's latency budget
+  ``ctx.nl(code, prompt=...)``                         optional LLM text read
 
-* 09:15 pre-open info tick — ``ctx.price`` is None (the auction has not matched).
-  Do the expensive work here: screen the cross-section, call ``ctx.nl(...)``, and
-  write the chosen targets to ``ctx.state_dir``.
-* 09:25 pre-open tick — the matched open is visible via ``ctx.price``. Read the
-  targets back and submit the orders; ``weight`` sizing works because the price is
-  known, and submitting from the persisted list keeps the order set deduplicated.
-  These orders fill at the 09:31 open (the first continuous bar).
-* every tick — manage open positions (exits / 做T / stops); those orders fill on
-  the next bar too.
-
-``ctx`` (market-level, rebuilt each tick):
-
-* ``ctx.cur_date`` ("YYYYMMDD"), ``ctx.cur_time`` ("HH:MM").
-* ``ctx.account`` / ``ctx.positions`` — read-only snapshots; ``ctx.cash``.
-* ``ctx.price(ts_code)`` / ``ctx.bar(ts_code)`` / ``ctx.bars`` — this tick only
-  (None at the 09:15 info tick).
-* ``ctx.broker`` — ``.buy/sell/short/cover/close(ts_code, amount=None, weight=None,
-  limit=None, valid_bars=1)``, ``.cash``/``.money``, ``.position(ts_code)``,
-  ``.pending(ts_code)`` (working orders). ``limit=P`` makes it a limit order.
-* ``ctx.nl(ts_code, prompt=...)`` — PIT NL sub-agent; use it only in the decision
-  stage and keep its frequency low (it is the main API cost).
-* ``ctx.asof_dir`` / ``ctx.snapshot_dir`` — point-in-time data for screening;
-  ``ctx.model_dir`` — persisted parameters; ``ctx.state_dir`` — run-scoped scratch
-  (e.g. the day's targets); ``ctx.params``.
-
-``ctx.positions`` reflects FILLED positions only; use ``ctx.broker.pending(code)``
-to see orders still working between decision and fill, and gate re-entry/exit on
-both. ``ctx.state_dir`` is for your own scratch (e.g. the day's screening targets),
-not the order ledger. ``amount`` is a lot-aligned share count (100); ``weight`` is
-a notional fraction of initial equity.
+Orders fill a LATER bar (``execution_lag_bars`` ahead), never within the decision
+bar, so re-submitting before a fill double-buys — ``ctx.broker.pending(code)``
+guards against that until the order lands. ``ctx.asof_dir`` is a per-day rolling
+view, so read it ONCE per day (cache it, as below) instead of on every tick; the
+full frozen cross-section lives under ``ctx.snapshot_dir``. None of the latency /
+``nl()`` helpers are required — this file uses only the core primitives.
 """
 
 from __future__ import annotations
 
-from candidate import open_targets, screen_targets
-from trading import manage_positions
+from pathlib import Path
+
+import pandas as pd
+
+TOP_N = 10
+
+# ``ctx.asof_dir`` rolls to a new directory each trading day, so caching the screen
+# by that path reads daily.parquet once per day rather than once per per-tick call.
+# The driver imports this module once and calls ``main`` every tick, so module-level
+# state persists across the replay (and resets between backtests).
+_SCREEN_CACHE: dict[str, list[str]] = {}
+
+
+def _screen(ctx) -> list[str]:
+    """The day's target basket. Cached per ``ctx.asof_dir`` to avoid re-reading the
+    full table on every tick. Replace the body with your own cross-sectional signal."""
+    asof_dir = str(ctx.asof_dir)
+    cached = _SCREEN_CACHE.get(asof_dir)
+    if cached is not None:
+        return cached
+    daily = pd.read_parquet(Path(asof_dir) / "daily.parquet")
+    codes = sorted(daily["ts_code"].astype(str).unique())[:TOP_N]
+    _SCREEN_CACHE[asof_dir] = codes
+    return codes
 
 
 def main(ctx) -> None:
-    # Manage existing positions every tick (exits, 做T, stops) — fills next bar.
-    manage_positions(ctx)
-    # Decide once pre-open, then submit once the matched open price is known.
-    if ctx.cur_time == "09:15":
-        screen_targets(ctx)  # heavy work: screen + nl(); write targets to state_dir
-    elif ctx.cur_time == "09:25":
-        open_targets(ctx)  # read targets; submit orders that fill at the 09:31 open
+    if ctx.positions:  # already holding the basket — hold to final-day liquidation
+        return
+    for code in _screen(ctx):
+        # Skip a code with a price unavailable this tick or an order still in flight
+        # (the fill lands a later bar, so re-submitting before then would double-buy).
+        if ctx.price(code) is not None and not ctx.broker.pending(code):
+            ctx.broker.buy(code, weight=1.0 / TOP_N, reason="equal_weight_basket")

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from autotrade.environment.backtest_engine import compute_return_stats
+from autotrade.environment.backtest_engine import BacktestError, compute_return_stats
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.executor import LocalExecutor
 from autotrade.environment.main_ctx_engine import MainPolicyRunner, run_main_ctx_replay
@@ -40,7 +40,7 @@ def main(ctx):
         ctx.broker.buy(code, weight=0.1, reason="clean_open")
 '''
 
-# Enters at the pre-open call-auction tick (09:25), filled at the day open.
+# Enters at the 09:25 call-auction tick and fills at the first continuous bar.
 AUCTION_MAIN = '''
 def main(ctx):
     code = "000001.SZ"
@@ -63,6 +63,14 @@ def main(ctx):
     code = "000001.SZ"
     if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
         ctx.broker.buy(code, weight=0.2, limit=9.50, valid_bars=2, reason="limit_miss")
+'''
+
+# Limit price the market never reaches, but its validity extends to the close.
+LIMIT_DAY_END_CANCEL_MAIN = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
+        ctx.broker.buy(code, weight=0.2, limit=7.00, valid_bars=99, reason="limit_day_end_miss")
 '''
 
 # Re-evaluates every continuous tick but skips codes with a working order, so the
@@ -103,6 +111,84 @@ def main(ctx):
     assert "20220331" not in dates, "future leaked"
     if ctx.broker.position(code) == 0:
         ctx.broker.buy(code, weight=0.1, reason="asof_ok")
+'''
+
+# Declares a heavy screening sub-step (budget_minutes=3 > execution_lag_bars=2):
+# its fill bar is pushed one bar past the default 09:32 to 09:33.
+SUBSTEP_LATENCY_MAIN = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
+        with ctx.substep("screen", budget_minutes=3):
+            ctx.broker.buy(code, weight=0.2, reason="slow_entry")
+'''
+
+# A sub-step that declares a small positive budget (0.001 min = 0.06s) but really
+# sleeps past it: the real wall-time exceeds the declared budget, so the replay
+# aborts (fail-fast, non-exploitable).
+SUBSTEP_OVERRUN_MAIN = '''
+import time
+
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "09:30":
+        with ctx.substep("slow", budget_minutes=0.001):
+            time.sleep(0.3)
+            ctx.broker.buy(code, weight=0.2, reason="overrun")
+'''
+
+# Wrapping a block with budget_minutes=0 is identical to not wrapping (no delay,
+# no ceiling), so ctx.substep rejects it: the agent must declare a positive budget
+# or leave the block unwrapped.
+SUBSTEP_ZERO_BUDGET_MAIN = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "09:30":
+        with ctx.substep("light", budget_minutes=0):
+            ctx.broker.buy(code, weight=0.2, reason="zero_budget")
+'''
+
+# A small positive budget (<= execution_lag_bars) fills at the SAME default bar as
+# unwrapped, but still gets a real-time ceiling — the intended way to wrap light work.
+SUBSTEP_LIGHT_BUDGET_MAIN = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
+        with ctx.substep("light", budget_minutes=1):
+            ctx.broker.buy(code, weight=0.2, reason="light_entry")
+'''
+
+NOOP_MAIN = '''
+def main(ctx):
+    return
+'''
+
+# A small substep budget (ceil(B) <= lag_floor) on a 09:25 auction order does NOT
+# change its auction fill; a larger budget delays the fill bar (still "auction").
+SUBSTEP_AUCTION_SMALL_MAIN = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "09:25" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
+        with ctx.substep("screen", budget_minutes=1):
+            ctx.broker.buy(code, weight=0.2, reason="auction_small_budget")
+'''
+
+SUBSTEP_AUCTION_LARGE_MAIN = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "09:25" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
+        with ctx.substep("screen", budget_minutes=4):
+            ctx.broker.buy(code, weight=0.2, reason="auction_large_budget")
+'''
+
+SUBSTEP_DUPLICATE_NAME_MAIN = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "09:30":
+        with ctx.substep("screen", budget_minutes=1):
+            ctx.broker.buy(code, weight=0.1, reason="first")
+        with ctx.substep("screen", budget_minutes=3):
+            ctx.broker.buy(code, weight=0.1, reason="second")
 '''
 
 REPLAY_ROWS = [
@@ -329,6 +415,16 @@ class MainCtxReplayTest(unittest.TestCase):
         ]
         self.assertTrue(cancels)
 
+    def test_day_end_limit_cancel_records_current_trade_date(self) -> None:
+        (self.sandbox.paths.agent_output / "main.py").write_text(LIMIT_DAY_END_CANCEL_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _limit_minutes())
+        cancels = [
+            e for e in result.broker.events
+            if e["event_type"] == "order_cancelled" and e.get("reason") == "day_end_unfilled"
+        ]
+        self.assertEqual(len(cancels), 1)
+        self.assertEqual(cancels[0]["trade_date"], "20220104")
+
     def test_pending_query_dedups_in_flight_orders(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(PENDING_DEDUP_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _dense_minutes())
@@ -337,6 +433,141 @@ class MainCtxReplayTest(unittest.TestCase):
         # position is still flat, so without ctx.broker.pending() the strategy would
         # submit a duplicate. The working-order query collapses it to a single buy.
         self.assertEqual(len(buys), 1)
+
+    def test_substep_budget_delays_fill_bar(self) -> None:
+        # A declared budget_minutes=3 (> execution_lag_bars=2) pushes the 09:30
+        # decision's fill from the default 09:32 to 09:33 (deterministic latency).
+        (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_LATENCY_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _dense_minutes())
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["price_label"], "minute:09:33")
+
+    def test_substep_overrun_aborts_replay(self) -> None:
+        # The sub-step's real wall-time exceeds its small positive declared budget,
+        # so the replay fails fast with an agent-facing error (under-declaring is
+        # not exploitable). Without ctx.substep the run would have completed.
+        (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_OVERRUN_MAIN, encoding="utf-8")
+        with self.assertRaises(BacktestError):
+            self._run_with(_ohlc_replay(), _dense_minutes())
+
+    def test_substep_zero_budget_is_rejected(self) -> None:
+        # Wrapping with budget_minutes=0 is a no-op identical to not wrapping, so
+        # ctx.substep rejects it (surfaced to the agent as a BacktestError).
+        (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_ZERO_BUDGET_MAIN, encoding="utf-8")
+        with self.assertRaises(BacktestError):
+            self._run_with(_ohlc_replay(), _dense_minutes())
+
+    def test_substep_light_positive_budget_fills_at_default_bar(self) -> None:
+        # A small positive budget (1 <= execution_lag_bars=2) leaves the fill bar at
+        # the default 09:32 while still declaring a real-time ceiling.
+        (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_LIGHT_BUDGET_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _dense_minutes())
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["price_label"], "minute:09:32")
+
+    def test_substep_small_budget_keeps_auction_fill(self) -> None:
+        # A 09:25 order in a small-budget substep (ceil(1) <= lag_floor=2) still fills
+        # at the auction (09:31, price_label "auction") — the budget adds no delay.
+        (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_AUCTION_SMALL_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _auction_minutes())
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["price_label"], "auction")
+
+    def test_substep_large_budget_delays_auction_fill(self) -> None:
+        # A larger budget (ceil(4) > lag_floor=2) delays the 09:25 order's fill bar
+        # like a continuous order — it keeps the "auction" label but fills at a later
+        # bar (a price clearly past the ~10.1 09:31 auction print) instead of 09:31.
+        (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_AUCTION_LARGE_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _auction_minutes())
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        self.assertGreater(buys[0]["price"], 10.5)  # delayed past the 09:31 auction fill (~10.1)
+
+    def test_substep_runtime_and_replay_metrics_in_result(self) -> None:
+        # The replay aggregates per-sub-step wall-time and reports total runtime +
+        # the replayed-day count so the Agent can read where backtest time went.
+        (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_LATENCY_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _dense_minutes())
+        self.assertIn("screen", result.substep_runtime)
+        self.assertEqual(result.substep_runtime["screen"]["count"], 1.0)
+        self.assertGreaterEqual(result.substep_runtime["screen"]["budget_minutes"], 3.0)
+        self.assertIsInstance(result.replay_wall_seconds, float)
+        self.assertEqual(result.replayed_trade_days, 2)  # _ohlc_replay has two trade dates
+
+    def test_on_progress_heartbeat_fires_for_long_replay(self) -> None:
+        # The throttled heartbeat fires by the day-count threshold (>=30 days) so a
+        # long replay is auditable even when each tick is fast.
+        (self.sandbox.paths.agent_output / "main.py").write_text(NOOP_MAIN, encoding="utf-8")
+        dates = [d.strftime("%Y%m%d") for d in pd.bdate_range("2022-01-03", periods=35)]
+        replay = pd.DataFrame(
+            [
+                {"trade_date": d, "ts_code": TS_CODE, "open": 10.0, "close": 10.0,
+                 "up_limit": 12.0, "down_limit": 8.0, "is_suspended": False}
+                for d in dates
+            ]
+        )
+        pings: list[tuple] = []
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=30.0,
+            decision_time="2022-01-03T09:25:00+08:00", replay_granularity="daily",
+        ) as policy:
+            policy.validate_main()
+            run_main_ctx_replay(
+                replay, BrokerProfile(initial_cash=1_000_000.0),
+                shortable_codes=frozenset(), main_policy=policy,
+                on_progress=lambda *a: pings.append(a),
+            )
+        self.assertTrue(pings)  # at least one heartbeat over 35 days
+        _date, idx, total, _elapsed, _orders = pings[0]
+        self.assertEqual(total, 35)
+        self.assertGreaterEqual(idx, 30)
+
+    def test_substep_duplicate_name_in_same_tick_is_rejected(self) -> None:
+        # Same-tick sub-step names are used as the order->budget key, so reusing a
+        # name would make latency ambiguous. The engine rejects it instead.
+        (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_DUPLICATE_NAME_MAIN, encoding="utf-8")
+        with self.assertRaisesRegex(BacktestError, "already used in this tick"):
+            self._run_with(_ohlc_replay(), _dense_minutes())
+
+    def test_per_trading_day_compute_cap_aborts(self) -> None:
+        # A trade day whose cumulative main(ctx) compute exceeds the per-day cap aborts.
+        (self.sandbox.paths.agent_output / "main.py").write_text(NOOP_MAIN, encoding="utf-8")
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=30.0,
+            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
+        ) as policy:
+            policy.validate_main()
+            with self.assertRaisesRegex(BacktestError, "compute budget"):
+                run_main_ctx_replay(
+                    _ohlc_replay(), BrokerProfile(initial_cash=1_000_000.0),
+                    shortable_codes=frozenset(), main_policy=policy,
+                    replay_intraday_1min=_dense_minutes(),
+                    max_seconds_per_trading_day=0.0001,  # any real tick exceeds this
+                )
+
+    def test_per_decision_wall_cap_kills_slow_tick(self) -> None:
+        # A single main(ctx) tick over the per-decision wall cap is killed immediately.
+        slow = (
+            "import time\n"
+            "def main(ctx):\n"
+            "    if ctx.cur_time == '09:30':\n"
+            "        time.sleep(3)\n"
+        )
+        (self.sandbox.paths.agent_output / "main.py").write_text(slow, encoding="utf-8")
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=1.0,  # the per-decision cap
+            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
+        ) as policy:
+            policy.validate_main()
+            with self.assertRaisesRegex(BacktestError, "decision exceeded"):
+                run_main_ctx_replay(
+                    _ohlc_replay(), BrokerProfile(initial_cash=1_000_000.0),
+                    shortable_codes=frozenset(), main_policy=policy,
+                    replay_intraday_1min=_dense_minutes(),
+                )
 
     def test_preopen_0915_tick_has_no_price_but_fills_at_open(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(PREOPEN_MAIN, encoding="utf-8")

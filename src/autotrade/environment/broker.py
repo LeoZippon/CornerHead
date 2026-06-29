@@ -257,7 +257,8 @@ _ACTION_TO_ORDER_TYPE = {action: order_type for order_type, action in _ORDER_TYP
 class WorkingOrder:
     """A resting order in the day's book (xtquant ``order_stock`` semantics).
 
-    A ``FIX_PRICE`` order fills at ``price`` when a bar's range reaches it; a
+    A ``FIX_PRICE`` order fills without slippage when a bar reaches it, using a
+    better open when the bar already crosses the limit; a
     ``MARKET_PEER_PRICE_FIRST`` order fills at the bar open. ``remaining_bars`` is
     the time-in-force countdown; at expiry the order auto-cancels.
     """
@@ -413,12 +414,27 @@ class SimBroker:
         )
         return order_id
 
-    def cancel_order_stock(self, order_id: str, *, reason: str = "cancelled") -> bool:
+    def cancel_order_stock(
+        self,
+        order_id: str,
+        *,
+        reason: str = "cancelled",
+        trade_date: str | None = None,
+        minute_key: str | None = None,
+    ) -> bool:
         """Cancel a working order by id (xtquant ``cancel_order_stock``)."""
         for index, order in enumerate(self._book):
             if order.order_id == order_id:
                 self._book.pop(index)
-                self._event("order_cancelled", trade_date=self.current_date, ts_code=order.ts_code, order_id=order_id, reason=reason)
+                payload = {
+                    "trade_date": str(trade_date or self.current_date),
+                    "ts_code": order.ts_code,
+                    "order_id": order_id,
+                    "reason": reason,
+                }
+                if minute_key:
+                    payload["minute_key"] = str(minute_key)
+                self._event("order_cancelled", **payload)
                 return True
         return False
 
@@ -491,7 +507,7 @@ class SimBroker:
         is a share count (lot-aligned); ``weight`` is a notional-fraction
         convenience used when ``amount`` is absent. ``apply_slippage`` is True for
         marketable (taker) fills and False for limit fills, where ``raw_price`` is
-        already the maker fill price (the limit) and no spread is crossed.
+        the no-slippage limit-fill price (limit or better open).
         ``order_id`` carries the originating working order's id onto the fill.
         """
         self._advance_date(trade_date)
@@ -899,9 +915,9 @@ def _limit_fill_price(order: WorkingOrder, bar: pd.Series) -> float | None:
     """Fill price for a working order against this bar, or None if not fillable now.
 
     Market orders fill at the bar open. A limit order fills only when the bar's
-    range reaches the limit: a buy/cover at ``min(open, limit)`` when the bar opens
-    at/below or dips to the limit; a sell/short at ``max(open, limit)`` when it
-    opens at/above or rises to the limit (the maker gets exactly the limit price)."""
+    range reaches the limit: buy/cover orders fill at the open when it is already
+    at or below the limit, otherwise at the limit after an intrabar dip; sell/short
+    orders symmetrically fill at an already-favorable open, otherwise at the limit."""
     open_price = _open_price(bar)
     if order.price is None or open_price is None:
         return open_price

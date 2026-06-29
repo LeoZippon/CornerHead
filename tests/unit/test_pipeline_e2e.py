@@ -9,8 +9,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autotrade.agent import AgentSessionConfig
+from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
 from autotrade.environment.data_summary import write_agent_data_summary
 from autotrade.environment.runtime import RunManifest
+from autotrade.environment.sandbox import LocalSandbox
 from autotrade.environment.snapshot import SnapshotConfig
 from autotrade.environment.llm.proxy import ScriptedLLM
 from autotrade.environment.tools import BacktestTool, FinishFoldTool, ModificationCheckTool, ToolContext, ToolError
@@ -18,6 +20,7 @@ from autotrade.pipelines import (
     ExperimentConfig,
     ExperimentLedger,
     ExperimentPipeline,
+    FrozenArtifact,
     build_fold_schedule,
 )
 from autotrade.pipelines.folds import period_bounds, quarter_bounds
@@ -130,6 +133,20 @@ class LedgerTest(unittest.TestCase):
                 ledger.append({"record_type": "fold", "experiment_id": "e"})
             ledger.append({"record_type": "fold", "experiment_id": "e", "epoch_id": "p", "fold_id": "f", "run_id": "r"})
             self.assertEqual(len(ledger.read("fold")), 1)
+
+
+class ImportSmokeNamesTest(unittest.TestCase):
+    def test_import_names_only_high_confidence(self):
+        from autotrade.pipelines.experiment import _python_import_names
+
+        # Aliases and simple names emit a smoke import (version/extras stripped).
+        self.assertEqual(_python_import_names(["numpy==2.1.3", "torch"]), ["numpy", "torch"])
+        self.assertEqual(_python_import_names(["scikit-learn>=1.5"]), ["sklearn"])
+        self.assertEqual(_python_import_names(["umap-learn>=0.5"]), ["umap"])
+        self.assertEqual(_python_import_names(["opencv-contrib-python[extra]"]), ["cv2"])
+        # An unaliased hyphenated/dotted name has an unguessable import — skip it
+        # (a wrong `import` line would reject a validly-installed package).
+        self.assertEqual(_python_import_names(["some-weird-pkg", "a.b.c"]), [])
 
 
 class ExperimentCliTest(unittest.TestCase):
@@ -373,6 +390,171 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual(heldout["strategy_artifact_id"], "strategy_epoch_001_fold_2022Q1")
             self.assertGreater(heldout["test_result"]["total_return"], 0.0)
 
+    def test_heldout_manifest_includes_replay_and_budget_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(
+                tmp,
+                execution_lag_bars=4,
+                decision_max_sim_minutes=17.0,
+                backtest_max_seconds_per_decision=99.0,
+                backtest_max_seconds_per_trading_day=123.0,
+                rolling_asof_enabled=False,
+                nl_max_calls_per_decision_day=7,
+                nl_max_calls_per_backtest=19,
+            )
+            final_output = tmp / "final_output"
+            final_models = tmp / "final_models"
+            final_output.mkdir()
+            final_models.mkdir()
+            write_strategy(final_output)
+            final = FrozenArtifact(
+                artifact_id="strategy_final",
+                path=final_output,
+                artifact_hash=artifact_hash(final_output),
+                model_path=final_models,
+                model_artifact_hash=model_artifact_hash(final_models),
+            )
+            captured: dict[str, object] = {}
+
+            def fake_run(tool, *args, **kwargs):
+                captured.update(tool.ctx.manifest.data)
+                return {
+                    "status": "ok",
+                    "mode": "frozen_eval",
+                    "total_return": 0.0,
+                    "sharpe": 0.0,
+                    "max_drawdown": 0.0,
+                }
+
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, fold, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+            )
+            with patch("autotrade.pipelines.experiment.BacktestTool.run", autospec=True, side_effect=fake_run):
+                pipeline.run_heldout(final, TRADING_DAYS, epoch_id="epoch_001")
+
+            self.assertEqual(captured["execution_lag_bars"], 4)
+            self.assertEqual(captured["decision_max_sim_minutes"], 17.0)
+            self.assertEqual(captured["backtest_max_seconds_per_decision"], 99.0)
+            self.assertEqual(captured["backtest_max_seconds_per_trading_day"], 123.0)
+            # Final evals (held-out is one) carry their own generous anti-hang caps.
+            self.assertEqual(
+                captured["backtest_final_eval_max_seconds_per_decision"],
+                config.backtest_final_eval_max_seconds_per_decision,
+            )
+            self.assertEqual(
+                captured["backtest_final_eval_max_seconds_per_trading_day"],
+                config.backtest_final_eval_max_seconds_per_trading_day,
+            )
+            self.assertIs(captured["rolling_asof_enabled"], False)
+            self.assertEqual(captured["nl_max_calls_per_decision_day"], 7)
+            self.assertEqual(captured["nl_max_calls_per_backtest"], 19)
+            self.assertEqual(captured["auction_decision_time"], config.auction_decision_time)
+
+    def test_agent_visible_data_summary_and_trace_opaque_fold_id(self):
+        # V1: data_summary.json and agent_trace.jsonl are both agent-readable, so the
+        # calendar period must not leak through them; host correlation stays on
+        # run_id + the host-only manifest.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+            pipeline = ExperimentPipeline(
+                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=ScriptedLLM([])
+            )
+            fold = build_fold_schedule("2022Q1", "2022Q1", TRADING_DAYS)[0]
+            outcome = pipeline.run_fold(fold, epoch_id="epoch_001", parent=None)
+
+            run_dir = config.experiment_dir / "artifacts" / outcome.run_id
+            data_summary = json.loads((run_dir / "data_summary.json").read_text(encoding="utf-8"))
+            self.assertTrue(str(data_summary["fold_id"]).startswith("fold_ref_"))
+            self.assertNotEqual(data_summary["fold_id"], "fold_2022Q1")
+
+            trace_text = (run_dir / "agent_trace.jsonl").read_text(encoding="utf-8")
+            self.assertNotIn("fold_2022Q1", trace_text)
+            events = [json.loads(line) for line in trace_text.splitlines() if line.strip()]
+            self.assertTrue(events)
+            for event in events:
+                self.assertTrue(str(event.get("fold_id", "")).startswith("fold_ref_"))
+
+            # Host correlation is preserved: the host-only manifest keeps the raw id.
+            host_manifest = json.loads((run_dir / "host_run_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(host_manifest["fold_id"], "fold_2022Q1")
+
+    def test_run_fold_writes_durable_ledger_when_collection_fails(self):
+        # C1: a failed artifact collection must not leave a frozen strategy without a
+        # ledger record (which previously made the experiment unresumable).
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+            pipeline = ExperimentPipeline(
+                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=ScriptedLLM([])
+            )
+            fold = build_fold_schedule("2022Q1", "2022Q1", TRADING_DAYS)[0]
+            with patch.object(LocalSandbox, "collect_artifacts", side_effect=RuntimeError("disk full")):
+                with self.assertRaisesRegex(RuntimeError, "disk full"):
+                    pipeline.run_fold(fold, epoch_id="epoch_001", parent=None)
+
+            folds = pipeline.ledger.read("fold")
+            self.assertEqual(len(folds), 1)
+            self.assertEqual(folds[0]["fold_status"], "frozen")  # frozen before collect failed
+            self.assertIn("disk full", folds[0]["finalize_error"])
+
+    def test_run_fold_test_eval_failure_is_non_fatal_and_recorded(self):
+        # C1 + H2: the OOS test_000 eval is diagnostic, so its failure must not
+        # discard the validation-accepted strategy or abort the experiment.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+            pipeline = ExperimentPipeline(
+                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=ScriptedLLM([])
+            )
+            fold = build_fold_schedule("2022Q1", "2022Q1", TRADING_DAYS)[0]
+            with patch.object(
+                ExperimentPipeline, "_frozen_test_eval", side_effect=RuntimeError("test eval blew up")
+            ):
+                outcome = pipeline.run_fold(fold, epoch_id="epoch_001", parent=None)  # must not raise
+
+            self.assertEqual(outcome.fold_status, "frozen")
+            record = pipeline.ledger.read("fold")[0]
+            self.assertIsNone(record["test_result"])
+            self.assertIn("test eval blew up", record["finalize_error"])
+
+    def test_run_heldout_writes_durable_ledger_when_collection_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+            final_output = tmp / "final_output"
+            final_models = tmp / "final_models"
+            final_output.mkdir()
+            final_models.mkdir()
+            write_strategy(final_output)
+            final = FrozenArtifact(
+                artifact_id="strategy_final",
+                path=final_output,
+                artifact_hash=artifact_hash(final_output),
+                model_path=final_models,
+                model_artifact_hash=model_artifact_hash(final_models),
+            )
+            pipeline = ExperimentPipeline(
+                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=ScriptedLLM([])
+            )
+
+            def fake_bt(tool, *args, **kwargs):
+                return {"status": "ok", "mode": "frozen_eval", "total_return": 0.0, "sharpe": 0.0, "max_drawdown": 0.0}
+
+            with patch("autotrade.pipelines.experiment.BacktestTool.run", autospec=True, side_effect=fake_bt), patch.object(
+                LocalSandbox, "collect_artifacts", side_effect=RuntimeError("disk full")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "disk full"):
+                    pipeline.run_heldout(final, TRADING_DAYS, epoch_id="epoch_001")
+
+            heldout = pipeline.ledger.read("heldout")
+            self.assertEqual(len(heldout), 1)
+            self.assertIn("disk full", heldout[0]["finalize_error"])
+
     def test_pipeline_freezes_model_artifacts_with_strategy(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -595,6 +777,31 @@ class PipelineEndToEndTest(unittest.TestCase):
             meta = pipeline.ledger.read("meta_learning")[0]
             self.assertEqual(meta["meta_learning_directive"], directive)
 
+    def test_meta_learning_workspace_includes_sandbox_environment_example_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, fold, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+            )
+
+            meta_sandbox, _ = pipeline._start_sandbox("run_meta", kind="meta_learning")
+            example_path = meta_sandbox.paths.workspace / "sandbox_environment.example.json"
+            self.assertTrue(example_path.exists())
+            self.assertFalse((meta_sandbox.paths.workspace / "sandbox_environment.json").exists())
+            example = json.loads(example_path.read_text(encoding="utf-8"))
+            self.assertEqual(example["python_packages"], [])
+            self.assertEqual(example["apt_packages"], [])
+            self.assertEqual(example["npm_packages"], [])
+            self.assertIn("sandbox_environment.json", example["reason"])
+
+            fold_sandbox, _ = pipeline._start_sandbox("run_fold", kind="fold")
+            self.assertFalse((fold_sandbox.paths.workspace / "sandbox_environment.example.json").exists())
+            self.assertFalse((fold_sandbox.paths.workspace / "sandbox_environment.json").exists())
+
     def test_meta_learning_rejects_unfinished_session_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -704,9 +911,99 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertIn("libgomp1", text)
             self.assertIn("lightgbm==4.5.0", text)
             self.assertIn("@scope/tool@1.2.3", text)
-            self.assertEqual(mocked_run.call_args.args[0][0:2], ["docker", "build"])
+            # First subprocess call is the image build; a trailing `docker images`
+            # GC call may follow once the build succeeds.
+            self.assertEqual(mocked_run.call_args_list[0].args[0][0:2], ["docker", "build"])
             stored = json.loads((tmp / "artifacts" / "run_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(stored["sandbox_image_update"]["status"], "ok")
+
+    def test_active_sandbox_image_reloads_from_ledger_on_fresh_pipeline(self):
+        # A successful rebuild updates the active image only in-memory; a fresh
+        # process (resumed/fold-only run) must reload the latest good derived image
+        # from the ledger instead of falling back to the base.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp, use_docker=True)
+            derived = "autotrade-sandbox:exp_e2e-epoch_002-aaaaaaaaaaaa"
+            seed = ExperimentPipeline(
+                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=ScriptedLLM([])
+            )
+            def _meta(epoch, status, image):
+                return {"record_type": "meta_learning", "experiment_id": "exp_e2e",
+                        "epoch_id": epoch, "fold_id": "fold_2022Q1", "run_id": f"run_{epoch}_{status}",
+                        "sandbox_image_update": {"status": status, "image": image}}
+
+            seed.ledger.append(_meta("epoch_001", "ok", "autotrade-sandbox:exp_e2e-epoch_001-old0"))
+            seed.ledger.append(_meta("epoch_001", "failed", "autotrade-sandbox:exp_e2e-broken"))
+            seed.ledger.append(_meta("epoch_002", "ok", derived))
+
+            resumed = ExperimentPipeline(
+                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=ScriptedLLM([])
+            )
+            self.assertEqual(resumed._active_sandbox_spec.image, derived)  # latest ok wins, failed ignored
+
+    def test_derived_sandbox_image_gc_prunes_old_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp, use_docker=True, meta_sandbox_image_keep=1)
+            pipeline = ExperimentPipeline(
+                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=ScriptedLLM([])
+            )
+            keep_image = "autotrade-sandbox:exp_e2e-epoch_002-new000000000"
+            listing = (
+                f"{keep_image}\t2026-06-27 10:00:00\n"
+                "autotrade-sandbox:exp_e2e-epoch_001-old111111111\t2026-06-26 10:00:00\n"
+                "autotrade-sandbox:exp_e2e-epoch_001-old222222222\t2026-06-25 10:00:00\n"
+                "autotrade-sandbox:other_exp-epoch_001-zzz\t2026-06-24 10:00:00\n"
+            )
+
+            def fake_run(cmd, **_kwargs):
+                if cmd[:2] == ["docker", "images"]:
+                    return subprocess.CompletedProcess(cmd, 0, stdout=listing, stderr="")
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            with patch("autotrade.pipelines.experiment.subprocess.run", side_effect=fake_run):
+                pruned = pipeline._gc_derived_sandbox_images(keep_image=keep_image)
+            # keep the newest 1, drop the older same-experiment tail; never the active
+            # image, never another experiment's images.
+            self.assertEqual(
+                pruned,
+                ["autotrade-sandbox:exp_e2e-epoch_001-old111111111",
+                 "autotrade-sandbox:exp_e2e-epoch_001-old222222222"],
+            )
+
+    def test_meta_learning_records_artifacts_when_sandbox_image_rebuild_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, fold, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+            )
+
+            def meta_learner(ctx: ToolContext) -> None:
+                (ctx.paths.workspace / "taste.md").write_text("gnn taste", encoding="utf-8")
+                (ctx.paths.workspace / "sandbox_environment.json").write_text(
+                    json.dumps({"python_packages": ["torch_geometric>=2.5.0"]}),
+                    encoding="utf-8",
+                )
+
+            def fail_rebuild(*_args, **kwargs) -> None:
+                kwargs["manifest"].update(sandbox_image_update={"status": "failed", "image": "broken"})
+                raise RuntimeError("meta-learning sandbox image rebuild failed: broken")
+
+            pipeline.meta_learner = meta_learner
+            with patch.object(pipeline, "_maybe_rebuild_sandbox_image", side_effect=fail_rebuild):
+                with self.assertRaisesRegex(RuntimeError, "sandbox image rebuild failed"):
+                    pipeline.run_meta_learning(epoch_id="epoch_001", parent=None)
+
+            meta = pipeline.ledger.read("meta_learning")[0]
+            self.assertEqual(meta["taste_chars"], len("gnn taste"))
+            self.assertEqual(meta["sandbox_image_update"]["status"], "failed")
+            self.assertTrue(Path(str(meta["agent_trace_ref"])).exists())
+            self.assertTrue((config.experiment_dir / "meta_learning" / "epoch_001" / "taste.md").exists())
 
     def test_meta_learning_environment_request_rejects_invalid_schema(self):
         with tempfile.TemporaryDirectory() as tmp:

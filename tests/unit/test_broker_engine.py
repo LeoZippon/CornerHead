@@ -139,6 +139,18 @@ class BrokerPrimitiveTest(unittest.TestCase):
         broker.match_bar("20220104", "09:32", group)
         self.assertEqual(broker.position_quantity("000001.SZ"), 1000)
         self.assertEqual(broker.query_stock_trades("000001.SZ")[-1]["price"], 9.85)
+        # If the activation bar opens through a buy limit, the better open is used.
+        better_open = self.make_broker(shortable=())
+        better_open.order_stock(xtconstant.STOCK_BUY, "000001.SZ", 1000, xtconstant.FIX_PRICE, 10.5)
+        better_open.match_bar("20220104", "09:31", group)
+        self.assertEqual(better_open.query_stock_trades("000001.SZ")[-1]["price"], 10.0)
+        # Sell limits use the same better-open rule on the other side.
+        better_sell = self.make_broker(shortable=())
+        better_sell.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        better_sell.order_stock(xtconstant.STOCK_SELL, "000001.SZ", 1000, xtconstant.FIX_PRICE, 9.5)
+        better_sell.match_bar("20220105", "09:31", group)
+        self.assertEqual(better_sell.query_stock_trades("000001.SZ")[-1]["price"], 10.0)
+        self.assertEqual(better_sell.position_quantity("000001.SZ"), 0)
 
     def test_max_total_holdings_rejects_new_code(self):
         broker = self.make_broker(shortable=(), max_total_holdings=1)

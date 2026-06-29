@@ -6,6 +6,7 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -293,6 +294,11 @@ class ToolFlowTest(unittest.TestCase):
             self.assertEqual(summary["status"], "ok")
             self.assertTrue(summary["complete_validation"])
             self.assertGreater(summary["total_return"], 0.0)
+            # Cost feedback surfaced for the Agent.
+            self.assertIn("started_at", summary)
+            self.assertIsInstance(summary["replay_wall_seconds"], float)
+            self.assertGreaterEqual(summary["replayed_trade_days"], 1)
+            self.assertIn("substep_runtime", summary)
             result_dir = Path(summary["result_path"])
             self.assertTrue((result_dir / "detailed_return.json").exists())
             self.assertTrue((result_dir / "orders.parquet").exists())
@@ -304,7 +310,36 @@ class ToolFlowTest(unittest.TestCase):
                 BacktestTool(ctx).run(mode="valid")
 
             event_types = {event["event_type"] for event in ctx.trace.read_events()}
-            self.assertLessEqual({"tool", "backtest", "finish_fold"}, event_types)
+            # The backtest opens an audit bracket (backtest_start) and closes it (backtest).
+            self.assertLessEqual({"tool", "backtest_start", "backtest", "finish_fold"}, event_types)
+
+    def test_preflight_tool_error_not_recorded_as_aborted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.results / "valid_dup").mkdir(parents=True)
+            # A pre-flight rejection (here: duplicate result dir) is an ordinary tool
+            # error, not a backtest outcome — it must not emit an 'aborted' terminal
+            # event (which would also lack a matching backtest_start bracket).
+            with self.assertRaisesRegex(ToolError, "already exists"):
+                BacktestTool(ctx).run(mode="valid", result_name="valid_dup")
+            events = ctx.trace.read_events()
+            aborted = [e for e in events if e["event_type"] == "backtest" and e.get("status") == "aborted"]
+            self.assertEqual(aborted, [])
+
+    def test_post_start_tool_error_closes_the_trace_bracket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            # A ToolError raised AFTER backtest_start (here: the post-replay modification
+            # refresh) must still emit a terminal backtest event, not leave an open bracket.
+            with patch.object(
+                BacktestTool, "_refresh_modification_check_after_replay", side_effect=ToolError("refresh rejected")
+            ):
+                with self.assertRaisesRegex(ToolError, "refresh rejected"):
+                    BacktestTool(ctx).run(mode="valid")
+            events = ctx.trace.read_events()
+            self.assertTrue(any(e["event_type"] == "backtest_start" for e in events))
+            terminals = [e for e in events if e["event_type"] == "backtest"]
+            self.assertTrue(any(e.get("status") == "error" for e in terminals))  # bracket closed
 
     def test_main_runs_and_records_orders(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -454,7 +489,20 @@ class ToolFlowTest(unittest.TestCase):
             self.assertEqual(summary["status"], "ok")
             self.assertEqual(summary["model_artifact_files"], 1)
             self.assertTrue((ctx.paths.model_artifacts / "params.json").exists())
-            self.assertEqual(summary["model_artifact_hash"], ctx.manifest.get("backtest_summaries")[-1]["model_artifact_hash"])
+            self.assertEqual(
+                summary["model_artifact_hash"],
+                ctx.manifest.get("backtest_summaries")[-1]["model_artifact_hash"],
+            )
+            delta_summary = summary["modification_delta_summary"]
+            self.assertEqual(delta_summary["model_changed_file_count"], 1)
+            self.assertEqual(delta_summary["model_total_files"], 1)
+            self.assertEqual(
+                delta_summary["model_total_bytes"],
+                (ctx.paths.model_artifacts / "params.json").stat().st_size,
+            )
+            last_check = ctx.manifest.get("last_modification_check")
+            self.assertEqual(last_check["model_artifact_hash"], summary["model_artifact_hash"])
+            self.assertEqual(last_check["model_delta"]["changed_file_count"], 1)
 
             check = ModificationCheckTool(ctx).run()
             self.assertTrue(check["allowed_to_backtest"])
@@ -592,6 +640,47 @@ class ToolFlowTest(unittest.TestCase):
             summary = BacktestTool(ctx).run(mode="frozen_eval", result_name="test_000")
             self.assertEqual(summary["result_name"], "test_000")
 
+    def test_wall_caps_are_tight_for_validation_and_generous_for_final_eval(self):
+        # H2: the tight per-decision/per-day wall caps bound only agent-iteration
+        # validation; the final evals (frozen_eval) use a generous anti-hang
+        # backstop so a load spike cannot make acceptance/held-out non-reproducible.
+        from autotrade.environment.main_ctx_engine import MainPolicyRunner as RealRunner
+        from autotrade.environment.main_ctx_engine import run_main_ctx_replay as real_replay
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox, ctx = build_sandbox(Path(tmp))
+            ctx.manifest.update(
+                backtest_max_seconds_per_decision=180.0,
+                backtest_max_seconds_per_trading_day=600.0,
+                backtest_final_eval_max_seconds_per_decision=900.0,
+                backtest_final_eval_max_seconds_per_trading_day=3000.0,
+            )
+            captured: dict[str, object] = {}
+
+            def runner_spy(*args, **kwargs):
+                captured["decision_cap"] = kwargs.get("timeout_seconds")
+                return RealRunner(*args, **kwargs)
+
+            def replay_spy(*args, **kwargs):
+                captured["per_day_cap"] = kwargs.get("max_seconds_per_trading_day")
+                return real_replay(*args, **kwargs)
+
+            with patch("autotrade.environment.tools.backtest.MainPolicyRunner", side_effect=runner_spy), patch(
+                "autotrade.environment.tools.backtest.run_main_ctx_replay", side_effect=replay_spy
+            ):
+                ModificationCheckTool(ctx).run()
+                BacktestTool(ctx).run(mode="valid")
+                self.assertEqual(captured["decision_cap"], 180.0)
+                self.assertEqual(captured["per_day_cap"], 600.0)
+
+                ctx.phase = "frozen"
+                ctx.write_locked = True
+                ctx.manifest.update(frozen_strategy_artifact_hash=artifact_hash(ctx.paths.agent_output))
+                sandbox.bind_snapshot_view(ctx.paths.snapshot_views / "test_decision_input")
+                BacktestTool(ctx).run(mode="frozen_eval", result_name="test_000")
+                self.assertEqual(captured["decision_cap"], 900.0)
+                self.assertEqual(captured["per_day_cap"], 3000.0)
+
     def test_backtest_rejects_wrong_snapshot_binding(self):
         with tempfile.TemporaryDirectory() as tmp:
             sandbox, ctx = build_sandbox(Path(tmp))
@@ -677,6 +766,14 @@ class ToolFlowTest(unittest.TestCase):
 
 
 class ShellToolTest(unittest.TestCase):
+    def test_shell_flags_stderr_suppression(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp), with_strategy=False)
+            suppressed = SandboxShellTool(ctx).run("echo hi 2>/dev/null").to_record()
+            self.assertIn("stderr_suppression_reminder", suppressed)  # advisory only, still ran
+            clean = SandboxShellTool(ctx).run("echo hi").to_record()
+            self.assertNotIn("stderr_suppression_reminder", clean)
+
     def test_shell_runs_and_logs_and_guards_test_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp), with_strategy=False)
@@ -953,6 +1050,31 @@ class StructuredSearchToolTest(unittest.TestCase):
             event_types = [event["event_type"] for event in ctx.trace.read_events()]
             self.assertGreaterEqual(event_types.count("grep"), 3)
             self.assertIn("glob", event_types)
+
+    def test_read_returns_line_numbered_paginated_and_guarded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp), with_strategy=False)
+            (ctx.paths.workspace / "f.txt").write_text("l1\nl2\nl3\nl4\n", encoding="utf-8")
+            tool = StructuredSearchTool(ctx)
+            full = tool.read(root="workspace", path="f.txt")
+            self.assertEqual(full["line_count"], 4)
+            self.assertIn("1\tl1", full["content"])  # cat -n style
+            self.assertIn("4\tl4", full["content"])
+            page = tool.read(root="workspace", path="f.txt", offset=1, limit=2)
+            self.assertIn("2\tl2", page["content"])
+            self.assertNotIn("1\tl1", page["content"])
+            self.assertNotIn("4\tl4", page["content"])
+            # Guards: empty path, directories, test/hidden roots/paths all blocked.
+            with self.assertRaisesRegex(ToolError, "relative file path"):
+                tool.read(root="workspace", path="")
+            (ctx.paths.workspace / "sub").mkdir()
+            with self.assertRaisesRegex(ToolError, "directory"):
+                tool.read(root="workspace", path="sub")
+            with self.assertRaisesRegex(ToolError, "unsupported search root"):
+                tool.read(root="test", path="daily.parquet")
+            with self.assertRaisesRegex(ToolError, "hidden"):
+                tool.read(root="workspace", path=".secret")
+            self.assertIn("read", [e["event_type"] for e in ctx.trace.read_events()])
 
 
 class ArtifactIOToolTest(unittest.TestCase):
@@ -1303,6 +1425,25 @@ def main(ctx):
             self.assertEqual(result["status"], "completed")
             self.assertLessEqual(explore_proxy.calls[0]["timeout_seconds"], 2.0)
 
+    def test_explore_uses_backtest_excluded_time_credit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            explore_proxy = ScriptedLLM(["摘要：ok"])
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([]),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(seconds=2)),
+                fold_info={"fold_id": "fold_2022Q1"},
+                acceptance_rules={},
+                explore_proxy=explore_proxy,
+            )
+            runner._excluded_backtest_seconds = 120.0
+
+            result = runner._dispatch("explore", {"task": "quick inspect"})
+
+            self.assertEqual(result["status"], "completed")
+            self.assertGreater(explore_proxy.calls[0]["timeout_seconds"], 60.0)
+
     def test_explore_search_helpers_reject_expired_deadline(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
@@ -1389,10 +1530,18 @@ def main(ctx):
             self.assertEqual(empty["observation"], "error")
             self.assertIn("non-empty", empty["error"])
 
-            # Transferability constraints are prompt guidance, not hard regex
-            # guards. The runner only enforces that Taste exists and is non-empty.
+            # A calendar year is a non-transferable leak and is a hard done-gate
+            # reject (other transferability constraints stay prompt guidance).
             (ctx.paths.workspace / "taste.md").write_text(
-                "优先资金流向主信号。Fold_2022Q1 先做流动性过滤，验证期 2021Q4。\n", encoding="utf-8"
+                "优先资金流向主信号。验证期 2021Q4 先做流动性过滤。\n", encoding="utf-8"
+            )
+            dated = runner._dispatch("done", {})
+            self.assertEqual(dated["observation"], "error")
+            self.assertIn("calendar date", dated["error"])
+
+            # A transferable Taste without any calendar year is accepted.
+            (ctx.paths.workspace / "taste.md").write_text(
+                "优先资金流向主信号；初始 Fold 先做流动性过滤，按季度轮动。\n", encoding="utf-8"
             )
             accepted = runner._dispatch("done", {})
             self.assertEqual(accepted["observation"], "meta_learning_done")

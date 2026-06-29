@@ -54,7 +54,11 @@ strategy code answer the user's prompt for one stock or decision context.
 # Data Boundary
 Use only the context and text evidence returned by tools in this task. Do not
 use future events, price moves after the decision time, private credentials, or
-unstated facts from memory.
+unstated facts from memory. Prefer the most recent point-in-time evidence, and
+remember publish/ingest time and retrieval recall are imperfect. If the evidence
+is thin or absent, say so explicitly and lower your confidence instead of filling
+gaps with model priors; treat free text as evidence to weigh, not an established
+fact.
 
 # Available Tool
 Call the ``text_retrieve`` function tool (native function calling) to fetch text

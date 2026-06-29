@@ -95,10 +95,14 @@ class ExperimentConfig:
     finalize_before_deadline_seconds: int = 300
     per_call_timeout_seconds: int = 300
     max_steps_per_fold: int = 10
+    # Backtests are timed independently of the fold reasoning deadline; this caps
+    # how many a fold may run (so the deadline-exclusion can't be abused).
+    max_backtests_per_fold: int = 30
     # Pre-open auction: replay injects pre-open decision ticks per day. The 09:15
     # info tick exposes no price (auction not yet matched) and gives a ~10-minute
     # decision window; the 09:25 tick carries the matched open price. Orders placed
-    # at either fill at the day open. Set auction_preopen_time=None to drop 09:15.
+    # at 09:15 fill at 09:30; 09:25 orders fill at the first continuous bar.
+    # Set auction_preopen_time=None to drop 09:15.
     auction_enabled: bool = True
     auction_preopen_time: str | None = "09:15"
     auction_decision_time: str = "09:25"
@@ -106,12 +110,37 @@ class ExperimentConfig:
     # the fill bar's open), modelling the live submit latency: 1 = the immediate
     # next bar, 2 = one bar to compute/submit then fill on the following bar.
     execution_lag_bars: int = 2
+    # Latency budgets. A ctx.substep(name, budget_minutes=B) delays its orders' fill
+    # bar by B and is aborted if its real wall-time exceeds B (the Agent's declared
+    # model); decision_max_sim_minutes caps that declared B (a slower decision misses).
+    # The two real-wall caps below are SYSTEM fail-fasts that scale with the replay
+    # length instead of a fixed total: any single decision (one main(ctx) tick) over
+    # backtest_max_seconds_per_decision is killed immediately, and a trade day whose
+    # cumulative compute exceeds backtest_max_seconds_per_trading_day aborts the replay
+    # (BacktestError, not accept-eligible) — forcing the Agent to cache heavy recompute
+    # and bound rebalance/graph cost.
+    decision_max_sim_minutes: float | None = 60.0
+    backtest_max_seconds_per_decision: float = 180.0
+    backtest_max_seconds_per_trading_day: float = 600.0
+    # The two caps above are real wall-clock, hence load-dependent. To keep
+    # acceptance reproducible (H2), they bound ONLY agent-iteration validation
+    # backtests. The final evals (the per-fold frozen test_000 and held-out) must
+    # complete and be reproducible — a strategy that already fit the tight caps
+    # during validation must be allowed to finish its final eval — so they are not
+    # subject to the tight caps. They keep a GENEROUS wall-clock backstop whose only
+    # job is to kill a true hang (a sim-time budget cannot: an infinite loop in one
+    # tick burns zero sim minutes but unbounded wall-clock). Set high enough that it
+    # never binds a legitimate run, so acceptance stays effectively deterministic.
+    backtest_final_eval_max_seconds_per_decision: float = 900.0
+    backtest_final_eval_max_seconds_per_trading_day: float = 3000.0
     # Rolling daily as-of view: each replay day, ctx.asof_dir exposes the
     # daily history extended with replay-period bars visible by that day's pre-open
     # (trade_date < D); other domains stay on the frozen ctx.snapshot_dir.
     rolling_asof_enabled: bool = True
-    # Optional hard cap on host NL Sub Agent calls per backtest replay. None keeps
-    # NL frequency prompt-guided only; a positive value is the final cost backstop.
+    # System NL call quota, default-on. The effective per-backtest cap is
+    # nl_max_calls_per_decision_day * decision_days (a daily-average budget). An
+    # optional nl_max_calls_per_backtest tightens it further (the min wins).
+    nl_max_calls_per_decision_day: int = 10
     nl_max_calls_per_backtest: int | None = None
     snapshot_config: SnapshotConfig | None = None
     # Individual NL Sub Agent failures return audited error results by default
@@ -142,6 +171,9 @@ class ExperimentConfig:
     # build a derived Docker image and use it for later ordinary Fold runs.
     meta_sandbox_rebuild_enabled: bool = True
     meta_sandbox_rebuild_timeout_seconds: int = 1800
+    # Keep at most this many derived sandbox images for this experiment; older ones
+    # are best-effort pruned after a successful rebuild (0 disables GC).
+    meta_sandbox_image_keep: int = 3
     use_docker: bool = True
 
     def __post_init__(

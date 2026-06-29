@@ -1,3 +1,137 @@
+2026-06-28 GPT 实验审计 + Opus 深审修复（C1/O3/H2/V1/V2/M3 + 模板）
+
+- GPT 对最近一轮实验的审计：3 个 Explore 核验 5 项均属实，并更正两处前提（compaction 0 次=设计内、非 bug；read 工具实被用 10 次=该指控不实），且 GPT 把两次实验混淆（core dump/垃圾脚本在 `regular_fold_last_taste_gpu_20260629_034005/run_c6d6e61dd4cb`）。随后 Opus 深审发现更高危缺陷，按序修复：
+  - **C1（CRITICAL）**：`run_meta_learning` 的“收集失败仍落 ledger 再抛”耐久模式从未施于 `run_fold`/`run_heldout`——冻结后 collect 抛错即丢 ledger 记录、实验不可续跑（已损坏上轮 run）。两者改为：守护 collect、**总是** `ledger.append`（带 `finalize_error`）再抛；`run_fold` 另把冻结后 `_frozen_test_eval` 失败设为**非致命**（OOS test 仅诊断，不弃验证已接受的策略，符合 H2）。
+  - **O3（HIGH，曾致真实数据丢失）**：`docker run` 加 `--ulimit core=0:0`（禁 core dump）；`_COLLECT_IGNORE` 加精确 `core.[0-9]*`（不误伤 `core.py`/`core/`）；`collect_artifacts` 改为**先收 output/models**（必成功）、workspace 末位 best-effort try/except（失败写 `*.collect_error.txt` 不中止）。放弃过度工程的 per-entry collect_errors 框架。
+  - **H2（HIGH，确定性）**：紧墙钟上限（180/600）是随负载浮动的实墙钟，仅约束 `mode="valid"` 验证；最终评估（冻结 `test_000` + held-out，`frozen_eval`）改用宽松防挂死兜底 `backtest_final_eval_max_seconds_per_*`（900/3000），保证已过验证的策略能跑完且 accept/held-out 可复现。Q1 结论：不引入分钟级仿真时间预算（单 tick 死循环耗 0 仿真分钟，只有墙钟兜底能拦）。
+  - **V1**：`data_summary.json` 与 `agent_trace.jsonl` 均 agent 可读（`/mnt/artifacts:ro` + SEARCH_ROOTS），raw `fold_2022Q1` 经其泄露日历期、使 manifest 不透明化形同虚设。5 处调用点（fold/meta/held-out）改传 `_agent_visible_ref(fold_id, prefix="fold_ref")`，host 关联靠 run_id + host_run_manifest。
+  - **V2**：删除从不被读回、误导性的 `SandboxSpec.max_fold_minutes`（字段 + to_record）；真实界仍是 `fold_deadline_at`（env_design 既有表述无需改）。
+  - **M3（MEDIUM）**：`DockerExecutor.kill_marker` 在标记 driver 后再 `pkill -KILL -u agent` 扫掉其衍生子进程（容器 PID1=root，安全），即便 driver 已退出也能回收孤儿，堵 pids/GPU 泄漏。
+- 模板（用户追加“适度优化，让 Agent 充分理解用法且不诱导重复全表读”）：`configs/agent_output_template/main.py` 改为按 `ctx.asof_dir` 每日缓存筛选（每日仅读一次 daily.parquet，非每 tick），docstring 列全 `ctx` 关键面（substep/pending/nl/asof 等）作自文档示例。
+- 推迟（用户确认）：Additional thought #2 固定日内推理窗口另立设计。不修（Agent 质量，非 harness）：GNN 过拟合/未用、CSV 杂乱等。
+- 验证：全套 330 单测通过（C1/O3/H2/V1 新增/扩展测试）；`git diff --check` clean；env_design §7.2 同步；清理误生成的模板 `__pycache__`。
+
+2026-06-28 GPT 审计修复（5 项）+ read 工具 + 工具文档微调
+
+- GPT 审计 5 项经 Explore 核验全部属实并修复：
+  - Fix1（High，我上轮引入的回归）：回放后 `_refresh_modification_check_after_replay` 抛 `ToolError`（line 368）经 `except ToolError: raise` 未发终止事件、留下未闭合的 `backtest_start`。改为 run() 维护 `_backtest_started` 标志，仅在已发 start 时由 ToolError 臂补发 `status="error"` 终止事件（pre-flight 拒绝仍干净抛出）。新增 test。
+  - Fix2（Med，doc）：env_design 预算表 `per_call_timeout_seconds` 行仍写“单个 main(ctx) tick RPC 超时”——实为 Agent 主 LLM 调用 + contract_check 校验；回放 tick 用 `backtest_max_seconds_per_decision`。已改。
+  - Fix3（Med）：`_python_import_names` 对未在别名表的连字符/点号包（`umap-learn`→应为 `umap`、`opencv-contrib-python`→`cv2`）会生成错误 import 烟测、误拒已装包。改为仅对“高置信”名（别名表或无 `-`/`.` 的简单名）发 import 行，歧义名跳过（仍验证 pip install 成功）；补两个常见别名。新增 test。
+  - Fix4（Low/Med）：substep 预算对盘前竞价 tick 的影响未文档化/无测试。经实测：小预算（`ceil(B) ≤ lag_floor`）不改变竞价成交；大预算像连续单一样顺延成交 bar（`price_label` 仍 `auction`）。已在 §7.2 文档化并加两测。
+  - Fix5（Low，提交卫生）：`run_audit_session.py` 未被 git 跟踪但被 pipeline_design 引用——是正式工具，应在提交时 git add（无代码改动）。
+- 用户追加（经询问选定）：A — 新增 `read` 工具（带行号、可分页），复用 `StructuredSearchTool._resolve_search_path`+`SEARCH_ROOTS` 守卫，**不禁用 cat**；注册进 runner，prompt/env/agent 工具表加行 + “读要编辑代码优先于 cat/head”提示；新增 test。B — 轻量工具文档：仅给 `glob` 补 use-for 提示。C — 工具架构保持不变（已是标准模块化）。
+- 验证：全套 322 单测通过（+5）；PROMPTS.md 同步含 read 行；`git diff --check` clean。
+
+2026-06-28 回测成本模型改 per-day/per-decision + 模板简化 + 审计修复
+
+- 成本模型（用户提议）：去掉固定总上限 `backtest_max_wall_seconds`，改两道随回放天数伸缩的真实墙钟硬上限——`backtest_max_seconds_per_decision`（180s，作 `MainPolicyRunner` 每 tick 硬截止、去掉 NL 不活跃重置，超时立即杀驱动）+ `backtest_max_seconds_per_trading_day`（600s，引擎按天累计 step() 墙钟、超限中止）。config/manifest/facts/白名单/docs/tests 全部改名；新增 per-day/per-decision 两测。
+- 模板简化（issue #2）：`configs/agent_output_template/main.py` 由“导入 candidate/trading 的高级节奏 + 默认不交易”改为最小可用默认（持平时按 asof 等权买 top-N 并持有到末日清仓，自包含、含 pending 去重）；`candidate.py`/`trading.py` 标注“可选高级 helper”，README 先讲最小默认再讲可选节奏。
+- 工具框架（issue #3）：现已是标准原生 function calling（`ActionSpec.to_tool_schema` → OpenAI 兼容 function tools → 结构化 tool_calls → Runner 硬校验），约 10 个工具；无需 Tool Search（那是给几十/上百工具的延迟加载，本系统加它属过度工程）。
+- Opus 审计（issue #4）修复：Defect2 `except BaseException` 把普通 `ToolError`（重复结果目录/修改检查拒绝）误记为 `aborted`——加 `except ToolError: raise` 前置（新增 test）；Defect3 删除“NL 可在 substep 内并发”的不实表述（NL 宿主串行服务，墙钟为各 NL 之和）；Defect4 NL 单次超时设为决策上限的 0.8 留余量。
+- 审计 Defect1（HIGH）已决：用户确认**不加**绝对总上限——总耗时上界即 `交易日数 × per-day 上限`，随回放长度自然伸缩，正是设计意图；已在 `environment_design.md` §7.2 记录“有意不设固定总上限”。过度工程评估：各 governor 互不冗余，`--init`/`timeout`/`kill_marker` 三件各管不同进程类；substep 声明式延迟模型最重但属既定设计。
+- 验证：全套 317 单测通过；PROMPTS.md 同步；`git diff --check` clean。
+
+2026-06-28 gnn_env_transfer_smoke 审计修复（G1–G6）
+
+- 背景：一次 meta+标准 Fold smoke 跑出 7 个问题；3 个 Opus SubAgent 对实际产物核验后修复。两处用户判断被证据更正：①问题1 是“透明度缺口”非执行失效——BacktestTool 读内存 manifest（含 `backtest_max_wall_seconds=3600`，墙钟检查本就生效），只是 agent-visible `run_manifest.json` 投影白名单剥掉了这些预算字段；② Fold deadline 仅用于推理、回测时间独立计算（现有 deadline-exclusion 已实现，保留）。
+- G1 透明度：`runtime.py` agent-visible 白名单补入 `decision_max_sim_minutes`/`backtest_max_wall_seconds`/`max_backtests_per_fold`/`execution_lag_bars`/`nl_max_calls_*`/`auction_*`/`rolling_asof_enabled`。
+- G3 进程清理：一次性 shell 在容器内 `timeout --kill-after=5 setsid -w` 包裹（超时整组杀），宿主 deadline 仅作更长兜底；容器 `--init` 回收孤儿；常驻回放 driver 加唯一 cmdline marker，超时/teardown 经 `docker exec pkill -f` 回收（避免 torch 子进程残留）。
+- G4 DuckDB CLI：`sandbox.Dockerfile` 装 duckdb CLI 1.1.3（curl release zip，带 `--retry`），`IMPORTANT_TOOLS` 加 `duckdb`（与镜像安装耦合）。镜像构建网络对 GitHub CDN 不稳→改用 `docker build --network=host`（host 可下，已在 Dockerfile 注释）。
+- G2 可观测：回测发 `backtest_start` + 节流 `backtest_progress` 心跳 + 保证终止事件（`BaseException`→`aborted`，解决“卡死无 outcome”）；replay 跨 tick 聚合 substep 墙钟，summary 增 `started_at`/`replay_wall_seconds`/`replayed_trade_days`/`substep_runtime`（并入 backtest-summary 白名单）。
+- G5 成本：默认 `backtest_max_wall_seconds` 3600→1800（完整验证超限即 `BacktestError`、不可冻结）；backtest 工具描述+prompt 指导“小 `replay_window` 试探→外推→再跑完整”，并要求缓存重计算、压低调仓/图构建成本。
+- G6 提示：shell schema+响应增 `2>/dev/null` 提醒（命中附非阻断 `stderr_suppression_reminder`）；FOLD 工作步骤加“最小数据契约”一步。
+- 验证：全套 314 单测通过（+5）；PROMPTS.md 同步；`git diff --check` clean；env_design 同步更新。镜像重建中（host 网络）。FYI（不属 harness）：实验里生成的 `candidate.py` `_trading_day_count` 从不自增、`REBALANCE_GAP_DAYS` 死路——属 Agent 代码。
+
+2026-06-28 docs/ 跨文档去重（单一权威 + 交叉引用）
+
+- 执行 docs 审计的跨文档去重：把重复内容收敛到单一权威文档，其余改为简洁摘要 + 交叉引用，保持各文档可独立阅读。
+- 权威归属：执行/Broker/延迟模型 → env §7.2（agent §5.2 收为 Agent 合同 + 引用）；ctx 字段清单 → agent §5.3（env §7.2 收为指针）；快照路径 → env §3（agent §2.1 / pipeline §6.1 引用）；shell guard → env §6.1（agent §3.2 引用）；联网/代理 → env §4.1（agent §3.1 / pipeline §6.2 引用）；派生镜像 schema/构建/GC → pipeline §6.1（env §8.1 引用，并把 schema 补进 pipeline §6.1）。
+- data_documentation 经核验本就健康：`available_at` 的 §5.2/§6 已是 `见 2.7` 指针；审计所指 §3.3 绝对路径 Nit 系误报（全文统一 `~/miniconda3/bin/conda run -n quant`）；§6 风险表单位行属风险视角的自包含表述，保留。
+- 校验：新增 12 处跨文档引用全部指向真实小节标题；`git diff --check` clean；纯 .md 改动，无代码/prompt 变更，单测不受影响。
+
+2026-06-28 docs/ Opus 审计与精确修复
+
+- 启动 Opus 4.8 审计 docs/ 五份 living docs（逻辑重构、简洁 vs 完整）。结论：单文档结构良好、内容完整，主要问题是跨文档重复（执行模型/快照路径/shell guard/元学习联网在 2–3 份文档近重复），非单文档冗余。
+- 已修正（确认无误后）：env §7.2 + agent §5.2/§5.3 三处坏 TOC 锚点（标题已改名，锚点未同步）；env §7.2 残留的“正预算（B>0）”措辞（B>0 已在 API 强制、fail-fast 已无条件）；补文档化 `ctx.substep` 同一 tick 重名拒绝（外部改动新增、此前无文档）——env §7.2 + agent ctx 注 + Fold prompt 同步，重导出 PROMPTS.md。
+- 待定（已呈报，属架构判断未自动执行）：跨文档去重（以 env §7 为执行模型唯一权威、env §3 为快照路径权威、env §6.1 为 shell guard 权威，agent/pipeline 改为交叉引用）；env §7.2 过载，建议把“决策延迟+资源预算”块拆为独立小节。
+- 验证：全套 309 单测通过；`git diff --check` clean；PROMPTS.md 同步。
+
+2026-06-28 NL SubAgent 提示词补齐证据纪律
+
+- 追问“NL SubAgent 工具/提示词是否对齐主 Agent”后的结论：工具不对齐（`text_retrieve` 是 PIT 证据检索，不是文件 grep；Explore SubAgent 才与主 Agent 共用 grep/glob，因同一文件语料）。仅对齐“实质”——把 Fold/元学习提示词与 `environment_design.md` §6.3 已规定的 NL 证据纪律补进 NL SubAgent 自身提示词。
+- 改动：`nl/engine.py` `SUB_AGENT_SYSTEM_PROMPT` 的 Data Boundary 增补一句——优先最近 PIT 证据、警惕发布/入库时间与召回偏差、证据不足时显式说明并降置信而非用模型先验填补、自由文本只作可权衡证据。约 30 token，不改其精简 4 段结构（该提示词每次 `ctx.nl()` 都发送，避免膨胀）。
+- 验证：重导出 PROMPTS.md（NL 提示词第 8 节同步）；NL scoring 19 测 + 全套 309 单测通过；`git diff --check` clean。
+
+2026-06-28 substep 禁止零预算（决策追问）
+
+- 决策：`ctx.substep` 现要求 `budget_minutes > 0`；包裹但 B=0 直接被拒（ValueError → 经驱动 surfaced 为 BacktestError）。理由：包裹+B=0 与“不包裹”完全等价（无延迟、无实时上限），是无意义写法；要求正预算让每个 substep 诚实，并对“轻量块”也重新启用实时安全网。
+- 关键事实：`B ≤ execution_lag_bars`（默认 2）时 `extra = max(0, ceil(B)-lag_floor) = 0`，成交 bar 与默认一致——所以轻量决策给 0.5–1 的小预算几乎不影响成交时点，却获得逐块实时上限。
+- 实现：驱动 `substep` 入口校验 `B>0`（default 改 None）；host fail-fast 去掉 `budget_min>0` 特判（API 已保证正），模型统一。逐 tick 琐碎代码仍可不包裹（默认 lag、无逐块上限）。
+- 测试：`test_substep_zero_budget_is_rejected`（B=0 → BacktestError）、`test_substep_light_positive_budget_fills_at_default_bar`（B=1 → 仍 09:32 成交）。prompt + environment/agent docs 同步“B 必须为正/轻量用小值/不包裹=默认 lag”。
+- 验证：全套 306 单测通过；PROMPTS.md 同步；`git diff --check` clean。
+
+2026-06-28 WS A/B/D Opus 审计与修复
+
+- 启动 Opus 4.8 SubAgent 全量审计（doc/code 对齐、逻辑合理性、过度工程）；全套 305 单测通过，PROMPTS.md 与 prompts.py 完全一致。
+- 已修高优问题：`budget_minutes=0` 退化 bug——fail-fast `real > B·60` 在 B=0 时令任何被包裹的真实工作都中止回测，且与 prompt/docs“budget 0 = 默认 lag 成交”矛盾。改为仅对正预算做 fail-fast；budget 0 = 不设上限、按默认 lag 成交（新增 `test_substep_zero_budget_does_not_abort_on_real_work`，overrun 测试改用 0.001min 正预算）。
+- 其它修复：`backtest_max_wall_seconds` 改为自回放开始的真实墙钟（含 NL/撮合），不再只累计 tick 计算；派生镜像 GC 改按 `CreatedAt` 排序而非依赖 `docker images` 默认序；substep 名为 "None" 不再与未包裹单冲突（用 None 哨兵跳过查找）；`run_audit_session.py` 补 `max_backtests_per_fold`。
+- 文档：prompt + environment_design 明确 budget 0 语义与“协作式”延迟模型（未包裹重决策不被建模），新增“执行与资源预算一览”表汇总 7 个时间/成本护栏。
+- 接受不改（已记录）：延迟模型 opt-in（按已批准设计，不引入 Environment 侧自动延迟）；auction tick 大预算会减去连续 lag 的边角不一致（低风险、修复会增分支）。
+- 验证：全套 305 单测通过；`git diff --check` clean；PROMPTS.md 重新导出同步。
+
+2026-06-28 延迟感知回测 + 资源护栏 + Pipeline 加固（WS A/B/D）
+
+- 背景：三轮 `gnn_dependency_transfer` 实验 + 取证审计暴露执行模型与 Pipeline 缺陷；按已批准计划实现。
+- WS A 延迟模型（LEAN 风格）：新增 `ctx.substep(name, budget_minutes=B)`，其内下单成交 bar 顺延到 `决策分钟 + max(execution_lag_bars, ceil(B))`，`B` 固定写码 ⇒ 成交可复现；Environment 实测每个 substep 真实墙钟，`real > B·60s` 立即 `BacktestError` fail-fast（低报不可利用）；`decision_max_sim_minutes` 上限 → `decision_too_slow` 可复现错过；`backtest_max_wall_seconds` 松总上限防失控。`backtest` 独立计时（耗时回补 Fold deadline），单 Fold 上限 `max_backtests_per_fold`。
+- WS B 加固：`ops/docker/sandbox.Dockerfile` 预装 build-essential/g++/gfortran/python3-dev（消除“缺编译器”构建失败类）；容器缓存（pip/HF/torch/CUDA）经环境变量重定向到 `/tmp`，不落进被采集的 `/mnt/agent`；派生镜像 tag 从 ledger 回读（resume/fold-only 仍继承扩展镜像）；成功构建后按 `meta_sandbox_image_keep` 尽力 GC 旧派生镜像。
+- WS D 文档：Fold Prompt 新增 `## Pipeline流程`、`## Broker 交易接口`表、`## ctx 接口与数据视图`，并写入延迟模型/独立计时/NL 配额；agent-visible facts 暴露 `execution_lag_bars`/`decision_max_sim_minutes`/`backtest_max_wall_seconds`/`nl_max_calls_*`/`max_backtests_per_fold`；regenerate `PROMPTS.md`；更新 environment/agent/pipeline 三份 living docs。
+- 验证：全量单测 304 passed（新增 substep 成交延迟 + overrun fail-fast、镜像 tag resume、派生镜像 GC、缓存重定向 4 项）；`PROMPTS.md` 同步。
+
+2026-06-28 最新元学习评估审计与 sandbox 清理
+
+- 审计最新实验 `meta_learning_network_boundary_20260627_200447` / `run_10ff0af686d2`：运行 exit code 0，ledger status `taste_only`，17 次主 LLM、43 次 shell、7 次 web_search、1 次 explore，未触发 context compact；只有 1 次 Semantic Scholar `empty_results`，后续搜索仍满足执行流程。
+- 发现 Taste 仍包含具体样本窗口日期/月度信息和模板文件名，和“跨周期迁移、避免写入时间窗口”的写作目标不完全一致；代码侧 Claude 新增的 trace `phase="pipeline_finalize"` 标记设计合理，但最新实验产物是在该改动前生成，trace 中尚无该字段。
+- 已删除 `.runtime/sandboxes` 中除最新 `run_10ff0af686d2` 外的旧 sandbox；部分旧目录权限归 Docker/agent 用户，普通 `rm` 失败后用 Docker root 挂载清理完成。当前 `.runtime/sandboxes` 仅剩最新 run，约 4.4G。
+- 清理 `src/`、`tests/`、`scripts/` 下 `__pycache__`；验证：7 条相关单测 OK，`git diff --check` OK。
+
+2026-06-27 元学习 Sandbox 依赖模板
+
+- 按 GPT 5.5 High SubAgent 只读审计建议，未在 workspace 默认创建会触发构建的 `sandbox_environment.json`，而是在元学习 Sandbox 初始化时写入非触发模板 `workspace/sandbox_environment.example.json`。
+- 模板是合法 JSON，列出 `python_packages`、`apt_packages`、`npm_packages`、`reason`、`notes`；普通 Fold 不写入该模板，正式派生镜像仍只由元学习主动写 `sandbox_environment.json` 触发。
+- 同步元学习 Prompt、`PROMPTS.md` 和 living docs；新增单测覆盖元学习有 example、普通 Fold 没有 example、真实请求文件不被自动创建。
+- 验证：`py_compile` OK；3 条 pipeline sandbox environment 相关单测 OK；`scripts/dev/export_prompts.py` OK。
+
+2026-06-27 单会话审计脚本
+
+- 确认当前代码默认镜像为 `autotrade-sandbox:latest`，旧 `macroquant-sandbox:latest` 不再被当前代码路径引用；可保留用于历史复现，当前实验不再需要。
+- 新增 `scripts/experiments/run_audit_session.py`：支持 `--mode meta-learning` 单独调用 `run_meta_learning()`，以及 `--mode fold` 单独调用 `run_fold()`；用于人工审计 Prompt、Trace、Sandbox 和单个 Fold 产物交接，不替代完整 `run_experiment.py`。
+- 脚本默认不自动构建 Docker 镜像，缺少 `autotrade-sandbox:latest` 时显式报错；`fold` 模式不构造 Web Search provider，避免普通 Fold 对联网 key 的隐性依赖。
+- 同步 `docs/pipeline_design.md`；验证：`py_compile` OK，`--help` OK。
+
+2026-06-27 元学习 Fold 运行与 Trace 整理
+
+- 运行前发现当前默认 Docker 镜像 `autotrade-sandbox:latest` 不存在；Docker Hub 直连拉取 `python:3.11-slim` 超时后，按历史做法从 `docker.m.daocloud.io/library/python:3.11-slim` 拉取并 retag，随后用清华 PyPI 源成功构建 `autotrade-sandbox:latest`。
+- 第一次 meta-learning direct run 因 one-off 调用脚本误导入不存在的 `make_folds` 失败，未进入 Agent 会话；已标记为失败并用正确 `build_fold_schedule()` 重跑。
+- 有效运行：`experiment_id=meta_learning_network_boundary_20260627_200447`，`run_id=run_10ff0af686d2`，真实 Docker meta-learning-only，DeepSeek V4 Pro `reasoning_effort=max`，季度周期，21 个月历史窗口，21 个交易日分钟线，Web Search engines=`tavily, semantic_scholar`。
+- 结果：`finish_status=meta_learning_done`，ledger status=`taste_only`，Taste 4253 chars；trace 17 次主 LLM、43 次 shell、7 次 web_search、1 次 explore、0 次 context compact；token total=619316，cache_hit_ratio=0.64。日志 `logs/meta_learning_network_boundary_20260627_200447.log`，trace `experiments/meta_learning_network_boundary_20260627_200447/artifacts/run_10ff0af686d2/agent_trace.jsonl`。
+- 已覆盖写入 `check.md`，按对话/工具调用格式整理完整会话过程、关键工具输出、Explore 摘要和最终 Taste；未逐字展开 provider `reasoning_content`。
+
+2026-06-27 元学习 Prompt 轻量优化
+
+- 元学习 System Prompt 改为明确“当前可见数据是本 Epoch 首个普通 Fold 的示例可见窗口”，后续普通 Fold 会滚动到各自窗口。
+- 联网措辞改为“配置允许时”：后续普通 Fold 不允许联网或安装新包，元学习 Fold 是唯一可配置联网阶段；工具表也改为按 tool schema/run manifest 选择搜索参数。
+- 在 `## Pipeline流程` 中直接补充后续普通 Fold 不可以联网、不安装新包；元学习期联网探索只能沉淀为可迁移 Taste，或通过 `sandbox_environment.json` 声明需要构建进后续 Sandbox 的稳定依赖。
+- Taste 输出模板放入 `text` 代码块，并说明代码块围栏不要写入 `taste.md`；实验事实块移除 `generated_at`，减少 prompt 审计 diff 噪声。
+- 验证：`scripts/dev/export_prompts.py` 重生成 `configs/prompts/PROMPTS.md`；`py_compile` 通过。
+
+2026-06-27 回测摘要、撤单日期与限价口径修复
+
+- 修复 `backtest_tool` 在 `main(ctx)` 回测期间生成/修改 `models/` 后仍使用旧 modification delta 的问题：回放后重新读取 output/models hash，必要时刷新 `ModificationCheckTool`，summary 增加模型侧 delta 计数。
+- 修复日终撤销仍挂限价单时 `order_cancelled` 事件日期可能取旧 `current_date` 的问题：日终自动撤单显式传入当日 `trade_date`。
+- 按现有 Broker 代码口径同步 Prompt/文档/模板：限价单无滑点；开盘已优于限价时按 open 成交，否则盘中触价按限价成交。同步修正少量旧注释。
+- GPT 5.5 High SubAgent 复审无阻塞问题；按建议把 `TraderProtocol.cancel_order_stock` 保持 xtquant 风格签名，并补卖出限价 better-open 单测。
+- 验证：定向测试通过；全量 `unittest discover` 294 通过（skipped=2）；`git diff --check` 通过。
+
 2026-06-27 Opus 审计：执行模型确认正确，落地小修
 
 - 用 Opus 4.8 子代理只读审计全仓代码 + 文档（基线 293 通过）。结论：次一根成交 / 订单簿 / 限价 / 竞价 / 滚动 as-of / pending 去重逻辑正确，无前视或数据完整性 bug，文档与代码一致。落地以下修复：
@@ -634,3 +768,37 @@
 - `configs/prompts/PROMPTS.md` 原先把多个超长 Prompt 平铺为巨大代码块，审计阅读体验较乱；已调整 `scripts/dev/export_prompts.py`，生成导航、编号章节和可折叠完整 Prompt 块，仍保留模型实际接收文本的原样代码块。
 - 重新导出 `configs/prompts/PROMPTS.md`；`py_compile scripts/dev/export_prompts.py` OK；`git diff --check` OK。
 - 按 SubAgent 审计修复第 7 节：不再把实验级探索方向作为独立“追加片段”展示，而是导出“含实验级探索方向示例”的完整元学习 System Prompt；外层代码围栏改为四反引号，避免 Prompt 内部 ```json 提前闭合 Markdown。同步把 `/mnt/agent/workspace/sandbox_environment.json` 加入元学习 Prompt 的可读写文件表。
+
+2026-06-28 GNN dependency transfer audit
+
+- 审计 Claude 年份/日期 Taste 兜底：逻辑只在 meta-learning `done` 检查 `taste.md`，无额外状态、文件或多层 guard，足够轻量；全量测试 299 OK。
+- 修复两处实验暴露问题：sandbox image rebuild 失败时仍记录 meta artifacts/ledger；artifact 收集忽略 Docker/GPU 运行缓存 `.nv`，避免权限错误。
+- 运行 `gnn_dependency_transfer_final_20260628_011339`：用户级 directive 已传入；meta-learning 写出 `sandbox_environment.json` 并成功构建派生镜像；第一个普通 Fold 使用该镜像且网络为 `none`，Taste 也已注入。
+- 正式 Fold 未完成验证回测：Agent 生成策略在分钟回放中反复加载/计算较重日频特征，回测超过 70 分钟无 trace/manifest 更新后手动 TERM，并停止残留容器。实验产物保留供审计。
+
+2026-06-28 Held-out/runtime audit fixes
+
+- 修复 GPT-5.5 High SubAgent 审计发现的三处问题：held-out manifest 现在写入与 Fold 一致的回放/预算/NL 字段；Explore SubAgent 使用扣除 backtest 墙钟后的有效 deadline；`ctx.substep` 同一 tick 内重名会被拒绝，避免预算映射覆盖。
+- 移除未使用的 `_TickResult.real_wall_s` / `tick_real_wall_s` 字段；substep 自身的 `real_wall_s` 仍保留用于预算 fail-fast。
+- 验证：`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_main_ctx_replay tests.unit.test_tools_flow tests.unit.test_pipeline_e2e tests.unit.test_sandbox_isolation` -> 148 tests OK；`git diff --check` OK。`scripts/dev/export_prompts.py --check` 不存在该参数，未执行。
+
+2026-06-28 GNN meta-to-fold transfer smoke
+
+- 启动 `gnn_env_transfer_smoke_20260628_143822`（meta-learning + 第一个普通 Fold），用户级指令要求安装/声明 GNN 相关依赖。
+- Meta-learning 正常 `meta_learning_done`，写出 `torch-geometric==2.8.0`、`einops>=0.8.0`、`scikit-learn>=1.5.0` 的 `sandbox_environment.json`；Pipeline 成功构建派生镜像 `autotrade-sandbox:gnn_env_transfer_smoke_20260628_143822-epoch_001-d5e3c6b5ca67`。
+- 普通 Fold 使用派生镜像、`network=none`、1 张 L20 GPU；容器内验证 `torch.cuda.is_available()==True`，可 import `torch_geometric/einops/sklearn`。
+- 普通 Fold 完成 debug 回测和两次完整 valid：`valid_001` total_return=3.33%、sharpe=1.36 但拒单 331；修复后 `valid_002` total_return=2.10%、sharpe=0.75、拒单 0。
+- 稳定性结论：环境传递和 GPU 分配正常，但普通 Fold 未干净完成。Agent 在 step_003 又重训并启动第三次完整回测，整体超过 60 分钟 Fold 预算；一次 shell timeout 还留下了需手动清理的子进程。已 TERM 实验进程并停止容器，GPU 释放。日志 `logs/gnn_env_transfer_smoke_20260628_143822.log`，trace/产物见 `experiments/gnn_env_transfer_smoke_20260628_143822/`。
+
+2026-06-28 Text evidence audit refresh
+
+- 补跑本地文本证据审计，刷新凌晨审计在文本回填前留下的 error 状态；不重新下载数据。
+- 命令输出：`audit status=warning errors=0 warnings=20 output=/Data/lzp/MacroQuant/results/data_quality/text_evidence_status.json`。
+- 日志：`logs/manual_text_evidence_audit_20260628_2021.log`。
+
+2026-06-28 Regular Fold from previous Taste with multi-GPU sandbox
+
+- 使用上一轮 `gnn_env_transfer_smoke_20260628_143822/meta_learning/epoch_001/taste.md` 启动单个常规 Fold，实验 `regular_fold_last_taste_gpu_20260629_034005`。
+- 启动前发现并修复 Docker 多 GPU 参数渲染问题：多卡需要 `--gpus '"device=5,6,7"'`，否则 Docker 报 `cannot set both Count and DeviceIDs`。补充 `run_audit_session.py` 的 `--sandbox-image` / `--gpu-devices` / 宽松 acceptance 参数和单测。
+- 当前运行：PID `2529022`，runtime `.runtime/sandboxes/run_c6d6e61dd4cb`，容器 `mqsbx_feba0ac75d17`，派生 GNN 镜像，`allocated_gpu_indices=[5,6,7]`，容器内 `torch.cuda.device_count()==3`。日志 `logs/regular_fold_last_taste_gpu_20260629_034005.log`。
+- 复查结果：Fold Agent 已 `fold_finished` 并冻结 `strategy_epoch_001_fold_2022Q1`，但 CLI 最后收集 artifacts 时因 `workspace/core.7194`/`core.7449` 权限不足退出。训练出的 `gnn_model.pt` 很小且过拟合，最终策略实际调用 simple factor ranking 而非 GNN；完整 valid_011 return=-6.31%、Sharpe=-2.75，test_000 return=-3.91%、Sharpe=-0.76。实验无 ledger，runtime/partial artifacts 可审计。

@@ -64,7 +64,8 @@
 
 ## Memory and GPU Monitoring
 
-- Check GPU memory and system memory before and after every script run.
+- Check GPU memory and system memory before and after experiment, training, inference, evaluation, or data-processing runs.
+- Routine read-only inspection, small documentation edits, prompt export, formatting checks, and targeted lightweight unit tests do not require RAM/GPU checks unless they are expected to be resource-intensive.
 - Stop and adjust the workload if memory usage becomes unsafe.
 
 Recommended checks:
@@ -76,6 +77,8 @@ free -h
 
 ## Execution Workflow
 
+For experiment, training, inference, evaluation, or data-processing jobs:
+
 1. Verify free system RAM and GPU memory.
 2. Start the job with logging enabled.
 3. Recheck memory usage after the job starts and after it finishes.
@@ -83,6 +86,8 @@ free -h
 
 ## Operational Guardrails
 
+- Avoid over-engineering.
+- Fully read sufficient code and supporting documentation to form a sound design idea before writing or modifying any code.
 - Treat resource checks and logging as mandatory steps, not optional cleanup.
 - Keep the repository organized, clean and tidy.
 - Prefer fail-fast behavior in core pipelines. Missing data files, cache splits, scaler/meta artifacts, or model weights should raise explicit errors instead of silently falling back.

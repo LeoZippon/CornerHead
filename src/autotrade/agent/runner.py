@@ -11,10 +11,12 @@ conversation calls and semantic compactions are logged in agent_trace.jsonl
 from __future__ import annotations
 
 import json
+import re
+import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from autotrade.environment.explore import ExploreSubAgentEngine
 from autotrade.environment.llm.proxy import LLMProxy, LLMProxyError, ProviderResponse
@@ -60,6 +62,11 @@ class AgentSessionConfig:
     per_call_timeout_seconds: float = 300.0
     max_llm_calls: int = 200
     max_steps: int = 10
+    # A backtest is an independently-timed tool: its wall-time is excluded from the
+    # fold reasoning deadline (the backtest carries its own internal budgets) so a
+    # slow-but-bounded replay can't starve reasoning. max_backtests_per_fold caps
+    # how many such exclusions a fold may claim (exclusion can't be abused).
+    max_backtests_per_fold: int = 30
     # Estimated prompt tokens are the primary trigger for trim/clear; the message
     # counts are high safety caps so a many-small-turn session still stays bounded
     # without rewriting the cacheable prefix every turn (which resets the cache).
@@ -153,6 +160,9 @@ class AgentSessionRunner:
         self._observation_digests: list[dict[str, object]] = []
         self._message_seq = 0
         self._meta_search_perspectives: set[str] = set()
+        # Backtest wall-time excluded from the reasoning deadline, and a running count.
+        self._excluded_backtest_seconds: float = 0.0
+        self._backtest_count: int = 0
         self._token_totals: dict[str, int] = {
             key: 0
             for key in (
@@ -317,6 +327,7 @@ class AgentSessionRunner:
             self.artifact_io.edit_spec,
             self.search.grep_spec,
             self.search.glob_spec,
+            self.search.read_spec,
             self.modification_check.spec,
             self.backtest.spec,
             self.finish_fold.spec,
@@ -636,12 +647,29 @@ class AgentSessionRunner:
                 return {"observation": "grep", **self.search.grep(**args)}
             if action == "glob":
                 return {"observation": "glob", **self.search.glob(**args)}
+            if action == "read":
+                return {"observation": "read", **self.search.read(**args)}
             if action == "modification_check":
                 return {"observation": "modification_check", **self.modification_check.run()}
             if action == "backtest":
                 if self.mode == "meta_learning":
                     return {"observation": "error", "action": action, "error": "backtests are not allowed in this session"}
-                return {"observation": "backtest", **self.backtest.run(mode="valid", replay_window=(args or {}).get("replay_window"))}
+                if self._backtest_count >= self.config.max_backtests_per_fold:
+                    return {
+                        "observation": "error", "action": action,
+                        "error": (
+                            f"backtest budget exhausted: {self.config.max_backtests_per_fold} backtests already "
+                            "run this fold; consolidate changes before validating again"
+                        ),
+                    }
+                self._backtest_count += 1
+                started = time.monotonic()
+                try:
+                    result = self.backtest.run(mode="valid", replay_window=(args or {}).get("replay_window"))
+                finally:
+                    # Exclude this independently-timed backtest from the reasoning deadline.
+                    self._excluded_backtest_seconds += time.monotonic() - started
+                return {"observation": "backtest", **result}
             if action == "finish_fold":
                 if self.mode == "meta_learning":
                     return {"observation": "error", "action": action, "error": "use done to end this session"}
@@ -669,7 +697,7 @@ class AgentSessionRunner:
                     trace=self.ctx.trace,
                     mode=self.mode,
                     step_id=self.ctx.current_step_id,
-                    deadline_at=self.config.fold_deadline_at,
+                    deadline_at=self._effective_deadline_at(),
                 )
                 return {"observation": "explore", **engine.run(task=str(args["task"]), max_rounds=int(args.get("max_rounds") or 0))}
             if action == "note":
@@ -709,7 +737,15 @@ class AgentSessionRunner:
             return {"observation": "error", "action": action, "error": f"internal tool failure: {error}"}
 
     def _remaining_seconds(self) -> float:
-        return (self.config.fold_deadline_at - datetime.now(timezone.utc)).total_seconds()
+        # Backtests are independently timed, so their wall-time is credited back to
+        # the reasoning deadline (the backtest enforces its own internal budgets).
+        return (
+            (self.config.fold_deadline_at - datetime.now(timezone.utc)).total_seconds()
+            + self._excluded_backtest_seconds
+        )
+
+    def _effective_deadline_at(self) -> datetime:
+        return datetime.now(timezone.utc) + timedelta(seconds=max(0.0, self._remaining_seconds()))
 
     def _compact_if_needed(self, messages: list[dict[str, str]], remaining: float) -> list[dict[str, str]]:
         if self.compactor is None:
@@ -910,6 +946,19 @@ class AgentSessionRunner:
                 break
         return {**payload, "items": compact_items, "truncated": True}
 
+    # A bare 4-digit number followed by one of these is a count/threshold, not a
+    # date (e.g. "2000 只股票"), so it must not trip the visible-window year check.
+    _COUNT_UNITS = "只家个支亿万元点名股条款行列页倍"
+
+    # A year welded to date syntax (年 / -MM / .MM / Qn / 季度), an 8-digit YYYYMMDD,
+    # or QnYYYY — a calendar date regardless of which year, so it stays correct when
+    # the visible fold moves to another year. Bare 4-digit numbers are NOT matched.
+    _DATE_EXPR = re.compile(
+        r"(?:19|20)\d{2}\s*(?:年|[/.\-]\s*\d{1,2}|[Qq][1-4]|\s*[一二三四]\s*季度)"
+        r"|(?:19|20)\d{6}"
+        r"|[Qq][1-4]\s*(?:19|20)\d{2}"
+    )
+
     def _taste_policy_violation(self) -> str:
         if self.mode != "meta_learning":
             return ""
@@ -919,7 +968,46 @@ class AgentSessionRunner:
         text = taste_path.read_text(encoding="utf-8", errors="replace")
         if not text.strip():
             return "taste.md must be non-empty before done"
+        # Taste must be cross-period transferable. Reject calendar dates two ways,
+        # robust to the visible fold switching years: generic date expressions
+        # (_DATE_EXPR), plus the actual visible-window years/bounds read from the
+        # manifest even when written bare. Cadence words (季度/月/周) and plain
+        # counts/percentages are unaffected.
+        window = self._visible_window_dates()
+        bare_window = (
+            re.compile(
+                r"\b(?:" + "|".join(re.escape(t) for t in sorted(window, key=len, reverse=True)) + r")\b"
+                rf"(?!\s*[{self._COUNT_UNITS}])"
+            )
+            if window
+            else None
+        )
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if self._DATE_EXPR.search(line) or (bare_window and bare_window.search(line)):
+                return (
+                    f"taste.md line {lineno} contains a calendar date (non-transferable): "
+                    f"{line.strip()[:80]!r}; state it qualitatively (e.g. 样本交易日不足、按季度轮动) "
+                    "with no year or window date, then call done again"
+                )
         return ""
+
+    def _visible_window_dates(self) -> set[str]:
+        """Years and YYYYMMDD period bounds of the meta-learning visible fold, read
+        from the manifest so the leak check targets the real window whatever year it
+        is (e.g. ``{"2020", "2021", "20200101", "20210930", ...}``)."""
+        data = self.ctx.manifest.data
+        fold = data.get("meta_learning_visible_fold") or {}
+        blob = " ".join(
+            str(value)
+            for value in (
+                fold.get("input_window"),
+                fold.get("validation_period"),
+                fold.get("valid_decision_time"),
+                data.get("valid_decision_time"),
+            )
+            if value
+        )
+        return set(re.findall(r"(?:19|20)\d{6}", blob)) | set(re.findall(r"(?:19|20)\d{2}", blob))
 
 def _shorten(value: object, max_chars: int) -> str:
     if isinstance(value, str):

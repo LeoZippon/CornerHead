@@ -22,6 +22,11 @@ OUTPUT_LIMIT_CHARS = 20_000
 OUTPUT_CAPTURE_LIMIT_CHARS = 200_000
 DEFAULT_TIMEOUT_SECONDS = 120.0
 ABSOLUTE_PATH_RE = re.compile(r"(?<![\w.:\-/])/(?:[^\s'\";|&<>`$(){}]+)")
+# Advisory (not enforced): nudge the Agent away from hiding stderr, which breaks audit.
+STDERR_SUPPRESSION_RE = re.compile(r"2\s*>\s*/dev/null|&>\s*/dev/null|/dev/null\s+2\s*>\s*&\s*1")
+STDERR_SUPPRESSION_REMINDER = (
+    "stderr 被重定向到 /dev/null：错误输出对审计与调试很重要，请保留 stderr（去掉 2>/dev/null 等）。"
+)
 CONTROL_OPERATOR_RE = re.compile(r"(&&|\|\||[;&|\n])")
 CONTROL_OPERATORS = {"&&", "||", ";", "&", "|"}
 READ_ONLY_COMMANDS = {
@@ -139,9 +144,10 @@ class ShellResult:
     host_stderr_path: str | None = None
     command_kind: str = "unknown"
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    stderr_suppression_reminder: str | None = None
 
     def to_record(self) -> dict[str, object]:
-        return {
+        record = {
             "call_id": self.call_id,
             "exit_code": self.exit_code,
             "stdout": self.stdout,
@@ -158,6 +164,9 @@ class ShellResult:
             "command_kind": self.command_kind,
             "timeout_seconds": self.timeout_seconds,
         }
+        if self.stderr_suppression_reminder:
+            record["stderr_suppression_reminder"] = self.stderr_suppression_reminder
+        return record
 
 
 class SandboxShellTool:
@@ -169,7 +178,8 @@ class SandboxShellTool:
             "Run one managed bash command inside the Agent sandbox. Use for data inspection, "
             "debugging, and controlled writes to workspace/output/models. For large parquet "
             "tables (events, text_index, intraday_1min), prefer DuckDB count/limit, Parquet "
-            "metadata, or column-select reads over full pd.read_parquet(); do not hide stderr."
+            "metadata, or column-select reads over full pd.read_parquet(). Keep stderr visible: do "
+            "NOT use `2>/dev/null` / `2>&1 >/dev/null` to hide errors — suppressed stderr breaks audit."
         ),
         fields=(
             ActionField(
@@ -178,7 +188,8 @@ class SandboxShellTool:
                 required=True,
                 description=(
                     "Bash command executed in the sandbox. Prefer explicit read/list/search commands; "
-                    "write only under workspace/output/models and keep stderr visible."
+                    "write only under workspace/output/models. Keep stderr visible — never redirect it to "
+                    "/dev/null (`2>/dev/null`)."
                 ),
             ),
             ActionField(
@@ -297,6 +308,9 @@ class SandboxShellTool:
             host_stderr_path=stderr_ref.get("host_stderr_path"),
             command_kind=command_kind,
             timeout_seconds=timeout_limit,
+            stderr_suppression_reminder=(
+                STDERR_SUPPRESSION_REMINDER if STDERR_SUPPRESSION_RE.search(guard_command) else None
+            ),
         )
 
     def _guard_paths(self, command: str) -> None:

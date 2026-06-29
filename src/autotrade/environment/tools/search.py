@@ -18,7 +18,9 @@ from .base import ActionField, ActionSpec, ToolContext, ToolError
 
 DEFAULT_GREP_LIMIT = 250
 DEFAULT_GLOB_LIMIT = 100
+DEFAULT_READ_LIMIT = 2000
 MAX_HEAD_LIMIT = 1000
+MAX_READ_LIMIT = 5000
 MAX_RESULT_CHARS = 20_000
 RG_TIMEOUT_SECONDS = 20.0
 VCS_DIRS = (".git", ".hg", ".svn", ".bzr", ".jj", ".sl")
@@ -106,7 +108,10 @@ class StructuredSearchTool:
     glob_spec = ActionSpec(
         action="glob",
         tool_name=name,
-        description="List files under an allowlisted sandbox root with structured pagination.",
+        description=(
+            "List files under an allowlisted sandbox root with structured pagination. "
+            "Use to discover files by name/pattern before reading or grepping them."
+        ),
         fields=(
             ActionField(
                 "pattern",
@@ -136,6 +141,33 @@ class StructuredSearchTool:
                 description="Maximum number of paginated paths to return.",
             ),
             ActionField("offset", "integer", default=0, min_value=0, description="Pagination offset."),
+        ),
+        read_only=True,
+        destructive=False,
+        concurrency_safe=True,
+        max_result_chars=MAX_RESULT_CHARS,
+        result_policy="paginated_bounded_inline",
+        allowed_modes=("fold", "meta_learning"),
+    )
+    read_spec = ActionSpec(
+        action="read",
+        tool_name=name,
+        description=(
+            "Read a file under an allowlisted sandbox root with line numbers and pagination. "
+            "Prefer this over `shell cat`/`head` for code you will edit (line-numbered, bounded output); "
+            "`cat`/`head` stay available for pipelines."
+        ),
+        fields=(
+            ActionField(
+                "root", "string", default="agent", choices=SEARCH_ROOTS,
+                description="Allowlisted sandbox root the file lives under.",
+            ),
+            ActionField("path", "string", required=True, description="Relative file path under root."),
+            ActionField("offset", "integer", default=0, min_value=0, description="Starting line offset (0-based)."),
+            ActionField(
+                "limit", "integer", default=DEFAULT_READ_LIMIT, min_value=1, max_value=MAX_READ_LIMIT,
+                description="Maximum number of lines to return from offset.",
+            ),
         ),
         read_only=True,
         destructive=False,
@@ -327,6 +359,41 @@ class StructuredSearchTool:
             **budget,
         }
         self.ctx.trace.emit("glob", record, step_id=self.ctx.current_step_id)
+        return record
+
+    def read(
+        self,
+        *,
+        root: str = "agent",
+        path: str = "",
+        offset: int = 0,
+        limit: int = DEFAULT_READ_LIMIT,
+    ) -> dict[str, object]:
+        if not path:
+            raise ToolError("read requires a relative file path under the root")
+        target, display_root = self._resolve_search_path(root, path)
+        if target.is_dir():
+            raise ToolError(f"read path is a directory, not a file: {root}:{path}")
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise ToolError(f"read failed for {root}:{path}: {exc}") from exc
+        # cat -n style line numbering, paginated by line so large files stay bounded.
+        numbered = [f"{i}\t{line}" for i, line in enumerate(text.splitlines(), start=1)]
+        visible, paging = _apply_paging(numbered, offset=offset, head_limit=limit, source_truncated=False)
+        content, budget = self._apply_result_budget("\n".join(visible), tool_kind="read")
+        record = {
+            "tool": self.name,
+            "tool_spec": self.read_spec.to_record(),
+            "root": root,
+            "root_path": display_root,
+            "path": path,
+            "line_count": len(numbered),
+            "content": content,
+            **paging,
+            **budget,
+        }
+        self.ctx.trace.emit("read", record, step_id=self.ctx.current_step_id)
         return record
 
     def _run_rg(

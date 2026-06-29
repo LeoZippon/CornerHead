@@ -1,4 +1,6 @@
-"""Cross-sectional screening (09:15) then order submission (09:25).
+"""Optional advanced helper — the minimal default ``main.py`` does not import this.
+
+Cross-sectional screening (09:15) then order submission (09:25).
 
 The two stages are split because orders use next-bar execution and the 09:15
 info tick exposes no price:

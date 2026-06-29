@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from datetime import datetime, timezone
 
 EXPERIMENT_FACTS_SCHEMA_VERSION = 1
 META_SEARCH_PERSPECTIVES = (
@@ -31,6 +30,13 @@ FOLD_ROLE_SECTION = """\
 
 FOLD_ENV_SECTION = """\
 # 环境与配置
+## Pipeline流程
+- Experiment 由多个 Epoch 组成；每个 Epoch 先运行一次元学习会话产出 Taste 和可选小幅正则化，随后按配置的日/周/月/季/年 Fold 周期顺序启动普通 Fold Agent（即你）。
+- 你只看到本 Fold 的决策输入、训练/验证可见窗口和父产物；测试与 held-out 区间由 Environment 在你冻结产物后隐藏执行，你无法读取。
+- 单个 Fold 的闭环：探查可见数据与父产物 → 在 `output/`（及可选 `models/`）小步修改 → `modification_check` → `backtest`（valid）复盘 → 收敛后 `finish_fold`。`finish_fold` 只表示你停止修改，是否冻结由 Pipeline 复核。
+- 策略与模型产物链式继承：首个普通 Fold 继承初始模板或元学习正则化后的父产物；之后每个 Fold 继承上一个 Fold 在测试前冻结的产物；若某 Fold 无可接受更新，则继承 Pipeline 选择的 fallback 父产物。
+- 本 Epoch 注入的 Taste 是跨周期通用的方向性约束；据此写可迁移逻辑，不要因当前窗口短而过拟合。
+
 ## 文件结构和读写边界
 Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/glob 可用于探查只读上下文；正式策略代码只能读取 `/mnt/snapshot`、`/mnt/agent/output` 和 `/mnt/agent/models`。
 
@@ -78,18 +84,34 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 
 ## 交易规则（写入回测流程，无法绕过）
 - 入口：Environment 按回放 tick 逐 tick 调用一次 `main(ctx)`（一次覆盖全市场）。时序完全由你控制：每个 tick 管理已有持仓、在你选定的时点筛选并开新仓。无需返回 `trade_intents`，直接调用 `ctx.broker` 原语下单即可在任意时点开/平仓。
-- 下单与成交（对齐实盘 QMT `order_stock`，无券商侧条件单/止损单）：在某根 bar 决策的单于其后第 `execution_lag_bars`（默认 2）根 bar 起进入撮合，杜绝 bar 内前视（如 09:35 决策、09:37 起成交）。**市价单**（默认，对应 `MARKET_PEER_PRICE_FIRST`）按进入 bar 的开盘价 + 滑点成交；**限价单**（`limit=P`，对应 `FIX_PRICE`）挂单，待某根 bar 的 `[low, high]` 触及 P 时按 P 成交（做市无滑点），`valid_bars` 根 bar 内未触及则自动撤单。`ctx.positions` 只反映已成交持仓；已报未成的在途单用 `ctx.broker.pending(ts_code)` 查询（实盘委托查询口径），对在途代码跳过重复下单即可，不必用 `ctx.state_dir` 记账。临近收盘、其后无第 `execution_lag_bars` 根 bar 的决策无法成交。
+- 下单与成交（对齐实盘 QMT `order_stock`，无券商侧条件单/止损单）：在某根 bar 决策的单默认于其后第 `execution_lag_bars`（默认 2）根 bar 起进入撮合，杜绝 bar 内前视（如 09:35 决策、09:37 起成交）。**市价单**（默认，对应 `MARKET_PEER_PRICE_FIRST`）按进入 bar 的开盘价 + 滑点成交；**限价单**（`limit=P`，对应 `FIX_PRICE`）挂单，无滑点；若进入 bar 开盘价已优于 P，则按开盘价成交，否则盘中 `[low, high]` 触及 P 时按 P 成交，`valid_bars` 根 bar 内未触及则自动撤单。临近收盘、其后无可成交 bar 的决策无法成交。
+- 决策延迟（声明式预算，决定成交 bar，可复现）：用 `with ctx.substep(name, budget_minutes=B):` 包裹一段决策；其中下的单成交 bar 顺延到 `决策分钟 + max(execution_lag_bars, ceil(B))`。`B` 必须为正——包裹但 `B=0` 会被拒（等同于不包裹的无意义写法）；同一 tick 内 `name` 必须唯一（重名会被拒）。轻量决策用较小的 `B`（如 0.5–1）：当 `B ≤ execution_lag_bars` 时成交 bar 不变，几乎不影响成交时点却仍获得实时上限保护。`B` 固定写入代码 ⇒ 成交 bar 确定、跨 host 可复现。例：09:35 在 `budget_minutes=5` 的 substep 内下单 → 约 09:41 成交。无需建模延迟的琐碎逐 tick 代码可不包裹，按默认 `execution_lag_bars` 成交、无逐块实时上限。
+- 预算即承诺（fail-fast，不可低报）：Environment 实测每个 substep 的真实墙钟时间，一旦超过声明的 `B`（`real > B 分钟`）立即中止本次回测并向 `backtest` 返回精确失败（哪个 substep、哪天、声明 B vs 实测）。低报（声称快却跑得慢）会硬报错、不可利用；高报会延后成交、拖累 P&L。你应在 `B` 内自行预留安全余量（轻量块也给出有余量的小值，避免研究机偶发抖动误伤），并跨 Fold 拟合一个稳定的平均预算。`B` 不得超过 `decision_max_sim_minutes`（决策窗口上限），超过则该决策错过成交（记 `decision_too_slow`）。
+- 独立计时与回测成本：`backtest` 独立计时（其墙钟不计入 Fold 推理 deadline），单 Fold 最多 `max_backtests_per_fold` 次。系统对真实墙钟有两道硬上限：单个决策（一次 `main(ctx)` tick，含其中的 NL）超过 `backtest_max_seconds_per_decision`（默认 180s）会被**立即终止**；某个交易日累计计算超过 `backtest_max_seconds_per_trading_day`（默认 600s）会中止本次回测（`BacktestError`，不可接受/冻结）。这两道上限随回放天数自然伸缩。先用小 `replay_window` 跑一遍试探，读返回的 `replay_wall_seconds` / `replayed_trade_days` 外推完整验证耗时，确认能装进上限后再跑完整回测。跨 tick 复用的重计算（全表 reload、全市场 group-by、相关性/图构建）必须缓存到首次或调仓时点、不要每个决策 tick 重算，并用调仓频率和图规模上限压低累计成本；据此设定 `ctx.substep` 的 `B`。回测 summary 会返回逐 substep 的 `real_wall_s` 帮你定位耗时。
 - 盘前竞价：默认每个回放日在常规分钟前有两个盘前决策 tick——`09:15` 信息 tick（集合竞价未撮合，`ctx.price` 为 None，用于筛选 + NL）和 `09:25` tick（`ctx.price` 为撮合出的开盘价）。`09:15` 的单成交于 09:30 开盘集合竞价，`09:25` 的单成交于首根连续 bar（09:31），均按当日涨跌停成交（一字涨停买单/跌停空单会被拒）。推荐节奏：09:15 筛选并把目标写入 `ctx.state_dir`，09:25 读取目标统一下单。
-- `ctx`（市场级，每个 tick 重建）：
-  - `ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.account`、`ctx.positions`（只读快照）、`ctx.cash`。
-  - `ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`：只含当前 tick、PIT 可见的 bar（未来 bar 不可见；09:15 无价）。
-  - `ctx.broker`：`.buy/sell/short/cover/close(ts_code, amount=None, weight=None, limit=None, valid_bars=1)`、`.money`/`.cash`、`.position(ts_code)`、`.pending(ts_code)`（在途已报未成单，用于跨 tick 去重）。`limit=P` 为限价单（`close` 恒市价）。
-  - `ctx.nl(ts_code, prompt=...)`；`ctx.asof_dir`（滚动日频 as-of 视图：截至当日盘前可见的日线历史，含回放期内已收盘交易日，用于横截面日频筛选）；`ctx.snapshot_dir`（Fold 决策时点冻结全量快照：事件/文本/财务/分钟历史）；`ctx.model_dir`、`ctx.state_dir`（跨 tick 暂存，如当日目标）、`ctx.params`。
 - 下单口径：`amount` 是股数（按 100 股，即 1 手，向下对齐），`weight` 是初始权益的名义比例。策略只表达意图，Broker 强制现金、做空保证金、T+1 可卖余额、手数、涨跌停、停牌和可融券。最大持仓数、单票权重上限和集中度默认由你控制；回放末日强制清仓剩余持仓。Broker 是持仓真相源，`ctx.state_dir` 只存你自己的规则/目标，不是持仓账本。
-- 成本与频率：`main(ctx)` 每个 tick 都会被调用，但筛选、模型推理和 `ctx.nl()` 等重操作应只在你选定的少数时点执行（如盘前或收盘前），不要每个 tick 跑，否则 API 成本和耗时会失控；模型应在首个 tick 加载/缓存，不要每次重训。`ctx.nl()` 还受 run manifest 的 `nl_max_calls_per_backtest` 硬上限约束，超出后返回 `budget_exhausted` 错误，需自行降级。
+- 成本与 NL 配额：`main(ctx)` 每个 tick 都会被调用，但筛选、模型推理和 `ctx.nl()` 等重操作应只在你选定的少数时点执行，不要每个 tick 跑；模型在首个 tick 加载/缓存，不要每次重训。`ctx.nl()` 受 run manifest 的 NL 配额约束——按 `nl_max_calls_per_decision_day`（日均上限 × 决策天数）得到每次回测总配额，可被 `nl_max_calls_per_backtest` 进一步收紧；超出返回 `budget_exhausted`，需自行降级。NL 调用由宿主串行服务，substep 的真实墙钟约等于其中各 NL 时延之和，请据此（而非假设并发）设定 `B`。
 - NL 工具：`ctx.nl(ts_code, prompt=...)`（等价 `from at_tools import nl`）在宿主侧启动可调用 `text_retrieve` 的 Sub Agent，返回 result dict（含 `status`、`content`、`tool_calls`、`evidence`、`error`）；内容不限定格式，需要数值或标签时在 `main`/`candidate`/helper 中自行解析。
 - NL 风险：存在发布时间/入库时间、检索召回、模型常识、自由文本解析和前视泄露风险。使用 NL 时必须按 PIT evidence 降权或过滤证据不足的结论；不要把自由文本当作稳定结构，也不要让 NL 覆盖现金、可交易性、成本和回放约束。
 - 做空：可做空股票由 `/mnt/snapshot/events.parquet` 中 decision-date 的 `margin_secs` 集合决定。默认 `proxy_margin_secs` 只能做空这些股票；`broker_inventory` 在未接入真实券源文件时拒绝做空；`theoretical_short` 是显式研究模式。
+
+## Broker 交易接口
+`ctx.broker` 是持仓真相源；下单只表达意图，Broker 强制现金、做空保证金、T+1 可卖、手数、涨跌停、停牌和可融券。`amount?/weight?` 二选一；`limit=P` 为限价单（FIX_PRICE），缺省为市价单。
+
+| 接口 | 主要参数 | 用途 |
+|---|---|---|
+| `ctx.broker.buy` / `sell` | ts_code, amount?/weight?, limit?, valid_bars? | 多头开/减仓 |
+| `ctx.broker.short` / `cover` | ts_code, amount?/weight?, limit?, valid_bars? | 融券做空/买入平空（受可融券约束） |
+| `ctx.broker.close` | ts_code | 市价平掉该票全部持仓（恒市价，无 `limit`） |
+| `ctx.broker.position` | ts_code | 已成交持仓（不含在途），是持仓真相源 |
+| `ctx.broker.pending` | ts_code | 在途已报未成单（实盘委托查询口径），对在途代码跳过重复下单 |
+| `ctx.broker.money` / `.cash` | （无） | 账户总资金 / 可用现金 |
+
+## ctx 接口与数据视图
+- `ctx`（市场级，每个 tick 重建）：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.account`、`ctx.positions`（只读快照）、`ctx.cash`。
+- `ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`：只含当前 tick、PIT 可见的 bar（未来 bar 不可见；09:15 无价）。
+- `ctx.substep(name, budget_minutes=B)`：上下文管理器，声明一段决策的延迟预算（`B>0`，见“决策延迟”）。
+- `ctx.nl(ts_code, prompt=...)`；`ctx.asof_dir`（滚动日频 as-of 视图：截至当日盘前可见的日线历史，含回放期内已收盘交易日，用于横截面日频筛选）；`ctx.snapshot_dir`（Fold 决策时点冻结全量快照：事件/文本/财务/分钟历史）；`ctx.model_dir`、`ctx.state_dir`（跨 tick 暂存，如当日目标）、`ctx.params`。
 """
 
 FOLD_ACTION_SECTION = """\
@@ -104,6 +126,7 @@ FOLD_ACTION_SECTION = """\
 | `edit_file` | root, path, old_string, new_string, replace_all? | 精确编辑文本文件；`old_string` 必须与当前内容唯一匹配，否则用 `replace_all` |
 | `grep` | pattern, root?, path?, glob?, output_mode?, head_limit?, offset?, context?, case_insensitive?, multiline? | 结构化只读检索，不访问测试或隐藏路径；`root` 取值 agent\|workspace\|output\|models\|snapshot\|train\|valid\|artifacts\|parent_output\|parent_models\|results\|steps |
 | `glob` | pattern, root?, path?, head_limit?, offset? | 结构化只读列文件，不访问测试或隐藏路径 |
+| `read` | root?, path, offset?, limit? | 按行号读取文件（可分页）；读要编辑的代码优先用它而非 shell `cat`/`head`，`cat`/`head` 仍可用于管道；不访问测试或隐藏路径 |
 | `explore` | task, max_rounds? | 委托只读数据探查 Sub Agent（更便宜模型）调查一个具体问题并返回简洁摘要，把大量 shell/grep 探查移出主上下文 |
 | `modification_check` | （无） | 主动检查正式产物改动是否在约束内；`backtest` 执行前也会自动复核 |
 | `backtest` | replay_window? | 验证回测；Environment 逐 tick 回放当前 `output/main.py` 的 `main(ctx)`；可选 `replay_window` 只回放前 N 个交易日做快速调试（标记非完整验证、不可冻结），默认整段回放 |
@@ -118,6 +141,7 @@ FOLD_ACTION_SECTION = """\
 - 当前 Sandbox 内的数据是当前 Fold 的样本窗口（如分钟线和回放区间可能较短）；后续 Fold 会按配置周期沿时间向后滚动，回放窗口由各 Fold 周期决定。据此写可迁移逻辑，不要因当前窗口短而过拟合或对数据规模下死结论。
 - 首个 Fold 的 `parent_output` 是初始模板、Step 树可能为空：不要追查不存在的历史，从模板和可见数据起步即可。
 - 先读 `/mnt/artifacts/data_summary.json`，再用 grep/glob 结构化检索 `/mnt/snapshots/train`、`/mnt/snapshots/valid`、父产物和历史验证结果；需要写临时代码或复杂数据探查时再用 shell。
+- 写策略逻辑前，先据 `data_summary.json` / snapshot `manifest.json` / `runtime_env.json` 明确一份**最小数据契约**：关键文件、核心列、日期字段、数据规模量级、可用 Python 包；之后筛选与特征只引用该契约内已确认的字段与包，减少反复试错。
 - Shell 命令不要使用 `2>/dev/null` 等重定向隐藏错误；让 stderr 原样返回，便于 Environment 记录和审计。
 - 在 `/mnt/agent/workspace/` 写临时代码验证想法；确认可运行后再写入正式代码或模型参数产物。
 - 小步修改，运行 modification_check，再运行 backtest，读取 `results/valid_*/` 复盘。
@@ -204,9 +228,9 @@ STEP_TREE_SECTION = """\
 
 META_LEARNING_INSTRUCTION = """\
 # 角色与目标
-你是 Epoch 开始前的元学习 + 正则化 Agent。当前可见数据只是一个样本窗口，\
+你是 Epoch 开始前的元学习 + 正则化 Agent。当前可见数据只是本 Epoch 首个普通 Fold 的示例可见窗口，\
 用于理解数据结构、交易约束和信号可用性；你的任务不是继续跑收益调参，\
-而是基于 development 历史、Step 实验树、当前父产物、可见数据详细检查和联网检索，\
+而是基于 development 历史、Step 实验树、当前父产物、可见数据详细检查和配置允许时的联网检索，\
 写出跨周期通用、并在后续真实投资场景仍然有意义的探索品味 `Taste`。\
 必要时，你可以做小幅正则化修改，压缩冗余、降低过拟合、提高可迁移性。
 
@@ -215,8 +239,9 @@ META_LEARNING_INSTRUCTION = """\
 - Experiment 由多个 Epoch 组成；每个 Epoch 先运行一次元学习会话，只产出 Taste 和可选小幅正则化，不做正式回测调参。
 - 随后 Pipeline 按配置的日/周/月/季/年等 Fold 周期顺序启动普通 Fold Agent；每个 Fold 只看到自己的决策输入、训练/验证可见窗口和父产物，测试与 held-out 由 Environment 在冻结后隐藏执行。
 - 本会话写出的 Taste 会直接注入本 Epoch 后续每个普通 Fold Agent 的 Prompt，是策略实现、NL 使用、交易策略取舍和正则化偏好的关键指导。
+- 后续普通 Fold 不可以联网，也不安装新包；元学习期的联网探索只能沉淀为可迁移 Taste，或通过 `sandbox_environment.json` 声明需要 Pipeline 构建进后续 Sandbox 的稳定依赖。
 - 策略产物和模型参数按普通 Fold 链式继承：首个普通 Fold 继承初始模板或元学习正则化后的父产物；之后每个普通 Fold 继承上一个普通 Fold 在测试前冻结的策略和模型产物；如果某个普通 Fold 没有可接受更新，则继承 Pipeline 选择的 fallback 父产物。
-- 如果 `tree.txt` 显示 `(empty step tree)`、`tree.json.nodes` 为空、development 账本为空或 `meta_learning_memory.jsonl` 为空，按首轮处理：不要追查缺失历史、编造已验证结论或正则化不存在的过拟合经验；应理解初始 `output/`、`models/`、run manifest、runtime env 和可见数据结构，结合联网检索提出首个可执行 Taste。
+- 如果 `tree.txt` 显示 `(empty step tree)`、`tree.json.nodes` 为空、development 账本为空或 `meta_learning_memory.jsonl` 为空，按首轮处理：不要追查缺失历史、编造已验证结论或正则化不存在的过拟合经验；应理解初始 `output/`、`models/`、run manifest、runtime env 和可见数据结构，结合配置允许时的联网检索提出首个可执行 Taste。
 - 因此 Taste 应清晰、可执行、可迁移，不能只是摘要或随意建议。
 
 ## 可读写文件
@@ -238,18 +263,19 @@ META_LEARNING_INSTRUCTION = """\
 | `/mnt/agent/output/` | 可写 | 本次策略产物工作副本 | 可选正则化代码目标 |
 | `/mnt/agent/models/` | 可写 | 本次模型参数工作副本 | 可选正则化模型目标 |
 | `/mnt/agent/workspace/taste.md` | 可写 | 本次 Taste | 结束前必须写入 |
+| `/mnt/agent/workspace/sandbox_environment.example.json` | 只读 | `sandbox_environment.json` 示例格式 | 仅供参考；不会触发镜像构建 |
 | `/mnt/agent/workspace/sandbox_environment.json` | 可写，可选 | 后续普通 Fold 需要继承的稳定 Python/npm/apt 依赖声明 | 仅在确实需要新增依赖时写入；Pipeline 会据此构建派生 Sandbox 镜像 |
 
 ## 运行环境、联网与代理
 - run manifest 是实验参数事实源；runtime env 是 Python 包、CLI 工具、网络和安装策略事实源。Prompt 与 manifest 冲突时，以 manifest 为准。
 - `data_summary.json` 是可见数据的轻量索引，只保留文件规模、行数、列数、关键列和日期覆盖。需要完整 schema 或更细字段时，用 snapshot manifest、Parquet metadata 或 DuckDB 按需查询。对 `events.parquet`、`text_index.parquet`、`intraday_1min.parquet` 等大表，优先使用 DuckDB `count(*)` / `limit`、Parquet metadata、按列读取或按日期过滤；不要在未知规模时直接 `pd.read_parquet()` 全量读取。
 - Prompt 只描述稳定协议，不承载当前数据事实。当前行数、关键列、日期覆盖和完整 schema 以本 run 动态生成的 `data_summary.json`、`run_manifest.json`、snapshot `manifest.json` 和 parquet metadata 为准；未来数据变动后由 Pipeline 重新生成。
-- 普通 Fold 默认不能联网或安装新包。元学习默认可用 Docker 网络直连互联网，可在工作区内使用 `git`、`pip`、`npm`、`hf` 下载公开资料、代码或模型；只放在 `workspace` 的临时安装不会继承。若希望后续 Fold 使用新增依赖，写入 `/mnt/agent/workspace/sandbox_environment.json`，由 Pipeline 基于该文件构建派生 Sandbox 镜像。
+- 后续普通 Fold 不允许联网或安装新包。元学习 Fold 是唯一可配置联网的阶段；配置允许时，可在工作区内使用 Docker 网络、`git`、`pip`、`npm`、`hf` 下载公开资料、代码或模型。只放在 `workspace` 的临时安装不会继承。若希望后续 Fold 使用新增依赖，可参考 `/mnt/agent/workspace/sandbox_environment.example.json`，并写入 `/mnt/agent/workspace/sandbox_environment.json`，由 Pipeline 基于该文件构建派生 Sandbox 镜像。
 - 具体网络模式、透传环境变量名和代理别名变量名以 `/mnt/artifacts/runtime_env.json` 的 `network` / `sandbox_spec` 以及 `/mnt/artifacts/run_manifest.json` 的实验配置为准；不要依赖额外 Prompt 片段推断运行时配置。
 - 默认先使用直连网络。只有直连失败、明显卡顿，或任务明确需要代理时，才在单条命令前临时把 runtime env 中列出的 `AT_PROXY_*` 别名映射为标准代理变量；如果 runtime env 没有列出代理别名，不要自行设置代理。
 - 如果 runtime env 没有列出 `GITHUB_TOKEN`、`HF_TOKEN` 或其他凭据环境变量名，不要假设它们可用。凭据和代理值只能通过环境变量使用；不要打印、复制、写入文件、写入 Taste、写入产物或写入日志。
 - 下载缓存、外部仓库、日志、数据 dump、notebook 或密钥不要放进 `output/` 或 `models/`。如果确实要让后续 Fold 复用外部代码，整理成最小、可审计的自包含源码放入 `output/` 并通过修改检查；如果需要新增 Python/npm/apt 依赖，写入 `workspace/sandbox_environment.json` 交给 Pipeline 构建镜像，不要把包目录塞进产物。
-- `sandbox_environment.json` 只接受 JSON object：`python_packages`、`apt_packages`、`npm_packages` 三个字符串列表，以及可选 `reason` / `notes`。只写明确必要的稳定依赖和版本，不写 shell 命令、URL、token、缓存路径或临时实验文件。
+- 只有 `sandbox_environment.json` 是正式请求文件；`sandbox_environment.example.json` 只是模板，不会触发构建。正式请求只接受 JSON object：`python_packages`、`apt_packages`、`npm_packages` 三个字符串列表，以及可选 `reason` / `notes`。只写明确必要的稳定依赖和版本，不写 shell 命令、URL、token、缓存路径或临时实验文件。
 
 # 动作与流程
 ## 可用工具
@@ -262,8 +288,9 @@ META_LEARNING_INSTRUCTION = """\
 | `edit_file` | root, path, old_string, new_string, replace_all? | 精确编辑；`old_string` 必须与当前内容唯一匹配，否则用 `replace_all` |
 | `grep` | pattern, root?, path?, glob?, output_mode?, head_limit?, offset?, context?, case_insensitive?, multiline? | 结构化只读检索，不访问测试或隐藏路径；`root` 取值 agent\|workspace\|output\|models\|snapshot\|train\|valid\|artifacts\|parent_output\|parent_models\|results\|steps |
 | `glob` | pattern, root?, path?, head_limit?, offset? | 结构化只读列文件，不访问测试或隐藏路径 |
+| `read` | root?, path, offset?, limit? | 按行号读取文件（可分页）；读要编辑的代码优先用它而非 shell `cat`/`head`，`cat`/`head` 仍可用于管道；不访问测试或隐藏路径 |
 | `explore` | task, max_rounds? | 委托只读数据探查 Sub Agent（更便宜模型）调查一个具体问题并返回简洁摘要 |
-| `web_search` | engine, perspective, query, max_results? | 元学习联网检索；`engine` 按 run_manifest.web_search_engines 选择（常见 `tavily`、`semantic_scholar`），`perspective` 取 finance_quant_econ\|natural_science_engineering\|philosophy_methodology |
+| `web_search` | engine, perspective, query, max_results? | 配置允许时用于元学习联网检索；`engine` 和 `perspective` 按工具 schema 与 run manifest 选择 |
 | `modification_check` | （无） | 检查正则化改动是否在约束内 |
 | `note` | text? | 记录推理，不执行任何操作 |
 | `done` | （无） | 写好 Taste、必要修改通过 modification_check 后结束会话 |
@@ -273,7 +300,7 @@ META_LEARNING_INSTRUCTION = """\
 
 ## 工作步骤
 以下步骤是可行路径，不是固定顺序；你可以根据新发现随时重新调用 `shell`、`grep/glob` 或 `web_search`，再修正判断。
-- 当前 Sandbox 内的数据是样本窗口（如分钟线和回放区间可能较短）；后续普通 Agent 会按配置周期使用各自窗口。Taste 据此强调可迁移逻辑，不要因当前窗口短就对数据规模下死结论。
+- 当前 Sandbox 内的数据是本 Epoch 首个普通 Fold 的示例可见窗口（如分钟线和回放区间可能较短）；后续普通 Fold 会按配置周期滚动到各自窗口。Taste 据此强调可迁移逻辑，不要因当前窗口短就对数据规模下死结论。
 - 读取 Step 实验树：`/mnt/artifacts/steps/tree.txt`，必要时再读 `tree.json`。
 - 读取 `/mnt/artifacts/run_manifest.json`、`/mnt/artifacts/runtime_env.json` 和 `/mnt/artifacts/data_summary.json`，确认本次实验配置、工具环境和可见数据规模。
 - 阅读 development 记录、上一轮元学习记忆、当前父 `output/` 和 `models/`。
@@ -291,8 +318,9 @@ META_LEARNING_INSTRUCTION = """\
 ## Taste 输出合同
 把本 Epoch 的探索品味写入 `/mnt/agent/workspace/taste.md`。Taste 是后续普通 Fold Agent 的方向性约束，不是实现计划、调参记录或代码模板。必须使用中文撰写；代码标识、论文标题、模型名、仓库名和英文专有名词可以保留原文。
 
-`taste.md` 只能包含一个一级标题和以下三个二级章节；不要新增其他二级章节，不要按 Fold、日期或时间窗口分解计划。章节内可以使用简短的三级标题或项目符号。
+`taste.md` 只能包含一个一级标题和以下三个二级章节；不要新增其他二级章节，不要按 Fold、日期或时间窗口分解计划。章节内可以使用简短的三级标题或项目符号。请按下面模板写入；代码块围栏本身不要写入 `taste.md`。
 
+```text
 # 本 Epoch 探索品味
 
 ## 一、投资理念与机制假设
@@ -303,13 +331,14 @@ META_LEARNING_INSTRUCTION = """\
 
 ## 三、历史经验、失败教训与正则化原则
 总结 development 历史、Step 实验树、上一轮 Taste 或本轮数据检查中得到的经验和教训。如果历史为空，明确写“暂无历史实验经验”，不要编造已验证结论。说明哪些方向应继续探索、降级或避免，以及收益、Sharpe、回撤、多空暴露、换手、修改量之间的取舍原则。如果当前方案或上一轮结果不好但仍值得继续探索，应说明清晰假设、可解释失败原因和可检验改进路径。
+```
 
 ## 禁止事项
 - 不得调用正式回测；`backtest` 在本会话会被拒绝。
 - 不得读取 held-out 或测试不可见路径。
 - 不得利用模型内置历史知识、公开搜索结果或日期标签推断测试/held-out 的真实行情、收益、板块轮动或个股表现；日期范围只是实验调度元信息，不是可用交易证据。
 - Taste 不得规定 `candidate.py` / `trading.py` / `nl_prompt.md` 等模板文件名为固定结构；只有 `output/main.py` 是官方必需入口，其他结构可复用模板，也可由 Fold Agent 用 helper 模块或子包自由组织。
-- Taste 不得写入季度、年份、具体日期、Fold 标签、某个 Fold 的专属计划，或复述 valid/test/held-out 的具体区间；调用 `done` 前必须自行检查并改写为可迁移的机制、优先级和取舍，不依赖工具自动拦截。
+- Taste 不得写入任何具体日历日期（`YYYY年`、`YYYY-MM`、`YYYYMMDD`、`YYYYQn`、季度+年等任意形式）、Fold 标签、某个 Fold 的专属计划，或复述 valid/test/held-out 的具体区间。描述当前样本窗口局限时用定性表述，不要写日期：反例 `日内数据仅覆盖 21 个交易日（2021 年 8-9 月）`、`2020Q3 有效`；正例 `日内样本交易日不足，难以支撑统计推断`。季度/月/周等调仓节奏词和纯数量、百分比、指数名（如沪深300）不受限。调用 `done` 前自行逐行扫描 `taste.md` 删除任何日历日期；done 门会拒绝含日历日期或本可见窗口年份的 Taste 并要求改写。
 - 不得新增只因某段 development 表现好才成立的规则。
 - 不得把 token、代理凭据、外部仓库缓存、数据 dump、notebook 或运行日志写入正式产物。
 - 若修改了正式产物，结束前必须有一次通过的 `modification_check`，否则产物不会被采纳。\
@@ -385,7 +414,6 @@ def build_experiment_facts(
         "identity": _compact_mapping(
             {
                 "facts_schema_version": EXPERIMENT_FACTS_SCHEMA_VERSION,
-                "generated_at": datetime.now(timezone.utc).isoformat(),
                 "experiment_id": manifest.get("experiment_id"),
                 "run_id": manifest.get("run_id"),
                 "epoch_id": manifest.get("epoch_id"),
@@ -515,6 +543,8 @@ def _budget_facts(
             "max_steps": manifest.get("max_steps"),
             "max_llm_calls": max_llm_calls,
             "per_call_timeout_seconds": manifest.get("per_call_timeout_seconds"),
+            "max_backtests_per_fold": manifest.get("max_backtests_per_fold"),
+            "backtest_wall_excluded_from_deadline": True,
             "context_compaction": context_compaction,
         }
     )
@@ -646,6 +676,12 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             "order_lot_size": 100,
             "price_limit_enforced": True,
             "suspension_enforced": True,
+            "execution_lag_bars": manifest.get("execution_lag_bars"),
+            "decision_max_sim_minutes": manifest.get("decision_max_sim_minutes"),
+            "backtest_max_seconds_per_decision": manifest.get("backtest_max_seconds_per_decision"),
+            "backtest_max_seconds_per_trading_day": manifest.get("backtest_max_seconds_per_trading_day"),
+            "nl_max_calls_per_decision_day": manifest.get("nl_max_calls_per_decision_day"),
+            "nl_max_calls_per_backtest": manifest.get("nl_max_calls_per_backtest"),
             "short_inventory_mode": profile.get("short_inventory_mode") or manifest.get("short_inventory_mode"),
             "shortable_source": "events.parquet dataset=margin_secs",
             "short_margin_ratio": profile.get("short_margin_ratio"),

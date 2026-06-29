@@ -15068,3 +15068,464 @@ Follow-up:
   - Doc: environment_design §7.2 notes the lag clamp for short/daily-fallback days.
 - False positives the audit flagged as KEEP (not removed): `TraderProtocol` (intentional live-adapter seam, referenced in docs), all `xtconstant` values (used via `_ORDER_TYPE_TO_ACTION`/`_submit_order`), `query_stock_trades`/`position_quantity`/`record_event` (public/tested), `has_pagination_probe` (re-export consumed by audit.py), the `_Broker` optimistic view (intra-tick consistency), and the `backtest_engine` filesystem guard (security boundary).
 - Validation: full `unittest discover` 293 passing (skipped=2).
+
+## 2026-06-27 Backtest summary, order-cancel date, and limit-fill wording fixes
+
+- Task: fix four audit findings after the execution-model refactor without changing the order-book design:
+  1. `backtest_tool` summary could report a stale `modification_delta_summary` when `main(ctx)` generated inheritable `models/` during replay.
+  2. Day-end cancellation of still-working orders could record an empty or previous `trade_date`.
+  3. Prompt/docs described all limit fills as exactly the limit price, while code intentionally gives the better open when the activation bar opens through the limit.
+  4. A few comments still described the old market-only/current-bar execution model.
+- Resource checks:
+  - Before prompt export: GPU memory used/total MiB = `40815/46068`, `39529/46068`, `34429/46068`, `3/46068`, `3/46068`, `14197/46068`, `5527/46068`, `0/46068`; system memory `503Gi total`, `78Gi used`, `424Gi available`.
+  - Before full tests: same GPU set; system memory `503Gi total`, `78Gi used`, `424Gi available`.
+  - After full tests: same GPU set; system memory `503Gi total`, `79Gi used`, `424Gi available`.
+- Code changes:
+  - `src/autotrade/environment/tools/backtest.py`: after replay, reload `output/` and `models/`; if the post-replay hash differs from the pre-run modification check, rerun `ModificationCheckTool` and use that refreshed record for the summary. `modification_delta_summary` now includes model-side changed-file/size counts.
+  - `src/autotrade/environment/broker.py`: `cancel_order_stock` accepts optional `trade_date`/`minute_key` for simulated cancellations; `_limit_fill_price` comments now match the existing “limit or better open” logic.
+  - `src/autotrade/environment/main_ctx_engine.py`: day-end auto-cancel passes the current replay date; replay docstring now describes market + FIX_PRICE order-book execution.
+  - Prompt/docs/templates synchronized: `src/autotrade/agent/prompts.py`, `configs/prompts/PROMPTS.md`, `docs/agent_design.md`, `docs/environment_design.md`, `configs/agent_output_template/{README.md,main.py}`, and `src/autotrade/pipelines/config.py`.
+- Tests:
+  - `tests/unit/test_tools_flow.py::test_main_persists_model_artifacts` now asserts the backtest summary and latest modification check both see the replay-generated `params.json`.
+  - `tests/unit/test_main_ctx_replay.py::test_day_end_limit_cancel_records_current_trade_date` covers day-end `day_end_unfilled` event dating.
+  - `tests/unit/test_broker_engine.py::test_order_stock_lifecycle_matches_xtquant_verbs` covers buy-limit and sell-limit fills at a better open.
+- Review:
+  - A GPT 5.5 High read-only SubAgent found no blocking issue. Two small suggestions were applied: keep `TraderProtocol.cancel_order_stock(order_id)` as the xtquant-style protocol surface while leaving SimBroker-only audit kwargs on the concrete implementation, and add the sell-side better-open branch coverage.
+- Validation commands:
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ToolFlowTest.test_main_persists_model_artifacts tests.unit.test_main_ctx_replay.MainCtxReplayTest.test_day_end_limit_cancel_records_current_trade_date tests.unit.test_main_ctx_replay.MainCtxReplayTest.test_limit_order_fills_at_limit_when_bar_reaches_it tests.unit.test_broker_engine.BrokerPrimitiveTest.test_order_stock_lifecycle_matches_xtquant_verbs` → 4 tests OK.
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py` → regenerated `configs/prompts/PROMPTS.md`.
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine.BrokerPrimitiveTest.test_order_stock_lifecycle_matches_xtquant_verbs` → OK after the sell-side branch was added.
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p 'test_*.py'` → 294 tests OK, skipped=2. Re-run after review small fixes also passed 294 tests, skipped=2.
+  - `git diff --check` → OK.
+- Hygiene: removed Python cache directories under `src/`, `tests/`, `scripts/`, and `ops/`. Existing unrelated working-tree edits in `AGENTS.md` and `CLAUDE.md` were left untouched.
+
+## 2026-06-27 Meta-learning prompt cleanup: Taste template, network wording, no generated_at
+
+- Task: apply three prompt cleanups requested after the GPT 5.5 High prompt audit:
+  1. Wrap the Taste output template in a `text` code block and tell the Agent not to write the code fence into `taste.md`.
+  2. Weaken network wording to “配置允许时”; make clear later ordinary Folds cannot use network/install packages, while the meta-learning Fold is the only configurable network-enabled stage.
+  3. Remove `generated_at` from the Agent-visible experiment facts to reduce prompt-audit diff noise.
+- Files:
+  - `src/autotrade/agent/prompts.py`: updated `META_LEARNING_INSTRUCTION`, the `web_search` tool-table row, the sample-window wording, and removed `generated_at` from `build_experiment_facts`.
+  - `configs/prompts/PROMPTS.md`: regenerated from `scripts/dev/export_prompts.py`.
+- Resource checks:
+  - Before export: GPU memory used/total MiB = `40815/46068`, `3/46068`, `5/46068`, `3/46068`, `3/46068`, `8521/46068`, `5527/46068`, `0/46068`; system memory `503Gi total`, `75Gi used`, `428Gi available`.
+  - After export/check: same GPU set; system memory `503Gi total`, `75Gi used`, `428Gi available`.
+- Validation:
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py` → regenerated `configs/prompts/PROMPTS.md`.
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m py_compile src/autotrade/agent/prompts.py scripts/dev/export_prompts.py` → OK.
+  - `rg generated_at configs/prompts/PROMPTS.md src/autotrade/agent/prompts.py` returns no matches.
+- Hygiene: removed Python cache directories under `src/`, `tests/`, `scripts/`, and `ops/`.
+
+## 2026-06-27 Meta-learning Pipeline network boundary
+
+- Task: make the meta-learning system prompt state the ordinary-Fold network boundary directly in `## Pipeline流程`.
+- Files:
+  - `src/autotrade/agent/prompts.py`: added a Pipeline-flow bullet that later ordinary Folds cannot use network or install new packages; meta-learning network exploration must become transferable Taste, or stable dependencies must be declared through `sandbox_environment.json` for Pipeline image rebuild.
+  - `configs/prompts/PROMPTS.md`: regenerated from the prompt exporter.
+  - `LOGBOOK.md`: concise entry added.
+- Validation:
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py` → regenerated `configs/prompts/PROMPTS.md`.
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m py_compile src/autotrade/agent/prompts.py scripts/dev/export_prompts.py` → OK.
+  - `rg -n "后续普通 Fold 不可以联网" src/autotrade/agent/prompts.py configs/prompts/PROMPTS.md` → source and generated prompts both include the new sentence.
+
+## 2026-06-27 Meta-learning Fold run and trace-to-check.md reconstruction
+
+- Task: start one formal meta-learning Fold and overwrite `check.md` with a detailed dialogue/tool-call reconstruction.
+- Repository path:
+  - `pwd -P` → `/Data/lzp/MacroQuant`.
+- Pre-run resource checks:
+  - GPU memory used/total MiB: `40815/46068`, `3/46068`, `5/46068`, `3/46068`, `3/46068`, `8521/46068`, `5527/46068`, `0/46068`.
+  - System memory: `503Gi total`, about `428Gi available`.
+- Sandbox image preparation:
+  - Current code default is `autotrade-sandbox:latest`.
+  - `docker image inspect autotrade-sandbox:latest` initially failed: image missing.
+  - Direct `docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile ops/docker` failed because Docker Hub timed out resolving `python:3.11-slim`.
+  - Retried with escalation and confirmed the timeout was external-network related.
+  - Pulled base image from mirror: `docker pull docker.m.daocloud.io/library/python:3.11-slim` → OK.
+  - Retagged: `docker tag docker.m.daocloud.io/library/python:3.11-slim python:3.11-slim`.
+  - Built sandbox with mirror PyPI: `docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple ops/docker` → OK.
+  - Built image ID/size: `sha256:efd360dd8f871a9651a38fb655b27287d0b2219e4bcc47edd0c909e1768fab88`, size about `3.4GB`.
+- First attempted run:
+  - Experiment: `meta_learning_network_boundary_20260627_200239`.
+  - It failed before Agent start because the one-off direct runner incorrectly tried to import nonexistent `make_folds` from `autotrade.pipelines.folds`.
+  - Status file was marked `failed: ImportError make_folds`; no Agent conversation was generated.
+- Effective run:
+  - Experiment: `meta_learning_network_boundary_20260627_200447`.
+  - Run ID: `run_10ff0af686d2`.
+  - Entry point: direct `ExperimentPipeline.run_meta_learning(epoch_id="epoch_001", parent=None, previous_taste="", visible_fold=folds[0])`, with `folds[0]` built by `build_fold_schedule()`.
+  - Mode: real Docker sandbox, meta-learning-only, no ordinary Fold replay or held-out evaluation.
+  - Config:
+    - `fold_period=quarter`.
+    - development test periods `2022Q1..2025Q4`; held-out boundary `2026Q1..2026Q1` configured but not executed.
+    - visible first Fold decision input: input window `20200101..20210930`, validation `20211001..20211231`.
+    - default PIT history window `21` months.
+    - intraday visible window `21` trading days.
+    - meta-learning sandbox network `bridge`; ordinary sandbox policy remains network disabled.
+    - main Agent model `deepseek-v4-pro`, `reasoning_effort=max`.
+    - NL/Explore model `deepseek-v4-flash`, `reasoning_effort=max`.
+    - compact model `deepseek-v4-flash`, thinking disabled, token threshold `200000`.
+    - web search engines `tavily`, `semantic_scholar`.
+- Runtime observations:
+  - Host-side snapshot/data-summary preparation took roughly 10 minutes before the Docker container was visible.
+  - The latest runtime sandbox was `.runtime/sandboxes/run_10ff0af686d2/`.
+  - During data preparation, a pandas FutureWarning was emitted from `src/autotrade/environment/snapshot.py:505` about concat behavior with empty/all-NA entries; it did not fail the run.
+  - The runtime sandbox visible data included large parquet files such as `snapshots/valid/intraday_1min.parquet` (~1.0GB) and `snapshots/train/intraday_1min.parquet` (~531MB).
+  - Docker container `mqsbx_387b9c69e3f8` started on `autotrade-sandbox:latest` and was stopped by the pipeline after completion.
+- Result:
+  - Ledger status: `taste_only`.
+  - Agent finish status: `meta_learning_done`.
+  - Taste length: `4253` chars (`wc -c` reports `9700` bytes because of UTF-8 Chinese text).
+  - Modification check: `allowed_to_backtest=true`, no reasons, `changed_file_count=0`, no model artifacts.
+  - Trace event counts: `llm_call=17`, `shell=43`, `web_search=7`, `explore=1`, `explore_llm_call=7`, `glob=2`, `grep=1`, `context_edit=10`, `session_end=1`, `tool=1`.
+  - Token usage: total `619316`, prompt `607246`, completion `12070`, reasoning `3719`, cache hit ratio `0.64`.
+  - Context compact was not triggered.
+- Key paths:
+  - Runtime log: `logs/meta_learning_network_boundary_20260627_200447.log`.
+  - Canonical trace: `experiments/meta_learning_network_boundary_20260627_200447/artifacts/run_10ff0af686d2/agent_trace.jsonl`.
+  - Manifest: `experiments/meta_learning_network_boundary_20260627_200447/artifacts/run_10ff0af686d2/run_manifest.json`.
+  - Runtime env: `experiments/meta_learning_network_boundary_20260627_200447/artifacts/run_10ff0af686d2/runtime_env.json`.
+  - Data summary: `experiments/meta_learning_network_boundary_20260627_200447/artifacts/run_10ff0af686d2/data_summary.json`.
+  - Taste: `experiments/meta_learning_network_boundary_20260627_200447/meta_learning/epoch_001/taste.md`.
+  - Ledger: `experiments/meta_learning_network_boundary_20260627_200447/ledgers/experiment_ledger.jsonl`.
+  - Human-readable reconstruction: `check.md`.
+- Post-run resource checks:
+  - GPU memory used/total MiB stayed `40815/46068`, `3/46068`, `5/46068`, `3/46068`, `3/46068`, `8521/46068`, `5527/46068`, `0/46068`.
+  - System memory after completion: `503Gi total`, about `429Gi available`.
+- `check.md` generation:
+  - Wrote a parser over the canonical trace, manifest, runtime env, data summary, ledger, and Taste.
+  - `check.md` includes run summary, paths, event counts, data/environment facts, all observable LLM rounds, every shell/web_search/explore/grep/glob/tool/session event, and the final Taste body.
+  - The trace field `reasoning_content` was not reproduced verbatim; `check.md` explicitly notes that internal provider reasoning is not expanded, while observable tool calls and outputs are preserved.
+  - Basic leak check: `rg -n "reasoning_content|github_pat_|hf_[A-Za-z0-9]{20,}|Authorization|Bearer" check.md` only matched the explanatory line mentioning `reasoning_content`, and no secret/token patterns.
+- Audit observation:
+  - The run satisfied the new ordinary-Fold no-network boundary in runtime policy: `ordinary_fold_network=disabled`, while meta-learning used `bridge`.
+  - Taste still mentions template names such as `candidate.py` / `trading.py` and visible sample-window dates; these should be manually reviewed against the desired “transferable Taste / avoid fixed template structure” writing boundary.
+
+## 2026-06-27 Single-session audit runner
+
+- Task: add a maintained script for manually auditing one meta-learning session or one ordinary Fold, so future runs do not require copy-pasted inline Python.
+- Docker image conclusion:
+  - Current code default: `src/autotrade/environment/sandbox.py` sets `DEFAULT_IMAGE = "autotrade-sandbox:latest"`.
+  - `ops/docker/sandbox.Dockerfile` also documents building `autotrade-sandbox:latest`.
+  - Existing `macroquant-sandbox:latest` is the pre-rename image tag. Current code no longer references it in runtime paths; it is only useful for historical reproduction or manual comparison.
+- Files:
+  - `scripts/experiments/run_audit_session.py`: new thin audit entrypoint.
+  - `docs/pipeline_design.md`: documents that this script is for single-session audits and does not replace the full `run_experiment.py`.
+  - `LOGBOOK.md`: concise entry added.
+- Script behavior:
+  - `--mode meta-learning` calls `ExperimentPipeline.run_meta_learning()` for one epoch-start session using the selected visible Fold.
+  - `--mode fold` calls `ExperimentPipeline.run_fold()` for one ordinary Fold, including Agent session, validation, freeze/fallback, and frozen test.
+  - `--fold-index` selects the visible/ordinary Fold from the configured schedule.
+  - `--taste-file` injects Taste into a normal Fold only.
+  - `--parent-output` and optional `--parent-models` allow auditing inheritance from an existing frozen artifact.
+  - The script preflights the current default Docker image and fails with an explicit build command if `autotrade-sandbox:latest` is missing. It does not auto-build images.
+  - `fold` mode does not construct Web Search providers, so ordinary Fold audit runs do not require web-search API keys.
+- Validation:
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m py_compile scripts/experiments/run_audit_session.py` → OK.
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python scripts/experiments/run_audit_session.py --help` → OK.
+
+## 2026-06-27 Meta-learning sandbox environment template
+
+- Task: provide a safe dependency-request template in the Agent workspace without accidentally triggering the derived Sandbox image build.
+- SubAgent review:
+  - GPT 5.5 High SubAgent reviewed the pipeline and recommended against creating `workspace/sandbox_environment.json` by default, because that exact filename is the trigger for `_maybe_rebuild_sandbox_image()`.
+  - Recommended name: `workspace/sandbox_environment.example.json`, a valid JSON example that the meta-learning Agent can copy to the real request filename only when later ordinary Folds need stable new dependencies.
+- Implementation:
+  - `src/autotrade/pipelines/experiment.py`: added `SANDBOX_ENVIRONMENT_REQUEST_NAME`, `SANDBOX_ENVIRONMENT_EXAMPLE_NAME`, and `_write_sandbox_environment_example()`.
+  - `ExperimentPipeline._start_sandbox(..., kind="meta_learning")` now writes `sandbox_environment.example.json` after `prepare_layout()`; ordinary Fold sandboxes do not receive the template.
+  - The actual rebuild path still only checks `workspace/sandbox_environment.json`.
+  - `src/autotrade/agent/prompts.py`, `configs/prompts/PROMPTS.md`, `docs/agent_design.md`, `docs/environment_design.md`, and `docs/pipeline_design.md` now state that the example is only a template and does not trigger image builds.
+  - `tests/unit/test_pipeline_e2e.py` adds coverage for meta-learning example creation, absence of the real request file, and absence of the example in ordinary Fold sandboxes.
+- Resource check before verification:
+  - GPU 0 had another Python process using about 40 GiB; GPU 5 about 8.5 GiB; remaining GPUs mostly idle. This change/test path is CPU only.
+  - System memory: 503 GiB total, about 434 GiB available.
+- Validation:
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m py_compile src/autotrade/pipelines/experiment.py src/autotrade/agent/prompts.py tests/unit/test_pipeline_e2e.py` → OK.
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_workspace_includes_sandbox_environment_example_only` → OK.
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py` → OK.
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_workspace_includes_sandbox_environment_example_only tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_environment_request_builds_derived_sandbox_image tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_environment_request_rejects_invalid_schema` → OK.
+
+## 2026-06-28 Latest meta-learning audit and sandbox cleanup
+
+- Task: audit the latest Claude-evaluated experiment run and delete old experiment result sandboxes except the latest run.
+- Latest run identified:
+  - Experiment: `experiments/meta_learning_network_boundary_20260627_200447`.
+  - Sandbox kept: `.runtime/sandboxes/run_10ff0af686d2`.
+  - Main log: `logs/meta_learning_network_boundary_20260627_200447.log`.
+  - Trace: `experiments/meta_learning_network_boundary_20260627_200447/artifacts/run_10ff0af686d2/agent_trace.jsonl`.
+  - Taste: `experiments/meta_learning_network_boundary_20260627_200447/meta_learning/epoch_001/taste.md`.
+- Audit results:
+  - Run finished with exit code 0; ledger status is `taste_only`; no frozen strategy artifact was produced.
+  - Agent session summary: 17 main LLM calls, 43 shell calls, 7 web_search calls, 1 explore call, 0 context compaction calls; total reported tokens 619,316 with cache hit ratio 0.64.
+  - Web search had one Semantic Scholar `empty_results` event; the run continued and completed with other successful search calls.
+  - Trace has no `phase` field because this experiment was generated before the new `phase="pipeline_finalize"` trace tagging change. The code change itself is small and reasonable: it distinguishes host post-session finalization checks from agent-driven tool actions.
+  - Taste still contains concrete sample-window date/month references and template filenames such as `candidate.py`/`trading.py`; this does not break the run, but it is not fully aligned with the cross-period, time-window-agnostic Taste writing boundary.
+- Cleanup:
+  - Initial `rm -rf` deleted normal old sandbox files but failed on Docker-owned/read-only remnants.
+  - `sudo rm -rf` could not run because sudo requires an interactive password.
+  - Used Docker root cleanup with `autotrade-sandbox:latest` mounted on `/Data/lzp/MacroQuant/.runtime/sandboxes`, deleting every run directory except `run_10ff0af686d2`.
+  - Confirmed `.runtime/sandboxes` now contains only `run_10ff0af686d2`; total size about 4.4G.
+  - Removed generated `__pycache__` directories under `src/`, `tests/`, and `scripts/`.
+- Validation:
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_workspace_includes_sandbox_environment_example_only tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_environment_request_builds_derived_sandbox_image tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_environment_request_rejects_invalid_schema` → OK.
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation.MetaLearningSessionTest.test_meta_learning_prompt_describes_default_network_without_secret_values tests.unit.test_sandbox_isolation.MetaLearningSessionTest.test_meta_learning_network_policy_is_inside_environment_section tests.unit.test_tools_flow.ToolFlowTest.test_modification_check_backtest_and_finish_fold tests.unit.test_tools_flow.ToolFlowTest.test_modification_check_returns_structured_failure_for_invalid_artifact` → OK.
+  - `git diff --check` → OK.
+  - Final cache check: no `__pycache__` directories under `src/`, `tests/`, or `scripts/`.
+- Resource check after cleanup:
+  - System memory: 503 GiB total, about 430 GiB available.
+  - GPU memory was occupied by pre-existing Python processes on GPUs 0, 5, and 7; this audit/cleanup used CPU and filesystem operations only.
+
+## 2026-06-28 GNN dependency transfer experiment and guard audit
+
+- Task: audit Claude's meta-learning Taste year/date fallback guard, then run one experiment containing meta-learning plus the first ordinary Fold with the user-level directive `请安装GNN相关包`.
+- Code audit:
+  - `src/autotrade/agent/runner.py` adds a small meta-learning-only `done` check for `taste.md`.
+  - The check rejects calendar-date expressions and visible-window years/bounds read from the public manifest; it does not affect ordinary Fold sessions, backtest replay, shell/search tools, or artifact freeze.
+  - Assessment: the fallback is harder than pure Prompt guidance, but it is single-point, stateless, and light enough. It did reject an academic citation year once (`SIGIR 2020`), which demonstrates a possible false positive but did not add architectural complexity.
+- Fixes made during this audit run:
+  - `src/autotrade/pipelines/experiment.py`: if `_maybe_rebuild_sandbox_image()` fails, meta artifacts and ledger records are still collected/written before re-raising. Added `test_meta_learning_records_artifacts_when_sandbox_image_rebuild_fails`.
+  - `src/autotrade/environment/sandbox.py`: artifact collection now ignores `.nv`, matching existing cache ignores, so Docker/GPU runtime caches do not fail collection. Extended `test_collect_artifacts_excludes_transient_caches`.
+- Failed preliminary run:
+  - Experiment `gnn_dependency_transfer_20260628_004327`.
+  - Meta-learning produced `sandbox_environment.json` with `torch_geometric`, `torch_scatter`, and `torch_sparse`.
+  - Derived image build failed because `torch_scatter` and `torch_sparse` attempted native wheel builds and `g++` was unavailable.
+  - This exposed the need to persist meta artifacts even on image rebuild failure.
+- Retry run:
+  - Experiment `gnn_dependency_transfer_retry_20260628_005939`.
+  - Meta-learning selected only `torch-geometric==2.8.0`; derived image build succeeded.
+  - Artifact collection failed on workspace `.nv/ComputeCache` permission errors, which led to the `.nv` ignore fix.
+- Final run:
+  - Experiment: `gnn_dependency_transfer_final_20260628_011339`.
+  - Runtime log: `logs/gnn_dependency_transfer_final_20260628_011339.log`.
+  - Directive file: `logs/gnn_dependency_transfer_final_20260628_011339_directive.txt`.
+  - Meta sandbox: `.runtime/sandboxes/run_9671822618d8`.
+  - Ordinary Fold sandbox: `.runtime/sandboxes/run_d2101010a6c2`.
+  - Meta artifacts:
+    - Trace: `experiments/gnn_dependency_transfer_final_20260628_011339/artifacts/run_9671822618d8/agent_trace.jsonl`.
+    - Taste: `experiments/gnn_dependency_transfer_final_20260628_011339/meta_learning/epoch_001/taste.md`.
+    - Sandbox env request: `experiments/gnn_dependency_transfer_final_20260628_011339/sandbox_images/epoch_001/sandbox_environment.json`.
+    - Ledger: `experiments/gnn_dependency_transfer_final_20260628_011339/ledgers/experiment_ledger.jsonl`.
+  - Meta result:
+    - User directive was recorded correctly in `run_manifest.json`.
+    - `sandbox_environment.json` requested `torch-geometric>=2.5.0,<2.9.0`, no apt/npm packages.
+    - Pipeline built image `autotrade-sandbox:gnn_dependency_transfer_final_20260628_011339-epoch_001-37b4ca09a3ef`; Docker build status `ok`.
+    - Taste passed the date guard after the Agent removed the academic citation year from `SIGIR 2020`.
+  - Transfer checks:
+    - Ordinary Fold `runtime_env.json` used the derived image `autotrade-sandbox:gnn_dependency_transfer_final_20260628_011339-epoch_001-37b4ca09a3ef`.
+    - Ordinary Fold network remained `none`.
+    - Ordinary Fold `run_manifest.json` included the meta-learning Taste (`taste_prompt` contained the GNN direction).
+    - The ordinary Fold Agent probed/wrote GNN-related exploration scripts in workspace and produced a model file `agent/models/ridge_model.pkl`.
+  - Ordinary Fold outcome:
+    - The Fold did not reach `finish_fold`; ledger contains only the meta-learning record.
+    - Backtest summaries remained empty.
+    - The run spent more than 70 minutes with no trace/manifest updates while the container replay process consumed CPU.
+    - Inspection of Agent output showed `candidate.py` recalculates/loads a large daily window at the 09:15 replay point, making minute replay too expensive for this generated strategy.
+    - The experiment process was terminated with `TERM`, and residual Docker container `mqsbx_5c6809d78311` was stopped. Artifacts and `.runtime` directories were kept for review.
+  - Taste quality observation:
+    - No concrete calendar dates remained in final `taste.md`.
+    - The Taste still contains generic `Fold` wording and suggests template/helper filenames. This does not break transfer, but it is a Prompt-quality issue if the desired output should avoid file-structure anchoring entirely.
+- Validation:
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -s tests` -> 299 tests OK.
+  - `git diff --check` -> OK.
+  - Removed generated `__pycache__` directories under `src/`, `tests/`, and `scripts/`.
+- Resource checks:
+  - Before validation: 503 GiB total RAM, about 436 GiB available; GPUs 0 and 7 had pre-existing heavy memory use.
+  - After validation: 503 GiB total RAM, about 436 GiB available; GPU memory profile unchanged for this CPU-heavy audit/test path.
+
+## 2026-06-28 Latency-aware backtest + resource guardrails + pipeline hardening (WS A/B/D)
+
+- Task: implement the user-approved plan (Workstreams A/B/D) addressing the three `gnn_dependency_transfer` runs' forensic findings and the execution-model/resource-control gaps. Plan: `~/.claude/plans/fluttering-petting-boot.md`.
+
+- Workstream A — declared-budget latency model (LEAN-style: deterministic fills + loose real-clock check):
+  - `src/autotrade/environment/main_ctx_engine.py`:
+    - Sandbox driver (`_MAIN_DRIVER`): `_Broker` tags each order with the active `_substep`; `_build_ctx` exposes `ctx.substep(name, budget_minutes=B)` as a contextmanager timing real wall-time; the per-tick RPC response now returns `substeps` and `tick_real_wall_s`.
+    - Host: `MainPolicyRunner.step` returns a frozen `_TickResult(actions, substeps, real_wall_s)`; `_normalize_tick` keeps test fakes (plain list) working at budget 0.
+    - Per-tick loop: per-substep fail-fast (`real_wall_s > budget_minutes*60` -> `BacktestError` naming substep+date); total `backtest_max_wall_seconds` backstop; per-action fill bar = `activate_index + max(0, ceil(B) - lag_floor)` (budget 0 == previous next-bar behaviour); `B > decision_max_sim_minutes` -> recorded `decision_too_slow` (order skipped); orders past the last real bar -> `main_actions_unfilled`. The internal `_substep` tag is popped before recording/submission so audit records stay clean.
+    - `run_main_ctx_replay` signature gained `decision_max_sim_minutes` and `backtest_max_wall_seconds`.
+  - Config/threading: `pipelines/config.py` adds `decision_max_sim_minutes=60.0`, `backtest_max_wall_seconds=3600.0`, `max_backtests_per_fold=30`; `experiment.py` writes them (+ `max_backtests_per_fold`) into the fold manifest; `tools/backtest.py` passes the two replay knobs through (`_optional_float`).
+  - Independent backtest timer: `agent/runner.py` excludes backtest wall-time from `fold_deadline_at` (`_excluded_backtest_seconds` credited back in `_remaining_seconds`), caps backtests at `max_backtests_per_fold` (returns `backtest budget exhausted`), `AgentSessionConfig.max_backtests_per_fold` wired from `run_experiment.py`.
+  - Tests (`tests/unit/test_main_ctx_replay.py`): `test_substep_budget_delays_fill_bar` (budget 3 pushes a 09:30 decision's fill from 09:32 to 09:33) and `test_substep_overrun_aborts_replay` (budget 0 + real sleep -> `BacktestError`).
+
+- Workstream B — pipeline durability, build env, transfer validation:
+  - `ops/docker/sandbox.Dockerfile`: pre-bake `build-essential`/g++/gfortran/python3-dev/pkg-config (removes the "no compiler" build-failure class that killed the first GNN run).
+  - `src/autotrade/environment/sandbox.py`: redirect container caches (`XDG_CACHE_HOME`/`PIP_CACHE_DIR`/`HF_HOME`/`CUDA_CACHE_PATH`/`NUMBA_CACHE_DIR`/`MPLCONFIGDIR`) to `/tmp` via `--env` so caches never land as root-owned dirs under the collected `/mnt/agent` (general fix for the `.nv` collect crash).
+  - `src/autotrade/pipelines/experiment.py`: `_restore_active_sandbox_image` reloads the latest `status="ok"` derived image tag from the ledger on construction (resume/fold-only durability); `_gc_derived_sandbox_images` best-effort prunes this experiment's stale derived images after a successful build, keeping `meta_sandbox_image_keep` (default 3), never the active image or another experiment's images; `pipelines/config.py` adds `meta_sandbox_image_keep`.
+  - Tests: `test_active_sandbox_image_reloads_from_ledger_on_fresh_pipeline`, `test_derived_sandbox_image_gc_prunes_old_tail` (`test_pipeline_e2e.py`); `test_docker_sandbox_redirects_tool_caches_out_of_workspace` (`test_sandbox_isolation.py`); existing rebuild test's `call_args` assertion updated to `call_args_list[0]` (a trailing GC `docker images` call now follows the build).
+
+- Workstream D — Fold prompt + living docs:
+  - `src/autotrade/agent/prompts.py`: `FOLD_ENV_SECTION` gains `## Pipeline流程`, a `## Broker 交易接口` table, and a `## ctx 接口与数据视图` section; `## 交易规则` now documents the declared-budget latency model (`ctx.substep`), the independent timer / `max_backtests_per_fold`, and the NL quota (`nl_max_calls_per_decision_day` × decision_days, min with `nl_max_calls_per_backtest`). Agent-visible facts now surface `execution_lag_bars`/`decision_max_sim_minutes`/`backtest_max_wall_seconds`/`nl_max_calls_*` (broker_replay) and `max_backtests_per_fold` + `backtest_wall_excluded_from_deadline` (budgets).
+  - Regenerated `configs/prompts/PROMPTS.md` via `scripts/dev/export_prompts.py`.
+  - Living docs updated: `docs/environment_design.md` (§7.2 latency model + independent timer; §6.3 NL quota; §4.1 build toolchain + cache redirect; §6 derived-image persistence/GC), `docs/agent_design.md` (§5.2/§5.3 ctx.substep + latency + quota), `docs/pipeline_design.md` (§2.3 independent timer; §6.1 derived-image persistence/GC + durable finalize).
+
+- Validation:
+  - `~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p "test_*.py"` -> 304 tests OK (was 299; +5 new tests, +3 net file count after consolidation).
+  - `scripts/dev/export_prompts.py` -> wrote `configs/prompts/PROMPTS.md` in sync.
+  - Lightweight unit/test + doc work; no GPU/heavy run, so no resource-intensive RAM/GPU checkpoint required per CLAUDE.md.
+
+## 2026-06-28 Opus audit of WS A/B/D + fixes
+
+- Task: launch an Opus 4.8 (high-effort) read-only audit of the repo focusing on doc/code alignment, logic soundness, and over-engineering; then triage and fix.
+- Audit verdict: change set healthy — 304 tests passing at audit time, PROMPTS.md in exact sync with prompts.py, fill-scheduling math and limit-fill logic correct, deadline accounting and durable finalization sound. One High finding plus several Medium/Low/Nit.
+- Fixes applied:
+  - **High — `budget_minutes=0` degenerate (doc/code contradiction).** The per-substep fail-fast `real_wall_s > budget_min*60` aborted any wrapped real work when `budget_min==0` (the contextmanager default), contradicting the prompt/docs which present `budget_minutes=0` as "lightweight → default-lag fill". Fix in `src/autotrade/environment/main_ctx_engine.py`: guard the fail-fast with `budget_min > 0`; `budget_minutes=0` now == not wrapping (no wall bound, default-lag fill). Reworked `tests/unit/test_main_ctx_replay.py`: `test_substep_overrun_aborts_replay` now uses a positive `budget_minutes=0.001` (0.06 s) + 0.3 s sleep; added `test_substep_zero_budget_does_not_abort_on_real_work` (budget 0 + 0.05 s sleep completes, fills 09:32). Prompt + `environment_design.md` §7.2 clarified (budget 0 sets no real-time bound; the latency model is cooperative — unwrapped heavy work is not modeled, only bounded loosely by `per_call_timeout_seconds`/`backtest_max_wall_seconds`).
+  - **Medium — `backtest_max_wall_seconds` semantics.** Was summing per-tick `main_fn` compute (`total_real_wall`), missing host-side RPC/NL/broker time. Changed to measure real replay wall-clock from a `replay_start = time.monotonic()` at the top of `run_main_ctx_replay` (a truer runaway backstop, also simpler). Doc wording updated ("自回放开始计的真实墙钟（含 NL/撮合）").
+  - **Low — derived-image GC ordering.** `_gc_derived_sandbox_images` trusted `docker images` default order; now parses `{{.CreatedAt}}` and sorts descending before slicing `[keep:]`. Existing GC test still passes (listing is newest-first).
+  - **Nit — substep named "None".** Unwrapped orders carried `_substep=None` looked up as the string `"None"`; a substep literally named "None" could mis-assign its budget. Now skips the lookup when `_substep is None` (sentinel), no stringification collision.
+  - **Nit — `scripts/experiments/run_audit_session.py`** (untracked manual-audit twin) now threads `max_backtests_per_fold` from `ExperimentConfig`, mirroring `run_experiment.py`.
+  - **Over-engineering — budget governor sprawl.** Added a single "执行与资源预算一览" table to `environment_design.md` §7.2 summarizing the seven time/cost controls (per_call_timeout, fold deadline, max_backtests_per_fold, per-substep budget fail-fast, decision_max_sim_minutes, backtest_max_wall_seconds, NL quota) and what each bounds.
+- Accepted / deferred (recorded, not changed):
+  - The latency model is opt-in/cooperative by the approved design (the plan explicitly rejected Environment-side latency math); documented rather than enforced.
+  - Auction-tick orders wrapped in a large budget subtract the continuous-bar `lag_floor` (`main_ctx_engine.py` fill formula), an obscure low-risk inconsistency; a special-case branch would add complexity the repo guidelines discourage, so left as-is.
+  - No absolute fold wall-clock ceiling beyond reasoning time + bounded backtests; the tighter `backtest_max_wall_seconds` (now real wall-clock) mitigates the main risk.
+- Validation: full suite `~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p "test_*.py"` -> **305 OK** (+1 zero-budget test); `scripts/dev/export_prompts.py` -> PROMPTS.md re-synced; `git diff --check` clean. Read-only/light work; no GPU checkpoint required per CLAUDE.md.
+
+## 2026-06-28 Prohibit zero-budget sub-steps (follow-up design decision)
+
+- Question from user: should sub-steps be prohibited from declaring a budget of 0 — i.e. should even lightweight tasks declare a positive value (within ~60 s)?
+- Decision: **yes, prohibit `budget_minutes <= 0` on a wrapped block.** Rationale: wrapping a block with `budget_minutes=0` is semantically identical to not wrapping it (no fill delay, no real-time ceiling), so it is a confusing no-op; requiring a positive budget makes every sub-step honest and re-enables the fail-fast safety net for "lightweight" blocks.
+- Key fact that makes it cheap: the fill offset is `extra = max(0, ceil(B) - lag_floor)`. With the default `execution_lag_bars=2`, any `B <= 2` gives `extra=0` — the **same fill bar** as budget 0. So a lightweight block can declare e.g. 0.5-1 min, fill at the same default bar, and still get a per-block real-time ceiling. This also removes the per-substep flakiness of the old 0-second threshold (the auditor's earlier note).
+- Implementation:
+  - `src/autotrade/environment/main_ctx_engine.py` driver `substep`: default `budget_minutes=None`; raise a descriptive `ValueError` if the resolved budget `<= 0` (surfaced to the agent as `BacktestError` via the driver error path at `_request`). The host fail-fast is now unconditional (`real_wall_s > budget_min*60`) since the API guarantees positivity — removed the `budget_min > 0` special-case branch (uniform model, addresses the earlier over-engineering note).
+  - Unwrapped orders still carry `_substep=None` → budget 0 → default-lag fill with no per-block ceiling. The escape hatch for trivial per-tick code is intact; only *wrapping* now requires a positive budget.
+  - Tests (`tests/unit/test_main_ctx_replay.py`): replaced `test_substep_zero_budget_does_not_abort_on_real_work` with `test_substep_zero_budget_is_rejected` (B=0 → `BacktestError`); added `test_substep_light_positive_budget_fills_at_default_bar` (B=1 fills at the default 09:32, proving small budgets don't move the fill bar).
+  - Docs/prompt: `prompts.py` (`决策延迟` / `预算即承诺` / ctx line), `environment_design.md` §7.2, `agent_design.md` §5.2/§5.3 updated to "B must be positive; lightweight → small value (0.5-1); `B <= execution_lag_bars` doesn't move the fill bar; leave trivial code unwrapped". Regenerated `configs/prompts/PROMPTS.md`.
+- Validation: full suite -> **306 OK** (+1 light-budget test); `git diff --check` clean; PROMPTS.md re-synced. Light test/doc work; no GPU checkpoint needed.
+
+## 2026-06-28 Held-out/runtime audit fixes
+
+- Task: fix three GPT-5.5 High SubAgent findings from the Claude optimization audit, and clarify the purpose of `run_audit_session.py` / `_TickResult.real_wall_s`.
+- Fixes:
+  - `src/autotrade/pipelines/experiment.py`: `run_heldout()` now writes the same replay and budget controls as Fold manifests: auction settings, `execution_lag_bars`, `decision_max_sim_minutes`, `backtest_max_wall_seconds`, `rolling_asof_enabled`, and NL call caps. This prevents held-out from silently reverting to defaults when experiments use non-default execution settings.
+  - `src/autotrade/agent/runner.py`: Explore SubAgent now receives an effective deadline that includes the backtest wall-clock credit already used by the main Runner. This keeps Explore consistent with the “backtest wall-time is excluded from Fold reasoning deadline” rule.
+  - `src/autotrade/environment/main_ctx_engine.py`: `ctx.substep` now rejects duplicate names within the same tick, avoiding ambiguous name-to-budget mapping. Removed unused per-tick `real_wall_s` / `tick_real_wall_s`; substep-level `real_wall_s` remains because it powers the declared-budget fail-fast check.
+  - Tests added for held-out manifest fields, Explore deadline credit, and duplicate substep names.
+- Resource checks:
+  - Before tests: RAM about 408 GiB available; GPUs 0-4 heavily occupied by existing Python jobs, GPUs 5-7 idle. Tests are CPU-only.
+  - After tests: RAM about 409 GiB available; GPU profile unchanged for this task.
+- Validation:
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_main_ctx_replay tests.unit.test_tools_flow tests.unit.test_pipeline_e2e tests.unit.test_sandbox_isolation` -> 148 tests OK.
+  - `git diff --check` -> OK.
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python scripts/dev/export_prompts.py --check` -> not executed successfully because the script only supports `--output`; no prompt source was changed in this task.
+
+## 2026-06-28 GNN meta-learning environment transfer smoke
+
+- Task: run one meta-learning Fold plus the first ordinary Fold with a user-level directive asking the meta-learning Agent to download/install or declare GNN-related dependencies, then verify whether the sandbox environment transfers and whether the ordinary Fold runs stably.
+- Command:
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python scripts/experiments/run_experiment.py --experiment-id gnn_env_transfer_smoke_20260628_143822 --epochs 1 --fold-period quarter --first-test-period 2022Q1 --last-test-period 2022Q1 --heldout-first-period 2026Q1 --heldout-last-period 2026Q1 --window-months 21 --intraday-trade-days 21 --max-fold-minutes 60 --reasoning-effort max --meta-learning-network bridge --meta-learning-directive '请下载或安装 GNN 相关依赖，并通过 /mnt/agent/workspace/sandbox_environment.json 声明后续普通 Fold 需要继承的稳定依赖；优先选择可稳定构建、可审计、对量化图结构研究有帮助的包。随后给出可迁移的 Taste，不要把依赖下载日志或缓存写入正式产物。'`
+  - Runtime log: `logs/gnn_env_transfer_smoke_20260628_143822.log`.
+- Meta-learning result:
+  - Meta sandbox: `.runtime/sandboxes/run_d6e5180a355d`.
+  - Persisted artifacts: `experiments/gnn_env_transfer_smoke_20260628_143822/artifacts/run_d6e5180a355d/`.
+  - Finish status: `meta_learning_done`.
+  - Trace counts: 16 `llm_call`, 27 `shell`, 6 `web_search`, 4 `glob`, 9 `context_edit`, 1 `session_end`.
+  - Token usage from `session_end`: total 525,659; prompt 512,424; completion 13,235; reasoning 4,176; cache hit ratio 0.6904.
+  - Wrote `experiments/gnn_env_transfer_smoke_20260628_143822/sandbox_images/epoch_001/sandbox_environment.json` with Python packages `torch-geometric==2.8.0`, `einops>=0.8.0`, `scikit-learn>=1.5.0`; no apt/npm packages.
+  - Pipeline built derived image `autotrade-sandbox:gnn_env_transfer_smoke_20260628_143822-epoch_001-d5e3c6b5ca67`.
+- Transfer and GPU verification:
+  - Ordinary Fold sandbox: `.runtime/sandboxes/run_bda1a599ead9`.
+  - Persisted artifacts copied for audit: `experiments/gnn_env_transfer_smoke_20260628_143822/artifacts/run_bda1a599ead9/`.
+  - `runtime_env.json` shows image `autotrade-sandbox:gnn_env_transfer_smoke_20260628_143822-epoch_001-d5e3c6b5ca67`, `network=none`, `gpu=auto`, `gpu_count=1`, `gpu_name_filter=L20`, `memory=50g`.
+  - Docker inspect during execution showed `DeviceIDs=["5"]`; `docker exec` verified `torch.cuda.is_available()==True`, one visible CUDA device, `NVIDIA L20`; imports for `torch_geometric 2.8.0`, `einops 0.8.2`, and `sklearn 1.5.2` succeeded.
+- Ordinary Fold process:
+  - Trace: `experiments/gnn_env_transfer_smoke_20260628_143822/artifacts/run_bda1a599ead9/agent_trace.jsonl`.
+  - Trace counts before manual stop: 42 `llm_call`, 43 `explore_llm_call`, 78 `shell`, 16 `glob`, 16 `context_summary`, 5 `explore`, 3 `backtest`, 3 `tool`, 2 `context_edit`.
+  - Agent used Explore and shell to inspect data, then generated GNN-related strategy code under `output/` and model artifacts under `models/`.
+  - Formal output files included `main.py`, `candidate.py`, `trading.py`, `features.py`, `gnn_model.py`, `nl_prompt.md`, `README.md`; model files included `gnn_model.pt`, `gnn_config.json`, `industry_map.json`.
+- Backtest results:
+  - `valid_000` debug (`replay_window=5`): total_return 0.003153, annualized_return 0.171955, max_drawdown 0.012384, sharpe 0.636064, trade_count 10, order_count 12, rejects 0.
+  - `valid_001` full validation: total_return 0.033272, annualized_return 0.144780, max_drawdown 0.046047, sharpe 1.362683, trade_count 48, order_count 414, long_return 0.020977, short_return 0.013013; 83 filled and 331 rejected orders (`limit_down_blocked_sell=240`, `t_plus_one_no_sellable=91`).
+  - `valid_002` full validation after strategy repair: total_return 0.021003, annualized_return 0.089664, max_drawdown 0.030514, sharpe 0.753327, trade_count 37, order_count 65, long_return 0.030777, short_return -0.011529; all 65 orders filled, rejects 0.
+  - After `valid_002`, the Agent continued into step_003, retrained a larger v4 model, passed another modification check, and started another full validation. This third full validation did not complete before manual stop.
+- Stability findings:
+  - Environment transfer worked: meta-learning dependency request produced a derived image, ordinary Fold inherited it, and the ordinary Fold used a GPU with the expected Python packages available.
+  - The ordinary Fold did not complete cleanly. It kept iterating after two full validations and exceeded the intended 60-minute Fold window; backtest calls are independently timed and can make the whole wall-clock run substantially longer than `--max-fold-minutes`.
+  - One timed-out shell command running `train_gnn.py` left an orphan child process in the container; it had to be killed manually. This suggests sandbox shell timeout handling should ensure child process groups are reaped.
+  - Tool-use quality was mixed: the Agent attempted a missing `duckdb` CLI, made some incorrect PyArrow/Pandas read calls before recovering, and used `2>/dev/null` despite prompt guidance to keep stderr visible.
+  - First full validation took about 39 minutes and second full validation about 37 minutes, mainly due generated daily GNN screening/training logic in a minute replay setting. The generated strategy needs stronger pressure to cache/load models and avoid heavy per-day/per-tick computation.
+- Manual stop and cleanup:
+  - Sent TERM to experiment PID `1382863`.
+  - Stopped residual container `mqsbx_8cdd749ade14`; it is now exited.
+  - Confirmed GPUs 5/6/7 free after stop; RAM about 411 GiB available.
+  - Copied trace/output/models/results/workspace for ordinary Fold into `experiments/gnn_env_transfer_smoke_20260628_143822/artifacts/run_bda1a599ead9/` and removed runtime-only `.asof`/cache/temp NL artifacts from the copy. Final copied ordinary Fold artifact directory is about 4.1 MiB.
+- Conclusion:
+  - GPU was allocated, so the run was not paused for lack of GPU.
+  - Meta-to-Fold sandbox environment transfer is functional.
+  - The ordinary Fold path is not yet stable enough for unattended completion under this GNN directive: the main issues are long backtest wall-clock, continued iteration after acceptable validation attempts, and shell timeout child cleanup.
+
+## 2026-06-28 Text evidence audit refresh
+
+- Task: refresh the formal text evidence audit after the preopen text backfill filled the 20260627 news/CCTV partitions that were missing during the earlier nightly audit.
+- Command:
+  - `/home/lzp/miniconda3/envs/quant/bin/python scripts/data/tushare_audit.py base --include-text --start-date 20200101 --bak-start-date 20200101 --end-date 20260627 --fundamental-start-date 20200101 --fundamental-end-date 20260627 --text-start-date 20200101 --text-end-date 20260627 --raw-dir data/raw 2>&1 | tee logs/manual_text_evidence_audit_20260628_2021.log`
+- Resource checks:
+  - Before: RAM about 412 GiB available; GPUs 0-4 occupied by existing Python jobs, GPUs 5-7 idle.
+  - After: RAM about 412 GiB available; GPU profile unchanged for this CPU/local audit.
+- Result:
+  - `audit status=warning errors=0 warnings=20 output=/Data/lzp/MacroQuant/results/data_quality/text_evidence_status.json`.
+  - `jq` verification: `finding_counts.error=0`; no `severity=="error"` findings remain.
+  - Runtime log: `logs/manual_text_evidence_audit_20260628_2021.log`.
+
+## 2026-06-28 Regular Fold from previous Taste with explicit multi-GPU allocation
+
+- Task: use the previous meta-learning Taste from `experiments/gnn_env_transfer_smoke_20260628_143822/meta_learning/epoch_001/taste.md`, allocate all currently idle GPUs, and start one ordinary Fold in the real Docker sandbox with relaxed audit/test parameters.
+- Resource check before start:
+  - RAM about 413 GiB available.
+  - GPUs 0-4 were occupied by existing Python processes; GPUs 5/6/7 were idle, so the run pins `[5,6,7]`.
+- Script/tooling fix made before successful start:
+  - `scripts/experiments/run_audit_session.py`: added `--sandbox-image`, `--gpu-devices`, and acceptance-threshold flags so single-session audit runs can explicitly inherit a derived image and pin multiple GPUs.
+  - `src/autotrade/environment/sandbox.py`: fixed multi-GPU Docker CLI rendering from `--gpus=device=5,6,7` to `--gpus '"device=5,6,7"'`. The unquoted form fails with `cannot set both Count and DeviceIDs on device request`.
+  - `tests/unit/test_sandbox_isolation.py`: added a no-Docker regression test for the multi-GPU argument format.
+- Validation before restart:
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation.SandboxSpecTest.test_docker_sandbox_quotes_multi_gpu_device_request tests.unit.test_sandbox_isolation.SandboxSpecTest.test_docker_sandbox_can_resolve_fixed_gpu_lists_without_docker` -> 2 tests OK.
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src ~/miniconda3/envs/quant/bin/python -m py_compile scripts/experiments/run_audit_session.py src/autotrade/environment/sandbox.py` -> OK.
+  - `git diff --check` -> OK.
+- First attempted run:
+  - Experiment id `regular_fold_last_taste_gpu_20260629_032348`, PID `2508322`, log `logs/regular_fold_last_taste_gpu_20260629_032348.log`.
+  - Failed at Docker start because of the unquoted multi-GPU request above. Runtime staging directory left for audit: `.runtime/sandboxes/run_08cee7e80bdb`.
+- Successful restarted run:
+  - Command used `scripts/experiments/run_audit_session.py --mode fold --experiment-id regular_fold_last_taste_gpu_20260629_034005 --epoch-id epoch_001 --fold-index 0 --fold-period quarter --first-test-period 2022Q1 --last-test-period 2022Q1 --heldout-first-period 2026Q1 --heldout-last-period 2026Q1 --window-months 21 --intraday-trade-days 21 --max-fold-minutes 120 --model deepseek-v4-pro --nl-model deepseek-v4-flash --compact-model deepseek-v4-flash --reasoning-effort max --compact-token-threshold 200000 --compact-keep-recent-messages 12 --compact-max-tokens 1600 --compact-max-calls 8 --taste-file experiments/gnn_env_transfer_smoke_20260628_143822/meta_learning/epoch_001/taste.md --sandbox-image autotrade-sandbox:gnn_env_transfer_smoke_20260628_143822-epoch_001-d5e3c6b5ca67 --gpu-devices 5,6,7 --min-return -1 --min-sharpe -99 --max-drawdown 1 --allow-incomplete-validation`.
+  - PID `2529022`; log `logs/regular_fold_last_taste_gpu_20260629_034005.log`.
+  - Runtime `.runtime/sandboxes/run_c6d6e61dd4cb`; container `mqsbx_feba0ac75d17`; experiment directory will be `experiments/regular_fold_last_taste_gpu_20260629_034005/` after artifact collection.
+  - Manifest confirmed `sandbox_runtime.allocated_gpu_indices=[5,6,7]`, image `autotrade-sandbox:gnn_env_transfer_smoke_20260628_143822-epoch_001-d5e3c6b5ca67`, `network=none`, `max_steps=10`, `max_backtests_per_fold=30`, `fold_deadline_at=2026-06-28T21:52:30.538561+00:00`.
+  - Container probe: `nvidia-smi -L` showed 3 visible L20 GPUs; `torch.cuda.is_available()==True`; `torch.cuda.device_count()==3`.
+  - Agent reached step 1 and started an Explore data-inspection task. Noted for later audit: Explore still used full `pd.read_parquet` on large snapshot files despite prompt guidance to prefer DuckDB/metadata/limit.
+- Follow-up training/run inspection:
+  - Main experiment process exited; Docker container `mqsbx_feba0ac75d17` is no longer running.
+  - Fold Agent itself finished cleanly: `session_end.finish_status=fold_finished`, `steps_used=2`, `llm_calls=96`, `context_compactions=0`, token usage `total_tokens=8,248,497` (`prompt_tokens=8,169,010`, `completion_tokens=79,487`, `reasoning_tokens=20,805`).
+  - Pipeline then failed while collecting artifacts because workspace contained root/subuid-owned core dumps: `.runtime/sandboxes/run_c6d6e61dd4cb/agent/workspace/core.7194` (~3.46 GB) and `core.7449` (~4.05 GB), both unreadable by the host collector. This left no experiment ledger, but partial artifacts, steps, strategy artifact, run manifest, trace, models, and results were already copied under `experiments/regular_fold_last_taste_gpu_20260629_034005/`.
+  - Training path: several GNN training attempts timed out or failed syntax/runtime checks (`train_fast.py`, `train_v2.py`, `train_v3.py`, inline scripts). The successful training was `train_tiny.py`, using 200 large-cap stocks and only two train points (`2021-06-29`, `2021-06-30`), with reported `best_ic=0.9955`; model artifact `gnn_model.pt` is only ~32 KB and has 5,507 parameters.
+  - Final strategy code kept the GNN implementation in `factor_utils.py`, but `candidate.py` explicitly says the GNN is currently overfit and calls `rank_stocks_simple()` instead of `rank_stocks_gnn()`. Actual trading is monthly 09:25 rebalance, top 300 by market cap, long top simple-factor ranks and short bottom ranks, plus stop-loss/take-profit management.
+  - Backtest summaries:
+    - `valid_011` complete validation: `total_return=-0.0631115`, `annualized_return=-0.236096`, `max_drawdown=0.102969`, `sharpe=-2.7540`, `order_count=90`, `trade_count=64`, `replay_wall_seconds=1773.2`, `replayed_trade_days=61`; rejects mostly `insufficient_short_margin`, `amount_below_lot_size`, and `margin_secs_not_shortable`.
+    - `test_000`: `total_return=-0.0390638`, `annualized_return=-0.158971`, `max_drawdown=0.142148`, `sharpe=-0.7601`, `order_count=90`, `trade_count=66`, `replay_wall_seconds=1724.3`, `replayed_trade_days=58`.
+  - Frozen artifact exists despite collection failure: `experiments/regular_fold_last_taste_gpu_20260629_034005/strategy_artifacts/epoch_001/strategy_epoch_001_fold_2022Q1/` plus `.models/`; step tree current node is `epoch_001__fold_2022Q1__valid_011 ret=-0.0631`.
+  - Resource check after inspection: RAM about 410 GiB available. GPUs 5/6 are currently used by a separate `czhaobo` process (`python main.py`, PID `2942797`), not by this Fold; GPU 7 is free.
+
+## 2026-06-28 gnn_env_transfer_smoke audit remediation (G1–G6)
+
+- Task: remediate 7 user-reported issues from `experiments/gnn_env_transfer_smoke_20260628_143822` (meta + standard Fold smoke). Three Opus sub-agents verified each against the real artifacts. Plan: `~/.claude/plans/fluttering-petting-boot.md`.
+- Two premises corrected by evidence:
+  - Issue #1 is a transparency gap, not broken enforcement. BacktestTool reads the in-memory `RunManifest` (`backtest.py:118`) which has `backtest_max_wall_seconds=3600.0` (verified in `host_run_manifest.json`); the wall-clock guard (`main_ctx_engine.py:648`) was active. Only the agent-visible projection whitelist (`runtime.py:_agent_visible_manifest`) stripped the budget fields from `/mnt/artifacts/run_manifest.json`.
+  - Backtest budget policy (user): the 60-min fold deadline is reasoning-only; backtest time stays separate (existing `runner.py:_remaining_seconds` deadline-exclusion — kept). Bound per-backtest cost instead.
+- G1 (`runtime.py`): added budget/replay config keys to the agent-visible whitelist (`decision_max_sim_minutes`, `backtest_max_wall_seconds`, `max_backtests_per_fold`, `execution_lag_bars`, `nl_max_calls_per_decision_day`, `nl_max_calls_per_backtest`, `auction_*`, `rolling_asof_enabled`). Test: `test_step_tree.py::test_run_manifest_public_view_redacts_test_schedule` extended.
+- G3 (`executor.py`/`sandbox.py`/`main_ctx_engine.py`): one-shot `docker exec` argv wrapped with `timeout --signal=TERM --kill-after=5 <T> ...` (in-container group kill); host deadline bumped by `_HOST_TIMEOUT_BUFFER_SECONDS=15` as a backstop. Container launched with `--init` (tini reaps orphans, protects `--pids-limit`). `MainPolicyRunner` tags the driver argv with a unique `at_driver_<uuid>` marker and `executor.kill_marker()` issues `docker exec ... pkill -KILL -f <marker>` on tick-timeout/close (the long-lived driver can't use the one-shot timeout). Tests: `test_sandbox_isolation.py` (timeout wrapper + kill_marker). Live `DockerSandboxE2ETest` passed with `--init`.
+- G4 (`sandbox.Dockerfile`/`sandbox.py`): install duckdb CLI 1.1.3 (curl release zip with `--retry 8 --retry-all-errors`), `IMPORTANT_TOOLS += "duckdb"` (coupled — the docker tools contract declares `available:True` without probing). The docker BUILD network can't reach the GitHub CDN reliably (curl 28/56) though the host can (16.7 MB ok after one retry); rebuild uses `docker build --network=host` (documented in the Dockerfile header).
+- G2 (`backtest.py`/`main_ctx_engine.py`/`backtest_engine.py`/`runtime.py`): `backtest_start` event before the replay; throttled `backtest_progress` heartbeat (>=30 days or >=30 s) via an `on_progress` callback threaded into `run_main_ctx_replay`; guaranteed terminal `backtest` event (`run()` broadened to catch `BaseException` -> `status="aborted"`). Substeps aggregated across ticks into `substep_runtime` + `replay_wall_seconds` + `replayed_trade_days` on `ReplayResult` -> `compute_return_stats` -> summary (`started_at` added); new keys added to `_agent_visible_backtest_summary`. Tests in `test_main_ctx_replay.py` + `test_tools_flow.py`.
+- G5 (`config.py`/`backtest.py`/`prompts.py`): default `backtest_max_wall_seconds` 3600 -> 1800 (a complete validation over it raises `BacktestError`, not accept-eligible). Backtest tool description + prompt instruct the test-pass -> extrapolate -> full workflow using the reported `replay_wall_seconds`/`replayed_trade_days`, plus cache heavy recompute / bound rebalance+graph cost. Env does NO server-side projection.
+- G6 (`shell.py`/`prompts.py`): shell schema + a non-blocking `stderr_suppression_reminder` (regex on the heredoc-stripped command) discourage `2>/dev/null`; FOLD `工作步骤` gains a "minimum data contract" step. Test in `test_tools_flow.py`.
+- Living docs: `environment_design.md` updated (§4 DuckDB CLI tool + docker-contract note; §6.1 shell in-container timeout + `--init` + stderr advisory; §7.2 backtest hard ceiling + test-pass + observability; budget table 3600->1800). Regenerated `configs/prompts/PROMPTS.md`.
+- Out of scope (FYI, Agent-generated code not a harness defect): `run_bda1a599ead9/output/candidate.py` `_trading_day_count` is read but never incremented, so the `REBALANCE_GAP_DAYS=20` cadence is dead (only month-change rebalances), which drove the 37-39 min runtime.
+- Validation: full suite `~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p "test_*.py"` -> 314 OK (+5); `scripts/dev/export_prompts.py` -> PROMPTS.md re-synced; `git diff --check` clean. Image rebuild (`--network=host`) in progress; `duckdb -c "select 1"` to be confirmed in the new image. Resource check: RAM ~82-92 GiB used / ~410 GiB available before/after the lightweight test + doc work.
+
+## 2026-06-28 GPT experiment audit + deep Opus audit remediation (C1/O3/H2/V1/V2/M3 + template)
+
+- Task: analyse a GPT audit of the latest experiments, judge each issue, and remediate. Three Explore passes confirmed all 5 GPT issues valid but corrected two premises (compaction 0 times = designed, not a bug; the Read tool WAS used 10×) and found the audit conflated two experiments (core dumps in `regular_fold_last_taste_gpu_20260629_034005/run_c6d6e61dd4cb`). A deep Opus forensic pass then found higher-severity defects. Plan: `~/.claude/plans/fluttering-petting-boot.md`. User decisions: wall caps iteration-only; daily-inference window deferred; implement V1/O3 only if necessary (re-verified necessary, O3 right-sized).
+- C1 (CRITICAL — `experiment.py`): the durability guard added to `run_meta_learning` (`:587-634`) was never applied to `run_fold`/`run_heldout`; the core-dump collection failure froze a strategy but wrote no ledger and left the experiment unresumable (`_freeze` raises `FileExistsError` on re-run, `run()` has no skip-completed-folds). Fix mirrors the meta pattern: guard `collect_artifacts`, ALWAYS `ledger.append` (with a host-only `finalize_error` field), then re-raise a genuine collect failure. `run_fold` additionally wraps the post-freeze `_frozen_test_eval` so a failure there is NON-fatal (OOS test_000 is diagnostic; acceptance is validation-based, H2) — recorded as `finalize_error`, `test_result=None`, not re-raised; `run_manifest_ref` falls back to `paths.run_manifest` when collection failed. Tests: `test_pipeline_e2e.py::test_run_fold_writes_durable_ledger_when_collection_fails`, `::test_run_fold_test_eval_failure_is_non_fatal_and_recorded`, `::test_run_heldout_writes_durable_ledger_when_collection_fails`.
+- O3 (HIGH, real data loss — `sandbox.py`): root cause was torch hitting `pids_limit` -> `std::system_error` -> multi-GB subuid-owned `core.7194`/`core.7449` in `workspace/`, and `collect_artifacts` copying `workspace` (AGENT_TOP_LEVEL[0]) before `output`/`models` with `_copy_path` re-raising. Three changes: (1) `docker run` argv gains `--ulimit core=0:0` after `--pids-limit`; (2) `_COLLECT_IGNORE` gains precise `core.[0-9]*` (avoids false-matching `core.py`/`core/`); (3) `collect_artifacts` now copies `output`+`models` FIRST (must-succeed) then `workspace` LAST best-effort in a single try/except that writes `<name>.collect_error.txt` on failure. Dropped the planned per-entry `collect_errors` framework as over-engineering. Tests: `test_sandbox_isolation.py::test_docker_sandbox_disables_core_dumps`, `::test_collect_artifacts_is_order_safe_when_workspace_is_uncollectable`, extended `::test_collect_artifacts_excludes_transient_caches` (core.7194 dropped, core.py kept).
+- H2 (HIGH, determinism — `backtest.py`/`config.py`/`experiment.py`/`environment_design.md`): the per-decision (180s)/per-day (600s) caps are real wall-clock, so a strategy passing validation under light load could `BacktestError` in its frozen `test_000`/held-out under contention -> non-reproducible accept + re-trigger C1. Fix: `BacktestTool._execute` selects caps by mode — `mode=="valid"` uses the tight caps; `frozen_eval` uses generous backstops `backtest_final_eval_max_seconds_per_decision`/`_per_trading_day` (new config, 900/3000 defaults, written into both fold and held-out manifests). Q1 analysis recorded: a sim-time/minute-K-line budget is the wrong tool (an infinite loop in one tick burns 0 sim-minutes but unbounded wall-clock; only a wall-clock backstop catches it), so the finals keep a generous wall backstop, not new dynamic timing logic. Test: `test_tools_flow.py::test_wall_caps_are_tight_for_validation_and_generous_for_final_eval` (spies on `MainPolicyRunner`/`run_main_ctx_replay`); extended `test_pipeline_e2e.py::test_heldout_manifest_includes_replay_and_budget_fields`.
+- V1 (`experiment.py`): verified both `data_summary.json` and `agent_trace.jsonl` are agent-readable (`/mnt/artifacts:ro` mount, `sandbox.py:561`; in `SEARCH_ROOTS`, `search.py:32`), so raw `fold_2022Q1` leaked the calendar period and defeated the existing manifest opacity. 5 call sites (fold data_summary + trace, meta data_summary + trace, held-out trace) now pass `_agent_visible_ref(fold_id, prefix="fold_ref")`; host correlation stays on `run_id` + `host_run_manifest.json` (raw). Test: `test_pipeline_e2e.py::test_agent_visible_data_summary_and_trace_opaque_fold_id`.
+- V2 (`sandbox.py`): removed `SandboxSpec.max_fold_minutes` (field + `to_record`) — never read back, advertised a flat 60-min cap while real wall ≈ 96-120 min. The real bound stays `fold_deadline_at` (from `ExperimentConfig.max_fold_minutes`); the env_design budget-table row already described it correctly. No constructor passed the field.
+- M3 (MEDIUM — `executor.py`): `DockerExecutor.kill_marker` matched only the marked driver, leaking `main(ctx)`-spawned children (reparent to tini). Confirmed container PID 1 (tini/sleep) runs as root (`USER root` in `sandbox.Dockerfile:60`), so it now reaps the marked driver then `pkill -KILL -u agent` to sweep the unprivileged user's whole tree — safe (cannot touch root PID 1) and robust against the driver-already-exited race. Test updated: `test_sandbox_isolation.py::test_docker_executor_kill_marker_reaps_driver_then_user_tree`.
+- Template (user addendum — `configs/agent_output_template/main.py`): rewritten to cache the screen per `ctx.asof_dir` (reads `daily.parquet` once per trading day, not per tick) and to be a self-documenting example of the key `ctx` surface (positions/price/broker.buy/pending/asof_dir/substep/nl); behaviour-equivalent (same equal-weight top-N basket).
+- Not fixed (Agent quality, not harness): GNN overfit/unused, messy `gnn_codes.csv`, dead code. Deferred: fixed daily inference window (separate production/QMT design).
+- Validation: full suite `~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p "test_*.py"` -> 330 OK; `git diff --check` clean; removed a stray `configs/agent_output_template/__pycache__` (created by a local `py_compile`, which had broken `test_artifacts::test_init_from_template_skips_runtime_cache`). Lightweight test + doc work only (no GPU/training run), so no GPU/RAM gating per CLAUDE.md.

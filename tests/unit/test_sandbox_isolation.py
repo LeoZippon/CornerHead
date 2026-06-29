@@ -75,6 +75,22 @@ class SandboxSpecTest(unittest.TestCase):
             self.assertEqual(docker._resolve_gpu_indices(), [2, 4])
             self.assertEqual(docker.allocation_record()["gpu_count"], 1)
 
+    def test_docker_sandbox_quotes_multi_gpu_device_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            sandbox.prepare_layout()
+            docker = DockerSandbox(sandbox, SandboxSpec(gpu=[5, 6, 7], gpu_count=3))
+
+            class Completed:
+                returncode = 0
+                stderr = ""
+
+            with patch("subprocess.run", return_value=Completed()) as run:
+                docker.start()
+            command = run.call_args.args[0]
+            self.assertIn("--gpus", command)
+            self.assertIn('"device=5,6,7"', command)
+
     def test_docker_sandbox_mounts_agent_rw_and_artifacts_ro(self):
         with tempfile.TemporaryDirectory() as tmp:
             sandbox = LocalSandbox(Path(tmp) / "mnt")
@@ -92,6 +108,47 @@ class SandboxSpecTest(unittest.TestCase):
             self.assertIn(f"{paths.agent}:/mnt/agent:rw", command)
             self.assertIn(f"{paths.current_snapshot}:/mnt/snapshot:ro", command)
             self.assertNotIn("/mnt/runtime/snapshot_views", command)
+
+    def test_docker_sandbox_redirects_tool_caches_out_of_workspace(self):
+        # pip/HF/torch/CUDA caches must land in the ephemeral /tmp, never under
+        # /mnt/agent (the collected workspace), so collect_artifacts never meets a
+        # root-owned cache dir.
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            sandbox.prepare_layout()
+            docker = DockerSandbox(sandbox, SandboxSpec(gpu=None))
+
+            class Completed:
+                returncode = 0
+                stderr = ""
+
+            with patch("subprocess.run", return_value=Completed()) as run:
+                docker.start()
+            command = run.call_args.args[0]
+            for key, value in (("HF_HOME", "/tmp/sandbox-cache/hf"),
+                               ("PIP_CACHE_DIR", "/tmp/sandbox-cache/pip"),
+                               ("CUDA_CACHE_PATH", "/tmp/sandbox-cache/cuda"),
+                               ("XDG_CACHE_HOME", "/tmp/sandbox-cache")):
+                self.assertIn(f"{key}={value}", command)
+                self.assertFalse(value.startswith("/mnt/agent"))
+
+    def test_docker_sandbox_disables_core_dumps(self):
+        # A crashing GPU/training child must not write a multi-GB, subuid-owned core
+        # into the workspace that the host collector cannot read.
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            sandbox.prepare_layout()
+            docker = DockerSandbox(sandbox, SandboxSpec(gpu=None))
+
+            class Completed:
+                returncode = 0
+                stderr = ""
+
+            with patch("subprocess.run", return_value=Completed()) as run:
+                docker.start()
+            command = run.call_args.args[0]
+            ui = command.index("--ulimit")
+            self.assertEqual(command[ui : ui + 2], ["--ulimit", "core=0:0"])
 
     def test_docker_sandbox_env_passthrough_records_names_without_values(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -235,13 +292,57 @@ class FilesystemPermissionTest(unittest.TestCase):
             pycache = paths.workspace / "__pycache__"
             pycache.mkdir()
             (pycache / "mod.pyc").write_text("x", encoding="utf-8")
+            nv_cache = paths.workspace / ".nv"
+            nv_cache.mkdir()
+            (nv_cache / "ComputeCache").mkdir()
+            # PID-suffixed core dumps are junk and excluded; a legitimately named
+            # file like core.py (or a core/ package) must NOT be false-matched.
+            (paths.workspace / "core.7194").write_text("coredump", encoding="utf-8")
+            (paths.workspace / "core.py").write_text("x = 1\n", encoding="utf-8")
 
             dest = Path(tmp) / "collected"
             sandbox.collect_artifacts(dest)
 
             self.assertTrue((dest / "workspace" / "note.txt").exists())
             self.assertFalse((dest / "workspace" / ".cache").exists())
+            self.assertFalse((dest / "workspace" / ".nv").exists())
             self.assertFalse((dest / "workspace" / "__pycache__").exists())
+            self.assertFalse((dest / "workspace" / "core.7194").exists())
+            self.assertTrue((dest / "workspace" / "core.py").exists())
+
+    def test_collect_artifacts_is_order_safe_when_workspace_is_uncollectable(self):
+        # The frozen artifacts (output/, models/) are collected before the
+        # adversarial agent workspace, so an uncollectable workspace file (e.g. a
+        # subuid-owned core dump) can never pre-empt them; the failure is recorded
+        # in a marker file rather than aborting the whole collection.
+        import shutil as _shutil
+
+        from autotrade.environment import sandbox as sandbox_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            paths = sandbox.prepare_layout()
+            (paths.agent_output / "main.py").write_text("x = 1\n", encoding="utf-8")
+            (paths.model_artifacts / "model.json").write_text("{}", encoding="utf-8")
+            (paths.workspace / "note.txt").write_text("keep", encoding="utf-8")
+
+            real_copy = sandbox_mod._copy_path
+
+            def flaky_copy(source, dest):
+                if Path(source).name == "workspace":
+                    raise _shutil.Error("simulated unreadable workspace file")
+                return real_copy(source, dest)
+
+            dest = Path(tmp) / "collected"
+            with patch("autotrade.environment.sandbox._copy_path", side_effect=flaky_copy):
+                sandbox.collect_artifacts(dest)  # must not raise
+
+            self.assertTrue((dest / "output" / "main.py").exists())
+            self.assertTrue((dest / "models" / "model.json").exists())
+            self.assertFalse((dest / "workspace").exists())
+            marker = dest / "workspace.collect_error.txt"
+            self.assertTrue(marker.exists())
+            self.assertIn("simulated unreadable workspace file", marker.read_text(encoding="utf-8"))
 
     def test_test_slot_is_owner_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -472,6 +573,79 @@ class MetaLearningSessionTest(unittest.TestCase):
             errors = [event for event in ctx.trace.read_events() if event["event_type"] == "llm_call"]
             self.assertEqual(len(errors), 1)
 
+    def test_meta_learning_done_rejects_taste_with_calendar_year(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            # A non-transferable calendar date in the Taste must block done.
+            (ctx.paths.workspace / "taste.md").write_text(
+                "# 品味\n## 一\n日内数据仅覆盖 21 个交易日（2021 年 8-9 月），样本不足。", encoding="utf-8"
+            )
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([tool_call_response(tool_call("done"))]),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5), max_llm_calls=1),
+                fold_info={"development_history": "workspace/development_history.json"},
+                acceptance_rules={},
+                mode="meta_learning",
+            )
+
+            summary = runner.run()
+
+            self.assertNotEqual(summary["finish_status"], "meta_learning_done")
+            self.assertEqual(runner._taste_policy_violation()[:14], "taste.md line ")
+            self.assertIn("calendar date", runner._taste_policy_violation())
+
+    def test_meta_learning_year_check_targets_visible_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            # The leak check derives the forbidden years from the visible fold, so it
+            # tracks whatever year the window uses (here 2024), not a hard-coded year.
+            ctx.manifest.update(
+                meta_learning_visible_fold={
+                    "input_window": "20240101..20240930",
+                    "validation_period": "20241001..20241231",
+                    "valid_decision_time": "2024-10-08T09:25:00+08:00",
+                },
+                valid_decision_time="2024-10-08T09:25:00+08:00",
+            )
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([tool_call_response(tool_call("done"))]),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5), max_llm_calls=1),
+                fold_info={"development_history": "workspace/development_history.json"},
+                acceptance_rules={},
+                mode="meta_learning",
+            )
+            # A bare visible-window year (no date syntax) is still caught.
+            (ctx.paths.workspace / "taste.md").write_text("# 品味\n## 一\n对标 2024 的市场结构轮动。", encoding="utf-8")
+            self.assertIn("calendar date", runner._taste_policy_violation())
+            # A bare non-window number reading as a transferable regime reference is allowed.
+            (ctx.paths.workspace / "taste.md").write_text(
+                "# 品味\n## 一\n借鉴 2008 式系统性风险的应对，按季度控制回撤。", encoding="utf-8"
+            )
+            self.assertEqual(runner._taste_policy_violation(), "")
+
+    def test_meta_learning_done_allows_cadence_words_without_year(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            # Quarterly cadence + plain counts/percentages are transferable, not dates.
+            (ctx.paths.workspace / "taste.md").write_text(
+                "# 品味\n## 一\n核心持仓按季度轮动；日内样本交易日不足（约 21 个），换手率 50%-80%。",
+                encoding="utf-8",
+            )
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([tool_call_response(tool_call("done"))]),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5)),
+                fold_info={"development_history": "workspace/development_history.json"},
+                acceptance_rules={},
+                mode="meta_learning",
+            )
+
+            self.assertEqual(runner._taste_policy_violation(), "")
+            summary = runner.run()
+            self.assertEqual(summary["finish_status"], "meta_learning_done")
+
     def test_meta_learning_prompt_includes_experiment_directive(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
@@ -505,7 +679,7 @@ class MetaLearningSessionTest(unittest.TestCase):
             )
 
             self.assertIn("## 运行环境、联网与代理", runner.system_prompt)
-            self.assertIn("元学习默认可用 Docker 网络直连互联网", runner.system_prompt)
+            self.assertIn("元学习 Fold 是唯一可配置联网的阶段", runner.system_prompt)
             self.assertIn("/mnt/artifacts/runtime_env.json", runner.system_prompt)
             self.assertIn("GITHUB_TOKEN", runner.system_prompt)
             self.assertIn("HF_TOKEN", runner.system_prompt)
@@ -742,6 +916,51 @@ class ExecutorTest(unittest.TestCase):
             self.assertEqual(executor.map_path(paths.run_manifest), "/mnt/artifacts/run_manifest.json")
             with self.assertRaises(Exception):
                 executor.map_path(Path("/etc/passwd"))
+
+    def test_docker_executor_wraps_command_with_container_timeout(self):
+        # A timed command runs under an in-container `timeout` so a deadline kills the
+        # whole in-container process group, not just the host docker exec client.
+        import subprocess as sp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "mnt"
+            paths = SandboxPaths(root)
+            (root / "artifacts" / "workspace").mkdir(parents=True)
+            executor = DockerExecutor("dummy", paths)
+            with patch(
+                "autotrade.environment.executor.subprocess.run",
+                return_value=sp.CompletedProcess([], 0, stdout="", stderr=""),
+            ) as run:
+                executor.run(["python3", "train.py"], timeout_seconds=30)
+            cmd = run.call_args.args[0]
+            ti = cmd.index("timeout")
+            self.assertEqual(cmd[ti : ti + 4], ["timeout", "--signal=TERM", "--kill-after=5", "30"])
+            self.assertEqual(cmd[-2:], ["python3", "train.py"])  # agent argv runs under timeout
+            self.assertEqual(run.call_args.kwargs["timeout"], 30 + 15.0)  # host deadline is a longer backstop
+
+    def test_docker_executor_kill_marker_reaps_driver_then_user_tree(self):
+        import subprocess as sp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SandboxPaths(Path(tmp) / "mnt")
+            executor = DockerExecutor("cont1", paths)
+            with patch(
+                "autotrade.environment.executor.subprocess.run",
+                return_value=sp.CompletedProcess([], 0),
+            ) as run:
+                executor.kill_marker("at_driver_abc")
+            commands = [call.args[0] for call in run.call_args_list]
+            # First the targeted marked driver, then a sweep of the unprivileged
+            # agent user's whole tree (reaps any child main(ctx) spawned, even if
+            # the driver already exited). The container's PID 1 is root, so the
+            # sweep cannot touch it.
+            self.assertEqual(
+                commands,
+                [
+                    ["docker", "exec", "--user", "agent", "cont1", "pkill", "-KILL", "-f", "at_driver_abc"],
+                    ["docker", "exec", "--user", "agent", "cont1", "pkill", "-KILL", "-u", "agent"],
+                ],
+            )
 
 
 @unittest.skipUnless(docker_available(), "docker daemon not accessible for the current user")

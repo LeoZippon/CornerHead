@@ -1,11 +1,16 @@
 # AutoTrade Agent sandbox image (docs/environment_design.md 3.1/3.3).
 # Build: docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile ops/docker
-# Behind restricted networks pre-pull the base via a registry mirror and pass
-# --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+# Behind restricted networks pre-pull the base via a registry mirror, pass
+# --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple, and add
+# --network=host so the build's curl (DuckDB CLI release) uses the host network.
 FROM python:3.11-slim
 
 ARG PIP_INDEX_URL=https://pypi.org/simple
 
+# Pre-bake the C/C++/Fortran build toolchain so a fold that pins a source-only
+# wheel (e.g. torch_scatter/torch_sparse) builds without declaring apt_packages.
+# Without this, the base python:3.11-slim has no compiler and such installs fail
+# at build time (the root cause of an early GNN-transfer run's image-build error).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -13,6 +18,11 @@ RUN apt-get update \
         git \
         npm \
         ripgrep \
+        build-essential \
+        g++ \
+        gfortran \
+        python3-dev \
+        pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
@@ -28,6 +38,18 @@ RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
 RUN if ! command -v hf >/dev/null 2>&1 && command -v huggingface-cli >/dev/null 2>&1; then \
         ln -s "$(command -v huggingface-cli)" /usr/local/bin/hf; \
     fi
+
+# DuckDB CLI binary, pinned to the Python package version. The Agent's data-probe
+# guidance uses `duckdb -c "..."`; without the CLI it fails with exit 127 and the
+# Agent wastes turns falling back. (curl is already installed; release zip extracted
+# with the bundled Python to avoid an extra apt dependency. Host is x86_64.)
+RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 --max-time 600 \
+        https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip \
+        -o /tmp/duckdb_cli.zip \
+    && python -c "import zipfile; zipfile.ZipFile('/tmp/duckdb_cli.zip').extractall('/usr/local/bin')" \
+    && chmod +x /usr/local/bin/duckdb \
+    && rm /tmp/duckdb_cli.zip \
+    && duckdb -c "select 1"
 
 # Non-root agent user; Runner/root stays root for frozen execution and binds.
 RUN useradd --create-home --uid 61000 agent

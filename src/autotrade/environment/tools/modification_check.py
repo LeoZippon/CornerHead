@@ -41,7 +41,7 @@ class ModificationCheckTool:
     def __init__(self, ctx: ToolContext) -> None:
         self.ctx = ctx
 
-    def run(self) -> dict[str, object]:
+    def run(self, *, phase: str | None = None) -> dict[str, object]:
         manifest = self.ctx.manifest
         constraints = ModificationConstraints.from_record(dict(manifest.require("modification_constraints")))
         work_root = self.ctx.paths.agent_output
@@ -108,5 +108,5 @@ class ModificationCheckTool:
             "reasons": reasons,
         }
         manifest.record_modification_check(summary)
-        self.ctx.trace.emit("tool", {**summary}, step_id=self.ctx.current_step_id)
+        self.ctx.trace.emit("tool", {**summary}, step_id=self.ctx.current_step_id, phase=phase)
         return summary

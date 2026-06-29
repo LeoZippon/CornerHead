@@ -45,7 +45,11 @@ class BacktestTool:
         description=(
             "Run the formal validation backtest by replaying output/main.py minute by minute. The "
             "Runner supplies validation mode; the tool auto-verifies the latest modification check "
-            "when needed and writes a new results/valid_<idx>/ artifact."
+            "when needed and writes a new results/valid_<idx>/ artifact. Real-wall caps abort the run: "
+            "any single decision over backtest_max_seconds_per_decision is killed immediately, and a trade "
+            "day over backtest_max_seconds_per_trading_day aborts (BacktestError, not accept-eligible). So "
+            "first run a small replay_window pass, read the returned replay_wall_seconds + replayed_trade_days, "
+            "extrapolate to the full validation period, and only run the full backtest once it fits."
         ),
         fields=(
             ActionField(
@@ -54,8 +58,10 @@ class BacktestTool:
                 required=False,
                 min_value=2,
                 description=(
-                    "Optional: replay only the first N trade days of the region for a fast debug "
-                    "check. The default full run is the only result eligible for acceptance/freeze."
+                    "Optional: replay only the first N trade days of the region for a fast debug check "
+                    "(non-accept-eligible). Use it to measure runtime (replay_wall_seconds / "
+                    "replayed_trade_days) and extrapolate the full run's cost before launching it. The "
+                    "default full run is the only result eligible for acceptance/freeze."
                 ),
             ),
         ),
@@ -67,6 +73,7 @@ class BacktestTool:
 
     def __init__(self, ctx: ToolContext) -> None:
         self.ctx = ctx
+        self._backtest_started = False
 
     def run(
         self, *, mode: str, result_name: str | None = None, replay_window: int | None = None
@@ -81,11 +88,25 @@ class BacktestTool:
         else:
             self.ctx.require_phase(PHASE_FROZEN, tool=self.name)
             replay_window = None  # frozen_eval always replays the full region
+        self._backtest_started = False
         try:
             return self._execute(mode=mode, result_name=result_name, replay_window=replay_window)
         except (BacktestError, ArtifactError) as exc:
             self._record_failure(mode, str(exc))
             raise ToolError(str(exc)) from exc
+        except ToolError as exc:
+            # A pre-flight rejection (dup result dir, modification-check/snapshot mismatch)
+            # happens before backtest_start, so no bracket is open and we record nothing.
+            # But the post-replay modification refresh can also raise ToolError AFTER
+            # backtest_start — that must close the bracket with a terminal event.
+            if self._backtest_started:
+                self._record_failure(mode, str(exc), status="error")
+            raise
+        except BaseException as exc:  # noqa: BLE001 - guarantee a terminal audit event on any abort
+            # An external/abort path (timeout kill, KeyboardInterrupt) would otherwise
+            # leave the trace open on an in-flight backtest with no outcome.
+            self._record_failure(mode, f"{type(exc).__name__}: {exc}", status="aborted")
+            raise
 
     def contract_check(self) -> dict[str, object]:
         """finish_fold's light check: artifact loads and main(ctx) is defined."""
@@ -138,7 +159,48 @@ class BacktestTool:
         result_dir = self._planned_result_dir(mode, result_name)
         if result_dir.exists():
             raise ToolError(f"result directory already exists: {result_dir}")
-        per_call_timeout = float(manifest.get("per_call_timeout_seconds", 300))
+        started_at = utc_now_iso()
+        total_trade_days = int(replay_daily["trade_date"].nunique())
+        # Open the audit bracket before the synchronous replay; without a start event a
+        # long backtest that is later killed leaves no trace of having run.
+        self.ctx.trace.emit(
+            "backtest_start",
+            {
+                "tool": self.name, "mode": mode, "result_name": result_dir.name,
+                "complete_validation": complete_validation, "replay_window": replay_window,
+                "replay_granularity": replay_granularity, "total_trade_days": total_trade_days,
+                "artifact_hash": artifact.artifact_hash, "started_at": started_at,
+            },
+            step_id=self.ctx.current_step_id,
+        )
+        self._backtest_started = True  # bracket open: any later failure must emit a terminal event
+
+        def _on_progress(date: str, idx: int, total: int, elapsed: float, orders: int) -> None:
+            self.ctx.trace.emit(
+                "backtest_progress",
+                {
+                    "tool": self.name, "mode": mode, "result_name": result_dir.name,
+                    "trade_date": date, "day_index": idx, "total_days": total,
+                    "percent": round(100.0 * idx / total, 1) if total else 0.0,
+                    "elapsed_seconds": round(elapsed, 1), "orders_so_far": orders,
+                },
+                step_id=self.ctx.current_step_id,
+            )
+
+        # The per-decision wall cap bounds one main(ctx) tick (its compute AND any nl()
+        # calls within it); the per-trading-day cap bounds a day's cumulative compute.
+        # These are real wall-clock, hence load-dependent, so the TIGHT iteration caps
+        # apply only to agent-iteration validation. The final evals (frozen_eval:
+        # per-fold test_000 and held-out) must complete and be reproducible — a
+        # strategy that already fit the caps during validation must finish its final
+        # eval (H2) — so they use a GENEROUS wall-clock backstop whose only job is to
+        # kill a true hang, not to gate acceptance.
+        if mode == "valid":
+            decision_cap = float(manifest.get("backtest_max_seconds_per_decision", 180))
+            per_day_cap = _optional_float(manifest.get("backtest_max_seconds_per_trading_day"))
+        else:
+            decision_cap = float(manifest.get("backtest_final_eval_max_seconds_per_decision", 900))
+            per_day_cap = _optional_float(manifest.get("backtest_final_eval_max_seconds_per_trading_day"))
         tmp_nl_dir = self.ctx.paths.workspace / f".{new_id('nl_tool')}"
         requests_host = self.ctx.paths.workspace / f".{new_id('nl_requests')}.jsonl"
         responses_host = self.ctx.paths.workspace / f".{new_id('nl_responses')}.jsonl"
@@ -150,8 +212,10 @@ class BacktestTool:
             snapshot_dir=snapshot_dir,
             log_dir=tmp_nl_dir,
             failure_policy=str(manifest.get("nl_failure_policy", "return_error_with_audit")),
-            per_call_timeout_seconds=per_call_timeout,
-            max_calls=_optional_int(manifest.get("nl_max_calls_per_backtest")),
+            # A single NL call gets a fraction of the decision cap so there is headroom
+            # for the surrounding compute before the per-decision wall cap kills the tick.
+            per_call_timeout_seconds=decision_cap * 0.8,
+            max_calls=_nl_call_budget(manifest, replay_daily),
         )
         try:
             profile = BrokerProfile(**_profile_kwargs(dict(manifest.require("broker_profile"))))
@@ -159,7 +223,7 @@ class BacktestTool:
             with MainPolicyRunner(
                 self.ctx.executor,
                 self.ctx.paths,
-                timeout_seconds=per_call_timeout,
+                timeout_seconds=decision_cap,
                 decision_time=decision_time,
                 replay_granularity=replay_granularity,
                 nl_service=nl_service,
@@ -177,11 +241,18 @@ class BacktestTool:
                     auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
                     auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
                     execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
+                    decision_max_sim_minutes=_optional_float(manifest.get("decision_max_sim_minutes")),
+                    max_seconds_per_trading_day=per_day_cap,
                     asof_view_enabled=bool(manifest.get("rolling_asof_enabled", True)),
                     snapshot_dir=snapshot_dir,
+                    on_progress=_on_progress,
                 )
             stats = compute_return_stats(replay)
+            artifact = load_strategy_artifact(self.ctx.paths.agent_output)
             model_artifacts = load_model_artifacts(self.ctx.paths.model_artifacts)
+            modification_check = self._refresh_modification_check_after_replay(
+                mode, modification_check, artifact.artifact_hash, model_artifacts.artifact_hash
+            )
             result_dir.mkdir(parents=True)
             nl_tool_dir = result_dir / "nl_tool"
             if tmp_nl_dir.exists():
@@ -234,7 +305,11 @@ class BacktestTool:
             "nl_tool_dir": self.ctx.executor.map_path(nl_tool_dir),
             "host_nl_tool_dir": str(nl_tool_dir),
             "modification_delta_summary": _modification_delta_summary(modification_check),
+            "started_at": started_at,
             "finished_at": utc_now_iso(),
+            "replay_wall_seconds": stats.get("replay_wall_seconds"),
+            "replayed_trade_days": stats.get("replayed_trade_days"),
+            "substep_runtime": stats.get("substep_runtime"),
         }
         self.ctx.manifest.append_backtest_summary(summary)
         self.ctx.trace.emit("backtest", summary, step_id=self.ctx.current_step_id)
@@ -290,6 +365,26 @@ class BacktestTool:
             raise ToolError(f"modification check rejected the backtest: {last.get('reasons')}")
         return last
 
+    def _refresh_modification_check_after_replay(
+        self,
+        mode: str,
+        check: dict[str, object] | None,
+        artifact_hash_value: str,
+        model_hash_value: str,
+    ) -> dict[str, object] | None:
+        """Refresh the summary gate if replay generated inheritable model files."""
+        if mode != "valid" or not isinstance(check, dict):
+            return check
+        if (
+            str(check.get("artifact_hash")) == artifact_hash_value
+            and str(check.get("model_artifact_hash")) == model_hash_value
+        ):
+            return check
+        refreshed = ModificationCheckTool(self.ctx).run()
+        if not refreshed.get("allowed_to_backtest"):
+            raise ToolError(f"modification check rejected the replay artifacts: {refreshed.get('reasons')}")
+        return refreshed
+
     def _resolved_snapshot(self) -> Path:
         link = self.ctx.paths.snapshot
         if not link.exists():
@@ -318,11 +413,11 @@ class BacktestTool:
             result_name = f"{prefix}_{len(existing):03d}"
         return results_root / result_name
 
-    def _record_failure(self, mode: str, error: str) -> None:
+    def _record_failure(self, mode: str, error: str, *, status: str = "error") -> None:
         summary = {
             "tool": self.name,
             "mode": mode,
-            "status": "error",
+            "status": status,
             "error": error,
             "finished_at": utc_now_iso(),
         }
@@ -466,16 +561,48 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
+def _optional_float(value: object) -> float | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nl_call_budget(manifest, replay_daily) -> int | None:
+    """System NL call quota for this backtest: a daily-average budget of
+    ``nl_max_calls_per_decision_day`` over the replay's decision days (the final
+    day is reserved for forced liquidation, not new decisions). An explicit
+    ``nl_max_calls_per_backtest`` only tightens it (the min wins)."""
+    per_day = _optional_int(manifest.get("nl_max_calls_per_decision_day"))
+    decision_days = max(1, len(set(replay_daily["trade_date"].astype(str))) - 1)
+    daily_total = per_day * decision_days if per_day is not None else None
+    explicit = _optional_int(manifest.get("nl_max_calls_per_backtest"))
+    caps = [c for c in (daily_total, explicit) if c is not None]
+    return min(caps) if caps else None
+
+
 def _modification_delta_summary(check: object) -> dict[str, object] | None:
     if not isinstance(check, dict):
         return None
     delta = check.get("delta")
     if not isinstance(delta, dict):
         return None
-    return {
+    summary = {
         "changed_file_count": delta.get("changed_file_count"),
         "diff_lines": delta.get("diff_lines"),
         "code_diff_lines": delta.get("code_diff_lines"),
         "total_files": delta.get("total_files"),
         "total_bytes": delta.get("total_bytes"),
     }
+    model_delta = check.get("model_delta")
+    if isinstance(model_delta, dict):
+        summary.update(
+            {
+                "model_changed_file_count": model_delta.get("changed_file_count"),
+                "model_total_files": model_delta.get("total_files"),
+                "model_total_bytes": model_delta.get("total_bytes"),
+            }
+        )
+    return summary

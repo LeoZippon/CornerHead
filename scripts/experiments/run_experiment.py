@@ -441,6 +441,7 @@ def main() -> int:
             finalize_before_deadline_seconds=config.finalize_before_deadline_seconds,
             per_call_timeout_seconds=config.per_call_timeout_seconds,
             max_steps=config.max_steps_per_fold,
+            max_backtests_per_fold=config.max_backtests_per_fold,
             context_compaction=compact_config,
         )
 

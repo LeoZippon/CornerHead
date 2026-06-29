@@ -38,7 +38,10 @@ PYTHON_PACKAGES: tuple[tuple[str, str, str | None], ...] = (
     ("torch", "torch", "2.5.1"),
     ("huggingface_hub", "huggingface-hub", "0.27.1"),
 )
-IMPORTANT_TOOLS = ("rg", "git", "npm", "pip", "hf", "huggingface-cli")
+# Keep in sync with ops/docker/sandbox.Dockerfile: the docker-mode runtime_env
+# contract declares each of these available without probing, so a tool must be
+# installed in the image before it is listed here (e.g. duckdb CLI).
+IMPORTANT_TOOLS = ("rg", "git", "npm", "pip", "hf", "huggingface-cli", "duckdb")
 
 
 @dataclass(frozen=True)
@@ -49,7 +52,6 @@ class SandboxSpec:
     cpus: float = 4.0
     memory: str = "8g"
     pids_limit: int = 512
-    max_fold_minutes: int = 60
     # "auto" allocates gpu_count matching GPUs with the most free memory at
     # container start; an integer or list pins devices; None runs CPU-only.
     gpu: str | int | Sequence[int] | None = "auto"
@@ -83,7 +85,6 @@ class SandboxSpec:
             "cpus": self.cpus,
             "memory": self.memory,
             "pids_limit": self.pids_limit,
-            "max_fold_minutes": self.max_fold_minutes,
             "gpu": self.gpu,
             "gpu_count": self.gpu_count,
             "gpu_name_filter": self.gpu_name_filter,
@@ -241,10 +242,24 @@ class LocalSandbox:
                 _copy_path(source, dest_dir / name)
         if self.paths.host_run_manifest.exists():
             _copy_path(self.paths.host_run_manifest, dest_dir / "host_run_manifest.json")
+        # Collect the frozen artifacts (output/, models/) FIRST: they are
+        # controlled, chmod-locked outputs and must never be pre-empted by an
+        # uncollectable file in the adversarial agent workspace. ``workspace`` is
+        # agent-writable scratch, so it is collected LAST and best-effort — a
+        # single unreadable/special file there (e.g. a subuid-owned core dump)
+        # is skipped and logged instead of aborting the whole collection.
         for name in AGENT_TOP_LEVEL:
+            if name == _AGENT_WORKSPACE:
+                continue
             source = self.paths.agent / name
             if source.exists():
                 _copy_path(source, dest_dir / name)
+        workspace_source = self.paths.agent / _AGENT_WORKSPACE
+        if workspace_source.exists():
+            try:
+                _copy_path(workspace_source, dest_dir / _AGENT_WORKSPACE)
+            except (OSError, shutil.Error) as exc:
+                _record_collect_skip(dest_dir, _AGENT_WORKSPACE, exc)
         _chmod_tree(dest_dir, file_mode=0o644, dir_mode=0o755)
         return dest_dir
 
@@ -263,7 +278,9 @@ def _link_or_copy(src: str, dst: str) -> None:
 # wrong and a copy failure. Excluded from artifact collection.
 _COLLECT_IGNORE = shutil.ignore_patterns(
     ".cache",
+    ".nv",
     ".asof",  # host-written per-day rolling daily as-of views; not Agent artifacts
+    "core.[0-9]*",  # PID-suffixed core dumps (RLIMIT_CORE=0 prevents these; belt-and-suspenders)
     "__pycache__",
     "*.pyc",
     "*.pyo",
@@ -281,11 +298,27 @@ _COLLECT_IGNORE = shutil.ignore_patterns(
 )
 
 
+# The single agent-writable top-level tree; everything else under /mnt/agent
+# (output/, models/) is a controlled, chmod-locked artifact.
+_AGENT_WORKSPACE = "workspace"
+
+
 def _copy_path(source: Path, dest: Path) -> None:
     if source.is_dir():
         shutil.copytree(source, dest, symlinks=True, ignore=_COLLECT_IGNORE)
     else:
         shutil.copy2(source, dest)
+
+
+def _record_collect_skip(dest_dir: Path, name: str, exc: Exception) -> None:
+    """Record a best-effort collection skip so a partially-collected workspace is
+    visible in the run directory rather than silently dropped."""
+    try:
+        (dest_dir / f"{name}.collect_error.txt").write_text(
+            f"{type(exc).__name__}: {exc}\n", encoding="utf-8"
+        )
+    except OSError:
+        pass
 
 
 def _runtime_env_record(*, mode: str, sandbox_spec: SandboxSpec | None) -> dict[str, object]:
@@ -372,6 +405,23 @@ def _runtime_policy() -> dict[str, object]:
         "meta_learning_network": "web_search_tool_only unless a meta-learning sandbox spec explicitly enables Docker network access",
         "formal_strategy_read_roots": ["/mnt/snapshot", "/mnt/agent/output", "/mnt/agent/models"],
     }
+
+
+# Redirect tool caches out of /mnt/agent (the collected workspace) into the
+# container's ephemeral /tmp, so pip/HF/torch/CUDA caches never land as root-owned
+# directories in the workspace and crash host-side collect_artifacts (forensics I2;
+# the .nv denylist was a narrower patch). /tmp is not collected.
+_CACHE_REDIRECT_ENV: tuple[tuple[str, str], ...] = (
+    ("XDG_CACHE_HOME", "/tmp/sandbox-cache"),
+    ("PIP_CACHE_DIR", "/tmp/sandbox-cache/pip"),
+    ("HF_HOME", "/tmp/sandbox-cache/hf"),
+    ("CUDA_CACHE_PATH", "/tmp/sandbox-cache/cuda"),
+    ("NUMBA_CACHE_DIR", "/tmp/sandbox-cache/numba"),
+    ("MPLCONFIGDIR", "/tmp/sandbox-cache/mpl"),
+)
+_CACHE_REDIRECT_ENV_ARGS: list[str] = [
+    arg for key, value in _CACHE_REDIRECT_ENV for arg in ("--env", f"{key}={value}")
+]
 
 
 def _docker_env_args(
@@ -482,7 +532,8 @@ class DockerSandbox:
             try:
                 self.gpu_indices = self._resolve_gpu_indices()
                 if self.gpu_indices:
-                    gpu_args = [f"--gpus=device={','.join(str(index) for index in self.gpu_indices)}"]
+                    devices = ",".join(str(index) for index in self.gpu_indices)
+                    gpu_args = ["--gpus", f'"device={devices}"']
             except GpuUnavailableError as exc:
                 message = str(exc)
                 if self.spec.gpu == "auto" and (
@@ -500,6 +551,9 @@ class DockerSandbox:
             "docker",
             "run",
             "--detach",
+            # tini as PID 1 reaps orphaned/zombie processes (e.g. a driver or training
+            # child left after a timeout kill), protecting --pids-limit.
+            "--init",
             "--name",
             self.container,
             *gpu_args,
@@ -507,11 +561,18 @@ class DockerSandbox:
             f"--cpus={self.spec.cpus}",
             f"--memory={self.spec.memory}",
             f"--pids-limit={self.spec.pids_limit}",
+            # Disable core dumps: a crashing GPU/training child (e.g. a torch
+            # std::system_error under pid pressure) would otherwise write a
+            # multi-GB, subuid-owned core into the agent workspace that the host
+            # collector cannot read.
+            "--ulimit",
+            "core=0:0",
             *(
                 ["--add-host", "host.docker.internal:host-gateway"]
                 if self.spec.add_host_gateway
                 else []
             ),
+            *_CACHE_REDIRECT_ENV_ARGS,
             *env_args,
             "-v",
             f"{paths.train}:/mnt/snapshots/train:ro",

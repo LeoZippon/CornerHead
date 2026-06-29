@@ -421,6 +421,12 @@ class ReplayResult:
     decision_date: str
     exit_date: str
     granularity: str = "minute"
+    # Cost feedback: per-sub-step wall-time aggregates, total replay wall-clock, and
+    # the number of trade days replayed (so the Agent can extrapolate a full run from
+    # a small replay_window test pass).
+    substep_runtime: dict[str, dict[str, float]] | None = None
+    replay_wall_seconds: float | None = None
+    replayed_trade_days: int | None = None
 
 
 class MinuteMarketData:
@@ -629,6 +635,9 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "short_borrow_fees": float(broker.borrow_fees),
         "forced_close_events": sum(1 for e in broker.events if e["event_type"] == "forced_close_triggered"),
         "replay_granularity": result.granularity,
+        "replay_wall_seconds": result.replay_wall_seconds,
+        "replayed_trade_days": result.replayed_trade_days,
+        "substep_runtime": result.substep_runtime or {},
         "equity_curve": {str(k): float(v) for k, v in curve.items()},
         "decision_date": result.decision_date,
         "exit_date": result.exit_date,

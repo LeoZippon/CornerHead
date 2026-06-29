@@ -321,9 +321,20 @@ def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
             "epoch_index",
             "phase",
             "max_steps",
+            "max_backtests_per_fold",
             "fold_deadline_at",
             "finalize_before_deadline_seconds",
             "per_call_timeout_seconds",
+            "execution_lag_bars",
+            "decision_max_sim_minutes",
+            "backtest_max_seconds_per_decision",
+            "backtest_max_seconds_per_trading_day",
+            "auction_enabled",
+            "auction_preopen_time",
+            "auction_decision_time",
+            "rolling_asof_enabled",
+            "nl_max_calls_per_decision_day",
+            "nl_max_calls_per_backtest",
             "sandbox_spec",
             "sandbox_runtime",
             "sandbox_image_update",
@@ -411,7 +422,11 @@ def _agent_visible_backtest_summary(record: dict[str, object]) -> dict[str, obje
             "model_artifact_hash",
             "combined_artifact_hash",
             "result_path",
+            "started_at",
             "finished_at",
+            "replay_wall_seconds",
+            "replayed_trade_days",
+            "substep_runtime",
             "error",
             "modification_delta_summary",
         )
@@ -439,6 +454,7 @@ class AgentTraceWriter:
         *,
         step_id: str | None = None,
         parent_call_id: str | None = None,
+        phase: str | None = None,
     ) -> str:
         call_id = new_id("call")
         record: dict[str, object] = {
@@ -450,6 +466,11 @@ class AgentTraceWriter:
         }
         if step_id is not None:
             record["step_id"] = step_id
+        if phase is not None:
+            # Tags events the host pipeline emits outside the agent loop (e.g. the
+            # post-session modification check) so audits don't read them as agent
+            # actions; agent-driven events leave this unset.
+            record["phase"] = phase
         record.update(sanitize_for_log(payload))
         line = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
         with self._lock:

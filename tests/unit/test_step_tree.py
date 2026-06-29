@@ -264,6 +264,12 @@ class PhasePromptTest(unittest.TestCase):
                         "test_decision_time": "2022-01-04T09:25:00+08:00",
                     },
                     "test_decision_time": "2022-01-04T09:25:00+08:00",
+                    "execution_lag_bars": 2,
+                    "decision_max_sim_minutes": 60.0,
+                    "backtest_max_seconds_per_decision": 180.0,
+                    "backtest_max_seconds_per_trading_day": 600.0,
+                    "max_backtests_per_fold": 30,
+                    "nl_max_calls_per_decision_day": 10,
                     "snapshots": {
                         "valid_decision_input": {"snapshot_id": "valid"},
                         "valid_replay": {"snapshot_id": "valid_replay"},
@@ -287,6 +293,11 @@ class PhasePromptTest(unittest.TestCase):
             self.assertEqual([item["mode"] for item in public["backtest_summaries"]], ["valid"])
             self.assertEqual(host["fold"]["test_period"], "20220101..20220331")
             self.assertIn("test_replay", host["snapshots"])
+            # Budget/replay config is pure (no test/held-out leak) and is asserted in the
+            # prompt facts, so it must survive into the agent-visible manifest too.
+            for key in ("execution_lag_bars", "decision_max_sim_minutes", "backtest_max_seconds_per_decision",
+                        "backtest_max_seconds_per_trading_day", "max_backtests_per_fold", "nl_max_calls_per_decision_day"):
+                self.assertEqual(public[key], manifest.data[key], key)
 
 
 if __name__ == "__main__":

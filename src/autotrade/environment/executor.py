@@ -20,6 +20,20 @@ from pathlib import Path
 from autotrade.environment.runtime import SandboxPaths
 
 
+# A timed shell command runs under an in-container `timeout` so its deadline kills
+# the whole in-container process group (not just the host `docker exec` client, which
+# would orphan children such as a training subprocess). The host deadline is a
+# slightly-longer backstop in case the container-side guard ever fails.
+_HOST_TIMEOUT_BUFFER_SECONDS = 15.0
+
+
+def _with_container_timeout(argv: list[str], timeout_seconds: float) -> list[str]:
+    # GNU coreutils `timeout` runs the command in its own process group and signals
+    # the entire group on expiry, so descendants are killed too; `--kill-after` sends
+    # SIGKILL if SIGTERM is ignored.
+    return ["timeout", "--signal=TERM", "--kill-after=5", f"{float(timeout_seconds):g}", *argv]
+
+
 @dataclass(frozen=True)
 class ExecResult:
     exit_code: int
@@ -44,6 +58,11 @@ class LocalExecutor:
 
     def map_path(self, host_path: Path | str) -> str:
         return str(host_path)
+
+    def kill_marker(self, marker: str, *, user: str = "agent") -> None:
+        # Local host subprocesses are killed directly via ``proc.kill()``; there is no
+        # detached container process tree to clean up.
+        return None
 
     def run(
         self,
@@ -170,22 +189,47 @@ class DockerExecutor:
             command.extend(["--env", f"{key}={value}"])
         command.extend(["--workdir", self.map_path(cwd) if cwd else "/mnt/agent"])
         command.append(self.container)
-        command.extend(argv)
+        command.extend(_with_container_timeout(argv, timeout_seconds))
+        host_timeout = timeout_seconds + _HOST_TIMEOUT_BUFFER_SECONDS
         if max_output_chars is not None:
             return _run_limited_capture(
                 command,
                 cwd=None,
                 env=None,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=host_timeout,
                 max_output_chars=max_output_chars,
             )
         try:
             completed = subprocess.run(
-                command, capture_output=True, text=True, errors="replace", timeout=timeout_seconds
+                command, capture_output=True, text=True, errors="replace", timeout=host_timeout
             )
         except subprocess.TimeoutExpired as exc:
             return ExecResult(exit_code=124, stdout=str(exc.stdout or ""), stderr=f"timeout after {timeout_seconds}s")
         return ExecResult(exit_code=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
+
+    def kill_marker(self, marker: str, *, user: str = "agent") -> None:
+        """Reap the in-container driver AND everything it spawned on timeout/teardown.
+
+        Killing the host ``docker exec`` client does not signal in-container
+        processes. A cmdline-marker ``pkill`` matches only the driver, not the
+        training/child processes ``main(ctx)`` spawns — those reparent to tini
+        (``--init``) and leak GPU/pids until the container is torn down. So after
+        the targeted driver kill we sweep the whole unprivileged ``user`` process
+        tree: the container's PID 1 (tini/sleep) runs as root, so this is safe and
+        catches every descendant even if the marked driver already exited and
+        orphaned them."""
+        for args in (
+            ["pkill", "-KILL", "-f", marker],  # targeted: the marked driver
+            ["pkill", "-KILL", "-u", user],  # sweep: any descendant it spawned/orphaned
+        ):
+            try:
+                subprocess.run(
+                    ["docker", "exec", "--user", user, self.container, *args],
+                    capture_output=True,
+                    timeout=10,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
 
     def popen(
         self,
