@@ -304,6 +304,33 @@ class ReplayIntegrationTest(unittest.TestCase):
         )
         self.assertTrue(any(o.reject_reason == "margin_secs_not_shortable" for o in replay.broker.orders))
 
+    def test_dynamic_shortability_gates_on_fill_day_set(self):
+        # The short fills same-day at 20220104; the broker must consult that day's
+        # per-day margin_secs set, independent of the frozen decision-day set (W7).
+        def go_short(state):
+            if state["cur_time"] != "09:25" or _held(state, "000002.SZ"):
+                return []
+            return [{"action": "short", "ts_code": "000002.SZ", "weight": 0.1}]
+
+        # Frozen set empty, but the fill day's per-day set allows the short.
+        allowed = run_main_ctx_replay(
+            REPLAY, BrokerProfile(),
+            shortable_codes=frozenset(),
+            shortable_by_date={"20220104": frozenset({"000002.SZ"})},
+            main_policy=FakeMainPolicy(go_short),
+        )
+        self.assertFalse(allowed.broker.reject_counts.get("margin_secs_not_shortable"))
+        self.assertTrue(any(o.action == "short" and o.status == "filled" for o in allowed.broker.orders))
+
+        # The fill day's set overrides a permissive frozen set: empty that day -> rejected.
+        denied = run_main_ctx_replay(
+            REPLAY, BrokerProfile(),
+            shortable_codes=frozenset({"000002.SZ"}),
+            shortable_by_date={"20220104": frozenset()},
+            main_policy=FakeMainPolicy(go_short),
+        )
+        self.assertTrue(denied.broker.reject_counts.get("margin_secs_not_shortable"))
+
 
 class CandidateIsolationTest(unittest.TestCase):
     def test_snapshot_slots_are_hidden_and_restored_during_candidate_run(self):

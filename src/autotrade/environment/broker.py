@@ -306,11 +306,19 @@ class SimBroker:
         market: MarketData,
         *,
         shortable_codes: frozenset[str],
+        shortable_by_date: dict[str, frozenset[str]] | None = None,
         initial_cash: float | None = None,
     ) -> None:
         self.profile = profile
         self.market = market
+        # Frozen decision-day shortable set (the agent's snapshot view), used as the
+        # fallback when a fill day is absent from the per-day map below.
         self.shortable_codes = shortable_codes
+        # Per-fill-day margin_secs sets from the replay slot. The short-inventory gate
+        # consults the FILL day's real set (current_date advances to the fill day before
+        # the check), so the broker constraint reflects same-day inventory and stays
+        # independent of the agent's frozen, decision-day snapshot.
+        self.shortable_by_date = dict(shortable_by_date or {})
         self.cash = float(initial_cash if initial_cash is not None else profile.initial_cash)
         self.initial_equity = self.cash
         self.positions: dict[str, Position] = {}
@@ -822,7 +830,8 @@ class SimBroker:
     def _short_inventory_reject(self, ts_code: str) -> str | None:
         mode = self.profile.short_inventory_mode
         if mode == "proxy_margin_secs":
-            return None if ts_code in self.shortable_codes else "margin_secs_not_shortable"
+            shortable = self.shortable_by_date.get(self.current_date, self.shortable_codes)
+            return None if ts_code in shortable else "margin_secs_not_shortable"
         if mode == "broker_inventory":
             # Real CITIC inventory/fee files are not wired yet; without them the
             # mode must reject rather than silently assume borrow availability.
@@ -895,6 +904,28 @@ def load_shortable_codes(snapshot_dir: str | Path, decision_date: str) -> frozen
     if "trade_date" in rows.columns:
         rows = rows[rows["trade_date"].astype(str) == str(decision_date)]
     return frozenset(rows["ts_code"].astype(str)) if "ts_code" in rows.columns else frozenset()
+
+
+def load_shortable_by_date(replay_dir: str | Path) -> dict[str, frozenset[str]]:
+    """Per-fill-day margin_secs membership from a replay slot's events domain.
+
+    Maps each replay trade_date to that day's complete shortable set so the broker
+    can gate short fills on the real same-day inventory (proxy mode) rather than the
+    agent's frozen decision-day snapshot. Empty when the slot carries no events; the
+    broker then falls back to the frozen ``shortable_codes`` for every fill day."""
+    events_path = Path(replay_dir) / "events.parquet"
+    if not events_path.exists():
+        return {}
+    events = pd.read_parquet(events_path)
+    if events.empty or "dataset" not in events.columns:
+        return {}
+    rows = events[events["dataset"] == "margin_secs"]
+    if rows.empty or "trade_date" not in rows.columns or "ts_code" not in rows.columns:
+        return {}
+    return {
+        str(date): frozenset(group["ts_code"].astype(str))
+        for date, group in rows.groupby(rows["trade_date"].astype(str))
+    }
 
 
 def _bar_for_code(minute_group: pd.DataFrame, ts_code: str) -> pd.Series | None:
