@@ -37,7 +37,13 @@ def main(ctx):
 '''
 
 # (trade_date, open, close) for the single fixture stock across all periods.
+# The two leading days predate every validation period so the prior-day research
+# snapshot always has an anchor: 20210930 anchors the 2021Q4 quarter validation
+# (2021Q4 opens 20211008 after the National Day holiday) and 20201231 anchors the
+# full-year 2021 validation. Neither enters a replay slot (no test period covers them).
 PRICE_ROWS = [
+    ("20201231", 9.5, 9.8),
+    ("20210930", 9.8, 10.0),
     ("20211008", 10.0, 10.5),
     ("20211011", 10.6, 11.0),
     ("20211230", 11.1, 12.0),

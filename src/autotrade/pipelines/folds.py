@@ -1,9 +1,14 @@
 """Rolling Fold schedules (docs/pipeline_design.md chapter 2).
 
 A fold is named after its test period. The previous period at the configured
-cadence is its validation period, the months before validation are the input
-window, and decision times are the first trading day of each period at 09:25
-Beijing time (pre-open, after the pre-open data gates).
+cadence is its validation period, and the months before validation are the input
+window. Each segment's decision-input snapshot is anchored at 23:59:59 of the last
+trading day BEFORE the period begins: the agent's frozen research baseline then
+holds everything published through that prior day's close but nothing from the
+period's first day, whose intraday/pre-open data rolls in only later as the replay
+sim-clock crosses each row's available_at (the per-tick Timeview). The intraday
+auction decision ticks (09:15/09:25/14:57) are a separate replay concern defined in
+environment_design.md, not this schedule.
 """
 
 from __future__ import annotations
@@ -18,7 +23,9 @@ import pandas as pd
 from autotrade.environment.data.contracts import CN_TZ
 
 QUARTER_PATTERN = re.compile(r"^(\d{4})Q([1-4])$")
-DECISION_TIME = time(9, 25)
+# Research-snapshot anchor: end of the prior trading day (close of business),
+# not an intraday moment. The decision-input view is frozen as of this time.
+RESEARCH_ANCHOR_TIME = time(23, 59, 59)
 DEFAULT_WINDOW_MONTHS = 21
 PERIOD_UNITS = ("day", "week", "month", "quarter", "year")
 
@@ -203,10 +210,27 @@ def _previous_label_for_schedule(label: str, trading_days: list[str], period: st
 
 
 def _decision_time(start: str, end: str, trading_days: list[str]) -> datetime:
-    day = first_trading_day(start, end, trading_days)
-    return datetime.strptime(day, "%Y%m%d").replace(
-        hour=DECISION_TIME.hour, minute=DECISION_TIME.minute, tzinfo=CN_TZ
+    """Research-snapshot anchor: 23:59:59 of the trading day before the period.
+
+    Freezing the decision-input snapshot at the close of the prior trading day keeps
+    the agent's research baseline strictly pre-period; the period's own data becomes
+    visible only as the replay sim-clock crosses each row's available_at.
+    """
+    first_day = first_trading_day(start, end, trading_days)
+    anchor_day = _prior_trading_day(first_day, trading_days)
+    return datetime.strptime(anchor_day, "%Y%m%d").replace(
+        hour=RESEARCH_ANCHOR_TIME.hour,
+        minute=RESEARCH_ANCHOR_TIME.minute,
+        second=RESEARCH_ANCHOR_TIME.second,
+        tzinfo=CN_TZ,
     )
+
+
+def _prior_trading_day(day: str, trading_days: list[str]) -> str:
+    earlier = [d for d in trading_days if d < day]
+    if not earlier:
+        raise ValueError(f"no trading day before {day}; cannot anchor the research snapshot")
+    return max(earlier)
 
 
 def _normalize_period(period: str) -> str:

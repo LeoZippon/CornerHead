@@ -85,8 +85,9 @@ class FoldScheduleTest(unittest.TestCase):
         self.assertEqual(first.input_window_end, "20210930")
         self.assertEqual((first.validation_start, first.validation_end), ("20211001", "20211231"))
         self.assertEqual((first.test_start, first.test_end), ("20220101", "20220331"))
-        self.assertEqual(first.valid_decision_time.strftime("%Y%m%d %H:%M"), "20211008 09:25")
-        self.assertEqual(first.test_decision_time.strftime("%Y%m%d %H:%M"), "20220104 09:25")
+        # Research-snapshot anchor = close (23:59:59) of the prior trading day, not 09:25.
+        self.assertEqual(first.valid_decision_time.strftime("%Y%m%d %H:%M:%S"), "20210930 23:59:59")
+        self.assertEqual(first.test_decision_time.strftime("%Y%m%d %H:%M:%S"), "20211230 23:59:59")
         self.assertEqual(folds[1].validation_start, "20220101")  # previous test quarter rolls forward
 
     def test_heldout_must_not_overlap_development(self):
@@ -108,11 +109,12 @@ class FoldScheduleTest(unittest.TestCase):
         self.assertEqual((week.validation_start, week.validation_end), ("20211228", "20220103"))
         self.assertEqual((week.test_start, week.test_end), ("20220104", "20220110"))
 
-        day = build_fold_schedule("20220104", "20220104", ["20220103", "20220104"], period="day")[0]
+        # Day-period lists carry an extra leading day so the prior-day anchor resolves.
+        day = build_fold_schedule("20220104", "20220104", ["20211231", "20220103", "20220104"], period="day")[0]
         self.assertEqual((day.validation_start, day.validation_end), ("20220103", "20220103"))
         self.assertEqual((day.test_start, day.test_end), ("20220104", "20220104"))
 
-        day_after_weekend = build_fold_schedule("20220110", "20220110", ["20220107", "20220110"], period="day")[0]
+        day_after_weekend = build_fold_schedule("20220110", "20220110", ["20220106", "20220107", "20220110"], period="day")[0]
         self.assertEqual((day_after_weekend.validation_start, day_after_weekend.validation_end), ("20220107", "20220107"))
         self.assertEqual((day_after_weekend.test_start, day_after_weekend.test_end), ("20220110", "20220110"))
 
@@ -351,7 +353,7 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual(meta_manifest["data_summary_ref"], "/mnt/artifacts/data_summary.json")
             self.assertTrue(meta_manifest["meta_learning_visible_fold"]["fold_id"].startswith("fold_ref_"))
             self.assertNotEqual(meta_manifest["meta_learning_visible_fold"]["fold_id"], "fold_2022Q1")
-            self.assertTrue(meta_manifest["valid_decision_time"].startswith("2021-10-08T09:25"))
+            self.assertTrue(meta_manifest["valid_decision_time"].startswith("2021-09-30T23:59:59"))
             self.assertEqual(meta_manifest["snapshots"]["train_snapshot"]["alias_of"], "valid_decision_input")
             self.assertEqual(
                 meta_manifest["snapshots"]["train_snapshot"]["snapshot_hash"],
@@ -370,7 +372,7 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertIn("manifest.json", captured_meta["valid_files"])
             self.assertEqual(captured_meta["test_files"], [])
             self.assertEqual(captured_meta["snapshot_manifest"]["kind"], "decision_input")
-            self.assertEqual(captured_meta["snapshot_manifest"]["decision_date"], "20211008")
+            self.assertEqual(captured_meta["snapshot_manifest"]["decision_date"], "20210930")
             self.assertEqual(captured_meta["valid_manifest"]["kind"], "replay_slot")
             self.assertEqual(captured_meta["valid_manifest"]["label"], "valid")
             self.assertEqual(captured_meta["valid_manifest"]["period_start"], "20211001")
