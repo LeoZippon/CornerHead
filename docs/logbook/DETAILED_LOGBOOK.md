@@ -15597,3 +15597,12 @@ Branch `chore/repo-hygiene` (stacked on Phase B). Docs/hygiene only — no code,
 - R15: `AGENTS.md`/`CLAUDE.md` were ~8.5KB near-duplicates that had begun to drift; replaced the AGENTS.md body with a pointer to CLAUDE.md as the single source of truth.
 
 Validation: no code change; `git diff --check` clean.
+
+2026-06-30 Phase D — living-doc sync (R12, R13)
+
+Branch `docs/post-audit-sync` (stacked on Phase E). Docs only — no code/tests/GPU. Implemented via a sub-agent, diff-reviewed by the parent.
+
+- R12 environment_design.md: §6.1 (steps 5/7/8) and §7.2 rewritten from "逐分钟/per-minute" to the per-tick 24h grid (intraday 1-min ticks; off-session ticks at offsession_tick_minutes default 15, research/state only, no orders); §7.2 auction paragraph adds the 14:57 close-auction decision tick filling at the 15:00 bar CLOSE (open-auction→open, close-auction→close, no slippage, price_label="auction") — matching the R6 code change; budget table gains offsession_tick_minutes (15), auction_enabled (True), auction_close_time ("14:57"), defaults verified against pipelines/config.py; §7.2 degradation paragraph + TOC/heading anchor updated. QMT_documentation.md:73's 14:57 reference is now grounded by the env doc (QMT left unchanged). "分钟回放是默认口径" (~§536) is legitimate (real-minute-bar vs daily-fallback) and was kept.
+- R13: env §7.2 "视图开关由 rolling_asof_enabled 更名为 timeview_enabled（保留弃用别名）" → "视图开关是 timeview_enabled（默认开）"; pipeline_design.md anchor paragraph dropped both "旧 09:25" comparisons for a forward statement; pipeline_design.md §4.2 "逐分钟成功执行" → "逐 tick 成功执行". fundamental_events 18:00 KEPT (verified real: features/fundamental_events.py:361 + contracts.py:40 set available_at=ann_date 18:00; the ~03:50 cn_nightly_pit_event_build node in data_documentation.md §5.2/§5.3 is the separate landing layer) and wording clarified to reference data_documentation.md §5.2 for the column basis.
+
+Validation: docs only; `git diff --check` clean.

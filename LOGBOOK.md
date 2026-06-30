@@ -835,3 +835,8 @@
 
 - Branch `chore/repo-hygiene` (on Phase B). R14: deleted the reappeared untracked leftovers `scripts/data/{download,audit}_tushare_p0.py` (duplicated the official src-backed entrypoints), `scripts/data/test_write_marker.txt`, and `.mutagenignore.suggested`; added `.gitignore` guards so they can't be committed if regenerated. R15: replaced `AGENTS.md` body with a pointer to `CLAUDE.md` (single source of truth; the two ~8.5KB copies had begun to drift).
 - No code change; `git diff --check` clean.
+
+2026-06-30 Phase D — living-doc sync (R12, R13)
+
+- Branch `docs/post-audit-sync` (on Phase E). R12: `environment_design.md` §6.1/§7.2 now describe the per-tick 24h grid (was "逐分钟"), document the 14:57 close-auction tick (fills at the 15:00 bar close, no slippage), and add `offsession_tick_minutes`/`auction_enabled`/`auction_close_time` to the budget table (defaults verified vs config.py); the QMT 14:57 reference is now grounded. R13: de-chronicled the `rolling_asof_enabled→timeview_enabled` rename note, removed the "旧 09:25" anchor comparison in `pipeline_design.md`, fixed a leftover "逐分钟" claim in §4.2, and clarified `fundamental_events.available_at`=公告日18:00 is the row-level rule (distinct from the ~03:50 PIT landing node).
+- Docs only; `git diff --check` clean.

@@ -112,7 +112,7 @@ Pipeline 通过 `fold_period` 控制每个 Fold 的决策/测试周期，支持 
 | 测试决策时点 | 测试区间前最后一个交易日 23:59:59 北京时间（2022Q1 首个交易日的前一交易日收盘） |
 | 测试可见数据 | Environment 配置窗口内、截至测试决策时点已可见的数据 |
 
-每个区间的研究/决策输入快照锚定在区间开始前最后一个交易日的 23:59:59（前一交易日收盘），而不是区间首个交易日 09:25。冻结的 `ctx.snapshot_dir` 因此只包含截至前一交易日收盘已发布的数据，不含区间首日的任何数据；区间自身的数据只在回放仿真时钟越过每行刷新节点时按逐 tick Timeview 滚动进入（见 `environment_design.md` §7.2）。该前一交易日收盘锚点消除了旧 09:25 锚点带来的区间首日盘前泄漏，并同样适用于 valid、test 和 held-out 决策输入截止时点。下游快照构建不变：该锚点仍是传入 `build_decision_snapshot` 的决策输入截止时点。
+每个区间的研究/决策输入快照锚定在区间开始前最后一个交易日的 23:59:59（前一交易日收盘）。冻结的 `ctx.snapshot_dir` 因此只包含截至前一交易日收盘已发布的数据，不含区间首日的任何数据；区间自身的数据只在回放仿真时钟越过每行刷新节点时按逐 tick Timeview 滚动进入（见 `environment_design.md` §7.2）。该前一交易日收盘锚点统一适用于 valid、test 和 held-out 决策输入截止时点，确保区间首日盘前数据不进入冻结快照。下游快照构建不变：该锚点仍是传入 `build_decision_snapshot` 的决策输入截止时点。
 
 下一个 Fold 向后移动一个配置周期：
 
@@ -245,7 +245,7 @@ Pipeline 不为 Step 单独维护账本文件。Shell、LLM、Broker、NL 和回
 
 完整验证定义：
 
-- `output/main.py` 的 `main(ctx)` 在整个回放区间逐分钟成功执行。
+- `output/main.py` 的 `main(ctx)` 在整个回放区间逐 tick 成功执行。
 - `main` 发出的 Broker 原语通过 universe、方向、股数/权重和可交易性校验。
 - Broker 完成日线或分钟线回放。
 - `detailed_return.json`、`orders.parquet` 和必要 manifest 摘要写入。
