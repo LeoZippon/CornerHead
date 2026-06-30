@@ -289,5 +289,57 @@ class NLBudgetTest(unittest.TestCase):
             self.assertEqual(second["status"], "error")
 
 
+class TextRetrieverRollingTest(unittest.TestCase):
+    """ctx.nl() text rolls on the cron refresh nodes: frozen corpus always visible,
+    replay-period text only once its dataset's node has completed by as_of."""
+
+    def _retriever(self, tmp: Path) -> TextRetriever:
+        snap, replay = tmp / "snap", tmp / "replay"
+        (snap / "text_library").mkdir(parents=True)
+        (replay / "text_library").mkdir(parents=True)
+        cols = ["text_id", "dataset", "ts_codes", "title", "available_at", "source_hash", "library_file"]
+        pd.DataFrame(
+            [["f1", "anns_d", "000001.SZ", "Frozen announcement", "2021-10-01T18:00:00+08:00", "h", "anns_d.parquet"]],
+            columns=cols,
+        ).to_parquet(snap / "text_index.parquet", index=False)
+        pd.DataFrame({"text_id": ["f1"], "body": ["frozen body"]}).to_parquet(snap / "text_library" / "anns_d.parquet", index=False)
+        pd.DataFrame(
+            [["r1", "anns_d", "000001.SZ", "Replay announcement", "2022-01-04T18:00:00+08:00", "h", "anns_d.parquet"]],
+            columns=cols,
+        ).to_parquet(replay / "text_index.parquet", index=False)
+        pd.DataFrame({"text_id": ["r1"], "body": ["replay body"]}).to_parquet(replay / "text_library" / "anns_d.parquet", index=False)
+        return TextRetriever(
+            snap / "text_index.parquet", snap / "text_library",
+            replay_index_path=replay / "text_index.parquet", replay_library_dir=replay / "text_library",
+        )
+
+    def _ids(self, retriever: TextRetriever) -> set:
+        return {hit["text_id"] for hit in retriever.search("announcement", ts_code="000001.SZ", max_results=10)}
+
+    def test_as_of_none_is_frozen_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            retriever = self._retriever(Path(tmp))
+            retriever.as_of = None
+            self.assertEqual(self._ids(retriever), {"f1"})
+
+    def test_replay_text_hidden_before_its_evening_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            retriever = self._retriever(Path(tmp))
+            # 20220104 noon: the announcement (available 18:00) and its evening node
+            # (completes ~02:05 the next day) have not landed.
+            retriever.as_of = datetime(2022, 1, 4, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            self.assertEqual(self._ids(retriever), {"f1"})
+
+    def test_replay_text_visible_after_evening_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            retriever = self._retriever(Path(tmp))
+            retriever.as_of = datetime(2022, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            self.assertEqual(self._ids(retriever), {"f1", "r1"})
+
+
 if __name__ == "__main__":
     unittest.main()

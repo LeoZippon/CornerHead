@@ -693,6 +693,8 @@ def run_main_ctx_replay(
                         broker.match_bar(trade_date, tick.minute_key, tick.group, granularity)
                     when = sim_datetime(trade_date, tick.minute_key)
                     asof_dir, asof_version = timeview.refresh(when) if timeview is not None else (None, None)
+                    if timeview is not None and main_policy.nl_service is not None:
+                        main_policy.nl_service.current_when = when  # roll ctx.nl() text on the same clock
                     state = _market_state(
                         broker,
                         trade_date=trade_date,

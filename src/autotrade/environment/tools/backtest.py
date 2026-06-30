@@ -207,6 +207,7 @@ class BacktestTool:
         requests_host.write_text("", encoding="utf-8")
         responses_host.write_text("", encoding="utf-8")
 
+        timeview_enabled = bool(manifest.get("timeview_enabled", manifest.get("rolling_asof_enabled", True)))
         nl_service = _StrategyNLService(
             proxy=self.ctx.effective_nl_proxy,
             snapshot_dir=snapshot_dir,
@@ -216,6 +217,8 @@ class BacktestTool:
             # for the surrounding compute before the per-decision wall cap kills the tick.
             per_call_timeout_seconds=decision_cap * 0.8,
             max_calls=_nl_call_budget(manifest, replay_daily),
+            # When the Timeview is on, ctx.nl() text rolls on the same nodes as the view.
+            replay_dir=replay_dir if timeview_enabled else None,
         )
         try:
             profile = BrokerProfile(**_profile_kwargs(dict(manifest.require("broker_profile"))))
@@ -249,9 +252,7 @@ class BacktestTool:
                     execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
                     offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 0) or 0),
                     max_seconds_per_trading_day=per_day_cap,
-                    timeview_enabled=bool(
-                        manifest.get("timeview_enabled", manifest.get("rolling_asof_enabled", True))
-                    ),
+                    timeview_enabled=timeview_enabled,
                     snapshot_dir=snapshot_dir,
                     replay_dir=replay_dir,
                     on_progress=_on_progress,
@@ -457,6 +458,7 @@ class _StrategyNLService:
         failure_policy: str,
         per_call_timeout_seconds: float,
         max_calls: int | None = None,
+        replay_dir: Path | None = None,
     ) -> None:
         self.proxy = proxy
         self.snapshot_dir = snapshot_dir
@@ -465,8 +467,16 @@ class _StrategyNLService:
         self.per_call_timeout_seconds = per_call_timeout_seconds
         self.max_calls = max_calls
         self.calls = 0
+        # Set per tick by the replay engine; rolls ctx.nl() text on the same nodes as
+        # the Timeview. None (Timeview off / no replay) keeps the frozen PIT corpus.
+        self.current_when = None
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.retriever = TextRetriever(snapshot_dir / "text_index.parquet", snapshot_dir / "text_library")
+        self.retriever = TextRetriever(
+            snapshot_dir / "text_index.parquet",
+            snapshot_dir / "text_library",
+            replay_index_path=(replay_dir / "text_index.parquet") if replay_dir is not None else None,
+            replay_library_dir=(replay_dir / "text_library") if replay_dir is not None else None,
+        )
 
     def run(
         self,
@@ -477,6 +487,9 @@ class _StrategyNLService:
         request: dict[str, object],
     ) -> dict[str, object]:
         self.calls += 1
+        # Bind the retriever to the requesting tick's sim clock so announcements/news
+        # become visible to ctx.nl() only once their refresh node has completed.
+        self.retriever.as_of = self.current_when
         if self.max_calls is not None and self.calls > self.max_calls:
             # Hard backstop on API spend; strategy code sees an audited error and
             # degrades (the prompt asks it to keep NL frequency low to begin with).
