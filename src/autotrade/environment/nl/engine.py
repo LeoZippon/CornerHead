@@ -19,7 +19,7 @@ from pathlib import Path
 import pandas as pd
 
 from autotrade.environment.data.contracts import text_dataset_visible_cutoff
-from autotrade.environment.llm.proxy import LLMProxy, LLMProxyError, ProviderResponse
+from autotrade.environment.llm.proxy import LLMProxy, LLMProxyError, ProviderResponse, assistant_tool_turn
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.snapshot import to_cn_timestamps
 
@@ -408,9 +408,7 @@ class NLSubAgentEngine:
                     task.content = response.content
                     task.state = "completed"
                     return task
-                messages.append(
-                    {"role": "assistant", "content": response.content or "", "tool_calls": list(response.tool_calls)}
-                )
+                messages.append(assistant_tool_turn(response))
                 for tool_name, tool_call_id, arguments, call_error in calls:
                     new_evidence = []
                     if call_error:

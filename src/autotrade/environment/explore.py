@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from autotrade.environment.llm.proxy import LLMProxy, LLMProxyError, ProviderResponse
+from autotrade.environment.llm.proxy import LLMProxy, LLMProxyError, ProviderResponse, assistant_tool_turn
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.tools.base import ToolError, ToolSchemaError
 
@@ -104,9 +104,7 @@ class ExploreSubAgentEngine:
                 if not calls:
                     digest = response.content.strip()
                     break
-                messages.append(
-                    {"role": "assistant", "content": response.content or "", "tool_calls": list(response.tool_calls)}
-                )
+                messages.append(assistant_tool_turn(response))
                 for tool_call_id, _name, observation, attempted_tool in self._dispatch_calls(calls):
                     if attempted_tool:
                         tool_calls_made += 1

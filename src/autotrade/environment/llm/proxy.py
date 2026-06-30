@@ -124,6 +124,11 @@ class DeepSeekProxy(LLMProxy):
         if timeout_seconds <= 0:
             raise LLMProxyError("provider calls require a positive timeout")
         chat_messages = [ChatMessage(role=str(m["role"]), content=str(m["content"])) for m in messages]
+        # A per-call timeout makes a throwaway client carrying that timeout. This is
+        # cheap (the client only stores a validated config; the transport opens a fresh
+        # connection per POST regardless) and keeps the conversation log's recorded
+        # timeout accurate for this request, so it is preferred over threading the
+        # timeout separately into urlopen.
         if abs(self.client.config.timeout_seconds - timeout_seconds) > 1e-9:
             config = DeepSeekConfig(
                 **{**_config_kwargs(self.client.config), "timeout_seconds": timeout_seconds}
@@ -240,6 +245,13 @@ class ScriptedLLM(LLMProxy):
         if isinstance(item, str):
             return ProviderResponse(content=item, provider=self.provider, model=self.model)
         return item
+
+
+def assistant_tool_turn(response: ProviderResponse) -> dict[str, object]:
+    """The OpenAI-shaped assistant turn that carries a native tool-call response back
+    into the message history (shared by the NL and Explore tool loops). A tool-call
+    turn legitimately has empty ``content``."""
+    return {"role": "assistant", "content": response.content or "", "tool_calls": list(response.tool_calls)}
 
 
 def tool_call(action: str, *, call_id: str | None = None, **arguments: object) -> dict[str, object]:

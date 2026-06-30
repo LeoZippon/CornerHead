@@ -1,3 +1,10 @@
+2026-06-30 R17 NL 性能（refactor/nl-perf）
+
+- 接续 check.md 剩余任务（R16–R19/RA1–RA5），子代理先审后改。R17.1（真问题）：`_StrategyNLService` 每次 `ctx.nl()` 都经 `build_company_contexts` 全量重读 `universe.parquet`+`fundamentals.parquet`；快照回测期冻结，故新增 `CompanyContextStore`（懒加载一次 + 按 ts_code 记忆化），服务持一份、`run()` 传 `{ts_code: store.context(ts_code)}`，行为不变、两文件每回测至多读一次。
+- R17.2（前提证伪、保留并加注）：`DeepSeekClient` 重建近乎零成本（仅存校验过的 config，urllib 每次 POST 本就新建连接），且按 timeout 重建能让会话日志记录的 `timeout_seconds` 准确；改为只把 timeout 透传 urlopen 反而丢日志保真度，故保留 per-timeout 重建（加注释）。连接池化是另一非等价改动，未做。
+- R17.3（部分属实、最小去重）：NL/Explore 两个原生工具循环仅“形状”相同，工具集/解析/派发/截止/错误收尾各异，强抽一个循环要约 6 个回调，属过度工程（违背原则#3），故仅抽出字节级相同的 assistant 轮构造为 `llm.proxy.assistant_tool_turn`，两引擎共用。
+- 验证：全套 375 OK（+1 记忆化断言：`pd.read_parquet` 跨重复/异码调用恰好 2 次、同码返回缓存对象）；`git diff --check` clean；内部性能、无契约变更、无 docs 改动。
+
 2026-06-30 24h tick-replay W2–W9 完成（feat/24h-tick-replay）
 
 - 接续 check.md（W1/W6/W7 已提交），完成剩余 W2–W9，单测 335→363。每步绿灯单独提交。

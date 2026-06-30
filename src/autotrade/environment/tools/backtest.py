@@ -26,7 +26,7 @@ from autotrade.environment.artifacts import (
 from autotrade.environment.backtest_engine import BacktestError, compute_return_stats
 from autotrade.environment.broker import BrokerProfile, load_shortable_by_date, load_shortable_codes
 from autotrade.environment.main_ctx_engine import MainPolicyRunner, run_main_ctx_replay
-from autotrade.environment.nl.context import build_company_contexts
+from autotrade.environment.nl.context import CompanyContextStore
 from autotrade.environment.nl.engine import NLSubAgentConfig, NLSubAgentEngine, TextRetriever
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.snapshot import load_snapshot_manifest
@@ -492,6 +492,10 @@ class _StrategyNLService:
         # Set per tick by the replay engine; rolls ctx.nl() text on the same nodes as
         # the Timeview. None (Timeview off / no replay) keeps the frozen PIT corpus.
         self.current_when = None
+        # Per-ts_code company context is constant for the frozen snapshot, so load the
+        # universe/fundamentals parquet once and memoize rather than re-reading both on
+        # every nl() call.
+        self.company_context_store = CompanyContextStore(snapshot_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.retriever = TextRetriever(
             snapshot_dir / "text_index.parquet",
@@ -529,7 +533,7 @@ class _StrategyNLService:
         engine = NLSubAgentEngine(
             self.proxy,
             self.retriever,
-            company_contexts=build_company_contexts(self.snapshot_dir, [ts_code]),
+            company_contexts={ts_code: self.company_context_store.context(ts_code)},
         )
         config = NLSubAgentConfig(
             per_call_timeout_seconds=self.per_call_timeout_seconds,

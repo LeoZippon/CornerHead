@@ -289,6 +289,50 @@ class NLBudgetTest(unittest.TestCase):
             self.assertEqual(second["status"], "error")
 
 
+class CompanyContextStoreTest(unittest.TestCase):
+    """The frozen snapshot is immutable for a backtest, so the company-context
+    sources are read once and each ts_code's context is memoized (R17)."""
+
+    def _make_snapshot(self, tmp: Path) -> Path:
+        snap = tmp / "snap"
+        snap.mkdir(parents=True)
+        pd.DataFrame(
+            {"ts_code": ["000001.SZ"], "name": ["平安银行"], "exchange": ["SZSE"], "l1_name": ["银行"]}
+        ).to_parquet(snap / "universe.parquet", index=False)
+        pd.DataFrame(
+            {
+                "dataset": ["fina_mainbz_vip"],
+                "ts_code": ["000001.SZ"],
+                "bz_item": ["零售金融"],
+                "end_date": ["20211231"],
+                "available_at": ["2022-01-04T18:00:00+08:00"],
+            }
+        ).to_parquet(snap / "fundamentals.parquet", index=False)
+        return snap
+
+    def test_sources_read_once_and_contexts_memoized(self):
+        from unittest import mock
+
+        from autotrade.environment.nl.context import CompanyContextStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snap = self._make_snapshot(Path(tmp))
+            with mock.patch(
+                "autotrade.environment.nl.context.pd.read_parquet", wraps=pd.read_parquet
+            ) as spy:
+                store = CompanyContextStore(snap)
+                self.assertEqual(spy.call_count, 0)  # lazy: nothing read at construction
+                first = store.context("000001.SZ")
+                again = store.context("000001.SZ")
+                other = store.context("999999.SZ")
+            # universe.parquet + fundamentals.parquet read exactly once across all calls.
+            self.assertEqual(spy.call_count, 2)
+            self.assertIs(first, again)  # memoized object, not rebuilt
+            self.assertEqual(first["name"], "平安银行")
+            self.assertEqual(first["main_business"], ["零售金融"])
+            self.assertEqual(other["context"], "insufficient_company_information")
+
+
 class TextRetrieverRollingTest(unittest.TestCase):
     """ctx.nl() text rolls on the cron refresh nodes: frozen corpus always visible,
     replay-period text only once its dataset's node has completed by as_of."""
