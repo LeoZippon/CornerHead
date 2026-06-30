@@ -88,6 +88,8 @@ class ExperimentConfig:
     last_test_quarter: InitVar[str | None] = None
     heldout_first_quarter: InitVar[str | None] = None
     heldout_last_quarter: InitVar[str | None] = None
+    # Deprecated alias for timeview_enabled, kept so older callers/manifests still work.
+    rolling_asof_enabled: InitVar[bool | None] = None
     fold_period: str = "quarter"
     epochs: int = 1
     window_months: int = 21
@@ -142,10 +144,11 @@ class ExperimentConfig:
     # never binds a legitimate run, so acceptance stays effectively deterministic.
     backtest_final_eval_max_seconds_per_decision: float = 900.0
     backtest_final_eval_max_seconds_per_trading_day: float = 3000.0
-    # Rolling daily as-of view: each replay day, ctx.asof_dir exposes the
-    # daily history extended with replay-period bars visible by that day's pre-open
-    # (trade_date < D); other domains stay on the frozen ctx.snapshot_dir.
-    rolling_asof_enabled: bool = True
+    # Per-tick Timeview: ctx.asof_dir exposes every data domain (daily, events,
+    # macro, fundamentals, intraday minute history) rolled in on its real refresh
+    # node (REFRESH_NODES), so a tick sees only data the landing cron job has
+    # already written. Off by replacing with the frozen snapshot view.
+    timeview_enabled: bool = True
     # System NL call quota, default-on. The effective per-backtest cap is
     # nl_max_calls_per_decision_day * decision_days (a daily-average budget). An
     # optional nl_max_calls_per_backtest tightens it further (the min wins).
@@ -191,7 +194,10 @@ class ExperimentConfig:
         last_test_quarter: str | None,
         heldout_first_quarter: str | None,
         heldout_last_quarter: str | None,
+        rolling_asof_enabled: bool | None,
     ) -> None:
+        if rolling_asof_enabled is not None:
+            object.__setattr__(self, "timeview_enabled", bool(rolling_asof_enabled))
         first_test_period = self.first_test_period or first_test_quarter
         last_test_period = self.last_test_period or last_test_quarter
         heldout_first_period = self.heldout_first_period or heldout_first_quarter

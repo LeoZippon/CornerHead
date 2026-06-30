@@ -334,6 +334,7 @@ def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
             "auction_decision_time",
             "auction_close_time",
             "offsession_tick_minutes",
+            "timeview_enabled",
             "rolling_asof_enabled",
             "nl_max_calls_per_decision_day",
             "nl_max_calls_per_backtest",

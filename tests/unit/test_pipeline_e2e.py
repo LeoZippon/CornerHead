@@ -451,7 +451,8 @@ class PipelineEndToEndTest(unittest.TestCase):
                 captured["backtest_final_eval_max_seconds_per_trading_day"],
                 config.backtest_final_eval_max_seconds_per_trading_day,
             )
-            self.assertIs(captured["rolling_asof_enabled"], False)
+            self.assertIs(captured["timeview_enabled"], False)
+            self.assertIs(captured["rolling_asof_enabled"], False)  # back-compat alias
             self.assertEqual(captured["nl_max_calls_per_decision_day"], 7)
             self.assertEqual(captured["nl_max_calls_per_backtest"], 19)
             self.assertEqual(captured["auction_decision_time"], config.auction_decision_time)

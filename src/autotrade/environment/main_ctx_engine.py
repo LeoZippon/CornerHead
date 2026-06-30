@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import select
-import shutil
 import sys
 import threading
 import time
@@ -45,6 +44,7 @@ from autotrade.environment.backtest_engine import (
 from autotrade.environment.broker import _ACTION_TO_ORDER_TYPE, SimBroker, xtconstant
 from autotrade.environment.data.contracts import sim_datetime
 from autotrade.environment.runtime import sanitize_for_log
+from autotrade.environment.timeview import Timeview
 
 _ACTION_ALIASES = {"long": "buy", "sell_short": "short", "close_long": "sell", "close_short": "cover", "exit": "close"}
 _SUPPORTED_ACTIONS = {"buy", "sell", "short", "cover", "close"}
@@ -321,6 +321,7 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir):
         nl=_nl,
         snapshot_dir=snapshot_dir,
         asof_dir=(state.get("asof_dir") or snapshot_dir),
+        asof_version=str(state.get("asof_version") or ""),
         model_dir=model_dir,
         state_dir=state_dir,
     ), broker
@@ -595,8 +596,9 @@ def run_main_ctx_replay(
     execution_lag_bars: int = 2,
     offsession_tick_minutes: int = 0,
     max_seconds_per_trading_day: float | None = None,
-    asof_view_enabled: bool = False,
+    timeview_enabled: bool = False,
     snapshot_dir: Path | None = None,
+    replay_dir: Path | None = None,
     on_progress: "Callable[[str, int, int, float, int], None] | None" = None,
 ) -> ReplayResult:
     """Replay the region tick by tick, calling ``main(ctx)`` per tick.
@@ -635,6 +637,16 @@ def run_main_ctx_replay(
     granularity = "minute" if minute_market is not None else "daily"
     entry_date, exit_date = market.trade_dates[0], market.trade_dates[-1]
     broker = SimBroker(profile, market, shortable_codes=shortable_codes, shortable_by_date=shortable_by_date)
+    timeview = (
+        Timeview(
+            host_dir=main_policy.paths.workspace / ".asof",
+            executor=main_policy.executor,
+            snapshot_dir=snapshot_dir,
+            replay_frames=_timeview_replay_frames(replay_dir, replay_daily, replay_intraday_1min),
+        )
+        if timeview_enabled and snapshot_dir is not None and getattr(main_policy, "paths", None) is not None
+        else None
+    )
     equity_by_date: dict[str, float] = {}
     replay_start = time.monotonic()  # wall-clock start, reported as replay_wall_seconds
     substep_runtime: dict[str, dict[str, float]] = {}
@@ -653,11 +665,6 @@ def run_main_ctx_replay(
             on_progress(str(trade_date), day_idx, total_days, now - replay_start, len(broker.query_stock_orders()))
             last_progress_idx, last_progress_time = day_idx, now
         if trade_date != exit_date:
-            asof_dir = (
-                _resolve_asof_dir(main_policy, snapshot_dir, replay_daily, str(trade_date))
-                if asof_view_enabled
-                else None
-            )
             minute_seed = minute_market.rows_for_date(trade_date) if minute_market is not None else _empty_minute_rows()
             minute_rows = _minute_rows_with_daily_fallback(replay_daily, trade_date, minute_seed)
             if not minute_rows.empty:
@@ -684,14 +691,17 @@ def run_main_ctx_replay(
                                     action=_jsonable(action), reason="unsupported_or_missing_ts_code",
                                 )
                         broker.match_bar(trade_date, tick.minute_key, tick.group, granularity)
+                    when = sim_datetime(trade_date, tick.minute_key)
+                    asof_dir, asof_version = timeview.refresh(when) if timeview is not None else (None, None)
                     state = _market_state(
                         broker,
                         trade_date=trade_date,
                         minute_key=tick.minute_key,
                         minute_group=tick.group,
                         asof_dir=asof_dir,
+                        asof_version=asof_version,
                         pending=_pending_view(broker, incoming),
-                        cur_datetime=sim_datetime(trade_date, tick.minute_key).isoformat(),
+                        cur_datetime=when.isoformat(),
                     )
                     # A single decision (one main(ctx) tick) over the per-decision real
                     # wall cap is killed inside MainPolicyRunner.step. Here we accumulate
@@ -920,40 +930,23 @@ def _pending_view(broker: SimBroker, incoming: dict[int, list[tuple[dict[str, ob
     return grouped
 
 
-def _write_asof_daily(out_dir: Path, snapshot_dir: Path | None, replay_daily: pd.DataFrame, asof_date: str) -> Path:
-    """Rolling daily as-of view for replay day D.
-
-    The frozen snapshot's daily history plus replay-period daily bars with
-    ``trade_date < D`` (visible after the prior close; the same-day bar stays
-    hidden until close). Universe is copied from the snapshot. Other domains
-    (events/text/fundamentals/intraday) remain on the frozen ``ctx.snapshot_dir``.
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    frames: list[pd.DataFrame] = []
-    if snapshot_dir is not None and (snapshot_dir / "daily.parquet").exists():
-        frames.append(pd.read_parquet(snapshot_dir / "daily.parquet"))
-    if replay_daily is not None and not replay_daily.empty:
-        prior = replay_daily[replay_daily["trade_date"].astype(str) < str(asof_date)]
-        if not prior.empty:
-            frames.append(prior)
-    daily = pd.concat(frames, ignore_index=True, sort=False) if frames else replay_daily.iloc[0:0].copy()
-    if not daily.empty and {"trade_date", "ts_code"}.issubset(daily.columns):
-        daily = daily.drop_duplicates(["trade_date", "ts_code"], keep="last").reset_index(drop=True)
-    daily.to_parquet(out_dir / "daily.parquet", index=False)
-    if snapshot_dir is not None and (snapshot_dir / "universe.parquet").exists():
-        shutil.copyfile(snapshot_dir / "universe.parquet", out_dir / "universe.parquet")
-    return out_dir
-
-
-def _resolve_asof_dir(main_policy, snapshot_dir: Path | None, replay_daily: pd.DataFrame, trade_date: str) -> str | None:
-    """Build the day's rolling daily as-of view under workspace/.asof and return
-    its container path; the strategy reads it via ``ctx.asof_dir``."""
-    paths = getattr(main_policy, "paths", None)
-    executor = getattr(main_policy, "executor", None)
-    if paths is None or executor is None:
-        return None
-    host_dir = _write_asof_daily(paths.workspace / ".asof" / trade_date, snapshot_dir, replay_daily, trade_date)
-    return executor.map_path(host_dir)
+def _timeview_replay_frames(
+    replay_dir: Path | None,
+    replay_daily: pd.DataFrame,
+    replay_intraday_1min: pd.DataFrame | None,
+) -> dict[str, pd.DataFrame]:
+    """Replay-slot frames the Timeview rolls in. daily/intraday reuse the frames
+    already loaded for the replay; events/macro/fundamentals are read from the
+    slot directory when present (each carries a row-level ``available_at``)."""
+    frames: dict[str, pd.DataFrame] = {"daily": replay_daily}
+    if replay_intraday_1min is not None:
+        frames["intraday_1min"] = replay_intraday_1min
+    if replay_dir is not None:
+        for name in ("events", "macro", "fundamentals"):
+            path = Path(replay_dir) / f"{name}.parquet"
+            if path.exists():
+                frames[name] = pd.read_parquet(path)
+    return frames
 
 
 def _market_state(
@@ -963,6 +956,7 @@ def _market_state(
     minute_key: str,
     minute_group: pd.DataFrame,
     asof_dir: str | None = None,
+    asof_version: str | None = None,
     pending: dict[str, list[dict[str, object]]] | None = None,
     cur_datetime: str = "",
 ) -> dict[str, object]:
@@ -988,6 +982,7 @@ def _market_state(
         "initial_equity": float(broker.initial_equity),
         "bars": bars,
         "asof_dir": asof_dir,
+        "asof_version": asof_version,
         "pending": pending or {},
         "params": {},
     }

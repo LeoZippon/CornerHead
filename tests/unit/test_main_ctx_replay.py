@@ -92,8 +92,10 @@ def main(ctx):
         ctx.broker.buy(code, weight=0.2, reason="preopen_blind")
 '''
 
-# Asserts the rolling daily as-of view at 20220105 holds history + the prior
-# replay day but never today or the future; raises (failing the run) on a leak.
+# Asserts the per-tick Timeview daily view at 20220105 09:15 holds the frozen
+# snapshot history + the prior replay day (visible once that night's evening node
+# completed ~02:05) but never today or the future; raises (failing the run) on a
+# leak. The agent reads the domain as a directory of parquet parts.
 ASOF_GUARD_MAIN = '''
 from pathlib import Path
 
@@ -104,11 +106,12 @@ def main(ctx):
     code = "000001.SZ"
     if ctx.cur_date != "20220105" or ctx.cur_time != "09:15":
         return
-    dates = set(pd.read_parquet(Path(str(ctx.asof_dir)) / "daily.parquet")["trade_date"].astype(str))
-    assert "20211230" in dates, dates           # snapshot history
-    assert "20220104" in dates, dates           # prior replay day (visible after close)
+    dates = set(pd.read_parquet(Path(str(ctx.asof_dir)) / "daily")["trade_date"].astype(str))
+    assert "20211230" in dates, dates           # frozen snapshot history
+    assert "20220104" in dates, dates           # prior replay day (evening node done)
     assert "20220105" not in dates, "today leaked"
     assert "20220331" not in dates, "future leaked"
+    assert ctx.asof_version, "asof_version not exposed"
     if ctx.broker.position(code) == 0:
         ctx.broker.buy(code, weight=0.1, reason="asof_ok")
 '''
@@ -375,11 +378,11 @@ class MainCtxReplayTest(unittest.TestCase):
         replay = pd.DataFrame(
             [
                 {"trade_date": "20220104", "ts_code": TS_CODE, "open": 10.0, "close": 10.2,
-                 "up_limit": 12.0, "down_limit": 8.0, "is_suspended": False},
+                 "up_limit": 12.0, "down_limit": 8.0, "is_suspended": False, "available_at": "2022-01-04T17:30:00+08:00"},
                 {"trade_date": "20220105", "ts_code": TS_CODE, "open": 10.3, "close": 11.0,
-                 "up_limit": 12.0, "down_limit": 8.0, "is_suspended": False},
+                 "up_limit": 12.0, "down_limit": 8.0, "is_suspended": False, "available_at": "2022-01-05T17:30:00+08:00"},
                 {"trade_date": "20220331", "ts_code": TS_CODE, "open": 12.0, "close": 12.5,
-                 "up_limit": 14.0, "down_limit": 9.0, "is_suspended": False},
+                 "up_limit": 14.0, "down_limit": 9.0, "is_suspended": False, "available_at": "2022-03-31T17:30:00+08:00"},
             ]
         )
         with MainPolicyRunner(
@@ -390,7 +393,7 @@ class MainCtxReplayTest(unittest.TestCase):
             result = run_main_ctx_replay(
                 replay, BrokerProfile(initial_cash=1_000_000.0),
                 shortable_codes=frozenset(),
-                main_policy=policy, asof_view_enabled=True, snapshot_dir=snap,
+                main_policy=policy, timeview_enabled=True, snapshot_dir=snap,
             )
         buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)  # main asserted the as-of view, then bought

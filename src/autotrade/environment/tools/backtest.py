@@ -249,8 +249,11 @@ class BacktestTool:
                     execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
                     offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 0) or 0),
                     max_seconds_per_trading_day=per_day_cap,
-                    asof_view_enabled=bool(manifest.get("rolling_asof_enabled", True)),
+                    timeview_enabled=bool(
+                        manifest.get("timeview_enabled", manifest.get("rolling_asof_enabled", True))
+                    ),
                     snapshot_dir=snapshot_dir,
+                    replay_dir=replay_dir,
                     on_progress=_on_progress,
                 )
             stats = compute_return_stats(replay)
