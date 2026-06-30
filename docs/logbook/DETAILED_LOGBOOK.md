@@ -15588,3 +15588,12 @@ Branch `fix/broker-faithfulness` (stacked on Phase C). Implemented via a focused
 Reviewer notes: R8(b) intentionally extends the `available_cash` gate to `_fill_long_open` (else the lock is cosmetic — a short could fund a long); safe and a no-op for long-only flows. R6 left auction slippage unchanged (existing tests assert slipped auction prices; the audit prompt's "no slippage" premise was wrong).
 
 Validation: full suite 374 OK (was 368; +6); targeted test_broker_engine + test_main_ctx_replay green; git diff --check clean.
+
+2026-06-30 Phase E — repo hygiene (R14, R15)
+
+Branch `chore/repo-hygiene` (stacked on Phase B). Docs/hygiene only — no code, no tests/GPU.
+
+- R14: removed untracked leftovers that had reappeared on the mirror — `scripts/data/download_tushare_p0.py` (408-line self-contained duplicate of the official `src/autotrade/data_sources/tushare/download.py` path), `scripts/data/audit_tushare_p0.py` (519-line duplicate of the audit path), `scripts/data/test_write_marker.txt` (mirror-sync marker), `.mutagenignore.suggested` (ai-sync scratch). Confirmed nothing in code/config/cron references them (only unrelated old log filenames in archive/). Added `.gitignore` guards (`/scripts/data/*_p0.py`, `/scripts/data/test_write_marker.txt`, `/.mutagenignore.suggested`).
+- R15: `AGENTS.md`/`CLAUDE.md` were ~8.5KB near-duplicates that had begun to drift; replaced the AGENTS.md body with a pointer to CLAUDE.md as the single source of truth.
+
+Validation: no code change; `git diff --check` clean.

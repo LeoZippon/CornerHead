@@ -830,3 +830,8 @@
 
 - Branch `fix/broker-faithfulness` (on Phase C). R4: `SimBroker.roll_to_date()` unlocks T+1 at each new trade date in the host day-loop before the first tick (overnight holds report correct `sellable_quantity` pre-fill). R5: shorts exempt from the T+1 sell lock (`sellable_quantity` side-aware) → same-day cover allowed; long T+1 unchanged. R6: the 14:57 close auction fills at the activation bar's CLOSE (threaded `is_close_auction`→`auction_close`→`_limit_fill_price use_close`); open auction unchanged. R7: per-substep wall fail-fast skipped under frozen/final eval (`enforce_substep_timeout = mode=="valid"`). R8: short borrow fee accrues per calendar-day gap (weekend carry); short proceeds locked as collateral (`available_cash = cash − short_margin − locked_proceeds`; long-buy and short-open gate on it) so a short no longer inflates buying power.
 - Validation: full suite 374 OK (+6); `git diff --check` clean. CPU-only, no GPU/training.
+
+2026-06-30 Phase E — repo hygiene (R14, R15)
+
+- Branch `chore/repo-hygiene` (on Phase B). R14: deleted the reappeared untracked leftovers `scripts/data/{download,audit}_tushare_p0.py` (duplicated the official src-backed entrypoints), `scripts/data/test_write_marker.txt`, and `.mutagenignore.suggested`; added `.gitignore` guards so they can't be committed if regenerated. R15: replaced `AGENTS.md` body with a pointer to `CLAUDE.md` (single source of truth; the two ~8.5KB copies had begun to drift).
+- No code change; `git diff --check` clean.

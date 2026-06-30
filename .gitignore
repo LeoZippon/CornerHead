@@ -43,3 +43,8 @@ Thumbs.db
 # Vendored references and local scratch (not part of the repo)
 /external_references/
 /check.md
+
+# Leftover/scratch data-ingestion experiments (superseded by src/autotrade/data_sources/tushare)
+/scripts/data/*_p0.py
+/scripts/data/test_write_marker.txt
+/.mutagenignore.suggested
