@@ -88,6 +88,8 @@ class SnapshotConfig:
     replay_include_events: bool = True
     replay_include_text: bool = True
     replay_include_minutes: bool = True
+    replay_include_macro: bool = True
+    replay_include_fundamentals: bool = True
 
     def __post_init__(self) -> None:
         for name, value in self.to_record()["decision_windows"].items():
@@ -134,6 +136,8 @@ class SnapshotConfig:
                 "include_events": self.replay_include_events,
                 "include_text": self.replay_include_text,
                 "include_minutes": self.replay_include_minutes,
+                "include_macro": self.replay_include_macro,
+                "include_fundamentals": self.replay_include_fundamentals,
             },
         }
 
@@ -291,8 +295,10 @@ class SnapshotBuilder:
         label: str,
         config: SnapshotConfig | None = None,
     ) -> dict[str, object]:
-        """Replay region data: daily bars plus the events/text/minutes published
-        inside the period, for backtest replay and Agent validation review."""
+        """Replay region data: daily bars plus the events/text/minutes/macro/
+        fundamentals published inside the period, every domain carrying row-level
+        ``available_at`` so the per-tick Timeview can roll each dataset in on its
+        refresh node. Read only by backtest_tool; never PIT-filtered up front."""
         config = config or SnapshotConfig()
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -306,10 +312,37 @@ class SnapshotBuilder:
         started = time.perf_counter()
         daily = self._daily_join(start_key, end_key)
         daily, conversions = normalize_daily_units(daily)
+        daily = _stamp_daily_available_at(daily, self.contracts["daily"])
         profiles["daily.parquet"] = _write_with_profile(
             output_dir / "daily.parquet", daily, build_seconds=time.perf_counter() - started
         )
         domains["daily"] = {"rows": int(len(daily)), "unit_conversions": conversions}
+
+        if config.replay_include_macro:
+            started = time.perf_counter()
+            macro, macro_meta = self._build_available_at_domain(
+                config.macro_datasets, period_end, period_start
+            )
+            profiles["macro.parquet"] = _write_with_profile(
+                output_dir / "macro.parquet", macro, build_seconds=time.perf_counter() - started
+            )
+            domains["macro"] = macro_meta
+        if config.replay_include_fundamentals and config.fundamental_datasets:
+            started = time.perf_counter()
+            # Not the formal PIT decision boundary: take fundamentals published
+            # inside the period without requiring partitions or the audit status,
+            # so a slot still builds where a fundamental window happens to be empty.
+            fundamentals = read_fundamental_events(
+                self.fundamental_events_root,
+                period_end.isoformat(),
+                datasets=config.fundamental_datasets,
+                min_available_at=period_start.isoformat(),
+                require_partitions=False,
+            )
+            profiles["fundamentals.parquet"] = _write_with_profile(
+                output_dir / "fundamentals.parquet", fundamentals, build_seconds=time.perf_counter() - started
+            )
+            domains["fundamentals"] = {"rows": int(len(fundamentals)), "datasets": list(config.fundamental_datasets)}
 
         if config.replay_include_events:
             started = time.perf_counter()
@@ -656,6 +689,21 @@ def to_cn_timestamps(series: pd.Series) -> pd.Series:
         if pd.notna(value)
         else pd.NaT
     )
+
+
+def _stamp_daily_available_at(daily: pd.DataFrame, contract) -> pd.DataFrame:
+    """Add a row-level ``available_at`` to replay daily bars (the daily core's
+    publish time, ``trade_date`` close). The Timeview gates the whole daily domain
+    on the evening refresh node, so any time before that night's 23:35 makes the
+    row roll in from the next day; this column carries that timestamp explicitly."""
+    if daily.empty or "trade_date" not in daily.columns:
+        return daily
+    out = daily.copy()
+    out["available_at"] = [
+        contract.available_at(datetime.strptime(str(date), "%Y%m%d").date()).isoformat()
+        for date in out["trade_date"].astype(str)
+    ]
+    return out
 
 
 def _filter_trade_dates(frame: pd.DataFrame, visible_dates: list[str]) -> pd.DataFrame:

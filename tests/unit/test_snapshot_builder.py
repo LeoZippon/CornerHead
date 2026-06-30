@@ -304,6 +304,10 @@ class SnapshotBuilderTest(unittest.TestCase):
             manifest = builder.build_replay_slot("20211007", "20211011", out, label="valid", config=CONFIG)
             daily = pd.read_parquet(out / "daily.parquet")
             self.assertEqual(sorted(daily["trade_date"].unique()), ["20211008"])
+            # Every replay domain now carries a row-level available_at for the Timeview;
+            # the daily core stamps the trade_date's evening publish time.
+            self.assertIn("available_at", daily.columns)
+            self.assertEqual(set(daily["available_at"]), {"2021-10-08T17:30:00+08:00"})
             # Replay region is not PIT-filtered: the same-evening moneyflow row is included.
             events = pd.read_parquet(out / "events.parquet")
             self.assertEqual(set(events["dataset"]), {"margin_secs", "moneyflow"})
@@ -311,11 +315,42 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(len(text_index), 1)
             minutes = pd.read_parquet(out / "intraday_1min.parquet")
             self.assertEqual(len(minutes), 0)  # fixture minutes are outside the period
+            # Macro and fundamentals domains are written even when empty for this period
+            # (cn_gdp rows fall outside, the events root is absent), so the Timeview
+            # always has a stable per-domain file to roll.
+            self.assertTrue((out / "macro.parquet").exists())
+            self.assertEqual(len(pd.read_parquet(out / "macro.parquet")), 0)
+            self.assertTrue((out / "fundamentals.parquet").exists())
+            self.assertEqual(len(pd.read_parquet(out / "fundamentals.parquet")), 0)
             self.assertEqual(manifest["kind"], "replay_slot")
             stored = load_snapshot_manifest(out)
             self.assertIn("build_profile", stored)
             self.assertIn("intraday_1min.parquet", stored["data_profile"]["files"])
             verify_snapshot_hash(out)
+
+    def test_replay_slot_rolls_in_period_macro_and_fundamentals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            build_raw(raw)
+            # A macro release and a fundamental filing published inside the period.
+            write(
+                raw / "cn_gdp" / "range=2021Q4.parquet",
+                pd.DataFrame([{"quarter": "2021Q3", "gdp": 1.2, "available_at": "2021-10-08T10:00:00+08:00", "available_at_rule": "release"}]),
+            )
+            events_root = Path(tmp) / "fund_events"
+            write(
+                events_root / "income_vip" / "available_month=202110.parquet",
+                pd.DataFrame([{"dataset": "income_vip", "ts_code": "000001.SZ", "available_at": "2021-10-08T18:00:00+08:00", "available_at_rule": "source:f_ann_date_or_ann_date", "available_month": "202110", "business_key": "k2", "source_path": "x", "source_hash": "h", "source_row_id": 0}]),
+            )
+            out = Path(tmp) / "replay"
+            builder = SnapshotBuilder(raw, events_root)
+            builder.build_replay_slot("20211007", "20211011", out, label="valid", config=CONFIG)
+            macro = pd.read_parquet(out / "macro.parquet")
+            self.assertEqual(set(macro["dataset"]), {"cn_gdp"})
+            self.assertIn("available_at", macro.columns)
+            fundamentals = pd.read_parquet(out / "fundamentals.parquet")
+            self.assertEqual(fundamentals["business_key"].tolist(), ["k2"])
+            self.assertIn("available_at", fundamentals.columns)
 
     def test_missing_configured_dataset_fails_fast(self):
         with tempfile.TemporaryDirectory() as tmp:
