@@ -44,6 +44,7 @@ from autotrade.environment.backtest_engine import (
 from autotrade.environment.broker import _ACTION_TO_ORDER_TYPE, SimBroker, xtconstant
 from autotrade.environment.data.contracts import sim_datetime
 from autotrade.environment.runtime import sanitize_for_log
+from autotrade.environment.state_staging import StateStager
 from autotrade.environment.timeview import Timeview
 
 _ACTION_ALIASES = {"long": "buy", "sell_short": "short", "close_long": "sell", "close_short": "cover", "exit": "close"}
@@ -164,6 +165,7 @@ class _Broker:
         self._substeps = []      # [{name, budget_minutes, real_wall_s}] declared this tick
         self._substep_names = set()
         self._cur_substep = None  # name of the open ctx.substep, tagged onto each order
+        self._staged = []        # [{staging_rel, state_rel, substep, budget_minutes}] this tick
 
     @property
     def cash(self):
@@ -244,10 +246,30 @@ class _Broker:
         return (raw // 100) * 100
 
 
-def _build_ctx(state, snapshot_dir, model_dir, state_dir):
+class _Ctx(types.SimpleNamespace):
+    \"\"\"main(ctx) view. ``state_dir`` is a property so that, inside ctx.substep(),
+    it resolves to a hidden staging directory; outside it resolves to the managed,
+    visible state directory. Writing via ctx.state_dir therefore stages a heavy
+    block's output regardless of the write mechanism (json, parquet, native), and
+    the host merges it into the visible directory only once the block's declared
+    duration has elapsed (ready_at = tick + B).\"\"\"
+
+    @property
+    def state_dir(self):
+        holder = self._state_holder
+        return holder[\"active\"] or holder[\"visible\"]
+
+
+def _safe_name(text):
+    return re.sub(r\"[^0-9A-Za-z._-]\", \"_\", str(text or \"tick\"))
+
+
+def _build_ctx(state, snapshot_dir, model_dir, state_dir, staging_root):
     bars = {str(b.get("ts_code", "")): dict(b) for b in (state.get("bars") or [])}
     prices = {code: _bar_price(bar) for code, bar in bars.items()}
     broker = _Broker(state, prices)
+    state_holder = {"active": None, "visible": state_dir}
+    tick_key = _safe_name(state.get("cur_datetime") or state.get("cur_time") or "tick")
 
     def price(ts_code):
         return prices.get(str(ts_code))
@@ -293,6 +315,12 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir):
             )
         broker._substep_names.add(step_name)
         prev = broker._cur_substep
+        prev_active = state_holder["active"]
+        # Writes via ctx.state_dir inside the block land here; the host merges them
+        # into the visible state dir once ready_at = this tick + budget elapses.
+        staging_subdir = os.path.join(staging_root, tick_key, _safe_name(step_name))
+        os.makedirs(staging_subdir, exist_ok=True)
+        state_holder["active"] = staging_subdir
         broker._cur_substep = step_name
         start = time.monotonic()
         try:
@@ -303,9 +331,19 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir):
                 "budget_minutes": budget,
                 "real_wall_s": time.monotonic() - start,
             })
+            for _root, _dirs, _files in os.walk(staging_subdir):
+                for _fn in _files:
+                    _abs = os.path.join(_root, _fn)
+                    broker._staged.append({
+                        "staging_rel": os.path.relpath(_abs, staging_root),
+                        "state_rel": os.path.relpath(_abs, staging_subdir),
+                        "substep": step_name,
+                        "budget_minutes": budget,
+                    })
+            state_holder["active"] = prev_active
             broker._cur_substep = prev
 
-    return types.SimpleNamespace(
+    return _Ctx(
         broker=broker,
         account=broker.account,
         positions=broker.positions,
@@ -323,7 +361,7 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir):
         asof_dir=(state.get("asof_dir") or snapshot_dir),
         asof_version=str(state.get("asof_version") or ""),
         model_dir=model_dir,
-        state_dir=state_dir,
+        _state_holder=state_holder,
     ), broker
 
 
@@ -340,7 +378,8 @@ def _load_module(path, name):
 main_path = Path(sys.argv[1])
 snapshot_dir = os.environ.get("AT_SNAPSHOT_DIR", "/mnt/snapshot")
 model_dir = os.environ.get("AT_MODEL_DIR", "/mnt/agent/models")
-state_dir = os.environ.get("AT_STATE_DIR", "/mnt/agent/workspace")
+state_dir = os.environ.get("AT_STATE_DIR", "/mnt/agent/workspace/.state")
+staging_root = os.environ.get("AT_STATE_STAGING_DIR", "/mnt/agent/workspace/.state_staging")
 main_module = None
 main_load_error = None
 with contextlib.redirect_stdout(sys.stderr):
@@ -366,7 +405,7 @@ for line in sys.stdin:
         else:
             if not callable(main_fn):
                 raise AttributeError("main.py must define main(ctx)")
-            ctx, broker = _build_ctx(request.get("state") or {}, snapshot_dir, model_dir, state_dir)
+            ctx, broker = _build_ctx(request.get("state") or {}, snapshot_dir, model_dir, state_dir, staging_root)
             with contextlib.redirect_stdout(sys.stderr):
                 main_fn(ctx)
             response = {
@@ -374,6 +413,7 @@ for line in sys.stdin:
                 "status": "ok",
                 "actions": broker._actions,
                 "substeps": broker._substeps,
+                "staged": broker._staged,
             }
     except Exception as exc:
         response = {"request_id": request_id, "status": "error", "error": _sanitize_error("%s: %s" % (type(exc).__name__, exc))}
@@ -383,10 +423,12 @@ for line in sys.stdin:
 
 @dataclass(frozen=True)
 class _TickResult:
-    """One ``main(ctx)`` tick: its orders and declared latency sub-steps."""
+    """One ``main(ctx)`` tick: its orders, declared latency sub-steps, and the
+    files staged via ctx.state_dir inside a sub-step (host-merged at ready_at)."""
 
     actions: list[dict[str, object]]
     substeps: list[dict[str, object]]
+    staged: list[dict[str, object]]
 
 
 class MainPolicyRunner:
@@ -434,7 +476,8 @@ class MainPolicyRunner:
                 "AT_SNAPSHOT_DIR": self.executor.map_path(self.paths.snapshot),
                 "AT_AGENT_OUTPUT_DIR": self.executor.map_path(self.paths.agent_output),
                 "AT_MODEL_DIR": self.executor.map_path(self.paths.model_artifacts),
-                "AT_STATE_DIR": self.executor.map_path(self.paths.workspace),
+                "AT_STATE_DIR": self.executor.map_path(self.paths.workspace / ".state"),
+                "AT_STATE_STAGING_DIR": self.executor.map_path(self.paths.workspace / ".state_staging"),
                 "AT_DECISION_TIME": self.decision_time,
                 "AT_REPLAY_GRANULARITY": self.replay_granularity,
                 "AT_FORBIDDEN_PATHS": _executor_pathsep_join(
@@ -496,9 +539,11 @@ class MainPolicyRunner:
         if not isinstance(actions, list):
             raise BacktestError("main(ctx) returned non-list actions")
         substeps = response.get("substeps") or []
+        staged = response.get("staged") or []
         return _TickResult(
             actions=[dict(action) for action in actions if isinstance(action, dict)],
             substeps=[dict(s) for s in substeps if isinstance(s, dict)],
+            staged=[dict(s) for s in staged if isinstance(s, dict)],
         )
 
     def close(self) -> None:
@@ -647,6 +692,16 @@ def run_main_ctx_replay(
         if timeview_enabled and snapshot_dir is not None and getattr(main_policy, "paths", None) is not None
         else None
     )
+    # Managed ctx.state_dir: sub-step writes stage to a hidden dir and merge into the
+    # visible dir at ready_at = tick + B. Reset per backtest for reproducibility.
+    stager = (
+        StateStager(
+            visible_dir=main_policy.paths.workspace / ".state",
+            staging_dir=main_policy.paths.workspace / ".state_staging",
+        )
+        if getattr(main_policy, "paths", None) is not None
+        else None
+    )
     equity_by_date: dict[str, float] = {}
     replay_start = time.monotonic()  # wall-clock start, reported as replay_wall_seconds
     substep_runtime: dict[str, dict[str, float]] = {}
@@ -695,6 +750,8 @@ def run_main_ctx_replay(
                     asof_dir, asof_version = timeview.refresh(when) if timeview is not None else (None, None)
                     if timeview is not None and main_policy.nl_service is not None:
                         main_policy.nl_service.current_when = when  # roll ctx.nl() text on the same clock
+                    if stager is not None:
+                        stager.merge_ready(when)  # surface staged writes whose ready_at has arrived
                     state = _market_state(
                         broker,
                         trade_date=trade_date,
@@ -710,8 +767,10 @@ def run_main_ctx_replay(
                     # the day's compute and fail-fast when it exceeds the per-day budget
                     # (scales with replay length, unlike a fixed total cap).
                     _tick_t0 = time.monotonic()
-                    actions, substeps = _normalize_tick(main_policy.step(state))
+                    actions, substeps, staged = _normalize_tick(main_policy.step(state))
                     day_compute_wall += time.monotonic() - _tick_t0
+                    if stager is not None and staged:
+                        stager.register(staged, when=when)
                     if max_seconds_per_trading_day is not None and day_compute_wall > max_seconds_per_trading_day:
                         raise BacktestError(
                             f"trade day {trade_date} exceeded its compute budget "
@@ -780,6 +839,7 @@ def run_main_ctx_replay(
         total_ticks=tick_counts["total"],
         intraday_ticks=tick_counts["intraday"],
         offsession_ticks=tick_counts["offsession"],
+        state_staging_audit=(stager.audit() if stager is not None else None),
     )
 
 
@@ -874,13 +934,13 @@ def _day_tick_plan(
     return plan
 
 
-def _normalize_tick(result: object) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+def _normalize_tick(result: object) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
     """A ``MainPolicyRunner`` step returns a ``_TickResult``; test fakes return a
-    plain action list (no sub-steps = current next-bar behavior)."""
+    plain action list (no sub-steps or staged writes = current next-bar behavior)."""
     if isinstance(result, _TickResult):
-        return result.actions, result.substeps
+        return result.actions, result.substeps, result.staged
     actions = [dict(a) for a in (result or []) if isinstance(a, dict)]
-    return actions, []
+    return actions, [], []
 
 
 def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool) -> bool:

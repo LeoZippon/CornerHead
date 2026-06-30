@@ -433,6 +433,9 @@ class ReplayResult:
     total_ticks: int | None = None
     intraday_ticks: int | None = None
     offsession_ticks: int | None = None
+    # Managed ctx.state_dir staging ledger: one record per sub-step-staged write with
+    # its ready_at and merge status (some may stay unmerged past the region end).
+    state_staging_audit: list[dict[str, object]] | None = None
 
 
 class MinuteMarketData:

@@ -280,6 +280,13 @@ class BacktestTool:
             json.dumps(sanitize_for_log(stats), ensure_ascii=False, indent=2, sort_keys=True, default=str),
             encoding="utf-8",
         )
+        staging_audit = replay.state_staging_audit or []
+        unmerged = sum(1 for record in staging_audit if not record.get("merged"))
+        if staging_audit:
+            (result_dir / "state_staging_audit.json").write_text(
+                json.dumps(sanitize_for_log(staging_audit), ensure_ascii=False, indent=2, sort_keys=True, default=str),
+                encoding="utf-8",
+            )
 
         summary = {
             "tool": self.name,
@@ -320,6 +327,8 @@ class BacktestTool:
             "replay_wall_seconds": stats.get("replay_wall_seconds"),
             "replayed_trade_days": stats.get("replayed_trade_days"),
             "substep_runtime": stats.get("substep_runtime"),
+            "state_staged_writes": len(staging_audit),
+            "state_unmerged_writes": unmerged,
         }
         self.ctx.manifest.append_backtest_summary(summary)
         self.ctx.trace.emit("backtest", summary, step_id=self.ctx.current_step_id)

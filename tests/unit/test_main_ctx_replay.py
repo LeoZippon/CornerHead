@@ -367,6 +367,56 @@ class MainCtxReplayTest(unittest.TestCase):
         self.assertEqual(buys[0]["trade_date"], "20220104")
         self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.1, is_buy=True))
 
+    def test_substep_state_write_is_delayed_then_merged(self) -> None:
+        # A plan written to ctx.state_dir inside a sub-step (B=2 min) is NOT visible
+        # at the generating tick; it surfaces in the visible state dir only once
+        # ready_at = tick + B has elapsed, and the audit records the merge.
+        stage_main = '''
+from pathlib import Path
+
+_SEEN = {}
+
+
+def main(ctx):
+    code = "000001.SZ"
+    visible = Path(str(ctx.state_dir)) / "plan.txt"   # outside a sub-step: the visible dir
+    if ctx.cur_date == "20220104" and ctx.cur_time == "09:25":
+        with ctx.substep("screen", budget_minutes=2):
+            (Path(str(ctx.state_dir)) / "plan.txt").write_text("go")   # staged, not yet visible
+        assert not visible.exists(), "staged write leaked at the generating tick"
+    if visible.exists() and "buy" not in _SEEN:
+        _SEEN["buy"] = ctx.cur_datetime
+        ctx.broker.buy(code, weight=0.1, reason="plan_visible")
+'''
+        (self.sandbox.paths.agent_output / "main.py").write_text(stage_main, encoding="utf-8")
+        replay = pd.DataFrame(
+            [
+                {"trade_date": "20220104", "ts_code": TS_CODE, "open": 10.0, "close": 10.2,
+                 "up_limit": 12.0, "down_limit": 8.0, "is_suspended": False},
+                {"trade_date": "20220105", "ts_code": TS_CODE, "open": 10.3, "close": 11.0,
+                 "up_limit": 12.0, "down_limit": 8.0, "is_suspended": False},
+                {"trade_date": "20220331", "ts_code": TS_CODE, "open": 12.0, "close": 12.5,
+                 "up_limit": 14.0, "down_limit": 9.0, "is_suspended": False},
+            ]
+        )
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=30.0,
+            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
+        ) as policy:
+            policy.validate_main()
+            result = run_main_ctx_replay(
+                replay, BrokerProfile(initial_cash=1_000_000.0),
+                shortable_codes=frozenset(), main_policy=policy,
+            )
+        # main(ctx) asserted the staged write was hidden at 09:25, then bought once it
+        # merged; one staged write is recorded and merged.
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        audit = result.state_staging_audit or []
+        self.assertEqual(len(audit), 1)
+        self.assertTrue(audit[0]["merged"])
+        self.assertEqual(audit[0]["substep"], "screen")
+
     def test_rolling_asof_view_excludes_today_and_future(self) -> None:
         snap = self.sandbox.paths.snapshot
         snap.mkdir(parents=True, exist_ok=True)

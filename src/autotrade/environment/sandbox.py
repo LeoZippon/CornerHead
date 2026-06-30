@@ -279,7 +279,9 @@ def _link_or_copy(src: str, dst: str) -> None:
 _COLLECT_IGNORE = shutil.ignore_patterns(
     ".cache",
     ".nv",
-    ".asof",  # host-written per-day rolling daily as-of views; not Agent artifacts
+    ".asof",  # host-built per-tick Timeview domain views; not Agent artifacts
+    ".state",  # host-managed visible ctx.state_dir; per-backtest scratch, not artifacts
+    ".state_staging",  # host-managed staged ctx.state_dir writes; per-backtest scratch
     "core.[0-9]*",  # PID-suffixed core dumps (RLIMIT_CORE=0 prevents these; belt-and-suspenders)
     "__pycache__",
     "*.pyc",
