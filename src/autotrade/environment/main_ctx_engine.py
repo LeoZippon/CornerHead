@@ -589,8 +589,13 @@ def _day_tick_plan(
             if column in open_group.columns:
                 open_group[column] = float("nan")  # intraday volume is unknown pre-open
         if preopen_time:
+            # 09:15 blind pre-open order clears in the 09:30 opening call auction (single
+            # price, no slippage): is_auction=True.
             plan.append(_Tick(preopen_time, _empty_minute_rows(), 0, False, True))
-        plan.append(_Tick(decision_time, open_group, min(1, n - 1), False, True))
+        # 09:25 sees the matched open and fills at the first CONTINUOUS bar (09:31), so it
+        # is a continuous taker fill (slippage applies): is_auction=False. Only the open/
+        # close call auctions are slippage-free.
+        plan.append(_Tick(decision_time, open_group, min(1, n - 1), False, False))
     # Clamp the lag to the day's bar count so short/daily-fallback days (e.g. the
     # 09:30+15:00 synthesis) still trade even with auctions disabled: >=1 preserves
     # next-bar execution; <=n-1 lets the first decision reach the last bar.

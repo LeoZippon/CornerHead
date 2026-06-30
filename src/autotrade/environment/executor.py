@@ -73,16 +73,9 @@ class LocalExecutor:
         # detached container process tree to clean up.
         return None
 
-    def run(
-        self,
-        argv: list[str],
-        *,
-        env: dict[str, str] | None = None,
-        cwd: Path | None = None,
-        timeout_seconds: float = 120.0,
-        user: str = "agent",
-        max_output_chars: int | None = None,
-    ) -> ExecResult:
+    def _base_env(self, env: dict[str, str] | None) -> dict[str, str]:
+        """The agent sandbox env for a host subprocess (shared by run/popen): user-base
+        PATH/HOME/pip/npm, the inherited PYTHONPATH, then the caller's overrides."""
         base_env = {
             "PATH": f"{self.paths.workspace}/.local/bin:{self.paths.workspace}/.npm-global/bin:/usr/local/bin:/usr/bin:/bin",
             "HOME": str(self.paths.workspace),
@@ -94,6 +87,19 @@ class LocalExecutor:
         if "PYTHONPATH" in os.environ:
             base_env["PYTHONPATH"] = os.environ["PYTHONPATH"]
         base_env.update(env or {})
+        return base_env
+
+    def run(
+        self,
+        argv: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        cwd: Path | None = None,
+        timeout_seconds: float = 120.0,
+        user: str = "agent",
+        max_output_chars: int | None = None,
+    ) -> ExecResult:
+        base_env = self._base_env(env)
         if max_output_chars is not None:
             return _run_limited_capture(
                 argv,
@@ -124,21 +130,10 @@ class LocalExecutor:
         cwd: Path | None = None,
         user: str = "agent",
     ) -> subprocess.Popen[str]:
-        base_env = {
-            "PATH": f"{self.paths.workspace}/.local/bin:{self.paths.workspace}/.npm-global/bin:/usr/local/bin:/usr/bin:/bin",
-            "HOME": str(self.paths.workspace),
-            "PYTHONUSERBASE": str(self.paths.workspace / ".local"),
-            "PIP_USER": "1",
-            "npm_config_prefix": str(self.paths.workspace / ".npm-global"),
-            "PYTHONDONTWRITEBYTECODE": "1",
-        }
-        if "PYTHONPATH" in os.environ:
-            base_env["PYTHONPATH"] = os.environ["PYTHONPATH"]
-        base_env.update(env or {})
         return subprocess.Popen(
             argv,
             cwd=str(cwd or self.paths.agent),
-            env=base_env,
+            env=self._base_env(env),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -179,6 +174,20 @@ class DockerExecutor:
             raise ExecutorError(f"path is outside the sandbox root and cannot be mapped: {host_path}") from exc
         return str(Path("/mnt") / relative)
 
+    @staticmethod
+    def _merged_env(env: dict[str, str] | None) -> dict[str, str]:
+        """The agent sandbox env inside the container (shared by run/popen): fixed
+        /mnt user-base PATH/HOME/pip/npm, then the caller's overrides."""
+        return {
+            "PATH": "/mnt/agent/workspace/.local/bin:/mnt/agent/workspace/.npm-global/bin:/usr/local/bin:/usr/bin:/bin",
+            "HOME": "/mnt/agent/workspace",
+            "PYTHONUSERBASE": "/mnt/agent/workspace/.local",
+            "PIP_USER": "1",
+            "npm_config_prefix": "/mnt/agent/workspace/.npm-global",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            **(env or {}),
+        }
+
     def run(
         self,
         argv: list[str],
@@ -190,15 +199,7 @@ class DockerExecutor:
         max_output_chars: int | None = None,
     ) -> ExecResult:
         command = ["docker", "exec", "-i", "--user", user]
-        merged_env = {
-            "PATH": "/mnt/agent/workspace/.local/bin:/mnt/agent/workspace/.npm-global/bin:/usr/local/bin:/usr/bin:/bin",
-            "HOME": "/mnt/agent/workspace",
-            "PYTHONUSERBASE": "/mnt/agent/workspace/.local",
-            "PIP_USER": "1",
-            "npm_config_prefix": "/mnt/agent/workspace/.npm-global",
-            "PYTHONDONTWRITEBYTECODE": "1",
-            **(env or {}),
-        }
+        merged_env = self._merged_env(env)
         for key, value in merged_env.items():
             command.extend(["--env", f"{key}={value}"])
         command.extend(["--workdir", self.map_path(cwd) if cwd else "/mnt/agent"])
@@ -257,15 +258,7 @@ class DockerExecutor:
         # serve per-bar JSONL requests; without it the container sees EOF and the
         # driver's stdin loop exits immediately.
         command = ["docker", "exec", "-i", "--user", user]
-        merged_env = {
-            "PATH": "/mnt/agent/workspace/.local/bin:/mnt/agent/workspace/.npm-global/bin:/usr/local/bin:/usr/bin:/bin",
-            "HOME": "/mnt/agent/workspace",
-            "PYTHONUSERBASE": "/mnt/agent/workspace/.local",
-            "PIP_USER": "1",
-            "npm_config_prefix": "/mnt/agent/workspace/.npm-global",
-            "PYTHONDONTWRITEBYTECODE": "1",
-            **(env or {}),
-        }
+        merged_env = self._merged_env(env)
         for key, value in merged_env.items():
             command.extend(["--env", f"{key}={value}"])
         command.extend(["--workdir", self.map_path(cwd) if cwd else "/mnt/agent"])

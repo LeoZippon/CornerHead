@@ -112,6 +112,30 @@ def main(ctx):
         json.dump(obs, handle)
 '''
 
+# Shorts a code then calls sell() on it (wrong action for a short) — the projection
+# must leave the short unchanged, matching SimBroker's side_mismatch reject.
+SIDE_MISMATCH_MAIN = '''
+import json, os
+def main(ctx):
+    c = "000002.SZ"
+    sd = ctx.state_dir
+    if os.path.exists(os.path.join(sd, "mobs.json")):
+        return
+    if ctx.price(c) is None or ctx.broker.position(c) != 0:
+        return
+    ctx.broker.short(c, weight=0.2, reason="short")
+    pos_after_short = ctx.broker.position(c)
+    avail_after_short = ctx.broker.available_cash
+    ctx.broker.sell(c, amount=1000, reason="wrong_sell_on_short")  # side mismatch
+    obs = {
+        "pos_after_short": pos_after_short, "avail_after_short": avail_after_short,
+        "pos_after_sell": ctx.broker.position(c), "avail_after_sell": ctx.broker.available_cash,
+    }
+    os.makedirs(sd, exist_ok=True)
+    with open(os.path.join(sd, "mobs.json"), "w") as handle:
+        json.dump(obs, handle)
+'''
+
 # Limit price the market never reaches, but its validity extends to the close.
 LIMIT_DAY_END_CANCEL_MAIN = '''
 def main(ctx):
@@ -479,6 +503,34 @@ class MainCtxReplayTest(unittest.TestCase):
         # literal cash rises by the net proceeds banked.
         self.assertAlmostEqual(obs["cash1"], 1_000_000.0 + fill.cash_delta)
 
+    def test_projection_rejects_side_mismatched_reduce(self) -> None:
+        # R16: calling sell() on a short-held code is a side mismatch the broker rejects,
+        # so the intra-tick projection must leave the short (and buying power) unchanged.
+        import json
+
+        (self.sandbox.paths.agent_output / "main.py").write_text(SIDE_MISMATCH_MAIN, encoding="utf-8")
+        replay = pd.DataFrame(
+            [
+                {"trade_date": d, "ts_code": "000002.SZ", "open": o, "close": c,
+                 "up_limit": o * 1.2, "down_limit": o * 0.8, "is_suspended": False}
+                for d, o, c in [("20220104", 20.0, 19.8), ("20220105", 19.8, 19.6)]
+            ]
+        )
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=30.0,
+            decision_time="2022-01-04T09:30:00+08:00", replay_granularity="daily",
+        ) as policy:
+            policy.validate_main()
+            run_main_ctx_replay(
+                replay, BrokerProfile(initial_cash=1_000_000.0),
+                shortable_codes=frozenset({"000002.SZ"}), main_policy=policy,
+                auction_enabled=False, offsession_tick_minutes=0,
+            )
+        obs = json.loads((self.sandbox.paths.workspace / ".state" / "mobs.json").read_text(encoding="utf-8"))
+        self.assertLess(obs["pos_after_short"], 0)  # short opened
+        self.assertEqual(obs["pos_after_sell"], obs["pos_after_short"])  # wrong sell is a no-op
+        self.assertAlmostEqual(obs["avail_after_sell"], obs["avail_after_short"])
+
     def _run_with(self, replay: pd.DataFrame, minutes: pd.DataFrame | None = None) -> object:
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
@@ -499,11 +551,12 @@ class MainCtxReplayTest(unittest.TestCase):
         result = self._run_with(_ohlc_replay(), _auction_minutes())
         buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
-        self.assertEqual(buys[0]["price_label"], "auction")
+        # The 09:25 decision fills at the first CONTINUOUS bar (09:31), so it is a taker
+        # fill: continuous price label and slippage apply (only the open/close call
+        # auctions are slippage-free).
+        self.assertEqual(buys[0]["price_label"], "minute:09:31")
         self.assertEqual(buys[0]["trade_date"], "20220104")
-        # A call auction clears at one price, so the fill is the raw auction price (10.1),
-        # with no taker slippage.
-        self.assertAlmostEqual(buys[0]["price"], 10.1)
+        self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.1, is_buy=True))
 
     def test_substep_state_write_is_delayed_then_merged(self) -> None:
         # A plan written to ctx.state_dir inside a sub-step (B=2 min) is NOT visible
@@ -730,23 +783,23 @@ def main(ctx):
 
     def test_substep_small_budget_keeps_auction_fill(self) -> None:
         # A 09:25 order in a small-budget substep (ceil(1) <= lag_floor=2) still fills
-        # at the auction (09:31, price_label "auction") — the budget adds no delay.
+        # at the first continuous bar (09:31) — the budget adds no delay.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_AUCTION_SMALL_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _auction_minutes())
         buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
-        self.assertEqual(buys[0]["price_label"], "auction")
+        self.assertEqual(buys[0]["price_label"], "minute:09:31")
 
     def test_substep_large_budget_keeps_auction_fill(self) -> None:
         # A large budget no longer delays the fill bar: a 09:25 order in a
-        # budget_minutes=4 substep still fills at the 09:31 auction print (10.1,
-        # price_label "auction", no slippage), identical to a small-budget or unwrapped order.
+        # budget_minutes=4 substep still fills at the 09:31 continuous bar (taker price,
+        # with slippage), identical to a small-budget or unwrapped order.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_AUCTION_LARGE_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _auction_minutes())
         buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
-        self.assertEqual(buys[0]["price_label"], "auction")
-        self.assertAlmostEqual(buys[0]["price"], 10.1)  # auction price, no slippage
+        self.assertEqual(buys[0]["price_label"], "minute:09:31")
+        self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.1, is_buy=True))
 
     def test_substep_runtime_and_replay_metrics_in_result(self) -> None:
         # The replay aggregates per-sub-step wall-time and reports total runtime +

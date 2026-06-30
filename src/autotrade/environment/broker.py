@@ -23,7 +23,6 @@ from typing import Protocol
 import pandas as pd
 
 from autotrade.environment.broker_core import (
-    LOT_SIZE,
     STAMP_DUTY_CUTOVER,
     CostModel,
     lot_floor,

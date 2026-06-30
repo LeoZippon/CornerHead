@@ -7,14 +7,12 @@ declared sub-steps, and staged state writes. The intra-tick broker view projects
 with the SAME ``broker_core`` math the host SimBroker uses, so the agent-visible cash /
 buying power / position after an order match the broker's real fill.
 
-This module imports only stdlib + pandas + the sibling ``broker_core`` (no ``autotrade``
-import), so it runs unchanged in the dependency-light sandbox image.
+This module imports only stdlib + the sibling ``broker_core`` (no ``autotrade`` or
+pandas import), so it runs unchanged in the dependency-light sandbox image.
 """
 
 import builtins, contextlib, filecmp, importlib.util, json, os, re, shutil, sys, time, types, uuid
 from pathlib import Path
-
-import pandas as pd
 
 import broker_core
 
@@ -481,7 +479,7 @@ class _Broker:
         price = self._prices.get(code)
         if held == 0 or price is None or price <= 0:
             return
-        self._project_reduce(code, price, abs(held))
+        self._project_reduce("close", code, price, abs(held))
 
     def _order(self, action, ts_code, amount, weight, limit, valid_bars, reason):
         code = str(ts_code)
@@ -509,7 +507,7 @@ class _Broker:
         if action in ("buy", "short"):
             self._project_open(action, code, price, shares)
         else:
-            self._project_reduce(code, price, shares)
+            self._project_reduce(action, code, price, shares)
 
     def _project_open(self, action, code, price, shares):
         side = "long" if action == "buy" else "short"
@@ -534,14 +532,17 @@ class _Broker:
             st["qty"] = total
             st["entry_cost"] += fill.cost_basis
 
-    def _project_reduce(self, code, price, shares):
+    def _project_reduce(self, action, code, price, shares):
         held = self._pos.get(code, 0)
         if held == 0 or shares <= 0:
             return
         if held > 0:
+            if action == "cover":
+                return  # the broker rejects cover on a long-held code (side mismatch)
             # A code absent from the snapshot was opened earlier THIS tick, so it is
             # T+1 locked (0 sellable) — default to 0, not the held count.
-            shares = min(shares, self._sellable.get(code, 0), held)
+            sellable = self._sellable.get(code, 0)
+            shares = min(shares, sellable, held)
             if shares <= 0:
                 return  # T+1: shares acquired today are not yet sellable
             fill = broker_core.project_reduce(
@@ -550,7 +551,10 @@ class _Broker:
             self._cash += fill.cash_delta
             self._available_cash += fill.cash_delta  # selling a long frees its cash
             self._pos[code] = held - shares
+            self._sellable[code] = sellable - shares  # consume the sellable balance this tick
         else:
+            if action == "sell":
+                return  # the broker rejects sell on a short-held code (side mismatch)
             shares = min(shares, -held)
             fill = broker_core.project_reduce(
                 self._cost, side="short", raw_price=price, shares=shares, trade_date=self._trade_date

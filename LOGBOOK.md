@@ -1,3 +1,15 @@
+2026-06-30 最终综合审计 + 修复（RA5；chore/post-audit-reaudit）
+
+- 三个并行 Opus 子代理按用户要求审计：docs↔源一致性、业务/设计逻辑正确性、冗余/重复/命名。维度1（docs↔码）全绿；维度3（冗余/命名）除两处死 import 外全绿。
+- 死 import 清理：`broker.py` 未用 `LOT_SIZE`、`main_ctx_driver.py` 未用 `pandas`（并修文档串）。executor 的 env 4 处重复收敛为 `_base_env`/`_merged_env`（run+popen 共用）。
+- 维度2：无任何缺陷会错记宿主 P&L 或前视；修复三处驱动盘中投影忠实度 + 一处竞价滑点：
+  * Finding3（关键）：RA2 误把所有 `is_auction` 免滑点，但 09:25 单成于首根连续 bar（09:31）属 taker 连续成交，并非集合竞价；仅 09:15→09:30 开盘、14:57→15:00 收盘是单一价清算。改 09:25 tick `is_auction=False`（计滑点、label `minute:HH:MM`），开/收竞价仍免滑点；env_design §7.2 澄清，3 个 09:25 测试改断言滑点价（09:15/14:57 测试不变）。
+  * Finding1：驱动 `_project_reduce` 只按持仓符号分支，导致对做空调 `sell`（或对多头调 `cover`）投影出幻影减仓而宿主按 side_mismatch 拒；改为按 action 门控，新增回归测试。
+  * Finding2：驱动同 tick 未消耗 `_sellable`，多次 sell/close 可能投影超卖 T+1 可卖量；改为每次多头减仓递减 `_sellable`。
+  * 可接受（已记）：投影仅做资金门控（停牌/涨跌停/可融券/持仓数上限由宿主在真实成交处强制）；借券费属研究假设。
+- 驱动改动→重建沙箱镜像（缓存复用）并经 `DockerizedFoldE2ETest` 端到端复验。
+- 验证：全套 387 OK；`git diff --check` clean；PROMPTS.md 同步；镜像已重建。
+
 2026-06-30 RA1/RA3/RA4 再审计（chore/post-audit-reaudit）
 
 - RA1（券商账务端到端 R4–R8 交互）确认正确，新增 `test_combined_long_short_accounting_and_forced_close`：多空并存时 `equity`/`maintenance_ratio` 用字面现金（做空所得作担保），`available_cash` 扣保证金+冻结所得；做空价 100→250 击穿 1.30 维持线，`mark_to_market` 强平两腿（R4 日滚解 T+1、R6 收盘价平、R8 借券费）。决策：R8(b) 保持锁“净”所得（available 恰降 margin），费级宽松属有意（净锁保实现盈亏正确）；R5 同日平空已有测试、`locked_today` 对做空设而不读、无不一致。
