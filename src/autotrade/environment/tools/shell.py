@@ -401,7 +401,7 @@ class SandboxShellTool:
                 retry_hint="Read the mounted /mnt/snapshot view or /mnt/artifacts/run_manifest.json instead of runtime internals.",
                 blocked_target=str(path),
             )
-        writable_roots = (self.ctx.paths.workspace, self.ctx.paths.agent_output, self.ctx.paths.model_artifacts)
+        writable_roots = self.ctx.paths.writable_roots
         if any(_is_relative_to(path, root) for root in writable_roots):
             return
         read_only_roots = (

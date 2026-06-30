@@ -11,10 +11,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from autotrade.environment.runtime import AGENT_TOP_LEVEL
+
 from .base import ActionField, ActionSpec, ToolContext, ToolError
 
 MAX_WRITE_CHARS = 200_000
-WRITE_ROOT_CHOICES = ("workspace", "output", "models")
+# The agent-writable roots; single-sourced with the collection loop and the shell
+# write guard (see runtime.AGENT_TOP_LEVEL / SandboxPaths.writable_root_map).
+WRITE_ROOT_CHOICES = AGENT_TOP_LEVEL
 
 
 class ArtifactIOTool:
@@ -90,11 +94,7 @@ class ArtifactIOTool:
 
     def __init__(self, ctx: ToolContext) -> None:
         self.ctx = ctx
-        self._roots = {
-            "workspace": ctx.paths.workspace,
-            "output": ctx.paths.agent_output,
-            "models": ctx.paths.model_artifacts,
-        }
+        self._roots = ctx.paths.writable_root_map
 
     def write_file(self, *, root: str, path: str, content: str) -> dict[str, object]:
         self.ctx.require_writable(tool="write_file")

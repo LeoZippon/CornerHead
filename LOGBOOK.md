@@ -1,3 +1,11 @@
+2026-06-30 R18 结构去重 T4/T6/T2（refactor/t2-t4-t6-dedup）
+
+- T4 可写根单源：`SandboxPaths` 加 `writable_roots`（元组）/`writable_root_map`（名→路径），shell 写守卫与 `ArtifactIOTool._roots` 改引用之；`WRITE_ROOT_CHOICES = AGENT_TOP_LEVEL`。Python 缓存子集单源：`runtime.RUNTIME_CACHE_DIR_NAMES/SUFFIXES`，`artifacts._is_runtime_cache` 与 `sandbox._COLLECT_IGNORE` 共用（广义 VCS/venv 列表仍只在采集忽略表，按审计不并入窄谓词）。
+- T6 派发改 handler map：`runner._dispatch` 的 if/elif 链改为 `_action_handlers`（键与 `action_specs` 一致），每动作一个 `_do_<action>`；删 4 处死 mode 守卫（`spec.validate(mode=)` 的 `allowed_modes` 已先于 handler 拒绝跨 mode 调用，且无测试依赖旧错误串）；新增漂移测试断言 spec 键集==handler 键集。
+- T2 RunManifest：抽 `_replay_config_fields()`（16 个回放/执行旋钮），spread 进 fold 与 held-out 两处 `RunManifest.create`（元学习清单不含、不动）；check.md “3 处含元学习” 经审计更正为“2 处”。e2e 断言 host_run_manifest 含该块代表字段。
+- T2 download/audit 模板化：**有意推迟**（审计建议）。download.py/audit.py(~3000 行)已按 5 个 family spec + ~25 个 `spec.strategy` 分派，仅 ~20-30% 是 skip/query/write/log 样板，其余真异构；且属 PIT 摄取路径（曾致夜间 cron 中断），统一模板高风险低收益，违背原则#3。结论记于详细 logbook。
+- 验证：全套 378 OK（+1 T6 漂移测试）；`git diff --check` clean；行为保持（清单/采集/派发不变）。
+
 2026-06-30 R19 小合规 + RA2 竞价无滑点（fix/minor-compliance）
 
 - 子代理审后逐项修，两处 check.md 断言被更正。R19-1 `step_tree` `[failed]` 标记改按 `status=="failed"`（仅 record_failed_attempt 设此字段），不再误标 `complete_validation is False` 的部分/调试节点。R19-2（证伪）：`artifacts.FORBIDDEN_CODE_REFERENCES` 不改——`/mnt/runtime/` 仍在 prompts/docs 须防硬编码、`/mnt/snapshot`（单数）是合法正式读根不可禁，加注释说明。R19-3 `broker.query_stock_orders` 文档串改准（当日可挂单簿 + 全回测累计已结/拒单；实盘 xtquant 仅返当日，差异已注）。

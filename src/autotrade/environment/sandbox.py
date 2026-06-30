@@ -21,7 +21,15 @@ from pathlib import Path
 from typing import Sequence
 
 from autotrade.environment.artifacts import READONLY_FILES, copy_artifact, copy_model_artifacts, init_from_template
-from autotrade.environment.runtime import AGENT_TOP_LEVEL, ARTIFACT_TOP_LEVEL, SandboxPaths, new_id, utc_now_iso
+from autotrade.environment.runtime import (
+    AGENT_TOP_LEVEL,
+    ARTIFACT_TOP_LEVEL,
+    RUNTIME_CACHE_DIR_NAMES,
+    RUNTIME_CACHE_SUFFIXES,
+    SandboxPaths,
+    new_id,
+    utc_now_iso,
+)
 
 DEFAULT_IMAGE = "autotrade-sandbox:latest"
 DEFAULT_HOST_FRACTION = 0.10
@@ -283,9 +291,8 @@ _COLLECT_IGNORE = shutil.ignore_patterns(
     ".state",  # host-managed visible ctx.state_dir; per-backtest scratch, not artifacts
     ".state_staging",  # host-managed staged ctx.state_dir writes; per-backtest scratch
     "core.[0-9]*",  # PID-suffixed core dumps (RLIMIT_CORE=0 prevents these; belt-and-suspenders)
-    "__pycache__",
-    "*.pyc",
-    "*.pyo",
+    *RUNTIME_CACHE_DIR_NAMES,  # __pycache__ (shared with artifacts._is_runtime_cache)
+    *(f"*{_suffix}" for _suffix in RUNTIME_CACHE_SUFFIXES),  # *.pyc, *.pyo
     ".git",
     ".hg",
     ".svn",

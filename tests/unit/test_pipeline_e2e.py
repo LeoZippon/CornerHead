@@ -337,6 +337,13 @@ class PipelineEndToEndTest(unittest.TestCase):
             host_run_manifest = json.loads((run_dir / "host_run_manifest.json").read_text(encoding="utf-8"))
             self.assertIn("test_period", host_run_manifest["fold"])
             self.assertIn("test_replay", host_run_manifest["snapshots"])
+            # The shared replay-config block (_replay_config_fields) is present in the
+            # fold manifest (and, identically, in the held-out manifest).
+            for key in (
+                "execution_lag_bars", "auction_enabled", "offsession_tick_minutes",
+                "backtest_max_seconds_per_decision", "nl_max_calls_per_backtest", "timeview_enabled",
+            ):
+                self.assertIn(key, host_run_manifest)
             self.assertTrue((run_dir / "runtime_env.json").exists())
             self.assertTrue((run_dir / "data_summary.json").exists())
             self.assertTrue((run_dir / "agent_trace.jsonl").exists())

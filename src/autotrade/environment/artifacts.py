@@ -16,6 +16,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from autotrade.environment.runtime import RUNTIME_CACHE_DIR_NAMES, RUNTIME_CACHE_SUFFIXES
+
 REQUIRED_FILES = ("main.py",)
 ARTIFACT_METADATA_FILES = frozenset({"manifest.json"})
 READONLY_FILES = frozenset({"README.md"})
@@ -462,7 +464,7 @@ def _changed_line_count(before: str, after: str) -> int:
 
 def _is_runtime_cache(relpath: str | Path) -> bool:
     path = Path(relpath)
-    return "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}
+    return any(name in path.parts for name in RUNTIME_CACHE_DIR_NAMES) or path.suffix in RUNTIME_CACHE_SUFFIXES
 
 
 def _has_hidden_part(relpath: str | Path) -> bool:

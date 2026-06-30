@@ -203,6 +203,28 @@ class ExperimentPipeline:
             ),
         }
 
+    def _replay_config_fields(self) -> dict[str, object]:
+        """The replay/execution knobs the Fold and held-out run manifests share, so a
+        new knob is added once (these manifests are the Agent-visible PIT contract)."""
+        return {
+            "per_call_timeout_seconds": self.config.per_call_timeout_seconds,
+            "auction_enabled": self.config.auction_enabled,
+            "auction_preopen_time": self.config.auction_preopen_time,
+            "auction_decision_time": self.config.auction_decision_time,
+            "auction_close_time": self.config.auction_close_time,
+            "offsession_tick_minutes": self.config.offsession_tick_minutes,
+            "execution_lag_bars": self.config.execution_lag_bars,
+            "decision_max_sim_minutes": self.config.decision_max_sim_minutes,
+            "backtest_max_seconds_per_decision": self.config.backtest_max_seconds_per_decision,
+            "backtest_max_seconds_per_trading_day": self.config.backtest_max_seconds_per_trading_day,
+            "backtest_final_eval_max_seconds_per_decision": self.config.backtest_final_eval_max_seconds_per_decision,
+            "backtest_final_eval_max_seconds_per_trading_day": self.config.backtest_final_eval_max_seconds_per_trading_day,
+            "timeview_enabled": self.config.timeview_enabled,
+            "rolling_asof_enabled": self.config.timeview_enabled,
+            "nl_max_calls_per_decision_day": self.config.nl_max_calls_per_decision_day,
+            "nl_max_calls_per_backtest": self.config.nl_max_calls_per_backtest,
+        }
+
     # ---- fold ----
 
     def run_fold(
@@ -298,22 +320,7 @@ class ExperimentPipeline:
                 "max_backtests_per_fold": self.config.max_backtests_per_fold,
                 "fold_deadline_at": deadline.isoformat(),
                 "finalize_before_deadline_seconds": self.config.finalize_before_deadline_seconds,
-                "per_call_timeout_seconds": self.config.per_call_timeout_seconds,
-                "auction_enabled": self.config.auction_enabled,
-                "auction_preopen_time": self.config.auction_preopen_time,
-                "auction_decision_time": self.config.auction_decision_time,
-                "auction_close_time": self.config.auction_close_time,
-                "offsession_tick_minutes": self.config.offsession_tick_minutes,
-                "execution_lag_bars": self.config.execution_lag_bars,
-                "decision_max_sim_minutes": self.config.decision_max_sim_minutes,
-                "backtest_max_seconds_per_decision": self.config.backtest_max_seconds_per_decision,
-                "backtest_max_seconds_per_trading_day": self.config.backtest_max_seconds_per_trading_day,
-                "backtest_final_eval_max_seconds_per_decision": self.config.backtest_final_eval_max_seconds_per_decision,
-                "backtest_final_eval_max_seconds_per_trading_day": self.config.backtest_final_eval_max_seconds_per_trading_day,
-                "timeview_enabled": self.config.timeview_enabled,
-                "rolling_asof_enabled": self.config.timeview_enabled,
-                "nl_max_calls_per_decision_day": self.config.nl_max_calls_per_decision_day,
-                "nl_max_calls_per_backtest": self.config.nl_max_calls_per_backtest,
+                **self._replay_config_fields(),
                 "sandbox_spec": self._active_sandbox_spec.to_record(),
                 "taste_prompt": taste_prompt,
             },
@@ -913,22 +920,7 @@ class ExperimentPipeline:
                     "broker_profile": self.config.broker_profile.to_record(),
                     "short_inventory_mode": self.config.broker_profile.short_inventory_mode,
                     "nl_failure_policy": self.config.nl_failure_policy,
-                    "per_call_timeout_seconds": self.config.per_call_timeout_seconds,
-                    "auction_enabled": self.config.auction_enabled,
-                    "auction_preopen_time": self.config.auction_preopen_time,
-                    "auction_decision_time": self.config.auction_decision_time,
-                    "auction_close_time": self.config.auction_close_time,
-                    "offsession_tick_minutes": self.config.offsession_tick_minutes,
-                    "execution_lag_bars": self.config.execution_lag_bars,
-                    "decision_max_sim_minutes": self.config.decision_max_sim_minutes,
-                    "backtest_max_seconds_per_decision": self.config.backtest_max_seconds_per_decision,
-                    "backtest_max_seconds_per_trading_day": self.config.backtest_max_seconds_per_trading_day,
-                    "backtest_final_eval_max_seconds_per_decision": self.config.backtest_final_eval_max_seconds_per_decision,
-                    "backtest_final_eval_max_seconds_per_trading_day": self.config.backtest_final_eval_max_seconds_per_trading_day,
-                    "timeview_enabled": self.config.timeview_enabled,
-                    "rolling_asof_enabled": self.config.timeview_enabled,
-                    "nl_max_calls_per_decision_day": self.config.nl_max_calls_per_decision_day,
-                    "nl_max_calls_per_backtest": self.config.nl_max_calls_per_backtest,
+                    **self._replay_config_fields(),
                     "sandbox_spec": self._active_sandbox_spec.to_record(),
                 },
             )

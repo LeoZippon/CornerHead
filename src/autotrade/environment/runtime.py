@@ -59,6 +59,12 @@ ARTIFACT_TOP_LEVEL = (
     "logs",
 )
 AGENT_TOP_LEVEL = ("workspace", "output", "models")
+# Python bytecode-cache dirs/suffixes that are never experiment artifacts. Single
+# source for both the artifact-collection ignore list (sandbox._COLLECT_IGNORE, which
+# adds VCS/venv/tooling dirs on top) and the formal-file runtime-cache predicate
+# (artifacts._is_runtime_cache).
+RUNTIME_CACHE_DIR_NAMES = ("__pycache__",)
+RUNTIME_CACHE_SUFFIXES = (".pyc", ".pyo")
 
 
 def utc_now_iso() -> str:
@@ -180,6 +186,17 @@ class SandboxPaths:
     @property
     def models(self) -> Path:
         return self.model_artifacts
+
+    @property
+    def writable_roots(self) -> tuple[Path, ...]:
+        """The three sandbox roots the agent may write to (single source of truth
+        for the shell write guard and the artifact_io tools)."""
+        return (self.workspace, self.agent_output, self.model_artifacts)
+
+    @property
+    def writable_root_map(self) -> dict[str, Path]:
+        """Agent-facing writable-root name (see ``AGENT_TOP_LEVEL``) -> path."""
+        return {"workspace": self.workspace, "output": self.agent_output, "models": self.model_artifacts}
 
     @property
     def results(self) -> Path:

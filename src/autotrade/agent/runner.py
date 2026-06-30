@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -156,6 +156,7 @@ class AgentSessionRunner:
         self.finish_fold = FinishFoldTool(ctx)
         self.search = StructuredSearchTool(ctx)
         self.action_specs = self._build_action_specs()
+        self._action_handlers = self._build_action_handlers()
         self._tool_schemas_cache: list[dict[str, object]] | None = None
         self._observation_digests: list[dict[str, object]] = []
         self._message_seq = 0
@@ -387,6 +388,121 @@ class AgentSessionRunner:
             ),
         ]
         return {spec.action: spec for spec in specs}
+
+    def _build_action_handlers(self) -> dict[str, Callable[[dict[str, object]], dict[str, object]]]:
+        """Per-action dispatch handler, keyed identically to ``_build_action_specs``.
+
+        A new tool registers its schema there and its handler here; a unit test
+        asserts the two key sets stay in lock-step (no orphan spec or handler). The
+        handler runs only after ``_dispatch`` has validated the payload against the
+        spec — including ``allowed_modes`` — so handlers never re-check the mode."""
+        return {
+            "shell": self._do_shell,
+            "write_file": self._do_write_file,
+            "edit_file": self._do_edit_file,
+            "grep": self._do_grep,
+            "glob": self._do_glob,
+            "read": self._do_read,
+            "modification_check": self._do_modification_check,
+            "backtest": self._do_backtest,
+            "finish_fold": self._do_finish_fold,
+            "web_search": self._do_web_search,
+            "note": self._do_note,
+            "explore": self._do_explore,
+            "done": self._do_done,
+        }
+
+    def _do_shell(self, args: dict[str, object]) -> dict[str, object]:
+        result = self.shell.run(
+            str(args["command"]),
+            max_output_chars=int(args["max_output_chars"]),
+            timeout_seconds=int(args["timeout_seconds"]),
+        )
+        return {"observation": "shell", **result.to_record()}
+
+    def _do_write_file(self, args: dict[str, object]) -> dict[str, object]:
+        return {"observation": "write_file", **self.artifact_io.write_file(**args)}
+
+    def _do_edit_file(self, args: dict[str, object]) -> dict[str, object]:
+        return {"observation": "edit_file", **self.artifact_io.edit_file(**args)}
+
+    def _do_grep(self, args: dict[str, object]) -> dict[str, object]:
+        return {"observation": "grep", **self.search.grep(**args)}
+
+    def _do_glob(self, args: dict[str, object]) -> dict[str, object]:
+        return {"observation": "glob", **self.search.glob(**args)}
+
+    def _do_read(self, args: dict[str, object]) -> dict[str, object]:
+        return {"observation": "read", **self.search.read(**args)}
+
+    def _do_modification_check(self, args: dict[str, object]) -> dict[str, object]:
+        return {"observation": "modification_check", **self.modification_check.run()}
+
+    def _do_backtest(self, args: dict[str, object]) -> dict[str, object]:
+        if self._backtest_count >= self.config.max_backtests_per_fold:
+            return {
+                "observation": "error", "action": "backtest",
+                "error": (
+                    f"backtest budget exhausted: {self.config.max_backtests_per_fold} backtests already "
+                    "run this fold; consolidate changes before validating again"
+                ),
+            }
+        self._backtest_count += 1
+        started = time.monotonic()
+        try:
+            result = self.backtest.run(mode="valid", replay_window=(args or {}).get("replay_window"))
+        finally:
+            # Exclude this independently-timed backtest from the reasoning deadline.
+            self._excluded_backtest_seconds += time.monotonic() - started
+        return {"observation": "backtest", **result}
+
+    def _do_finish_fold(self, args: dict[str, object]) -> dict[str, object]:
+        return {"observation": "finish_fold", **self.finish_fold.run()}
+
+    def _do_web_search(self, args: dict[str, object]) -> dict[str, object]:
+        if self.web_search is None:
+            return {"observation": "error", "action": "web_search", "error": "web search provider is not configured"}
+        result = self.web_search.run(
+            engine=str(args["engine"]),
+            perspective=str(args["perspective"]),
+            query=str(args["query"]),
+            max_results=int(args["max_results"]),
+        )
+        if int(result.get("result_count") or 0) > 0:
+            self._meta_search_perspectives.add(str(args["perspective"]))
+        return {"observation": "web_search", **result}
+
+    def _do_explore(self, args: dict[str, object]) -> dict[str, object]:
+        engine = ExploreSubAgentEngine(
+            self.explore_proxy,
+            shell=self.shell,
+            search=self.search,
+            trace=self.ctx.trace,
+            mode=self.mode,
+            step_id=self.ctx.current_step_id,
+            deadline_at=self._effective_deadline_at(),
+        )
+        return {"observation": "explore", **engine.run(task=str(args["task"]), max_rounds=int(args.get("max_rounds") or 0))}
+
+    def _do_note(self, args: dict[str, object]) -> dict[str, object]:
+        return {"observation": "note_recorded", "text": str(args.get("text", ""))}
+
+    def _do_done(self, args: dict[str, object]) -> dict[str, object]:
+        if self.web_search is not None:
+            missing = [item for item in META_SEARCH_PERSPECTIVES if item not in self._meta_search_perspectives]
+            if missing:
+                return {
+                    "observation": "error",
+                    "action": "done",
+                    "error": (
+                        "complete successful web_search calls for all required perspectives before done: "
+                        + ", ".join(missing)
+                    ),
+                }
+        taste_violation = self._taste_policy_violation()
+        if taste_violation:
+            return {"observation": "error", "action": "done", "error": taste_violation}
+        return {"observation": "meta_learning_done"}
 
     def _initial_user_message(self) -> str:
         if self.mode == "meta_learning":
@@ -631,98 +747,11 @@ class AgentSessionRunner:
             }
             self.ctx.trace.emit("tool_cancelled", cancellation, step_id=self.ctx.current_step_id)
             return cancellation
-        try:
-            if action == "shell":
-                result = self.shell.run(
-                    str(args["command"]),
-                    max_output_chars=int(args["max_output_chars"]),
-                    timeout_seconds=int(args["timeout_seconds"]),
-                )
-                return {"observation": "shell", **result.to_record()}
-            if action == "write_file":
-                return {"observation": "write_file", **self.artifact_io.write_file(**args)}
-            if action == "edit_file":
-                return {"observation": "edit_file", **self.artifact_io.edit_file(**args)}
-            if action == "grep":
-                return {"observation": "grep", **self.search.grep(**args)}
-            if action == "glob":
-                return {"observation": "glob", **self.search.glob(**args)}
-            if action == "read":
-                return {"observation": "read", **self.search.read(**args)}
-            if action == "modification_check":
-                return {"observation": "modification_check", **self.modification_check.run()}
-            if action == "backtest":
-                if self.mode == "meta_learning":
-                    return {"observation": "error", "action": action, "error": "backtests are not allowed in this session"}
-                if self._backtest_count >= self.config.max_backtests_per_fold:
-                    return {
-                        "observation": "error", "action": action,
-                        "error": (
-                            f"backtest budget exhausted: {self.config.max_backtests_per_fold} backtests already "
-                            "run this fold; consolidate changes before validating again"
-                        ),
-                    }
-                self._backtest_count += 1
-                started = time.monotonic()
-                try:
-                    result = self.backtest.run(mode="valid", replay_window=(args or {}).get("replay_window"))
-                finally:
-                    # Exclude this independently-timed backtest from the reasoning deadline.
-                    self._excluded_backtest_seconds += time.monotonic() - started
-                return {"observation": "backtest", **result}
-            if action == "finish_fold":
-                if self.mode == "meta_learning":
-                    return {"observation": "error", "action": action, "error": "use done to end this session"}
-                return {"observation": "finish_fold", **self.finish_fold.run()}
-            if action == "web_search":
-                if self.mode != "meta_learning":
-                    return {"observation": "error", "action": action, "error": "web_search is only available in meta_learning"}
-                if self.web_search is None:
-                    return {"observation": "error", "action": action, "error": "web search provider is not configured"}
-                result = self.web_search.run(
-                    engine=str(args["engine"]),
-                    perspective=str(args["perspective"]),
-                    query=str(args["query"]),
-                    max_results=int(args["max_results"]),
-                )
-                result_count = int(result.get("result_count") or 0)
-                if result_count > 0:
-                    self._meta_search_perspectives.add(str(args["perspective"]))
-                return {"observation": "web_search", **result}
-            if action == "explore":
-                engine = ExploreSubAgentEngine(
-                    self.explore_proxy,
-                    shell=self.shell,
-                    search=self.search,
-                    trace=self.ctx.trace,
-                    mode=self.mode,
-                    step_id=self.ctx.current_step_id,
-                    deadline_at=self._effective_deadline_at(),
-                )
-                return {"observation": "explore", **engine.run(task=str(args["task"]), max_rounds=int(args.get("max_rounds") or 0))}
-            if action == "note":
-                return {"observation": "note_recorded", "text": str(args.get("text", ""))}
-            if action == "done" and self.mode == "meta_learning":
-                if self.web_search is not None:
-                    missing = [item for item in META_SEARCH_PERSPECTIVES if item not in self._meta_search_perspectives]
-                    if missing:
-                        return {
-                            "observation": "error",
-                            "action": action,
-                            "error": (
-                                "complete successful web_search calls for all required perspectives before done: "
-                                + ", ".join(missing)
-                            ),
-                        }
-                taste_violation = self._taste_policy_violation()
-                if taste_violation:
-                    return {
-                        "observation": "error",
-                        "action": action,
-                        "error": taste_violation,
-                    }
-                return {"observation": "meta_learning_done"}
+        handler = self._action_handlers.get(action)
+        if handler is None:
             return {"observation": "error", "error": f"unknown action: {action!r}"}
+        try:
+            return handler(args)
         except ToolError as exc:
             return _tool_error_observation(action, exc)
         except WebSearchError as exc:

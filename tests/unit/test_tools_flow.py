@@ -1649,6 +1649,22 @@ def main(ctx):
             explore_props = explore_schema["function"]["parameters"]["properties"]
             self.assertIn("not final strategy design", explore_props["task"]["description"])
 
+    def test_every_action_spec_has_a_dispatch_handler(self):
+        # The spec registry and the dispatch handler map must stay in lock-step, so a
+        # new tool cannot be registered with a schema but no handler (or vice versa).
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([]),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5)),
+                fold_info={},
+                acceptance_rules={},
+            )
+            self.assertEqual(set(runner.action_specs), set(runner._action_handlers))
+            for action, handler in runner._action_handlers.items():
+                self.assertTrue(callable(handler), f"handler for {action} is not callable")
+
     def test_runner_injects_deterministic_context_summary_when_history_is_trimmed(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
