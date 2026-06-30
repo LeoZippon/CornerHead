@@ -448,5 +448,58 @@ class CandidateIsolationTest(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(paths.artifacts.stat().st_mode), 0o755)
 
 
+class BrokerCoreTest(unittest.TestCase):
+    """The shared deterministic fill core (R16): the math SimBroker and the sandbox
+    intra-tick view both project from."""
+
+    def setUp(self) -> None:
+        from autotrade.environment import broker_core as core
+
+        self.core = core
+        self.cost = BrokerProfile().cost_model  # CostModel matching the default profile
+
+    def test_profile_delegates_to_cost_model(self):
+        profile = BrokerProfile()
+        self.assertAlmostEqual(profile.slipped_price(10.0, is_buy=True), self.cost.slipped_price(10.0, is_buy=True))
+        self.assertAlmostEqual(profile.commission(100_000.0), self.cost.commission(100_000.0))
+        self.assertAlmostEqual(
+            profile.stamp_duty_on_sale(100_000.0, "20230827"), self.cost.stamp_duty_on_sale(100_000.0, "20230827")
+        )
+
+    def test_project_open_long_is_notional_plus_fee(self):
+        fill = self.core.project_open(self.cost, side="long", raw_price=10.0, shares=1000, trade_date="20220104")
+        price = self.cost.slipped_price(10.0, is_buy=True)
+        notional = 1000 * price
+        fee = self.cost.commission(notional)
+        self.assertAlmostEqual(fill.price, price)
+        self.assertAlmostEqual(fill.required_cash, notional + fee)
+        self.assertAlmostEqual(fill.cash_delta, -(notional + fee))
+        self.assertAlmostEqual(fill.cost_basis, notional + fee)
+
+    def test_project_open_short_locks_margin_and_banks_net_proceeds(self):
+        fill = self.core.project_open(self.cost, side="short", raw_price=10.0, shares=1000, trade_date="20220104")
+        price = self.cost.slipped_price(10.0, is_buy=False)
+        notional = 1000 * price
+        fee = self.cost.commission(notional)
+        duty = self.cost.stamp_duty_on_sale(notional, "20220104")
+        self.assertAlmostEqual(fill.margin, notional * self.cost.short_margin_ratio)
+        self.assertAlmostEqual(fill.required_cash, fill.margin + fee + duty)
+        self.assertAlmostEqual(fill.cash_delta, notional - fee - duty)  # net proceeds banked
+        self.assertAlmostEqual(fill.cost_basis, notional - fee - duty)
+
+    def test_project_reduce_sell_banks_net_cover_pays(self):
+        sell = self.core.project_reduce(self.cost, side="long", raw_price=11.0, shares=500, trade_date="20220105")
+        self.assertGreater(sell.cash_delta, 0)  # selling a long banks cash
+        cover = self.core.project_reduce(self.cost, side="short", raw_price=9.0, shares=500, trade_date="20220105")
+        self.assertLess(cover.cash_delta, 0)  # covering a short pays cash
+
+    def test_lot_floor_and_resolve_shares(self):
+        self.assertEqual(self.core.lot_floor(1099), 1000)
+        self.assertEqual(self.core.lot_floor("abc"), 0)
+        self.assertEqual(self.core.resolve_shares(350, None, 10.0, 1_000_000.0), 300)
+        # weight 0.01 of 1,000,000 at price 10 -> 1000 shares.
+        self.assertEqual(self.core.resolve_shares(None, 0.01, 10.0, 1_000_000.0), 1000)
+
+
 if __name__ == "__main__":
     unittest.main()

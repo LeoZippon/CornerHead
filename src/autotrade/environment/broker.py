@@ -22,13 +22,18 @@ from typing import Protocol
 
 import pandas as pd
 
+from autotrade.environment.broker_core import (
+    LOT_SIZE,
+    STAMP_DUTY_CUTOVER,
+    CostModel,
+    lot_floor,
+    project_open,
+    project_reduce,
+    resolve_shares,
+)
 from autotrade.environment.runtime import new_id
 
-LOT_SIZE = 100
 SHORT_INVENTORY_MODES = ("proxy_margin_secs", "broker_inventory", "theoretical_short")
-
-
-STAMP_DUTY_CUTOVER = "20230828"  # sell-side stamp duty halved to 0.05% from this date
 
 
 @dataclass(frozen=True)
@@ -78,20 +83,27 @@ class BrokerProfile:
     def effective_short_margin_ratio(self) -> float:
         return self.short_margin_ratio_private_fund if self.is_private_fund else self.short_margin_ratio
 
+    @property
+    def cost_model(self) -> CostModel:
+        """The deterministic fill-cost model SimBroker and the sandbox intra-tick view
+        share (single source of truth for commission/duty/slippage/short margin)."""
+        return CostModel(
+            commission_bps=self.commission_bps,
+            min_commission_cny=self.min_commission_cny,
+            stamp_duty_sell_bps_before_cutover=self.stamp_duty_sell_bps_before_cutover,
+            stamp_duty_sell_bps_from_cutover=self.stamp_duty_sell_bps_from_cutover,
+            slippage_bps=self.slippage_bps,
+            short_margin_ratio=self.effective_short_margin_ratio,
+        )
+
     def commission(self, notional: float) -> float:
-        return max(notional * self.commission_bps / 10_000.0, self.min_commission_cny)
+        return self.cost_model.commission(notional)
 
     def stamp_duty_on_sale(self, notional: float, trade_date: str) -> float:
-        bps = (
-            self.stamp_duty_sell_bps_from_cutover
-            if str(trade_date) >= STAMP_DUTY_CUTOVER
-            else self.stamp_duty_sell_bps_before_cutover
-        )
-        return notional * bps / 10_000.0
+        return self.cost_model.stamp_duty_on_sale(notional, trade_date)
 
     def slipped_price(self, price: float, *, is_buy: bool) -> float:
-        slip = self.slippage_bps / 10_000.0
-        return price * (1.0 + slip) if is_buy else price * (1.0 - slip)
+        return self.cost_model.slipped_price(price, is_buy=is_buy)
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -610,34 +622,34 @@ class SimBroker:
         return self._fill_long_open(order, raw_price, shares, apply_slippage)
 
     def _fill_long_open(self, order: Order, raw_price: float, shares: int, apply_slippage: bool = True) -> Order:
-        price = self.profile.slipped_price(raw_price, is_buy=True) if apply_slippage else raw_price
-        notional = shares * price
-        fee = self.profile.commission(notional)
+        fill = project_open(
+            self.profile.cost_model, side="long", raw_price=raw_price, shares=shares,
+            trade_date=order.trade_date, apply_slippage=apply_slippage,
+        )
         # A long buy may only deploy available cash: short-sale proceeds are locked
         # collateral (not deployable), so available_cash() == cash when flat/long-only.
-        if notional + fee > self.available_cash() + 1e-6:
+        if fill.required_cash > self.available_cash() + 1e-6:
             return self._reject(order, "insufficient_cash")
-        self.cash -= notional + fee
-        self.fees_paid += fee
-        self._add_to_position(order.ts_code, "long", shares, price, notional + fee, order.trade_date)
-        return self._fill(order, price, shares, "open")
+        self.cash += fill.cash_delta
+        self.fees_paid += fill.fee
+        self._add_to_position(order.ts_code, "long", shares, fill.price, fill.cost_basis, order.trade_date)
+        return self._fill(order, fill.price, shares, "open")
 
     def _fill_short_open(self, order: Order, raw_price: float, shares: int, apply_slippage: bool = True) -> Order:
-        price = self.profile.slipped_price(raw_price, is_buy=False) if apply_slippage else raw_price
-        notional = shares * price
-        fee = self.profile.commission(notional)
-        duty = self.profile.stamp_duty_on_sale(notional, order.trade_date)
-        margin = notional * self.profile.effective_short_margin_ratio
+        fill = project_open(
+            self.profile.cost_model, side="short", raw_price=raw_price, shares=shares,
+            trade_date=order.trade_date, apply_slippage=apply_slippage,
+        )
         # The new short's margin must be backed by deployable cash, which already
         # excludes the locked proceeds and margin of any existing shorts.
-        if margin + fee + duty > self.available_cash() + 1e-6:
+        if fill.required_cash > self.available_cash() + 1e-6:
             return self._reject(order, "insufficient_short_margin")
-        self.cash += notional - fee - duty
-        self.fees_paid += fee
-        self.stamp_duty_paid += duty
+        self.cash += fill.cash_delta
+        self.fees_paid += fill.fee
+        self.stamp_duty_paid += fill.duty
         # entry_cost for a short is the net sale proceeds released proportionally on cover.
-        self._add_to_position(order.ts_code, "short", shares, price, notional - fee - duty, order.trade_date)
-        return self._fill(order, price, shares, "open")
+        self._add_to_position(order.ts_code, "short", shares, fill.price, fill.cost_basis, order.trade_date)
+        return self._fill(order, fill.price, shares, "open")
 
     def _reduce(self, order: Order, bar: pd.Series, raw_price: float, *, amount, apply_slippage: bool = True) -> Order:
         pos = self.positions.get(order.ts_code)
@@ -793,20 +805,20 @@ class SimBroker:
         if shares <= 0:
             return
         self.traded_notional += shares * price
-        notional = shares * price
-        fee = self.profile.commission(notional)
+        # ``price`` is already the fill price (slipped by the caller), so the shared
+        # reduce projection runs with apply_slippage=False.
+        fill = project_reduce(
+            self.profile.cost_model, side=pos.side, raw_price=price, shares=shares,
+            trade_date=trade_date, apply_slippage=False,
+        )
         basis_released = pos.entry_cost * shares / pos.quantity
-        if pos.side == "long":
-            duty = self.profile.stamp_duty_on_sale(notional, trade_date)
-            self.cash += notional - fee - duty
-            self.stamp_duty_paid += duty
-            realized = (notional - fee - duty) - basis_released
-        else:
-            # covering a short: pay to buy back; basis_released is the net proceeds banked at open
-            duty = 0.0
-            self.cash -= notional + fee
-            realized = basis_released - (notional + fee)
-        self.fees_paid += fee
+        # covering a short releases the net proceeds banked at open (basis_released).
+        self.cash += fill.cash_delta
+        self.stamp_duty_paid += fill.duty
+        self.fees_paid += fill.fee
+        realized = (
+            fill.cash_delta - basis_released if pos.side == "long" else basis_released + fill.cash_delta
+        )
         pos.quantity -= shares
         pos.entry_cost -= basis_released
         pos.last_price = price
@@ -895,19 +907,11 @@ class SimBroker:
         return min(shares, budget_shares)
 
     def _resolve_amount(self, amount: int | None, weight: float | None, raw_price: float) -> int:
-        if amount is not None and str(amount).strip() != "":
-            return self._lot_floor(amount)
-        if weight is not None and str(weight).strip() != "" and raw_price > 0:
-            return self._lot_floor(abs(float(weight)) * self.initial_equity / raw_price)
-        return 0
+        return resolve_shares(amount, weight, raw_price, self.initial_equity)
 
     @staticmethod
     def _lot_floor(amount: object) -> int:
-        try:
-            shares = int(float(amount))
-        except (TypeError, ValueError):
-            return 0
-        return (shares // LOT_SIZE) * LOT_SIZE
+        return lot_floor(amount)
 
     def _short_margin_occupied(self) -> float:
         return sum(
