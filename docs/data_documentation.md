@@ -45,7 +45,8 @@
 - [5. 原始数据时间可见性合同](#5-原始数据时间可见性合同)
   - [5.1 原始层原则](#51-原始层原则)
   - [5.2 可见时间速查](#52-可见时间速查)
-  - [5.3 交给环境层的最小信息](#53-交给环境层的最小信息)
+  - [5.3 Timeview 刷新节点](#53-timeview-刷新节点)
+  - [5.4 交给环境层的最小信息](#54-交给环境层的最小信息)
 - [6. 数据风险与口径修正](#6-数据风险与口径修正)
 - [7. 官方文档索引](#7-官方文档索引)
 
@@ -334,6 +335,8 @@ TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_sched
 | `cn_preopen_margin_backfill_0905` / `cn_preopen_margin_retry_0915` | 09:05 / 09:15 | 回补上一交易日两融汇总和明细 |
 | `cn_preopen_event_flow_audit_0920` | 09:20 | 盘前刷新事件/资金状态 |
 
+回测的逐 tick 滚动数据视图（Timeview）按这些落库 job 的真实完成时间放行数据，建模为 `REFRESH_NODES` 刷新节点，节点定义与门禁语义见 5.3。纯审计 job（`cn_nightly_full_audit`、`cn_daily_revision_sentinel`、`cn_preopen_event_flow_audit_0920`）不落新数据，刻意不作为节点。
+
 runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
 
 当前 crontab 必须通过 `ops/cron/install_tushare_cron.py` 安装，使用 `/home/lzp/miniconda3/envs/quant/bin/python` 和 `scripts/data/tushare_cron_update.py`。旧的 `stock` 环境和 `scripts/tushare/cron_update.py` 不再作为正式调度入口。
@@ -465,19 +468,40 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 
 ### 5.2 可见时间速查
 
+下表是行级 `available_at` 规则。回测的 Timeview 在此之上再叠加落库 job 延迟（见 5.3）：一行要同时满足行级 `available_at` 门禁与落库节点 `ready_at` 才进入滚动视图，节点不替代 `available_at`，只在其上叠加落库延迟。
+
 | 数据 | 可见时间规则 |
 |---|---|
-| `daily` / `daily_basic` | 当日收盘后或下一交易日；09:25 信号不得使用当日数据 |
-| 分钟线 | `available_at=trade_time`，视为该分钟 bar close 后可见 |
-| 财务 | 优先 `f_ann_date`，否则 `ann_date`；多版本按决策时点选择 |
+| `daily` / `daily_basic` | 行级 `available_at` 为当日收盘后（次一交易日生效）；Timeview 另由 `cn_evening_full`（约次日 02:05 完成）门禁，故交易日内横截面日频只到 D-1，当日数据要到次日约 02:05 才落库可见，09:25 信号不得使用当日数据 |
+| 分钟线 | `available_at=trade_time`，视为该分钟 bar close 后可见；历史分钟随 `cn_evening_full` 晚间滚动落库，当日实时 bar 由引擎 `ctx.bars` 提供、不走持久化视图 |
+| 财务 | 优先 `f_ann_date`，否则 `ann_date`；多版本按决策时点选择；`fundamental_events` 由 `cn_nightly_pit_event_build`（约 03:50）落库后可查 |
 | 分红 | 只用 `imp_ann_date/ann_date` 判断可见性，`ex_date/record_date/pay_date` 是未来事件属性 |
-| 宏观 | 优先发布时间或 `cn_schedule.publish_date`，否则保守延后 |
-| 全球事件 | 有具体 `time` 时使用 `date+time`，否则当日收盘后可见 |
-| 文本 | 优先 `rec_time/pub_time/pubtime/datetime/create_time`；有日期基准的字段须通过 -1~+3 天合理性检查，否则按日期保守回退（见 2.7） |
-| 两融 | `margin/margin_detail` 按下一日 09:00，`margin_secs` 按当日 09:00 |
-| 资金/大宗 | `moneyflow` 按当日 19:00，`block_trade` 按当日 21:00 |
+| 宏观 | 优先发布时间或 `cn_schedule.publish_date`，否则保守延后；Timeview 随 `cn_evening_full` 落库 |
+| 全球事件 | 有具体 `time` 时使用 `date+time`，否则当日收盘后可见；Timeview 随 `cn_evening_full` 落库 |
+| 文本 | 优先 `rec_time/pub_time/pubtime/datetime/create_time`；有日期基准的字段须通过 -1~+3 天合理性检查，否则按日期保守回退（见 2.7）；`cctv_news/news` 盘前另由 `cn_preopen_text_backfill_0855` 回补 |
+| 两融 | `margin/margin_detail` 行级 `available_at` 为下一日 09:00，Timeview 经盘前 `cn_preopen_margin_backfill_0905`/`_retry_0915` 落库；`margin_secs` 为当日盘前 09:00，经 `cn_preopen_margin_secs_backfill_0903`/`_retry_0913` 落库 |
+| 资金/大宗 | `moneyflow` 当日 19:00、`block_trade` 当日 21:00 为行级 `available_at`；Timeview 实际随 `cn_evening_full`（约次日 02:05）落库，故当日盘中不可见 |
 
-### 5.3 交给环境层的最小信息
+### 5.3 Timeview 刷新节点
+
+回测的逐 tick 滚动数据视图（Timeview）复刻本地库的真实刷新节奏：一行数据只有在落库它的 cron job 写完之后才可见，建模为 `ready_at = job 启动时间 + 实测刷新时长`。共享节点表是 `src/autotrade/environment/data/contracts.py` 的 `REFRESH_NODES`，与 `configs/tushare_update_schedule.json` 一一对应（漂移守护测试断言每个节点都是真实 cron job、纯审计 job 不得成为节点）。该节点模型在已写入的 `available_at` 之上叠加落库延迟：`available_at` 仍是行级门禁，节点只把落库 job 的延迟加在其上，二者都满足才进入滚动视图。完整执行/回放语义见 `docs/environment_design.md`。
+
+默认节点和各自让什么变可见：
+
+| 节点 | 启动 → 就绪 | 让什么变可见 |
+|---|---|---|
+| `cn_evening_full` | 23:35 → 次日约 02:05（约 150 分钟） | A 股日频核心（`daily` / `daily_basic` / `adj_factor` / `stk_limit` / `suspend_d`）、分钟历史、`moneyflow`、`block_trade`、股东/回购/解禁/龙虎榜、全部宏观、文本主语料 |
+| `cn_nightly_pit_event_build` | 03:35 → 约 03:50（约 15 分钟） | 财务 PIT 事件（`fundamental_events`）变为可查询 |
+| `cn_preopen_board_backfill_0850` | 08:50 → 约 08:55 | 前一日打板关键榜单（`kpl_list` 等） |
+| `cn_preopen_text_backfill_0855` | 08:55 → 约 09:00 | 短新闻 `cctv_news` / `news` 盘前回补 |
+| `cn_preopen_margin_secs_backfill_0903` / `_retry_0913` | 09:03 / 09:13 → 约 09:05 / 09:15 | 当日融资融券标的 `margin_secs`（做空券源池） |
+| `cn_preopen_margin_backfill_0905` / `_retry_0915` | 09:05 / 09:15 → 约 09:07 / 09:17 | 前一交易日 `margin` / `margin_detail` |
+
+关键后果：`cn_evening_full` 在 23:35 才启动、约次日 02:05 才写完，所以在一个交易日内，横截面日频视图只到上一交易日（D-1），当日 `daily` 等要到次日约 02:05 才落库可见。分钟历史同样在晚间节点滚动落库；当日实时分钟 bar 不走持久化视图，由引擎单独提供（`ctx.bars`）。
+
+纯审计 job（`cn_nightly_full_audit`、`cn_daily_revision_sentinel`、09:20 的 `cn_preopen_event_flow_audit_0920`）不落新数据，刻意不作为节点。
+
+### 5.4 交给环境层的最小信息
 
 每个数据域必须能提供：
 

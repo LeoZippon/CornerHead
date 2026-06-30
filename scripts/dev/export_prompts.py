@@ -35,7 +35,7 @@ SAMPLE_FOLD = {
     "input_window": "20200101..20210930",
     "validation_period": "20211001..20211231",
     "test_period": "20220101..20220331",
-    "valid_decision_time": "2021-10-08T09:25:00+08:00",
+    "valid_decision_time": "2021-09-30T23:59:59+08:00",
 }
 SAMPLE_ACCEPTANCE = {"min_return": 0.0, "min_sharpe": 0.0, "max_drawdown": 0.25, "require_complete_validation": True}
 SAMPLE_MANIFEST = {
@@ -58,7 +58,7 @@ SAMPLE_MANIFEST = {
             "intraday_trade_days": 21,
         }
     },
-    "valid_decision_time": "2021-10-08T09:25:00+08:00",
+    "valid_decision_time": "2021-09-30T23:59:59+08:00",
     "is_initial_artifact": True,
     "initial_template_hash": "sha256:template",
     "modification_constraints": {"max_changed_lines": 500, "max_model_artifact_bytes": 104857600},
@@ -111,7 +111,7 @@ SAMPLE_DATA_SUMMARY = {
     "views": {
         "snapshot": {
             "mount_path": "/mnt/snapshot",
-            "decision_time": "2021-10-08T09:25:00+08:00",
+            "decision_time": "2021-09-30T23:59:59+08:00",
             "domain_windows": {"daily": {"window_months": 21}, "intraday_1min": {"trade_days": 21}},
             "files": [
                 {
@@ -140,7 +140,7 @@ SAMPLE_DATA_SUMMARY = {
         },
         "train": {
             "mount_path": "/mnt/snapshots/train",
-            "decision_time": "2021-10-08T09:25:00+08:00",
+            "decision_time": "2021-09-30T23:59:59+08:00",
             "files": [{"path": "daily.parquet", "mount_path": "/mnt/snapshots/train/daily.parquet", "rows": 100000}],
         },
         "valid": {

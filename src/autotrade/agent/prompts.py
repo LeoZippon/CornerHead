@@ -76,7 +76,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 
 ## 正式产物格式（modification_check 按此校验）
 - `main.py`：必须定义唯一正式入口 `main(ctx) -> None`，由 Environment 每个回放分钟调用一次。
-- `candidate.py`：推荐用于横截面筛选与开仓逻辑，可读取 `ctx.snapshot_dir`，可调用 `ctx.nl(code, prompt="...")`；由 `main` 在选定时点调用。
+- `candidate.py`：推荐用于横截面筛选与开仓逻辑，可读取 `ctx.asof_dir`（逐 tick 时点视图）和 `ctx.snapshot_dir`（冻结研究基准），可调用 `ctx.nl(code, prompt="...")`；由 `main` 在选定时点调用。
 - `trading.py`：推荐用于按 `ts_code` 管理持仓的交易/做T/平仓函数（`def 名字(ctx, ts_code): ...`）；由 `main` 每个 tick 调用。Agent 可修改或新增。
 - `nl_prompt.md`：可选，保存策略复用的 NL 提示片段；也可以直接在 `main.py` 或 `candidate.py` 中传入 prompt。
 - `models/`：可选，保存需要跨 Fold 继承的模型参数、权重或轻量元数据；可按模型/组件分子目录。每次回测重训的临时中间产物留在内存；需要复用或继承的参数写入 `models/`。依赖包不写入 `models/`，应通过 Sandbox 镜像安装。
@@ -85,15 +85,30 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 ## 交易规则（写入回测流程，无法绕过）
 - 入口：Environment 按回放 tick 逐 tick 调用一次 `main(ctx)`（一次覆盖全市场）。时序完全由你控制：每个 tick 管理已有持仓、在你选定的时点筛选并开新仓。无需返回 `trade_intents`，直接调用 `ctx.broker` 原语下单即可在任意时点开/平仓。
 - 下单与成交（对齐实盘 QMT `order_stock`，无券商侧条件单/止损单）：在某根 bar 决策的单默认于其后第 `execution_lag_bars`（默认 2）根 bar 起进入撮合，杜绝 bar 内前视（如 09:35 决策、09:37 起成交）。**市价单**（默认，对应 `MARKET_PEER_PRICE_FIRST`）按进入 bar 的开盘价 + 滑点成交；**限价单**（`limit=P`，对应 `FIX_PRICE`）挂单，无滑点；若进入 bar 开盘价已优于 P，则按开盘价成交，否则盘中 `[low, high]` 触及 P 时按 P 成交，`valid_bars` 根 bar 内未触及则自动撤单。临近收盘、其后无可成交 bar 的决策无法成交。
-- 决策延迟（声明式预算，决定成交 bar，可复现）：用 `with ctx.substep(name, budget_minutes=B):` 包裹一段决策；其中下的单成交 bar 顺延到 `决策分钟 + max(execution_lag_bars, ceil(B))`。`B` 必须为正——包裹但 `B=0` 会被拒（等同于不包裹的无意义写法）；同一 tick 内 `name` 必须唯一（重名会被拒）。轻量决策用较小的 `B`（如 0.5–1）：当 `B ≤ execution_lag_bars` 时成交 bar 不变，几乎不影响成交时点却仍获得实时上限保护。`B` 固定写入代码 ⇒ 成交 bar 确定、跨 host 可复现。例：09:35 在 `budget_minutes=5` 的 substep 内下单 → 约 09:41 成交。无需建模延迟的琐碎逐 tick 代码可不包裹，按默认 `execution_lag_bars` 成交、无逐块实时上限。
-- 预算即承诺（fail-fast，不可低报）：Environment 实测每个 substep 的真实墙钟时间，一旦超过声明的 `B`（`real > B 分钟`）立即中止本次回测并向 `backtest` 返回精确失败（哪个 substep、哪天、声明 B vs 实测）。低报（声称快却跑得慢）会硬报错、不可利用；高报会延后成交、拖累 P&L。你应在 `B` 内自行预留安全余量（轻量块也给出有余量的小值，避免研究机偶发抖动误伤），并跨 Fold 拟合一个稳定的平均预算。`B` 不得超过 `decision_max_sim_minutes`（决策窗口上限），超过则该决策错过成交（记 `decision_too_slow`）。
-- 独立计时与回测成本：`backtest` 独立计时（其墙钟不计入 Fold 推理 deadline），单 Fold 最多 `max_backtests_per_fold` 次。系统对真实墙钟有两道硬上限：单个决策（一次 `main(ctx)` tick，含其中的 NL）超过 `backtest_max_seconds_per_decision`（默认 180s）会被**立即终止**；某个交易日累计计算超过 `backtest_max_seconds_per_trading_day`（默认 600s）会中止本次回测（`BacktestError`，不可接受/冻结）。这两道上限随回放天数自然伸缩。先用小 `replay_window` 跑一遍试探，读返回的 `replay_wall_seconds` / `replayed_trade_days` 外推完整验证耗时，确认能装进上限后再跑完整回测。跨 tick 复用的重计算（全表 reload、全市场 group-by、相关性/图构建）必须缓存到首次或调仓时点、不要每个决策 tick 重算，并用调仓频率和图规模上限压低累计成本；据此设定 `ctx.substep` 的 `B`。回测 summary 会返回逐 substep 的 `real_wall_s` 帮你定位耗时。
-- 盘前竞价：默认每个回放日在常规分钟前有两个盘前决策 tick——`09:15` 信息 tick（集合竞价未撮合，`ctx.price` 为 None，用于筛选 + NL）和 `09:25` tick（`ctx.price` 为撮合出的开盘价）。`09:15` 的单成交于 09:30 开盘集合竞价，`09:25` 的单成交于首根连续 bar（09:31），均按当日涨跌停成交（一字涨停买单/跌停空单会被拒）。推荐节奏：09:15 筛选并把目标写入 `ctx.state_dir`，09:25 读取目标统一下单。
-- 下单口径：`amount` 是股数（按 100 股，即 1 手，向下对齐），`weight` 是初始权益的名义比例。策略只表达意图，Broker 强制现金、做空保证金、T+1 可卖余额、手数、涨跌停、停牌和可融券。最大持仓数、单票权重上限和集中度默认由你控制；回放末日强制清仓剩余持仓。Broker 是持仓真相源，`ctx.state_dir` 只存你自己的规则/目标，不是持仓账本。
+- 24h 切片网格与竞价：Environment 在整日时间网格上调用 `main(ctx)`——盘中 09:15–15:00 为 1 分钟粒度，非交易时段按 `offsession_tick_minutes`（默认 15 分钟）唤醒只做研究/状态的切片（不撮合）。每日盘前有 `09:15` 信息 tick（竞价未撮合，`ctx.price` 为 None，用于筛选 + NL）和 `09:25` tick（`ctx.price` 为撮合开盘价）；`09:15` 单成交于 09:30 开盘竞价、`09:25` 单成交于首根连续 bar（09:31）；`14:57` 尾盘竞价 tick 的单成交于当日 15:00 收盘。均按当日涨跌停成交（一字涨停买单/跌停空单被拒）。同一套 `main(ctx)` 循环也用于实盘。
+- 决策延迟与子步骤（声明式预算）：用 `with ctx.substep(name, budget_minutes=B):` 包裹一段重决策，声明该代码块的运算耗时 `B`（分钟，必须 `>0`）。`B` 有两重作用：(1) 真实墙钟上限——实测耗时超过 `B` 立即 fail-fast；(2) `ctx.state_dir` 写可见性门控——子步骤内写入 `ctx.state_dir` 的数据要到 `ready_at = 当前 tick + B` 后才对外可见（见“跨 tick 状态”）。`B` **不改变成交 bar**：无论 `B` 多大，委托都在常规 `execution_lag_bars`（默认 2）生效 bar 撮合。`B` 超过 `decision_max_sim_minutes` 会在 substep 初始化即被拒；同一 tick 内 `name` 必须唯一。轻量逐 tick 代码无需包裹（按默认 lag 成交、无逐块上限）。
+- 预算即承诺（fail-fast，不可低报）：Environment 实测每个 substep 的真实墙钟，一旦 `real > B·60s` 立即中止本次回测并返回精确失败（哪个 substep、哪天、声明 B vs 实测）。低报会硬报错、不可利用。重 IO、复杂运算、大模型调用统一放进 substep，让 `B` 如实覆盖开销，并跨 Fold 拟合一个留有余量的稳定预算。
+- 独立计时与回测成本：`backtest` 独立计时（不计入 Fold 推理 deadline），单 Fold 最多 `max_backtests_per_fold` 次。系统对真实墙钟有两道硬上限：单个决策（一次 `main(ctx)` tick，含其中的 NL）超过 `backtest_max_seconds_per_decision`（默认 180s）会被**立即终止**；某交易日累计计算超过 `backtest_max_seconds_per_trading_day`（默认 600s）会中止本次回测（`BacktestError`，不可接受/冻结）。两道上限随回放天数伸缩。先用小 `replay_window` 试探、读 `replay_wall_seconds` / `replayed_trade_days` 外推完整耗时再跑整段。跨 tick 复用的重计算（全表 reload、全市场 group-by、相关性/图构建）必须缓存到首次或调仓时点、不要每个决策 tick 重算。回测 summary 返回逐 substep 的 `real_wall_s`、分阶段耗时 `phase_seconds`（策略/大模型/时序视图/状态合并/券商撮合）与盘中/非交易切片数，帮你定位 24h 回放的额外开销。
+- 推荐节奏：在一个研究 substep 内读 `ctx.asof_dir` 筛选、把带状态标记的委托计划（每条标记 pending/filled/cancelled）写入 `ctx.state_dir`（就绪后可见）；后续切片只遍历未完成条目，结合 Broker 真实持仓/在途核对成交、撤销过期计划、对 pending 条目下单。闲置/管理切片只用常驻基础信号，不每个 tick 重新筛选。
+- 下单口径：`amount` 是股数（按 100 股，即 1 手，向下对齐），`weight` 是初始权益的名义比例。策略只表达意图，Broker 强制现金、做空保证金、T+1 可卖余额、手数、涨跌停、停牌和可融券。最大持仓数、单票权重上限和集中度默认由你控制；回放末日强制清仓剩余持仓。
+- 跨 tick 状态（`ctx.state_dir`）：托管的跨 tick 暂存目录，只存你自己的规则/计划，不是持仓/委托账本（Broker 才是真相源）。子步骤内的写入会被暂存，到 `ready_at = tick + B` 才合并进可见目录（任何写法都适用，含 parquet）；子步骤外的写入实时可见；读取始终读可见目录。每次回测重置——需跨回测继承的参数写入 `models/`。
 - 成本与 NL 配额：`main(ctx)` 每个 tick 都会被调用，但筛选、模型推理和 `ctx.nl()` 等重操作应只在你选定的少数时点执行，不要每个 tick 跑；模型在首个 tick 加载/缓存，不要每次重训。`ctx.nl()` 受 run manifest 的 NL 配额约束——按 `nl_max_calls_per_decision_day`（日均上限 × 决策天数）得到每次回测总配额，可被 `nl_max_calls_per_backtest` 进一步收紧；超出返回 `budget_exhausted`，需自行降级。NL 调用由宿主串行服务，substep 的真实墙钟约等于其中各 NL 时延之和，请据此（而非假设并发）设定 `B`。
-- NL 工具：`ctx.nl(ts_code, prompt=...)`（等价 `from at_tools import nl`）在宿主侧启动可调用 `text_retrieve` 的 Sub Agent，返回 result dict（含 `status`、`content`、`tool_calls`、`evidence`、`error`）；内容不限定格式，需要数值或标签时在 `main`/`candidate`/helper 中自行解析。
+- NL 工具：`ctx.nl(ts_code, prompt=...)`（等价 `from at_tools import nl`）在宿主侧启动可调用 `text_retrieve` 的 Sub Agent，返回 result dict（含 `status`、`content`、`tool_calls`、`evidence`、`error`）；内容不限定格式，需要数值或标签时在 `main`/`candidate`/helper 中自行解析。其文本语料按数据落库节点滚动（见“数据可见性”），公告/新闻跨过各自节点后才可被检索到。
 - NL 风险：存在发布时间/入库时间、检索召回、模型常识、自由文本解析和前视泄露风险。使用 NL 时必须按 PIT evidence 降权或过滤证据不足的结论；不要把自由文本当作稳定结构，也不要让 NL 覆盖现金、可交易性、成本和回放约束。
-- 做空：可做空股票由 `/mnt/snapshot/events.parquet` 中 decision-date 的 `margin_secs` 集合决定。默认 `proxy_margin_secs` 只能做空这些股票；`broker_inventory` 在未接入真实券源文件时拒绝做空；`theoretical_short` 是显式研究模式。
+- 做空：默认 `proxy_margin_secs` 模式下，可做空标的由**成交当日**真实 `margin_secs` 集合决定——委托在成交日撮合时按该日融券清单校验，无当日数据时回退到决策日快照集合（`/mnt/snapshot/events.parquet` 的 `margin_secs`）；不可融券返回 `margin_secs_not_shortable`。`broker_inventory` 在未接入真实券源时拒绝做空，`theoretical_short` 是显式研究模式。
+
+## 数据可见性（逐 tick 时序视图）
+`ctx.asof_dir` 是逐 tick 滚动的时点视图：某行数据只有在“把它写入本地库的定时任务在仿真时钟下已完成”后才可见，严格复刻实盘本地库的刷新节奏。六大数据域各按其落库节点滚动：
+
+| 数据域 | 落库节点（北京时间，含刷新耗时） | 对回测的可见性 |
+|---|---|---|
+| 日线核心（daily/daily_basic/复权/涨跌停/停牌）、资金流、大宗、股东/回购/解禁/龙虎榜、宏观全域、分钟历史、批量文本 | `cn_evening_full` 23:35 启动、约次日 02:05 完成 | 交易日内横截面只到 **D-1**；当日日线要等次日约 02:05 才可见，当日实时行情用 `ctx.bars`/`ctx.price` |
+| 基本面 PIT 事件 | `cn_nightly_pit_event_build` 约 03:50 | 次日凌晨可查 |
+| 当日融券标的 `margin_secs` | 盘前 `cn_preopen_margin_secs_*` 约 09:05/09:15 | **当日**盘前可见 |
+| 上一交易日两融 `margin`/`margin_detail` | 盘前 `cn_preopen_margin_*` 约 09:05/09:15 | 次日盘前可见 |
+| 短讯/新闻联播（cctv_news/news） | 盘前 `cn_preopen_text_backfill` 约 09:00 | 当日盘前可见 |
+
+按域以 parquet 目录提供，用 `pd.read_parquet(ctx.asof_dir / "daily")` 读取（域名 `daily`/`events`/`macro`/`fundamentals`/`intraday_1min`）。盘中无刷新节点跨越，视图冻结、`ctx.asof_version` 不变——按它缓存读取、变化时再重算。`ctx.nl()` 文本语料同样按上表节点滚动（冻结研究语料始终可见）。`ctx.snapshot_dir` 是 Fold 决策时点（区间前一交易日收盘）冻结的研究基准快照。
 
 ## Broker 交易接口
 `ctx.broker` 是持仓真相源；下单只表达意图，Broker 强制现金、做空保证金、T+1 可卖、手数、涨跌停、停牌和可融券。`amount?/weight?` 二选一；`limit=P` 为限价单（FIX_PRICE），缺省为市价单。
@@ -108,10 +123,11 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 | `ctx.broker.money` / `.cash` | （无） | 账户总资金 / 可用现金 |
 
 ## ctx 接口与数据视图
-- `ctx`（市场级，每个 tick 重建）：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.account`、`ctx.positions`（只读快照）、`ctx.cash`。
-- `ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`：只含当前 tick、PIT 可见的 bar（未来 bar 不可见；09:15 无价）。
-- `ctx.substep(name, budget_minutes=B)`：上下文管理器，声明一段决策的延迟预算（`B>0`，见“决策延迟”）。
-- `ctx.nl(ts_code, prompt=...)`；`ctx.asof_dir`（滚动日频 as-of 视图：截至当日盘前可见的日线历史，含回放期内已收盘交易日，用于横截面日频筛选）；`ctx.snapshot_dir`（Fold 决策时点冻结全量快照：事件/文本/财务/分钟历史）；`ctx.model_dir`、`ctx.state_dir`（跨 tick 暂存，如当日目标）、`ctx.params`。
+- `ctx`（市场级，每个 tick 重建）：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`（只读快照）、`ctx.cash`。
+- `ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`：只含当前 tick、PIT 可见的 bar（未来 bar 不可见；09:15 与非交易切片无价）。
+- `ctx.substep(name, budget_minutes=B)`：上下文管理器，声明一段重决策的运算耗时 `B>0`（实时上限 + `state_dir` 写可见性门控，不改变成交 bar；见“决策延迟与子步骤”）。
+- `ctx.asof_dir`（逐 tick 滚动时点视图，按域为 parquet 目录，见“数据可见性”）、`ctx.asof_version`（视图滚动时才变的版本号，用于缓存）、`ctx.snapshot_dir`（决策时点冻结的研究基准快照）、`ctx.model_dir`、`ctx.state_dir`（托管跨 tick 暂存，子步骤内写入延时可见）、`ctx.params`。
+- `ctx.nl(ts_code, prompt=...)`：见“NL 工具”。
 """
 
 FOLD_ACTION_SECTION = """\

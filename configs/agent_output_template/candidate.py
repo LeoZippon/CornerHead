@@ -1,22 +1,24 @@
 """Optional advanced helper — the minimal default ``main.py`` does not import this.
 
-Cross-sectional screening (09:15) then order submission (09:25).
+Shows the recommended cadence for a heavier strategy under the 24h tick model:
 
-The two stages are split because orders use next-bar execution and the 09:15
-info tick exposes no price:
+* ``research(ctx)`` wraps the expensive cross-sectional screen in
+  ``ctx.substep("research", budget_minutes=B)`` and writes the day's order plan to
+  ``ctx.state_dir``. Writes inside a sub-step are STAGED: they become visible in
+  ``ctx.state_dir`` only after the block's declared duration elapses
+  (ready_at = this tick + B), modelling the latency before a heavy computation's
+  output is usable. So research and execution are separate ticks — a later tick
+  reads the plan once it has landed. Read the data domains from ``ctx.asof_dir``
+  (rolling, point-in-time) and the frozen history from ``ctx.snapshot_dir``;
+  ``ctx.nl(code, prompt=...)`` is optional and the main API cost — keep it rare.
+* ``manage(ctx)`` runs every tick on the resident plan (no re-screening): it submits
+  still-pending entries, marks entries filled against the real broker position,
+  cancels entries that have gone stale, and persists the updated plan. Status updates
+  written OUTSIDE a sub-step land immediately, so plan bookkeeping stays live.
 
-* ``screen_targets(ctx)`` runs at the 09:15 info tick. Rank the cross-section from
-  ``ctx.asof_dir`` (the rolling daily as-of view: daily bars visible by the
-  current replay day's pre-open, including replay-period days that have already
-  closed) and from ``ctx.snapshot_dir`` (events/text/fundamentals/intraday history
-  frozen at the fold decision time). Optionally call ``ctx.nl(code, prompt=...)``
-  and parse ``result["content"]`` yourself — keep its frequency low; it is the
-  main API cost. Write the chosen targets to ``ctx.state_dir`` (no price is
-  available yet to size or submit an order).
-* ``open_targets(ctx)`` runs at the 09:25 tick, when ``ctx.price`` carries the
-  matched open. Read the targets back and submit them with
-  ``ctx.broker.buy(code, weight=...)`` / ``.short(...)``; the orders fill at the
-  09:31 open. Submitting from the persisted list keeps the order set deduplicated.
+Each plan entry carries a status (``pending`` / ``filled`` / ``cancelled``); only
+unfinished entries are acted on, reconciled against ``ctx.broker`` truth, mirroring
+how a live executor tracks its own working orders.
 """
 
 from __future__ import annotations
@@ -26,35 +28,49 @@ from pathlib import Path
 
 import pandas as pd  # noqa: F401 - available for screening reads
 
-_TARGETS = "targets.json"
+_PLAN = "plan.json"
+TOP_N = 5
 
 
-def screen_targets(ctx) -> None:
-    """Screen the cross-section and persist the day's targets to ``state_dir``.
-
-    The template selects nothing. A strategy reads ``ctx.asof_dir``, ranks the
-    cross-section, and writes a ``{ts_code: weight}`` map, e.g.::
-
-        asof_dir = Path(str(ctx.asof_dir))
-        daily = pd.read_parquet(asof_dir / "daily.parquet")
-        code = sorted(daily["ts_code"].astype(str).unique())[0]
-        targets = {code: 0.1}
-    """
-    asof_dir = Path(str(ctx.asof_dir))
-    if not (asof_dir / "daily.parquet").exists():
-        raise FileNotFoundError(f"missing as-of dir: {asof_dir}")
-    targets: dict[str, float] = {}
-    Path(str(ctx.state_dir), _TARGETS).write_text(json.dumps(targets), encoding="utf-8")
+def _plan_path(ctx) -> Path:
+    return Path(str(ctx.state_dir), _PLAN)
 
 
-def open_targets(ctx) -> None:
-    """Submit the targets persisted at 09:15; the orders fill at the 09:31 open."""
-    path = Path(str(ctx.state_dir), _TARGETS)
-    if not path.exists():
+def research(ctx, *, budget_minutes: float = 5.0) -> None:
+    """Screen the cross-section in a sub-step and stage the day's plan to state_dir.
+
+    The template selects nothing; a strategy ranks ``ctx.asof_dir`` and writes a
+    ``{ts_code: {"status": "pending", "weight": w}}`` map. The write is staged and
+    surfaces in ``ctx.state_dir`` only after ``budget_minutes`` elapse, so call this
+    once per research window and let a later tick execute it."""
+    if _plan_path(ctx).exists():  # already have a live plan; manage it instead
         return
-    targets = json.loads(path.read_text(encoding="utf-8"))
-    for code, weight in targets.items():
-        # Skip codes already held or with an order still working (mirrors the live
-        # order query), so the multi-bar fill lag cannot create a duplicate entry.
-        if ctx.broker.position(code) == 0 and not ctx.broker.pending(code) and ctx.price(code) is not None:
-            ctx.broker.buy(code, weight=float(weight), reason="screen_target")
+    with ctx.substep("research", budget_minutes=budget_minutes):
+        daily = pd.read_parquet(Path(str(ctx.asof_dir)) / "daily")
+        codes = sorted(daily["ts_code"].astype(str).unique())[:TOP_N]
+        plan = {code: {"status": "pending", "weight": 1.0 / TOP_N} for code in codes}
+        # Inside the sub-step ctx.state_dir is the staging dir, so this write is held
+        # back until ready_at; a later tick's manage() sees it once it has merged.
+        _plan_path(ctx).write_text(json.dumps(plan), encoding="utf-8")
+
+
+def manage(ctx) -> None:
+    """Act on the resident plan: submit pending entries, reconcile fills, persist."""
+    path = _plan_path(ctx)
+    if not path.exists():  # the staged plan has not become visible yet
+        return
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    changed = False
+    for code, entry in plan.items():
+        if entry.get("status") != "pending":
+            continue
+        if ctx.broker.position(code) != 0:  # the broker confirms the fill
+            entry["status"] = "filled"
+            changed = True
+            continue
+        if ctx.broker.pending(code) or ctx.price(code) is None:
+            continue  # an order is already in flight, or no price to size/submit yet
+        ctx.broker.buy(code, weight=float(entry["weight"]), reason="plan_entry")
+    if changed:
+        # Outside a sub-step this write lands immediately, keeping plan status live.
+        path.write_text(json.dumps(plan), encoding="utf-8")
