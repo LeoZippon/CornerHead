@@ -436,6 +436,9 @@ class ReplayResult:
     # Managed ctx.state_dir staging ledger: one record per sub-step-staged write with
     # its ready_at and merge status (some may stay unmerged past the region end).
     state_staging_audit: list[dict[str, object]] | None = None
+    # Per-phase replay wall-time (strategy_compute / nl_service / timeview_build /
+    # state_merge / broker_match), so the 24h replay's added cost is auditable.
+    phase_seconds: dict[str, float] | None = None
 
 
 class MinuteMarketData:
@@ -647,6 +650,10 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "replay_wall_seconds": result.replay_wall_seconds,
         "replayed_trade_days": result.replayed_trade_days,
         "substep_runtime": result.substep_runtime or {},
+        "phase_seconds": result.phase_seconds or {},
+        "total_ticks": result.total_ticks,
+        "intraday_ticks": result.intraday_ticks,
+        "offsession_ticks": result.offsession_ticks,
         "equity_curve": {str(k): float(v) for k, v in curve.items()},
         "decision_date": result.decision_date,
         "exit_date": result.exit_date,

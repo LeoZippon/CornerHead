@@ -551,6 +551,12 @@ def main(ctx):
         self.assertGreaterEqual(result.substep_runtime["screen"]["budget_minutes"], 3.0)
         self.assertIsInstance(result.replay_wall_seconds, float)
         self.assertEqual(result.replayed_trade_days, 2)  # _ohlc_replay has two trade dates
+        # Per-phase wall-time is reported for the 24h replay's cost breakdown (W9).
+        self.assertEqual(
+            set(result.phase_seconds),
+            {"strategy_compute", "nl_service", "timeview_build", "state_merge", "broker_match"},
+        )
+        self.assertGreaterEqual(result.phase_seconds["strategy_compute"], 0.0)
 
     def test_on_progress_heartbeat_fires_for_long_replay(self) -> None:
         # The throttled heartbeat fires by the day-count threshold (>=30 days) so a

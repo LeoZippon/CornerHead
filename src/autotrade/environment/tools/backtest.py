@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -327,6 +328,10 @@ class BacktestTool:
             "replay_wall_seconds": stats.get("replay_wall_seconds"),
             "replayed_trade_days": stats.get("replayed_trade_days"),
             "substep_runtime": stats.get("substep_runtime"),
+            "phase_seconds": stats.get("phase_seconds"),
+            "total_ticks": stats.get("total_ticks"),
+            "intraday_ticks": stats.get("intraday_ticks"),
+            "offsession_ticks": stats.get("offsession_ticks"),
             "state_staged_writes": len(staging_audit),
             "state_unmerged_writes": unmerged,
         }
@@ -476,6 +481,7 @@ class _StrategyNLService:
         self.per_call_timeout_seconds = per_call_timeout_seconds
         self.max_calls = max_calls
         self.calls = 0
+        self.nl_wall_seconds = 0.0  # cumulative LLM-service wall, reported as a replay phase
         # Set per tick by the replay engine; rolls ctx.nl() text on the same nodes as
         # the Timeview. None (Timeview off / no replay) keeps the frozen PIT corpus.
         self.current_when = None
@@ -522,7 +528,9 @@ class _StrategyNLService:
             per_call_timeout_seconds=self.per_call_timeout_seconds,
             failure_policy=self.failure_policy,
         )
+        _nl_t0 = time.monotonic()
         result = engine.run(ts_code=ts_code, prompt=prompt, request_kwargs=kwargs, config=config)
+        self.nl_wall_seconds += time.monotonic() - _nl_t0
         record = result.to_record()
         self._write_result(request, record)
         _append_jsonl(self.log_dir / "search_requests.jsonl", [{"ts_code": ts_code, **r} for r in result.tool_calls])

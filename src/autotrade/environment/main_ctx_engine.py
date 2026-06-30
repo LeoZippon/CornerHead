@@ -705,6 +705,10 @@ def run_main_ctx_replay(
     equity_by_date: dict[str, float] = {}
     replay_start = time.monotonic()  # wall-clock start, reported as replay_wall_seconds
     substep_runtime: dict[str, dict[str, float]] = {}
+    # Per-phase wall-time so the 24h replay's added cost is visible (W9): the agent
+    # main(ctx) step, the Timeview rebuilds, the state-staging merges, and the Broker
+    # matching. The NL-service share of step wall is split out from strategy compute.
+    phase_wall = {"strategy_step": 0.0, "timeview_build": 0.0, "state_merge": 0.0, "broker_match": 0.0}
     tick_counts = {"total": 0, "intraday": 0, "offsession": 0}
     total_days = len(market.trade_dates)
     last_progress_idx = 0
@@ -738,6 +742,7 @@ def run_main_ctx_replay(
                     tick_counts["total"] += 1
                     tick_counts["offsession" if tick.is_offsession else "intraday"] += 1
                     if tick.is_real:
+                        _match_t0 = time.monotonic()
                         index = real_index[tick.minute_key]
                         for action, is_auction in incoming.pop(index, []):
                             if not _submit_order(broker, action, is_auction):
@@ -746,12 +751,20 @@ def run_main_ctx_replay(
                                     action=_jsonable(action), reason="unsupported_or_missing_ts_code",
                                 )
                         broker.match_bar(trade_date, tick.minute_key, tick.group, granularity)
+                        phase_wall["broker_match"] += time.monotonic() - _match_t0
                     when = sim_datetime(trade_date, tick.minute_key)
-                    asof_dir, asof_version = timeview.refresh(when) if timeview is not None else (None, None)
+                    if timeview is not None:
+                        _tv_t0 = time.monotonic()
+                        asof_dir, asof_version = timeview.refresh(when)
+                        phase_wall["timeview_build"] += time.monotonic() - _tv_t0
+                    else:
+                        asof_dir, asof_version = None, None
                     if timeview is not None and main_policy.nl_service is not None:
                         main_policy.nl_service.current_when = when  # roll ctx.nl() text on the same clock
                     if stager is not None:
+                        _merge_t0 = time.monotonic()
                         stager.merge_ready(when)  # surface staged writes whose ready_at has arrived
+                        phase_wall["state_merge"] += time.monotonic() - _merge_t0
                     state = _market_state(
                         broker,
                         trade_date=trade_date,
@@ -768,7 +781,9 @@ def run_main_ctx_replay(
                     # (scales with replay length, unlike a fixed total cap).
                     _tick_t0 = time.monotonic()
                     actions, substeps, staged = _normalize_tick(main_policy.step(state))
-                    day_compute_wall += time.monotonic() - _tick_t0
+                    _tick_wall = time.monotonic() - _tick_t0
+                    day_compute_wall += _tick_wall
+                    phase_wall["strategy_step"] += _tick_wall
                     if stager is not None and staged:
                         stager.register(staged, when=when)
                     if max_seconds_per_trading_day is not None and day_compute_wall > max_seconds_per_trading_day:
@@ -840,6 +855,9 @@ def run_main_ctx_replay(
         intraday_ticks=tick_counts["intraday"],
         offsession_ticks=tick_counts["offsession"],
         state_staging_audit=(stager.audit() if stager is not None else None),
+        phase_seconds=_phase_seconds(
+            phase_wall, getattr(getattr(main_policy, "nl_service", None), "nl_wall_seconds", 0.0)
+        ),
     )
 
 
@@ -932,6 +950,20 @@ def _day_tick_plan(
     for key in _offsession_keys(after_start, 24 * 60, offsession_tick_minutes):
         plan.append(_Tick(key, _empty_minute_rows(), None, False, False, True))
     return plan
+
+
+def _phase_seconds(phase_wall: dict[str, float], nl_wall: float) -> dict[str, float]:
+    """Per-phase replay wall-time. The NL-service share of the agent step is split
+    out of strategy compute so the four host phases plus the LLM service sum to the
+    replay's active work."""
+    nl = float(nl_wall or 0.0)
+    return {
+        "strategy_compute": round(max(0.0, phase_wall["strategy_step"] - nl), 3),
+        "nl_service": round(nl, 3),
+        "timeview_build": round(phase_wall["timeview_build"], 3),
+        "state_merge": round(phase_wall["state_merge"], 3),
+        "broker_match": round(phase_wall["broker_match"], 3),
+    }
 
 
 def _normalize_tick(result: object) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
