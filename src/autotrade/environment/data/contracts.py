@@ -89,3 +89,120 @@ def sim_datetime(trade_date: str, minute_key: str) -> datetime:
     return datetime.strptime(str(trade_date), "%Y%m%d").replace(
         hour=int(hour_text or 0), minute=int(minute_text or 0), tzinfo=CN_TZ
     )
+
+
+# ---- Timeview refresh nodes (docs/environment_design.md, check.md W3) ----
+#
+# The per-tick Timeview replays the real local-DB refresh cadence: a dataset row
+# is visible only once the cron job that lands it has finished writing. Each node
+# below mirrors one data-landing job in configs/tushare_update_schedule.json:
+# ``start`` is the installed crontab launch time (Asia/Shanghai), and
+# ``duration_minutes`` is the measured refresh cost, so the view does not see the
+# data until ``ready_at = start + duration_minutes``. Audit-only jobs (the nightly
+# full audit, the revision sentinel, the 09:20 event-flow audit) land no new data
+# and are deliberately NOT nodes. ``test_*`` drift guards assert every node name is
+# a real cron job and that the audit jobs stay excluded.
+
+
+@dataclass(frozen=True)
+class RefreshNode:
+    """One data-landing refresh job: launches at ``start`` and is queryable from
+    ``ready_at = start + duration_minutes`` (possibly the next calendar day)."""
+
+    name: str
+    start: time
+    duration_minutes: int
+
+    def start_at(self, day: date) -> datetime:
+        return datetime.combine(day, self.start, tzinfo=CN_TZ)
+
+    def ready_at(self, day: date) -> datetime:
+        return self.start_at(day) + timedelta(minutes=self.duration_minutes)
+
+
+REFRESH_NODES: dict[str, RefreshNode] = {
+    # Evening rolling-window update: A-share daily core, minute history, money flow,
+    # block trade, holders/repurchase/float/top-list, macro, and bulk text. Launches
+    # 23:35 and finishes ~02:05 next day, so its data is visible only from D+1.
+    "cn_evening_full": RefreshNode("cn_evening_full", time(23, 35), 150),
+    # Fundamental PIT event index build (financial filings become queryable).
+    "cn_nightly_pit_event_build": RefreshNode("cn_nightly_pit_event_build", time(3, 35), 15),
+    # Pre-open board-trading backfill (kpl_list etc.).
+    "cn_preopen_board_backfill_0850": RefreshNode("cn_preopen_board_backfill_0850", time(8, 50), 5),
+    # Pre-open short-text backfill (cctv_news / news).
+    "cn_preopen_text_backfill_0855": RefreshNode("cn_preopen_text_backfill_0855", time(8, 55), 5),
+    # Same-day margin_secs (shortable universe) first attempt + retry.
+    "cn_preopen_margin_secs_backfill_0903": RefreshNode("cn_preopen_margin_secs_backfill_0903", time(9, 3), 2),
+    "cn_preopen_margin_secs_retry_0913": RefreshNode("cn_preopen_margin_secs_retry_0913", time(9, 13), 2),
+    # Previous-day margin / margin_detail first attempt + retry.
+    "cn_preopen_margin_backfill_0905": RefreshNode("cn_preopen_margin_backfill_0905", time(9, 5), 2),
+    "cn_preopen_margin_retry_0915": RefreshNode("cn_preopen_margin_retry_0915", time(9, 15), 2),
+}
+
+EVENING_NODE = "cn_evening_full"
+
+# Whole-domain node assignment (a domain file's rows all roll on the same node).
+DOMAIN_REFRESH_NODES: dict[str, tuple[str, ...]] = {
+    "daily": (EVENING_NODE,),
+    "intraday_1min": (EVENING_NODE,),
+    "macro": (EVENING_NODE,),
+    "fundamentals": ("cn_nightly_pit_event_build",),
+}
+
+# Per-dataset overrides inside the events domain (default = cn_evening_full).
+EVENT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
+    "margin_secs": ("cn_preopen_margin_secs_backfill_0903", "cn_preopen_margin_secs_retry_0913"),
+    "margin": ("cn_preopen_margin_backfill_0905", "cn_preopen_margin_retry_0915"),
+    "margin_detail": ("cn_preopen_margin_backfill_0905", "cn_preopen_margin_retry_0915"),
+}
+
+# Per-dataset overrides inside the text domain (default = cn_evening_full). The
+# pre-open backfill refines the same natural day's short text before the open.
+TEXT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
+    "cctv_news": (EVENING_NODE, "cn_preopen_text_backfill_0855"),
+    "news": (EVENING_NODE, "cn_preopen_text_backfill_0855"),
+}
+
+
+def node_visible_cutoff(node: RefreshNode, when: datetime) -> datetime | None:
+    """Latest daily instance of ``node`` already finished by ``when``; returns its
+    ``start`` instant (the availability cutoff) or None if none has completed yet.
+
+    A row is visible under this node when its ``available_at`` is at or before the
+    returned cutoff. Searching back three days covers any sub-day refresh duration
+    (the longest node, the evening update, completes ~2.5h after launch).
+    """
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=CN_TZ)
+    base_day = when.astimezone(CN_TZ).date()
+    for delta in range(0, 3):
+        day = base_day - timedelta(days=delta)
+        if node.ready_at(day) <= when:
+            return node.start_at(day)
+    return None
+
+
+def visible_cutoff(node_names: tuple[str, ...], when: datetime) -> datetime | None:
+    """Availability cutoff under any of ``node_names`` at ``when``: the most recent
+    completed node's start instant (later node refines an earlier one)."""
+    cutoffs = [
+        cutoff
+        for name in node_names
+        if (cutoff := node_visible_cutoff(REFRESH_NODES[name], when)) is not None
+    ]
+    return max(cutoffs) if cutoffs else None
+
+
+def domain_visible_cutoff(domain: str, when: datetime) -> datetime | None:
+    """Timeview availability cutoff for a whole-domain file at ``when``."""
+    return visible_cutoff(DOMAIN_REFRESH_NODES.get(domain, (EVENING_NODE,)), when)
+
+
+def event_dataset_visible_cutoff(dataset: str, when: datetime) -> datetime | None:
+    """Timeview availability cutoff for one events-domain dataset at ``when``."""
+    return visible_cutoff(EVENT_DATASET_REFRESH_NODES.get(dataset, (EVENING_NODE,)), when)
+
+
+def text_dataset_visible_cutoff(dataset: str, when: datetime) -> datetime | None:
+    """Timeview availability cutoff for one text-domain dataset at ``when``."""
+    return visible_cutoff(TEXT_DATASET_REFRESH_NODES.get(dataset, (EVENING_NODE,)), when)
