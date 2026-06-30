@@ -180,6 +180,41 @@ class BrokerPrimitiveTest(unittest.TestCase):
             avail_before - asset_after["available_cash"], asset_after["short_margin_occupied"]
         )
 
+    def test_combined_long_short_accounting_and_forced_close(self):
+        # RA1: with a simultaneous long + short, equity()/maintenance_ratio() use literal
+        # cash while available_cash() subtracts locked proceeds + margin; a short loss that
+        # breaches the 1.30 maintenance line forces a close. Exercises the R4 (T+1 unlock on
+        # the day roll), R6 (close-price exit) and R8 (locked proceeds + borrow fee) interplay.
+        daily = make_daily(
+            [
+                ("20220104", "000001.SZ", 10.0, 10.0, 12.0, 8.0, False),
+                ("20220105", "000001.SZ", 10.2, 10.2, 12.0, 8.0, False),
+                ("20220104", "000002.SZ", 100.0, 100.0, 2500.0, 1.0, False),
+                ("20220105", "000002.SZ", 250.0, 250.0, 2500.0, 1.0, False),  # short loss day
+            ]
+        )
+        broker = self.make_broker(daily=daily)  # 000002.SZ shortable, 1,000,000 initial
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=100.0, amount=5000)
+        asset = broker.query_stock_asset()
+        positions = {p["ts_code"]: p for p in broker.query_stock_positions()}
+        long_mv = positions["000001.SZ"]["market_value"]
+        short_liab = positions["000002.SZ"]["market_value"]
+        proceeds_locked = positions["000002.SZ"]["entry_cost"]
+        # equity and maintenance ratio use literal cash (the banked short proceeds count as
+        # collateral); available_cash subtracts the locked proceeds + margin.
+        self.assertAlmostEqual(broker.equity(), broker.cash + long_mv - short_liab)
+        self.assertAlmostEqual(broker.maintenance_ratio(), (broker.cash + long_mv) / short_liab)
+        self.assertAlmostEqual(
+            asset["available_cash"], broker.cash - asset["short_margin_occupied"] - proceeds_locked
+        )
+        self.assertLess(asset["available_cash"], broker.cash)  # locked collateral not deployable
+        # Day 2: the short jumps 100 -> 250, breaching the maintenance line -> forced close.
+        broker.mark_to_market("20220105")
+        self.assertTrue(any(e["event_type"] == "forced_close_triggered" for e in broker.events))
+        self.assertEqual(broker.positions, {})  # both legs liquidated at the close
+        self.assertGreater(broker.borrow_fees, 0.0)  # the short accrued a calendar-day borrow fee
+
     def test_broker_inventory_mode_rejects_without_files(self):
         broker = self.make_broker(mode="broker_inventory")
         order = broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=500)

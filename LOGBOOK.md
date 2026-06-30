@@ -1,3 +1,10 @@
+2026-06-30 RA1/RA3/RA4 再审计（chore/post-audit-reaudit）
+
+- RA1（券商账务端到端 R4–R8 交互）确认正确，新增 `test_combined_long_short_accounting_and_forced_close`：多空并存时 `equity`/`maintenance_ratio` 用字面现金（做空所得作担保），`available_cash` 扣保证金+冻结所得；做空价 100→250 击穿 1.30 维持线，`mark_to_market` 强平两腿（R4 日滚解 T+1、R6 收盘价平、R8 借券费）。决策：R8(b) 保持锁“净”所得（available 恰降 margin），费级宽松属有意（净锁保实现盈亏正确）；R5 同日平空已有测试、`locked_today` 对做空设而不读、无不一致。
+- RA3（`ctx.state_dir` 进 substep 拷贝种子成本）文档化：env_design §7.2 注明 state_dir 仅适合小体量跨 tick 状态，大数据放 models/；hardlink+CoW 待真成瓶颈再做。
+- RA4（24h 网格 Docker 基准 offsession 15 vs 0）不自动跑：真实 fold 走外部 DeepSeek API + GPU，需用户显式触发；冒烟由 `DockerizedFoldE2ETest` 覆盖（去字符串化驱动端到端）。按需基准命令见详细 logbook。RA5 并入最终审计。
+- 验证：全套绿；`git diff --check` clean；docs + 一个券商测试，无 GPU。
+
 2026-06-30 R16 T1 盘中券商视图忠实化（refactor/t1-driver-and-broker-core）
 
 - 收尾任务（重建沙箱镜像），两次提交 + Opus 子代理对抗审计（抓到并修复一处真缺陷）。Part1：新增纯 stdlib `broker_core`（CostModel + lot_floor/resolve_shares + project_open/project_reduce），SimBroker 委托之为单一成交真相源（`_fill_long_open/_fill_short_open/_reduce_position` 等），行为不变 + 单测。
