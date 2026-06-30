@@ -1,8 +1,9 @@
 """Timeview refresh-node table: cron drift guard + visibility-cutoff helpers."""
 
 import json
+import re
 import unittest
-from datetime import datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -34,6 +35,22 @@ def _cron_jobs() -> set[str]:
     return set(schedule["jobs"])
 
 
+CRONTAB = REPO_ROOT / "ops" / "cron" / "tushare_update.cron"
+
+# A managed crontab line: "MM HH * * * ... --job <name> ...".
+_CRON_LINE = re.compile(r"^\s*(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*\s+.*--job\s+(\S+)")
+
+
+def _crontab_job_times() -> dict[str, time]:
+    times: dict[str, time] = {}
+    for line in CRONTAB.read_text(encoding="utf-8").splitlines():
+        match = _CRON_LINE.match(line)
+        if match:
+            minute, hour, name = int(match.group(1)), int(match.group(2)), match.group(3)
+            times[name] = time(hour, minute)
+    return times
+
+
 class RefreshNodeDriftGuardTest(unittest.TestCase):
     def test_every_node_is_a_real_cron_job(self) -> None:
         jobs = _cron_jobs()
@@ -43,6 +60,39 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
     def test_audit_only_jobs_are_not_nodes(self) -> None:
         for job in AUDIT_ONLY_JOBS:
             self.assertNotIn(job, REFRESH_NODES, f"audit-only job {job!r} must not be a refresh node")
+
+    def test_node_start_times_match_crontab(self) -> None:
+        # Node ``start`` must equal the real installed crontab launch time, so the
+        # Timeview ``ready_at`` cadence cannot silently drift from ingestion.
+        cron_times = _crontab_job_times()
+        for name, node in REFRESH_NODES.items():
+            self.assertIn(name, cron_times, f"REFRESH_NODES[{name!r}] has no managed crontab line")
+            self.assertEqual(
+                node.start,
+                cron_times[name],
+                f"REFRESH_NODES[{name!r}].start {node.start} != crontab launch {cron_times[name]}",
+            )
+
+    def test_every_landing_job_has_a_node(self) -> None:
+        # The crontab and the JSON schedule must list the same jobs, and every job
+        # that lands data (not audit-only) must have a Timeview refresh node.
+        cron_jobs = set(_crontab_job_times())
+        schedule_jobs = _cron_jobs()
+        self.assertEqual(
+            cron_jobs,
+            schedule_jobs,
+            "ops/cron/tushare_update.cron jobs differ from configs/tushare_update_schedule.json jobs",
+        )
+        for job in schedule_jobs - AUDIT_ONLY_JOBS:
+            self.assertIn(job, REFRESH_NODES, f"data-landing job {job!r} has no Timeview refresh node")
+
+    def test_evening_node_ready_at_matches_duration_fixture(self) -> None:
+        # Lock the calibrated refresh duration: 23:35 launch + 150 min -> 02:05 next day.
+        node = REFRESH_NODES["cn_evening_full"]
+        self.assertEqual(
+            node.ready_at(date(2022, 1, 5)),
+            datetime(2022, 1, 6, 2, 5, tzinfo=CN_TZ),
+        )
 
     def test_dataset_overrides_reference_real_nodes(self) -> None:
         for mapping in (DOMAIN_REFRESH_NODES, EVENT_DATASET_REFRESH_NODES, TEXT_DATASET_REFRESH_NODES):

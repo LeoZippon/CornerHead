@@ -814,3 +814,9 @@
 - 启动前发现并修复 Docker 多 GPU 参数渲染问题：多卡需要 `--gpus '"device=5,6,7"'`，否则 Docker 报 `cannot set both Count and DeviceIDs`。补充 `run_audit_session.py` 的 `--sandbox-image` / `--gpu-devices` / 宽松 acceptance 参数和单测。
 - 当前运行：PID `2529022`，runtime `.runtime/sandboxes/run_c6d6e61dd4cb`，容器 `mqsbx_feba0ac75d17`，派生 GNN 镜像，`allocated_gpu_indices=[5,6,7]`，容器内 `torch.cuda.device_count()==3`。日志 `logs/regular_fold_last_taste_gpu_20260629_034005.log`。
 - 复查结果：Fold Agent 已 `fold_finished` 并冻结 `strategy_epoch_001_fold_2022Q1`，但 CLI 最后收集 artifacts 时因 `workspace/core.7194`/`core.7449` 权限不足退出。训练出的 `gnn_model.pt` 很小且过拟合，最终策略实际调用 simple factor ranking 而非 GNN；完整 valid_011 return=-6.31%、Sharpe=-2.75，test_000 return=-3.91%、Sharpe=-0.76。实验无 ledger，runtime/partial artifacts 可审计。
+
+2026-06-30 Full-repo audit + remediation plan (check.md R1–R19); Phase A landed
+
+- 7 parallel Opus auditors + own verification over `feat/24h-tick-replay`: 363 tests green, no PIT/look-ahead leak (Timeview predicate, prior-day-close anchor, sim-clock, W7 fill-day short gate, `ctx.nl()` cron-gating, agent-readable `run_manifest` redaction all verified). Findings recorded as R1–R19 in `check.md` (replaced the landed W-plan); decisions D-R7/D-R8/D-R16 resolved with the user.
+- Phase A `fix/audit-tier1-contracts` (commit c92aa81): R1 remove non-existent `ctx.cash` from prompts/docs/template, keep `ctx.broker.cash` (regenerated `PROMPTS.md`); R2 unify `offsession_tick_minutes` default to 15 (engine + tool fallback; explicit 0 still disables); R3 bind Timeview drift guard to `ops/cron/tushare_update.cron` launch times + assert every non-audit job has a node + evening `ready_at` fixture.
+- Validation: full suite 366 OK (was 363; +3 drift-guard cases); `git diff --check` clean. CPU-only unit work, RAM ~401Gi free, no GPU/training run.

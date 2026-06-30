@@ -123,7 +123,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 | `ctx.broker.money` / `.cash` | （无） | 账户总资金 / 可用现金 |
 
 ## ctx 接口与数据视图
-- `ctx`（市场级，每个 tick 重建）：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`（只读快照）、`ctx.cash`。
+- `ctx`（市场级，每个 tick 重建）：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`（只读快照）；可用现金见 `ctx.broker.cash`。
 - `ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`：只含当前 tick、PIT 可见的 bar（未来 bar 不可见；09:15 与非交易切片无价）。
 - `ctx.substep(name, budget_minutes=B)`：上下文管理器，声明一段重决策的运算耗时 `B>0`（实时上限 + `state_dir` 写可见性门控，不改变成交 bar；见“决策延迟与子步骤”）。
 - `ctx.asof_dir`（逐 tick 滚动时点视图，按域为 parquet 目录，见“数据可见性”）、`ctx.asof_version`（视图滚动时才变的版本号，用于缓存）、`ctx.snapshot_dir`（决策时点冻结的研究基准快照）、`ctx.model_dir`、`ctx.state_dir`（托管跨 tick 暂存，子步骤内写入延时可见）、`ctx.params`。

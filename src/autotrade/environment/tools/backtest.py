@@ -251,7 +251,7 @@ class BacktestTool:
                     auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
                     auction_close_time=(manifest.get("auction_close_time") or None),
                     execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
-                    offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 0) or 0),
+                    offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 15)),
                     max_seconds_per_trading_day=per_day_cap,
                     timeview_enabled=timeview_enabled,
                     snapshot_dir=snapshot_dir,

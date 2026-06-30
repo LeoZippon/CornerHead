@@ -76,7 +76,7 @@ def main(ctx):
 `ctx` exposes (rebuilt each tick):
 
 - `ctx.cur_date` (`"YYYYMMDD"`), `ctx.cur_time` (`"HH:MM"`).
-- `ctx.account`, `ctx.positions` (read-only snapshots), `ctx.cash`.
+- `ctx.account`, `ctx.positions` (read-only snapshots); available cash via `ctx.broker.cash`.
 - `ctx.cur_datetime` — ISO Beijing timestamp (`+08:00`) for the tick.
 - `ctx.price(ts_code)`, `ctx.bar(ts_code)`, `ctx.bars` — the current tick only
   (`None` at the 09:15 info tick and off-session ticks; future bars never visible).

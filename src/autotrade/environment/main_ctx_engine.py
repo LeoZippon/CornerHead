@@ -639,7 +639,7 @@ def run_main_ctx_replay(
     auction_decision_time: str = "09:25",
     auction_close_time: str | None = None,
     execution_lag_bars: int = 2,
-    offsession_tick_minutes: int = 0,
+    offsession_tick_minutes: int = 15,
     max_seconds_per_trading_day: float | None = None,
     timeview_enabled: bool = False,
     snapshot_dir: Path | None = None,
@@ -893,7 +893,7 @@ def _day_tick_plan(
     decision_time: str,
     execution_lag_bars: int,
     *,
-    offsession_tick_minutes: int = 0,
+    offsession_tick_minutes: int = 15,
     close_auction_time: str | None = None,
 ) -> list[_Tick]:
     """Ordered decision ticks for one day, each tagged with the real-bar index its
