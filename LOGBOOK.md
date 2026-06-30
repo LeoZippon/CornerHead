@@ -1,3 +1,11 @@
+2026-06-30 R16 T1 盘中券商视图忠实化（refactor/t1-driver-and-broker-core）
+
+- 收尾任务（重建沙箱镜像），两次提交 + Opus 子代理对抗审计（抓到并修复一处真缺陷）。Part1：新增纯 stdlib `broker_core`（CostModel + lot_floor/resolve_shares + project_open/project_reduce），SimBroker 委托之为单一成交真相源（`_fill_long_open/_fill_short_open/_reduce_position` 等），行为不变 + 单测。
+- Part2：660 行 `_MAIN_DRIVER` 字符串（含 286 行路径 guard）去字符串化为真实模块 `main_ctx_driver.py`，按文件加载（`executor.runtime_path`→`/opt/at_runtime`），`import broker_core` 同目录解析；驱动内 `_Broker` 改用 broker_core 做盘中投影（佣金/滑点/整手/融券保证金/冻结所得、按 `available_cash` 门控开仓、平仓释放买力、T+1），新增 `ctx.broker.available_cash`；`_market_state` 带 `cost_model`/`entry_cost`/`available_cash`；删除 backtest_engine 里现已死的 `_STRATEGY_PATH_GUARD`。
+- 对抗审计：核心数学==原 SimBroker、去字符串化字节级一致、wiring 均 CLEAN；唯一缺陷=做空开仓把 `available_cash` 多扣了 `fee+duty`（实际只锁 `margin`，净所得抵消费用/印花税）→ 修为做空只扣 `margin`（开仓门控仍用 `required_cash`，与 SimBroker 拒单口径一致）；并把同 tick 新开多头的 T+1 可卖默认改 0。新增做空投影测试（旧逻辑会 fail）+ 两笔买入 parity 测试。
+- 镜像：`sandbox.Dockerfile` 把两个运行时模块烤入 `/opt/at_runtime`（构建上下文改仓库根 + 新 `.dockerignore`；`chmod 0644` 让 agent 可读）；重建基础镜像（缓存复用 pip/apt 层）并验证容器内 agent 可 import、`DockerizedFoldE2ETest` 端到端通过。
+- 验证：全套 385 OK（含 Docker e2e）；`git diff --check` clean；PROMPTS.md 同步；env/agent docs 更新。
+
 2026-06-30 R18 结构去重 T4/T6/T2（refactor/t2-t4-t6-dedup）
 
 - T4 可写根单源：`SandboxPaths` 加 `writable_roots`（元组）/`writable_root_map`（名→路径），shell 写守卫与 `ArtifactIOTool._roots` 改引用之；`WRITE_ROOT_CHOICES = AGENT_TOP_LEVEL`。Python 缓存子集单源：`runtime.RUNTIME_CACHE_DIR_NAMES/SUFFIXES`，`artifacts._is_runtime_cache` 与 `sandbox._COLLECT_IGNORE` 共用（广义 VCS/venv 列表仍只在采集忽略表，按审计不并入窄谓词）。

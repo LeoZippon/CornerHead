@@ -424,6 +424,9 @@ class CandidateIsolationTest(unittest.TestCase):
             def map_path(self, path):
                 return str(path)
 
+            def runtime_path(self, path):
+                return str(path)
+
             def popen(self, *_args, **_kwargs):
                 raise RuntimeError("popen failed")
 

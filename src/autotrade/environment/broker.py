@@ -387,6 +387,9 @@ class SimBroker:
                 "sellable_quantity": pos.sellable_quantity,
                 "entry_price": pos.entry_price,
                 "entry_date": pos.entry_date,
+                # Cost basis (a short's locked net proceeds) so the sandbox view can
+                # project the buying-power released on a cover; matches xtquant's cost field.
+                "entry_cost": pos.entry_cost,
                 "last_price": pos.last_price,
                 "market_value": pos.market_value,
             }

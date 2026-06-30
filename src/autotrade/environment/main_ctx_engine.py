@@ -22,13 +22,12 @@ import time
 import uuid
 from collections.abc import Callable
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import pandas as pd
 
 from autotrade.environment.backtest_engine import (
-    _STRATEGY_PATH_GUARD,
     BacktestError,
     MarketData,
     MinuteMarketData,
@@ -51,385 +50,10 @@ _ACTION_ALIASES = {"long": "buy", "sell_short": "short", "close_long": "sell", "
 _SUPPORTED_ACTIONS = {"buy", "sell", "short", "cover", "close"}
 
 
-_MAIN_DRIVER = """\
-import builtins, contextlib, filecmp, importlib.util, json, os, re, shutil, sys, time, types, uuid
-from pathlib import Path
-
-import pandas as pd
-
-_PROTOCOL_STDOUT = sys.stdout
-
-""" + _STRATEGY_PATH_GUARD + """\
-_SECRET_PATTERNS = (
-    (re.compile(r"sk-[A-Za-z0-9_-]{8,}"), "sk-***"),
-    (re.compile(r"Bearer\\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE), "Bearer [REDACTED]"),
-)
-
-
-def _sanitize_error(value):
-    text = str(value)
-    for pattern, replacement in _SECRET_PATTERNS:
-        text = pattern.sub(replacement, text)
-    return text
-
-
-def _append_jsonl(path, record):
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\\n")
-
-
-_RESP_STATE = {"offset": 0, "responses": {}}
-
-
-def _read_responses(path):
-    state = _RESP_STATE
-    try:
-        with open(path, "rb") as handle:
-            handle.seek(state["offset"])
-            chunk = handle.read()
-    except FileNotFoundError:
-        return state["responses"]
-    head, sep, _partial = chunk.rpartition(b"\\n")
-    if sep:
-        state["offset"] += len(head) + len(sep)
-        for raw in head.splitlines():
-            line = raw.decode("utf-8", "replace").strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            state["responses"][str(record.get("request_id"))] = record
-    return state["responses"]
-
-
-def _nl(ts_code="", prompt="", *, timeout_seconds=None, content_only=False, **kwargs):
-    request_path = os.environ.get("AT_NL_REQUESTS_PATH", "")
-    response_path = os.environ.get("AT_NL_RESPONSES_PATH", "")
-    if not request_path or not response_path:
-        raise RuntimeError("nl tool is not configured for this backtest")
-    request_id = uuid.uuid4().hex
-    _append_jsonl(request_path, {"request_id": request_id, "ts_code": str(ts_code), "prompt": str(prompt or ""), "kwargs": kwargs})
-    timeout = float(timeout_seconds or os.environ.get("AT_NL_TOOL_TIMEOUT_SECONDS", "300"))
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        response = _read_responses(response_path).get(request_id)
-        if response is not None:
-            if response.get("status") != "ok":
-                raise RuntimeError(str(response.get("error", "nl tool failed")))
-            result = response.get("result") or {}
-            return str(result.get("content", "")) if content_only else result
-        time.sleep(0.05)
-    raise TimeoutError("nl tool timed out after %ss for %s" % (timeout, ts_code))
-
-
-tools_module = types.ModuleType("at_tools")
-tools_module.nl = _nl
-sys.modules["at_tools"] = tools_module
-
-
-def _bar_price(bar):
-    if not bar:
-        return None
-    for field in ("close", "open"):
-        value = bar.get(field)
-        if value not in (None, ""):
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return None
-    return None
-
-
-class _Broker:
-    \"\"\"Market-wide, ts_code-keyed view of the host Broker primitives.
-
-    Calls are recorded as deferred actions applied by the trusted host Broker
-    with full market constraints. An optimistic intra-minute view of cash and
-    per-code position keeps several actions in one minute self-consistent.\"\"\"
-
-    def __init__(self, state, prices):
-        account = state.get("account") or {}
-        self.account = account
-        self.positions = state.get("positions") or []
-        self._cash = float(state.get("cash", account.get("cash", 0.0)) or 0.0)
-        self._initial_equity = float(state.get("initial_equity", 0.0) or 0.0)
-        self._prices = prices
-        self._working = state.get("pending") or {}
-        self._pos = {}
-        for item in self.positions:
-            qty = int(item.get("quantity", 0) or 0)
-            self._pos[str(item.get("ts_code"))] = qty if str(item.get("side", "long")) == "long" else -qty
-        self._actions = []
-        self._substeps = []      # [{name, budget_minutes, real_wall_s}] declared this tick
-        self._substep_names = set()
-        self._cur_substep = None  # name of the open ctx.substep, tagged onto each order
-        self._staged = []        # [{staging_rel, state_rel, substep, budget_minutes}] this tick
-
-    @property
-    def cash(self):
-        return self._cash
-
-    @property
-    def money(self):
-        return self._cash
-
-    def position(self, ts_code):
-        return self._pos.get(str(ts_code), 0)
-
-    def pending(self, ts_code):
-        \"\"\"Still-working orders for ``ts_code`` — those queued on earlier ticks and
-        not yet filled, plus any submitted this tick. Mirrors the live order query
-        so re-entry/exit logic can skip codes with an order already in flight.\"\"\"
-        code = str(ts_code)
-        working = list(self._working.get(code, []))
-        working.extend(action for action in self._actions if str(action.get("ts_code")) == code)
-        return working
-
-    def buy(self, ts_code, amount=None, weight=None, limit=None, valid_bars=None, reason=None, **kwargs):
-        self._order("buy", ts_code, amount, weight, limit, valid_bars, reason, +1)
-
-    def sell(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None, **kwargs):
-        self._order("sell", ts_code, amount, None, limit, valid_bars, reason, -1)
-
-    def short(self, ts_code, amount=None, weight=None, limit=None, valid_bars=None, reason=None, **kwargs):
-        self._order("short", ts_code, amount, weight, limit, valid_bars, reason, -1)
-
-    def cover(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None, **kwargs):
-        self._order("cover", ts_code, amount, None, limit, valid_bars, reason, +1)
-
-    def close(self, ts_code, reason=None, **kwargs):
-        code = str(ts_code)
-        self._actions.append({"action": "close", "ts_code": code, "reason": reason, "_substep": self._cur_substep})
-        price = self._prices.get(code)
-        held = self._pos.get(code, 0)
-        if price is not None:
-            self._cash += held * price
-        self._pos[code] = 0
-
-    def _order(self, action, ts_code, amount, weight, limit, valid_bars, reason, sign):
-        code = str(ts_code)
-        record = {"action": action, "ts_code": code}
-        if amount is not None:
-            record["amount"] = amount
-        if weight is not None:
-            record["weight"] = weight
-        if limit is not None:
-            record["limit"] = limit
-        if valid_bars is not None:
-            record["valid_bars"] = valid_bars
-        if reason is not None:
-            record["reason"] = reason
-        record["_substep"] = self._cur_substep
-        self._actions.append(record)
-        if limit is not None:
-            return  # a resting limit order may not fill; leave the optimistic view unchanged
-        price = self._prices.get(code)
-        shares = self._resolve_shares(amount, weight, price)
-        if shares > 0 and price is not None:
-            self._pos[code] = self._pos.get(code, 0) + sign * shares
-            self._cash -= sign * shares * price
-
-    def _resolve_shares(self, amount, weight, price):
-        if price is None or price <= 0:
-            return 0
-        try:
-            if amount is not None and str(amount).strip() != "":
-                raw = int(float(amount))
-            elif weight is not None and str(weight).strip() != "":
-                raw = int(abs(float(weight)) * self._initial_equity / price)
-            else:
-                return 0
-        except (TypeError, ValueError):
-            return 0
-        return (raw // 100) * 100
-
-
-class _Ctx(types.SimpleNamespace):
-    \"\"\"main(ctx) view. ``state_dir`` is a property so that, inside ctx.substep(),
-    it resolves to a hidden staging directory; outside it resolves to the managed,
-    visible state directory. Writing via ctx.state_dir therefore stages a heavy
-    block's output regardless of the write mechanism (json, parquet, native), and
-    the host merges it into the visible directory only once the block's declared
-    duration has elapsed (ready_at = tick + B).\"\"\"
-
-    @property
-    def state_dir(self):
-        holder = self._state_holder
-        return holder[\"active\"] or holder[\"visible\"]
-
-
-def _safe_name(text):
-    return re.sub(r\"[^0-9A-Za-z._-]\", \"_\", str(text or \"tick\"))
-
-
-def _build_ctx(state, snapshot_dir, model_dir, state_dir, staging_root):
-    bars = {str(b.get("ts_code", "")): dict(b) for b in (state.get("bars") or [])}
-    prices = {code: _bar_price(bar) for code, bar in bars.items()}
-    broker = _Broker(state, prices)
-    state_holder = {"active": None, "visible": state_dir}
-    tick_key = _safe_name(state.get("cur_datetime") or state.get("cur_time") or "tick")
-
-    def price(ts_code):
-        return prices.get(str(ts_code))
-
-    def bar(ts_code):
-        return bars.get(str(ts_code))
-
-    @contextlib.contextmanager
-    def substep(name, budget_minutes=None):
-        # Declared compute duration (minutes) for a heavy block. B is the block's
-        # real-time ceiling (the host aborts the backtest if real wall-time exceeds B),
-        # it is bounded by decision_max_sim_minutes, and it gates when in-block writes
-        # to ctx.state_dir become visible (ready_at = tick + B). It does NOT move the
-        # order fill bar: orders fill at the normal decision-bar lag regardless of B.
-        # A wrapped block MUST declare B > 0; wrapping with 0 is identical to not
-        # wrapping, so it is rejected. Leave trivial per-tick code unwrapped.
-        try:
-            budget = float(budget_minutes) if budget_minutes is not None else 0.0
-        except (TypeError, ValueError):
-            budget = 0.0
-        if budget <= 0:
-            raise ValueError(
-                "ctx.substep(name, budget_minutes=B) requires B > 0 minutes (the time this "
-                "block may take, which is also its real-time ceiling); use a small value such "
-                "as 0.5 for light work. Leave trivial per-tick code unwrapped for the default lag."
-            )
-        _cap = os.environ.get("AT_DECISION_MAX_SIM_MINUTES", "")
-        if _cap:
-            try:
-                _cap_val = float(_cap)
-            except ValueError:
-                _cap_val = None
-            if _cap_val is not None and budget > _cap_val:
-                raise ValueError(
-                    "ctx.substep budget_minutes=%.4g exceeds the decision_max_sim_minutes cap "
-                    "(%.4g); split the work or declare a smaller budget" % (budget, _cap_val)
-                )
-        step_name = str(name)
-        if step_name in broker._substep_names:
-            raise ValueError(
-                f"ctx.substep name {step_name!r} was already used in this tick; use a unique name "
-                "for each decision block so its latency budget maps unambiguously to orders."
-            )
-        broker._substep_names.add(step_name)
-        prev = broker._cur_substep
-        prev_active = state_holder["active"]
-        # ctx.state_dir resolves to this staging dir inside the block. Seed it with a
-        # copy of the current visible state so reads see the old visible value (the
-        # contract: reads always see the visible directory); writes land here and the
-        # host merges them into the visible state dir once ready_at = this tick + B.
-        staging_subdir = os.path.join(staging_root, tick_key, _safe_name(step_name))
-        os.makedirs(staging_subdir, exist_ok=True)
-        visible_dir = state_holder["visible"]
-        if visible_dir and os.path.isdir(visible_dir):
-            shutil.copytree(visible_dir, staging_subdir, dirs_exist_ok=True)
-        state_holder["active"] = staging_subdir
-        broker._cur_substep = step_name
-        start = time.monotonic()
-        try:
-            yield
-        finally:
-            broker._substeps.append({
-                "name": step_name,
-                "budget_minutes": budget,
-                "real_wall_s": time.monotonic() - start,
-            })
-            # Stage only files the block created or changed vs the visible copy; the
-            # unchanged seeded copies are not writes and must not re-merge.
-            for _root, _dirs, _files in os.walk(staging_subdir):
-                for _fn in _files:
-                    _abs = os.path.join(_root, _fn)
-                    _state_rel = os.path.relpath(_abs, staging_subdir)
-                    _visible = os.path.join(visible_dir, _state_rel) if visible_dir else ""
-                    if _visible and os.path.exists(_visible) and filecmp.cmp(_abs, _visible, shallow=False):
-                        continue
-                    broker._staged.append({
-                        "staging_rel": os.path.relpath(_abs, staging_root),
-                        "state_rel": _state_rel,
-                        "substep": step_name,
-                        "budget_minutes": budget,
-                    })
-            state_holder["active"] = prev_active
-            broker._cur_substep = prev
-
-    return _Ctx(
-        broker=broker,
-        account=broker.account,
-        positions=broker.positions,
-        bars=bars,
-        bar=bar,
-        substep=substep,
-        price=price,
-        cur_price=price,
-        cur_date=str(state.get("cur_date", "") or ""),
-        cur_time=str(state.get("cur_time", "") or ""),
-        cur_datetime=str(state.get("cur_datetime", "") or ""),
-        params=dict(state.get("params") or {}),
-        nl=_nl,
-        snapshot_dir=snapshot_dir,
-        asof_dir=(state.get("asof_dir") or snapshot_dir),
-        asof_version=str(state.get("asof_version") or ""),
-        model_dir=model_dir,
-        _state_holder=state_holder,
-    ), broker
-
-
-def _load_module(path, name):
-    if not path.exists():
-        return None
-    sys.path.insert(0, str(path.parent))
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-main_path = Path(sys.argv[1])
-snapshot_dir = os.environ.get("AT_SNAPSHOT_DIR", "/mnt/snapshot")
-model_dir = os.environ.get("AT_MODEL_DIR", "/mnt/agent/models")
-state_dir = os.environ.get("AT_STATE_DIR", "/mnt/agent/workspace/.state")
-staging_root = os.environ.get("AT_STATE_STAGING_DIR", "/mnt/agent/workspace/.state_staging")
-main_module = None
-main_load_error = None
-with contextlib.redirect_stdout(sys.stderr):
-    try:
-        main_module = _load_module(main_path, "agent_strategy_main")
-    except Exception as exc:
-        main_load_error = _sanitize_error("%s: %s" % (type(exc).__name__, exc))
-
-main_fn = getattr(main_module, "main", None) if main_module is not None else None
-
-for line in sys.stdin:
-    if not line.strip():
-        continue
-    request = json.loads(line)
-    request_id = str(request.get("request_id", ""))
-    try:
-        if main_load_error is not None:
-            raise RuntimeError("main.py failed to import: " + main_load_error)
-        if request.get("op") == "validate":
-            if not callable(main_fn):
-                raise AttributeError("main.py must define main(ctx)")
-            response = {"request_id": request_id, "status": "ok"}
-        else:
-            if not callable(main_fn):
-                raise AttributeError("main.py must define main(ctx)")
-            ctx, broker = _build_ctx(request.get("state") or {}, snapshot_dir, model_dir, state_dir, staging_root)
-            with contextlib.redirect_stdout(sys.stderr):
-                main_fn(ctx)
-            response = {
-                "request_id": request_id,
-                "status": "ok",
-                "actions": broker._actions,
-                "substeps": broker._substeps,
-                "staged": broker._staged,
-            }
-    except Exception as exc:
-        response = {"request_id": request_id, "status": "error", "error": _sanitize_error("%s: %s" % (type(exc).__name__, exc))}
-    print(json.dumps(response, ensure_ascii=False, default=str), file=_PROTOCOL_STDOUT, flush=True)
-"""
+# The persistent per-tick driver is a real module (main_ctx_driver.py) shipped into
+# the sandbox image next to broker_core; it is launched by file (executor.runtime_path)
+# rather than as a -c string so it stays typed, testable, and shares the broker core.
+_DRIVER_PATH = Path(__file__).with_name("main_ctx_driver.py")
 
 
 @dataclass(frozen=True)
@@ -507,7 +131,12 @@ class MainPolicyRunner:
             self._hide_cm.__enter__()
             self._hide_entered = True
             self.proc = self.executor.popen(
-                [self.executor.python, "-c", _MAIN_DRIVER, self.executor.map_path(main_py), self._run_marker],
+                [
+                    self.executor.python,
+                    self.executor.runtime_path(_DRIVER_PATH),
+                    self.executor.map_path(main_py),
+                    self._run_marker,
+                ],
                 env=env,
                 cwd=self.paths.agent,
                 user="agent",
@@ -1105,6 +734,9 @@ def _market_state(
         "positions": _jsonable(broker.query_stock_positions()),
         "cash": float(broker.cash),
         "initial_equity": float(broker.initial_equity),
+        # The deterministic cost model so the in-sandbox view projects fills with the
+        # same commission/duty/slippage/short-margin math the host broker fills with.
+        "cost_model": asdict(broker.profile.cost_model),
         "bars": bars,
         "asof_dir": asof_dir,
         "asof_version": asof_version,

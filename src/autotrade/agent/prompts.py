@@ -120,7 +120,8 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 | `ctx.broker.close` | ts_code | 市价平掉该票全部持仓（恒市价，无 `limit`） |
 | `ctx.broker.position` | ts_code | 已成交持仓（不含在途），是持仓真相源 |
 | `ctx.broker.pending` | ts_code | 在途已报未成单（实盘委托查询口径），对在途代码跳过重复下单 |
-| `ctx.broker.money` / `.cash` | （无） | 账户总资金 / 可用现金 |
+| `ctx.broker.money` / `.cash` | （无） | 现金视图（盘中随每笔成交按真实佣金/滑点投影更新） |
+| `ctx.broker.available_cash` | （无） | 可部署买力（现金扣融券保证金与冻结所得）；同一 tick 多笔下单据此定量与宿主真实成交一致 |
 
 ## ctx 接口与数据视图
 - `ctx`（市场级，每个 tick 重建）：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`（只读快照）；可用现金见 `ctx.broker.cash`。

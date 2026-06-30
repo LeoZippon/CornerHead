@@ -1,5 +1,6 @@
 # AutoTrade Agent sandbox image (docs/environment_design.md 3.1/3.3).
-# Build: docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile ops/docker
+# Build (context is the repo root so the trusted runtime modules can be copied in):
+#   docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile .
 # Behind restricted networks pre-pull the base via a registry mirror, pass
 # --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple, and add
 # --network=host so the build's curl (DuckDB CLI release) uses the host network.
@@ -50,6 +51,18 @@ RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 -
     && chmod +x /usr/local/bin/duckdb \
     && rm /tmp/duckdb_cli.zip \
     && duckdb -c "select 1"
+
+# Trusted host-side runtime modules baked in (R16): the de-stringed per-tick
+# main(ctx) driver and the dependency-light broker_core it shares with the host
+# SimBroker. Loaded by file (executor.runtime_path -> CONTAINER_RUNTIME_DIR), with
+# broker_core resolved as a sibling on the driver's sys.path[0]. Must match
+# autotrade.environment.executor.CONTAINER_RUNTIME_DIR.
+RUN mkdir -p /opt/at_runtime
+COPY src/autotrade/environment/broker_core.py /opt/at_runtime/broker_core.py
+COPY src/autotrade/environment/main_ctx_driver.py /opt/at_runtime/main_ctx_driver.py
+# COPY preserves the source mode (0600 on the host), so make the trusted modules
+# world-readable for the non-root `agent` user that runs the driver.
+RUN chmod 0644 /opt/at_runtime/*.py
 
 # Non-root agent user; Runner/root stays root for frozen execution and binds.
 RUN useradd --create-home --uid 61000 agent

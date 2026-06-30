@@ -277,7 +277,9 @@ ctx.cur_datetime      # ISO 时间戳（含 +08:00 时区）；同一 main(ctx) 
 ctx.account, ctx.positions                # 只读账户/持仓快照（可用现金见 ctx.broker.cash）
 ctx.price(ts_code), ctx.bar(ts_code), ctx.bars   # 仅当前 tick、PIT 可见的 bar（09:15 无价）
 ctx.broker.buy/sell/short/cover/close(ts_code, amount=None, weight=None, limit=None, valid_bars=1)
-ctx.broker.money, ctx.broker.cash, ctx.broker.position(ts_code)
+ctx.broker.money, ctx.broker.cash         # 现金视图（盘中随成交按真实成本投影更新）
+ctx.broker.available_cash                 # 可部署买力（现金扣融券保证金/冻结所得）
+ctx.broker.position(ts_code)
 ctx.broker.pending(ts_code)               # 已报未成的在途单（实盘委托查询口径）
 # limit=P -> 限价单（FIX_PRICE），开盘优于 P 时按 open，否则触及 P 时按 P；close 恒市价
 ctx.substep(name, budget_minutes=B)       # 上下文管理器：声明重决策块计算时长（B>0，tick 内 name 唯一）

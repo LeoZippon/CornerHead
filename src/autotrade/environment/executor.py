@@ -26,6 +26,10 @@ from autotrade.environment.runtime import SandboxPaths
 # slightly-longer backstop in case the container-side guard ever fails.
 _HOST_TIMEOUT_BUFFER_SECONDS = 15.0
 
+# Where the sandbox image bakes trusted host-side runtime modules (the de-stringed
+# main_ctx driver and broker_core). Must match ops/docker/sandbox.Dockerfile.
+CONTAINER_RUNTIME_DIR = "/opt/at_runtime"
+
 
 def _with_container_timeout(argv: list[str], timeout_seconds: float) -> list[str]:
     # GNU coreutils `timeout` runs the command in its own process group and signals
@@ -57,6 +61,11 @@ class LocalExecutor:
         self.python = python or sys.executable
 
     def map_path(self, host_path: Path | str) -> str:
+        return str(host_path)
+
+    def runtime_path(self, host_path: Path | str) -> str:
+        """Path to a trusted host-side runtime module (e.g. the main_ctx driver). Runs
+        the repo file directly; its sibling ``broker_core`` is found on sys.path[0]."""
         return str(host_path)
 
     def kill_marker(self, marker: str, *, user: str = "agent") -> None:
@@ -147,6 +156,11 @@ class DockerExecutor:
         self.container = container
         self.host_paths = host_paths
         self.python = python
+
+    def runtime_path(self, host_path: Path | str) -> str:
+        """Container path of a trusted runtime module baked into the image at
+        ``CONTAINER_RUNTIME_DIR`` (its sibling ``broker_core`` sits there too)."""
+        return str(Path(CONTAINER_RUNTIME_DIR) / Path(host_path).name)
 
     def map_path(self, host_path: Path | str) -> str:
         """Translate a host sandbox path to the container /mnt layout."""

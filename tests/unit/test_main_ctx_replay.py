@@ -65,6 +65,53 @@ def main(ctx):
         ctx.broker.buy(code, weight=0.2, limit=9.50, valid_bars=2, reason="limit_miss")
 '''
 
+# Two buys in one tick, the second sized off the (faithful) projected buying power
+# after the first; records what the agent saw so the test can compare to broker_core.
+PARITY_MAIN = '''
+import json, os
+def main(ctx):
+    c1, c2 = "000001.SZ", "000002.SZ"
+    sd = ctx.state_dir
+    if os.path.exists(os.path.join(sd, "obs.json")):
+        return
+    p1, p2 = ctx.price(c1), ctx.price(c2)
+    if p1 is None or p2 is None or ctx.broker.position(c1) != 0:
+        return
+    obs = {"cash0": ctx.broker.cash, "avail0": ctx.broker.available_cash, "p1": p1, "p2": p2}
+    ctx.broker.buy(c1, weight=0.6, reason="buy1")
+    obs["cash1"] = ctx.broker.cash
+    obs["avail1"] = ctx.broker.available_cash
+    obs["pos1"] = ctx.broker.position(c1)
+    shares2 = int((ctx.broker.available_cash * 0.9) / p2 // 100 * 100)
+    ctx.broker.buy(c2, amount=shares2, reason="buy2")
+    obs["pos2"] = ctx.broker.position(c2)
+    os.makedirs(sd, exist_ok=True)
+    with open(os.path.join(sd, "obs.json"), "w") as handle:
+        json.dump(obs, handle)
+'''
+
+# Opens a short and records buying power before/after so the test can confirm a short
+# locks only margin (not margin+fee+duty) in the projected available_cash.
+SHORT_PARITY_MAIN = '''
+import json, os
+def main(ctx):
+    c = "000002.SZ"
+    sd = ctx.state_dir
+    if os.path.exists(os.path.join(sd, "sobs.json")):
+        return
+    p = ctx.price(c)
+    if p is None or ctx.broker.position(c) != 0:
+        return
+    obs = {"avail0": ctx.broker.available_cash, "cash0": ctx.broker.cash, "p": p}
+    ctx.broker.short(c, weight=0.2, reason="short1")
+    obs["avail1"] = ctx.broker.available_cash
+    obs["cash1"] = ctx.broker.cash
+    obs["pos1"] = ctx.broker.position(c)
+    os.makedirs(sd, exist_ok=True)
+    with open(os.path.join(sd, "sobs.json"), "w") as handle:
+        json.dump(obs, handle)
+'''
+
 # Limit price the market never reaches, but its validity extends to the close.
 LIMIT_DAY_END_CANCEL_MAIN = '''
 def main(ctx):
@@ -342,6 +389,95 @@ class MainCtxReplayTest(unittest.TestCase):
             )
         buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
+
+    def test_intra_tick_projection_matches_broker_core_fills(self) -> None:
+        # R16: the agent's intra-tick broker view projects the SAME fee/slippage/
+        # buying-power math the host SimBroker fills with, so a second order sized off
+        # the projected buying power fits (rather than being rejected off optimistic cash).
+        import json
+
+        from autotrade.environment import broker_core
+
+        (self.sandbox.paths.agent_output / "main.py").write_text(PARITY_MAIN, encoding="utf-8")
+        replay = pd.DataFrame(
+            [
+                {"trade_date": d, "ts_code": code, "open": o, "close": c,
+                 "up_limit": o * 1.2, "down_limit": o * 0.8, "is_suspended": False}
+                for d, code, o, c in [
+                    ("20220104", "000001.SZ", 10.0, 9.9), ("20220105", "000001.SZ", 9.9, 9.8),
+                    ("20220104", "000002.SZ", 20.0, 19.8), ("20220105", "000002.SZ", 19.8, 19.6),
+                ]
+            ]
+        )
+        profile = BrokerProfile(initial_cash=1_000_000.0)
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=30.0,
+            decision_time="2022-01-04T09:30:00+08:00", replay_granularity="daily",
+        ) as policy:
+            policy.validate_main()
+            result = run_main_ctx_replay(
+                replay, profile, shortable_codes=frozenset(), main_policy=policy,
+                auction_enabled=False, offsession_tick_minutes=0,
+            )
+        obs = json.loads((self.sandbox.paths.workspace / ".state" / "obs.json").read_text(encoding="utf-8"))
+        cost = profile.cost_model
+        shares_a = broker_core.resolve_shares(None, 0.6, obs["p1"], 1_000_000.0)
+        fill_a = broker_core.project_open(
+            cost, side="long", raw_price=obs["p1"], shares=shares_a, trade_date="20220104"
+        )
+        # The agent's view after buy 1 equals the shared-core projection (cash + fee + slippage).
+        self.assertEqual(obs["pos1"], shares_a)
+        self.assertAlmostEqual(obs["avail1"], 1_000_000.0 + fill_a.cash_delta)
+        self.assertAlmostEqual(obs["cash1"], 1_000_000.0 + fill_a.cash_delta)
+        # ... and it is strictly below the bare notional, i.e. slippage + commission are included.
+        self.assertLess(obs["avail1"], 1_000_000.0 - shares_a * obs["p1"])
+        self.assertGreater(obs["pos2"], 0)
+        # Both buys, sized against the faithful view, are actually filled by the broker.
+        filled = {
+            o["ts_code"]
+            for o in result.broker.query_stock_orders()
+            if o["action"] == "buy" and o["status"] == "filled"
+        }
+        self.assertEqual(filled, {"000001.SZ", "000002.SZ"})
+
+    def test_short_open_projects_only_margin_to_available_cash(self) -> None:
+        # R16: a short locks only margin in available_cash (its banked net proceeds
+        # offset the fee/duty), matching SimBroker.available_cash() — not margin+fee+duty.
+        import json
+
+        from autotrade.environment import broker_core
+
+        (self.sandbox.paths.agent_output / "main.py").write_text(SHORT_PARITY_MAIN, encoding="utf-8")
+        replay = pd.DataFrame(
+            [
+                {"trade_date": d, "ts_code": code, "open": o, "close": c,
+                 "up_limit": o * 1.2, "down_limit": o * 0.8, "is_suspended": False}
+                for d, code, o, c in [
+                    ("20220104", "000002.SZ", 20.0, 19.8), ("20220105", "000002.SZ", 19.8, 19.6),
+                ]
+            ]
+        )
+        profile = BrokerProfile(initial_cash=1_000_000.0)
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=30.0,
+            decision_time="2022-01-04T09:30:00+08:00", replay_granularity="daily",
+        ) as policy:
+            policy.validate_main()
+            run_main_ctx_replay(
+                replay, profile, shortable_codes=frozenset({"000002.SZ"}), main_policy=policy,
+                auction_enabled=False, offsession_tick_minutes=0,
+            )
+        obs = json.loads((self.sandbox.paths.workspace / ".state" / "sobs.json").read_text(encoding="utf-8"))
+        cost = profile.cost_model
+        shares = broker_core.resolve_shares(None, 0.2, obs["p"], 1_000_000.0)
+        fill = broker_core.project_open(cost, side="short", raw_price=obs["p"], shares=shares, trade_date="20220104")
+        self.assertEqual(obs["pos1"], -shares)
+        self.assertGreater(fill.fee + fill.duty, 0)  # there ARE fees, so the two are distinct
+        # available_cash drops by margin only, NOT by required_cash (margin+fee+duty).
+        self.assertAlmostEqual(obs["avail1"], 1_000_000.0 - fill.margin)
+        self.assertNotAlmostEqual(obs["avail1"], 1_000_000.0 - fill.required_cash)
+        # literal cash rises by the net proceeds banked.
+        self.assertAlmostEqual(obs["cash1"], 1_000_000.0 + fill.cash_delta)
 
     def _run_with(self, replay: pd.DataFrame, minutes: pd.DataFrame | None = None) -> object:
         with MainPolicyRunner(
