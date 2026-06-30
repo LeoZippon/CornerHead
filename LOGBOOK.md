@@ -825,3 +825,8 @@
 
 - Branch `fix/reporting-and-state-contract` (on Phase A). R9: experiment report now sets top-level `status="warning"` when benchmark data is missing (missing_raw_dir/missing_data/no_period_coverage); `ok`/`disabled` stay `ok`; `report_experiment.py` surfaces it. R10: inside `ctx.substep`, `ctx.state_dir` is seeded with a copy of the visible state so reads return the old visible value (contract), while writes still stage for delayed merge (capture only changed/new files). R11: `AcceptanceRules.min_return` now uses `<` (inclusive), matching the Sharpe/drawdown bounds.
 - Validation: full suite 368 OK (+2 cases: in-substep read, benchmark warning); `git diff --check` clean. CPU-only, no GPU/training.
+
+2026-06-30 Phase B — broker faithfulness (R4–R8)
+
+- Branch `fix/broker-faithfulness` (on Phase C). R4: `SimBroker.roll_to_date()` unlocks T+1 at each new trade date in the host day-loop before the first tick (overnight holds report correct `sellable_quantity` pre-fill). R5: shorts exempt from the T+1 sell lock (`sellable_quantity` side-aware) → same-day cover allowed; long T+1 unchanged. R6: the 14:57 close auction fills at the activation bar's CLOSE (threaded `is_close_auction`→`auction_close`→`_limit_fill_price use_close`); open auction unchanged. R7: per-substep wall fail-fast skipped under frozen/final eval (`enforce_substep_timeout = mode=="valid"`). R8: short borrow fee accrues per calendar-day gap (weekend carry); short proceeds locked as collateral (`available_cash = cash − short_margin − locked_proceeds`; long-buy and short-open gate on it) so a short no longer inflates buying power.
+- Validation: full suite 374 OK (+6); `git diff --check` clean. CPU-only, no GPU/training.

@@ -554,6 +554,26 @@ def main(ctx):
         with self.assertRaises(BacktestError):
             self._run_with(_ohlc_replay(), _dense_minutes())
 
+    def test_substep_overrun_does_not_abort_under_final_eval(self) -> None:
+        # R7: the final/frozen (held-out) eval skips the per-substep wall fail-fast so
+        # a transient overrun cannot abort an already-accepted strategy's reproducible
+        # eval. The same SUBSTEP_OVERRUN_MAIN that aborts under valid completes here,
+        # and the overrunning sub-step's runtime is still aggregated.
+        (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_OVERRUN_MAIN, encoding="utf-8")
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=30.0,
+            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
+        ) as policy:
+            policy.validate_main()
+            result = run_main_ctx_replay(
+                _ohlc_replay(), BrokerProfile(initial_cash=1_000_000.0),
+                shortable_codes=frozenset(), main_policy=policy,
+                replay_intraday_1min=_dense_minutes(),
+                enforce_substep_timeout=False,
+            )
+        self.assertIn("slow", result.substep_runtime)
+        self.assertEqual(result.substep_runtime["slow"]["count"], 1.0)
+
     def test_substep_zero_budget_is_rejected(self) -> None:
         # Wrapping with budget_minutes=0 is a no-op identical to not wrapping, so
         # ctx.substep rejects it (surfaced to the agent as a BacktestError).
@@ -755,8 +775,9 @@ def main(ctx):
         self.assertTrue(any(e["event_type"] == "main_actions_unfilled" for e in result.broker.events))
 
     def test_close_auction_fills_decision_at_final_bar(self) -> None:
-        # With auction_close_time=14:57, the 14:57 bar's decision fills at the day's
-        # final 15:00 bar (the close auction), labelled "auction".
+        # R6: with auction_close_time=14:57, the 14:57 bar's decision fills at the
+        # day's final 15:00 bar's CLOSE (the close auction), labelled "auction". The
+        # final bar's open (10.5) and close (10.6) differ so the test pins the close.
         main = (
             "def main(ctx):\n"
             "    if ctx.cur_time == '14:57' and ctx.broker.position('000001.SZ') == 0 "
@@ -766,8 +787,9 @@ def main(ctx):
         (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
         minutes = pd.DataFrame(
             [
-                {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": t, "open": o, "high": o, "low": o, "close": o}
-                for t, o in (("09:31", 10.0), ("14:57", 10.4), ("15:00", 10.6))
+                {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": "09:31", "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0},
+                {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": "14:57", "open": 10.4, "high": 10.4, "low": 10.4, "close": 10.4},
+                {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": "15:00", "open": 10.5, "high": 10.7, "low": 10.4, "close": 10.6},
             ]
         )
         with MainPolicyRunner(
@@ -783,6 +805,7 @@ def main(ctx):
         buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "auction")
+        # Fills at the 15:00 close (10.6), not the 15:00 open (10.5).
         self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.6, is_buy=True))
 
     def test_cur_datetime_is_exposed(self) -> None:

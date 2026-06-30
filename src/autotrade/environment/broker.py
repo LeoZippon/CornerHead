@@ -214,6 +214,8 @@ class Position:
     last_price: float
     locked_today: int = 0
     locked_date: str = ""
+    # Last trade date this short accrued a borrow fee on (calendar-day accrual).
+    last_mark_date: str = ""
 
     @property
     def market_value(self) -> float:
@@ -225,7 +227,14 @@ class Position:
 
     @property
     def sellable_quantity(self) -> int:
-        """Shares that may be sold (long) or covered (short) right now."""
+        """Shares that may be sold (long) or covered (short) right now.
+
+        A long position is T+1 locked: shares acquired today (``locked_today``) are
+        not sellable until a later date. A short position has no T+1 sell lock — the
+        融券 mechanic permits same-day cover (买券还券) — so its full quantity is
+        always coverable."""
+        if self.side == "short":
+            return self.quantity
         return max(self.quantity - self.locked_today, 0)
 
 
@@ -273,6 +282,9 @@ class WorkingOrder:
     remaining_bars: int
     is_auction: bool
     reason: str
+    # A close (15:00) call-auction order fills at the activation bar's CLOSE; an
+    # open (09:25) auction or a continuous order fills at its bar OPEN.
+    auction_close: bool = False
 
     @property
     def is_limit(self) -> bool:
@@ -341,7 +353,7 @@ class SimBroker:
         return {
             "cash": self.cash,
             "total_assets": self.equity(),
-            "available_cash": self.cash - self._short_margin_occupied(),
+            "available_cash": self.available_cash(),
             "short_margin_occupied": self._short_margin_occupied(),
             "maintenance_ratio": self.maintenance_ratio(),
             "risk_limits": {
@@ -394,6 +406,7 @@ class SimBroker:
         weight: float | None = None,
         valid_bars: int = 1,
         is_auction: bool = False,
+        auction_close: bool = False,
         reason: str = "",
     ) -> str:
         """Submit an order to the day's book and return its ``order_id``.
@@ -417,6 +430,7 @@ class SimBroker:
                 price=float(price) if (is_limit and price) else None,
                 remaining_bars=max(1, int(valid_bars or 1)),
                 is_auction=bool(is_auction),
+                auction_close=bool(auction_close),
                 reason=str(reason or action),
             )
         )
@@ -455,7 +469,7 @@ class SimBroker:
         survivors: list[WorkingOrder] = []
         for order in self._book:
             bar = _bar_for_code(minute_group, order.ts_code)
-            price = _limit_fill_price(order, bar) if bar is not None else None
+            price = _limit_fill_price(order, bar, use_close=order.auction_close) if bar is not None else None
             if price is not None:
                 self.execute(
                     order.ts_code,
@@ -490,6 +504,18 @@ class SimBroker:
     def record_event(self, event_type: str, **payload: object) -> None:
         """Append an audited replay event from trusted Environment code."""
         self._event(event_type, **payload)
+
+    def roll_to_date(self, trade_date: str) -> None:
+        """Lift the T+1 lock for every position when the sim-date rolls to a new day.
+
+        Runs the same ``locked_date < trade_date`` unlock as :meth:`_advance_date`
+        for ALL positions, but is called once by the host at the START of each new
+        trade date — before the day's first ``ctx``/tick is built — so an overnight
+        hold reports its full ``sellable_quantity`` from the day's first off-session
+        tick rather than only after that day's first fill. Idempotent and
+        deterministic: ``execute``/``mark_to_market`` still call ``_advance_date`` as
+        a safety net, and re-rolling to the same date is a no-op."""
+        self._advance_date(trade_date)
 
     # ---- fundamental primitives ----
 
@@ -579,7 +605,9 @@ class SimBroker:
         price = self.profile.slipped_price(raw_price, is_buy=True) if apply_slippage else raw_price
         notional = shares * price
         fee = self.profile.commission(notional)
-        if notional + fee > self.cash + 1e-6:
+        # A long buy may only deploy available cash: short-sale proceeds are locked
+        # collateral (not deployable), so available_cash() == cash when flat/long-only.
+        if notional + fee > self.available_cash() + 1e-6:
             return self._reject(order, "insufficient_cash")
         self.cash -= notional + fee
         self.fees_paid += fee
@@ -592,7 +620,9 @@ class SimBroker:
         fee = self.profile.commission(notional)
         duty = self.profile.stamp_duty_on_sale(notional, order.trade_date)
         margin = notional * self.profile.effective_short_margin_ratio
-        if margin + fee + duty > self.cash - self._short_margin_occupied() + 1e-6:
+        # The new short's margin must be backed by deployable cash, which already
+        # excludes the locked proceeds and margin of any existing shorts.
+        if margin + fee + duty > self.available_cash() + 1e-6:
             return self._reject(order, "insufficient_short_margin")
         self.cash += notional - fee - duty
         self.fees_paid += fee
@@ -636,9 +666,15 @@ class SimBroker:
             if bar is not None and pd.notna(bar.get("close")):
                 pos.last_price = float(bar["close"])
             if pos.side == "short":
-                daily_fee = pos.quantity * pos.entry_price * self.profile.short_borrow_fee_annual / 365.0
-                self.cash -= daily_fee
-                self.borrow_fees += daily_fee
+                # Borrow fee accrues every CALENDAR day held (weekends/holidays
+                # included), so charge the calendar-day gap since this short's last
+                # mark (1 day on its first mark) — not a flat per-trade-day fee, which
+                # would undercount by ~31% over the ~252 trade days in a 365-day year.
+                gap_days = _calendar_day_gap(pos.last_mark_date, trade_date)
+                fee = pos.quantity * pos.entry_price * self.profile.short_borrow_fee_annual / 365.0 * gap_days
+                self.cash -= fee
+                self.borrow_fees += fee
+                pos.last_mark_date = str(trade_date)
         ratio = self.maintenance_ratio()
         if ratio is not None and ratio < self.profile.maintenance_closeout_ratio:
             self._event("forced_close_triggered", trade_date=trade_date, maintenance_ratio=ratio)
@@ -872,6 +908,21 @@ class SimBroker:
             if pos.side == "short"
         )
 
+    def _short_proceeds_locked(self) -> float:
+        """Net short-sale proceeds held as locked collateral (融券卖出所得资金).
+
+        Banked into ``cash`` when the short opens and released proportionally on
+        cover (``pos.entry_cost`` for a short tracks exactly this). They are part of
+        account equity but are NOT deployable for new positions, so a short never
+        frees up its own proceeds as buying power."""
+        return sum(pos.entry_cost for pos in self.positions.values() if pos.side == "short")
+
+    def available_cash(self) -> float:
+        """Cash deployable for new positions: literal ``cash`` minus the margin
+        reserved against open shorts and minus the locked short-sale proceeds. With
+        no shorts this equals ``cash``, so long-only accounting is unchanged."""
+        return self.cash - self._short_margin_occupied() - self._short_proceeds_locked()
+
     def _ledger(self, ts_code: str, *, side: str, kind: str, price: float, quantity: int, trade_date: str, realized_pnl: float | None = None) -> None:
         record = {
             "ts_code": ts_code,
@@ -942,26 +993,51 @@ def _open_price(bar: pd.Series) -> float | None:
     return None
 
 
-def _limit_fill_price(order: WorkingOrder, bar: pd.Series) -> float | None:
+def _close_price(bar: pd.Series) -> float | None:
+    """Close-auction fill price: the bar's close, falling back to its open."""
+    for field_name in ("close", "open"):
+        value = bar.get(field_name)
+        if value is not None and pd.notna(value):
+            return float(value)
+    return None
+
+
+def _limit_fill_price(order: WorkingOrder, bar: pd.Series, *, use_close: bool = False) -> float | None:
     """Fill price for a working order against this bar, or None if not fillable now.
 
-    Market orders fill at the bar open. A limit order fills only when the bar's
-    range reaches the limit: buy/cover orders fill at the open when it is already
-    at or below the limit, otherwise at the limit after an intrabar dip; sell/short
-    orders symmetrically fill at an already-favorable open, otherwise at the limit."""
-    open_price = _open_price(bar)
-    if order.price is None or open_price is None:
-        return open_price
+    Market orders fill at the bar reference price: the bar OPEN by default, or the
+    bar CLOSE for a close (15:00) call-auction order (``use_close``) so a 14:57
+    close-auction decision settles at the day's close, not its open. A limit order
+    fills only when the bar's range reaches the limit: buy/cover orders fill at the
+    reference price when it is already at or below the limit, otherwise at the limit
+    after an intrabar dip; sell/short orders symmetrically fill at an already-favorable
+    reference price, otherwise at the limit."""
+    ref_price = _close_price(bar) if use_close else _open_price(bar)
+    if order.price is None or ref_price is None:
+        return ref_price
     limit = order.price
     if order.action in ("buy", "cover"):
-        if open_price <= limit:
-            return open_price
+        if ref_price <= limit:
+            return ref_price
         low = bar.get("low")
         return limit if (low is not None and pd.notna(low) and float(low) <= limit) else None
-    if open_price >= limit:
-        return open_price
+    if ref_price >= limit:
+        return ref_price
     high = bar.get("high")
     return limit if (high is not None and pd.notna(high) and float(high) >= limit) else None
+
+
+def _calendar_day_gap(prev_date: str, trade_date: str) -> int:
+    """Calendar days of borrow accrual for a short between marks.
+
+    1 on a short's first mark (``prev_date`` empty); otherwise the number of
+    calendar days between the previous mark and this trade date (weekends and
+    holidays included). 0 if marked again on the same date (idempotent)."""
+    if not prev_date:
+        return 1
+    prev = pd.to_datetime(str(prev_date), format="%Y%m%d")
+    cur = pd.to_datetime(str(trade_date), format="%Y%m%d")
+    return max(0, int((cur - prev).days))
 
 
 class TraderProtocol(Protocol):

@@ -87,6 +87,39 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertIn("000001.SZ", broker.positions)
         self.assertTrue(any(e["event_type"] == "exit_blocked_t_plus_one" for e in broker.events))
 
+    def test_date_roll_unlocks_t_plus_one_before_any_fill(self):
+        # R4: rolling the sim-date to D+1 unlocks an overnight hold's T+1 shares
+        # before the day's first fill, so sellable_quantity is correct from the first
+        # off-session tick (the host calls broker.roll_to_date at each new trade date).
+        broker = self.make_broker()
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        held = next(p for p in broker.query_stock_positions() if p["ts_code"] == "000001.SZ")
+        self.assertEqual(held["sellable_quantity"], 0)  # T+1 locked on D
+        broker.roll_to_date("20220105")  # the host rolls the date before any D+1 tick
+        held = next(p for p in broker.query_stock_positions() if p["ts_code"] == "000001.SZ")
+        self.assertEqual(held["sellable_quantity"], 1000)  # unlocked without a fill
+        # roll_to_date is idempotent: re-rolling the same date does not relock or error.
+        broker.roll_to_date("20220105")
+        held = next(p for p in broker.query_stock_positions() if p["ts_code"] == "000001.SZ")
+        self.assertEqual(held["sellable_quantity"], 1000)
+
+    def test_short_can_cover_same_day(self):
+        # R5: a 融券 short has no T+1 sell lock, so same-day cover (买券还券) fills.
+        broker = self.make_broker()  # 000002.SZ shortable
+        opened = broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=500)
+        self.assertEqual(opened.status, "filled")
+        covered = broker.execute("000002.SZ", "cover", trade_date="20220104", raw_price=19.5, amount=500)
+        self.assertEqual(covered.status, "filled")
+        self.assertEqual(broker.position_quantity("000002.SZ"), 0)
+
+    def test_long_still_t_plus_one_blocks_same_day_sell(self):
+        # R5: the long T+1 mechanic is untouched — a same-day sell is still rejected.
+        broker = self.make_broker()
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        sell = broker.execute("000001.SZ", "sell", trade_date="20220104", raw_price=10.5, amount=1000)
+        self.assertEqual(sell.status, "rejected")
+        self.assertEqual(sell.reject_reason, "t_plus_one_no_sellable")
+
     def test_partial_sell_clamps_to_sellable_balance(self):
         broker = self.make_broker()
         broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
@@ -113,6 +146,39 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertGreater(broker.borrow_fees, 0.0)
         self.assertGreater(broker.stamp_duty_paid, 0.0)
         self.assertEqual(closed["side"], "short")
+
+    def test_short_borrow_fee_accrues_over_calendar_gap(self):
+        # R8a: borrow fee accrues per CALENDAR day, so a short marked Friday then
+        # Monday is charged 3 days for the weekend carry, not one trade-day's fee.
+        daily = make_daily(
+            [
+                ("20220107", "000002.SZ", 20.0, 19.8, 22.0, 18.0, False),  # Friday
+                ("20220110", "000002.SZ", 19.8, 19.5, 21.5, 17.6, False),  # Monday (+3 calendar days)
+            ]
+        )
+        broker = self.make_broker(daily=daily)
+        broker.execute("000002.SZ", "short", trade_date="20220107", raw_price=20.0, amount=500)
+        broker.mark_to_market("20220107")  # first mark: 1 calendar day
+        fee_friday = broker.borrow_fees
+        broker.mark_to_market("20220110")  # +3 calendar days (Sat, Sun, Mon)
+        fee_monday = broker.borrow_fees
+        self.assertGreater(fee_friday, 0.0)
+        # The weekend gap charges 3x the single-day fee, not 1x (the old trade-day model).
+        self.assertAlmostEqual(fee_monday - fee_friday, fee_friday * 3)
+
+    def test_short_proceeds_are_locked_not_deployable(self):
+        # R8b: a short banks its proceeds into cash but locks them as collateral, so
+        # available_cash falls by the posted margin and never inflates with proceeds.
+        broker = self.make_broker()  # 000002.SZ shortable, 1,000,000 initial cash
+        avail_before = broker.query_stock_asset()["available_cash"]
+        broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=500)
+        asset_after = broker.query_stock_asset()
+        self.assertGreater(broker.cash, 1_000_000.0)  # proceeds banked into literal cash
+        self.assertLess(asset_after["available_cash"], avail_before)  # but not deployable
+        # Buying power drops by exactly the margin posted (proceeds net out of cash).
+        self.assertAlmostEqual(
+            avail_before - asset_after["available_cash"], asset_after["short_margin_occupied"]
+        )
 
     def test_broker_inventory_mode_rejects_without_files(self):
         broker = self.make_broker(mode="broker_inventory")

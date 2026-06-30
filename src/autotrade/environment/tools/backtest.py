@@ -196,6 +196,12 @@ class BacktestTool:
         # strategy that already fit the caps during validation must finish its final
         # eval (H2) — so they use a GENEROUS wall-clock backstop whose only job is to
         # kill a true hang, not to gate acceptance.
+        # The per-substep wall fail-fast is part of the tight iteration-validation
+        # gate; the final/frozen (held-out) eval skips it so a transient overrun under
+        # load cannot abort an already-accepted strategy's reproducible eval (it still
+        # aggregates the substep runtime). This tracks the same valid/final split as
+        # the coarse caps below.
+        enforce_substep_timeout = mode == "valid"
         if mode == "valid":
             decision_cap = float(manifest.get("backtest_max_seconds_per_decision", 180))
             per_day_cap = _optional_float(manifest.get("backtest_max_seconds_per_trading_day"))
@@ -253,6 +259,7 @@ class BacktestTool:
                     execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
                     offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 15)),
                     max_seconds_per_trading_day=per_day_cap,
+                    enforce_substep_timeout=enforce_substep_timeout,
                     timeview_enabled=timeview_enabled,
                     snapshot_dir=snapshot_dir,
                     replay_dir=replay_dir,
