@@ -1,3 +1,15 @@
+2026-06-30 24h tick-replay W2–W9 完成（feat/24h-tick-replay）
+
+- 接续 check.md（W1/W6/W7 已提交），完成剩余 W2–W9，单测 335→363。每步绿灯单独提交。
+- REFRESH_NODES（`data/contracts.py`）：镜像 `tushare_update_schedule.json` 的落库 cron 任务（start+刷新耗时→ready_at）+ 域/数据集可见性 helper；漂移守卫测试（节点名∈cron、审计任务非节点）。
+- 回放分片扩展（`snapshot.py`）：`build_replay_slot` 补宏观/基本面域 + 日线行级 `available_at`，六域齐备。
+- W3 逐 tick 六域时序视图（`timeview.py`）：替换旧滚动日频 as-of。`ctx.asof_dir/<域>` 为 parquet 目录，part0 硬链冻结快照（零拷贝）、增量 write-once 仅在跨节点时追加；盘中视图冻结、零重建；`ctx.asof_version` 滚动时才变（缓存键）。配置 `rolling_asof_enabled`→`timeview_enabled`（保留别名）。
+- W3.5 NL 文本滚动：`TextRetriever` 同读冻结+回放索引/库（零拷贝，1.6GB 语料就地按 `available_at` 门控），`as_of` 逐 tick 绑定；冻结研究语料恒可见。
+- W4/W5 托管 `ctx.state_dir` 暂存（`state_staging.py`）：子步骤内写入路径式重定向到隐藏暂存目录（捕获 parquet 等任意写法，规避 path-guard 抓不到原生写的缺陷——经用户确认采用），主机在 `ready_at=tick+B` 合并、后写覆盖、审计 ledger（含未合并）；每次回测重置。`ctx.substep` B 不再改成交 bar。
+- W9 分阶段耗时：summary/ReplayResult 增 `phase_seconds`（策略/大模型/时序视图/状态合并/券商撮合）+ 盘中/非交易切片数，并入 agent 白名单。
+- W2/W9 文档+提示词+模板：Fold 提示词加数据可见性表（按节点）、24h 网格/尾盘竞价、substep 双重语义、暂存计划节奏、动态做空、phase 指标；五份 living docs 更新；模板 main/candidate 改为目录读取+asof_version 缓存+暂存计划；重生成 PROMPTS.md。W8 QMT 文档：统一 tick 轮询=实盘环路，下单前重校验当日融券+约束。
+- 验证：全套 363 单测 OK；`git diff --check` clean；PROMPTS.md in sync。基准：metrics 已落地+轻量单测；完整 Docker 回放基准待用户按需触发（见 DETAILED_LOGBOOK 命令与对比口径）。
+
 2026-06-28 GPT 实验审计 + Opus 深审修复（C1/O3/H2/V1/V2/M3 + 模板）
 
 - GPT 对最近一轮实验的审计：3 个 Explore 核验 5 项均属实，并更正两处前提（compaction 0 次=设计内、非 bug；read 工具实被用 10 次=该指控不实），且 GPT 把两次实验混淆（core dump/垃圾脚本在 `regular_fold_last_taste_gpu_20260629_034005/run_c6d6e61dd4cb`）。随后 Opus 深审发现更高危缺陷，按序修复：
