@@ -25,11 +25,14 @@
 
 - [1. 当前状态](#1-当前状态)
 - [2. 目标架构](#2-目标架构)
+  - [2.1 统一逐 tick 实盘环路](#21-统一逐-tick-实盘环路)
 - [3. 当前日常流程](#3-当前日常流程)
   - [3.1 准备和健康检查](#31-准备和健康检查)
   - [3.2 只读检查命令](#32-只读检查命令)
 - [4. 未来实盘流程](#4-未来实盘流程)
   - [4.1 上线后日常顺序](#41-上线后日常顺序)
+  - [4.2 实盘下单前重校验](#42-实盘下单前重校验)
+  - [4.3 实盘状态持久化](#43-实盘状态持久化)
 - [5. 上线门槛](#5-上线门槛)
 - [6. 远端部署](#6-远端部署)
   - [6.1 固定目录](#61-固定目录)
@@ -50,6 +53,7 @@
 - 远端阿里云 Windows 服务器和 QMT/MiniQMT 环境已部署，可作为未来交易执行端。
 - 本项目当前代码重点仍是数据、PIT snapshot、WFO/held-out、LLM shadow 和审计链路；尚未形成冻结可交易模型。
 - 当前仓库没有 `scripts/live/` 实盘调度入口，也没有已冻结的 AutoTrade 订单生成器。
+- 统一逐 tick 实盘环路（§2.1）是既定目标契约，但本轮不落地任何 live 下单代码；live `QMTBroker` 与本地 tick executor 尚未实现，回测仍是唯一运行路径。
 - 任何 QMT 操作默认只读或 dry-run。真实委托必须等到模型、策略、订单合约、风控和对账流程全部冻结后，才允许人工双确认执行。
 
 ## 2. 目标架构
@@ -58,6 +62,17 @@
 - 远端 Windows：负责 QMT/MiniQMT 连接、账户/持仓/成交查询、订单执行、策略 state、pending 委托和 payload 归档。
 - 通信：本机通过 `scp` 上传 JSON payload，通过 `ssh` 调用远端 Python 执行器。
 - 状态：远端策略 state 是实盘对账的权威来源；本机实验 ledger 只能作为研究和审计记录，不能替代 broker 成交状态。
+
+### 2.1 统一逐 tick 实盘环路
+
+实盘执行沿用回测的统一逐 tick 模型，不另起一套下单逻辑：
+
+- 本地 executor 在 Asia/Shanghai 真实时钟上按与回测相同的 24h tick 网格逐时间片推进，每个 tick 调用同一个 `main(ctx)`，并通过同一套 `ctx.broker.*` 原语（`buy`/`sell`/`short`/`cover`/`close`）下单。
+- 回测的 `SimBroker` 已实现 `TraderProtocol`，其 `order_stock` / `cancel_order_stock` / `query_stock_*` 接口与 miniQMT `xt_trader` 1:1 对齐；因此实盘只需一个包装 `xt_trader` 的 `QMTBroker`，即可在同一 protocol 下 drop-in 替换回测 broker，策略代码无需改动。
+- `QMTBroker` 连接的是 §6 部署的 Windows 节点上的 miniQMT `xt_trader`。
+- 盘前集合竞价（09:15 info tick / 09:25 撮合开盘）与 14:57 收盘集合竞价从回测原样沿用，实盘 tick 网格在这些节点上的决策与下单语义与回测一致。
+
+本节描述目标契约，本轮不落地 live 代码（见 §1）。
 
 ## 3. 当前日常流程
 
@@ -108,6 +123,24 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
 5. 人工确认后才允许真实执行。
    - 实盘命令必须带双确认参数。
    - 下单后必须运行对账，不能把委托号当成成交。
+
+### 4.2 实盘下单前重校验
+
+实盘 executor 在发出每一笔订单前，必须就当日最新状态重新校验：
+
+- 当日 `margin_secs`（融资/融券）资格，即该标的当日是否可融券做空 / 可融资。
+- 全部交易约束：可用现金、T+1 可卖余额、涨跌停价限、停牌、最小交易单位（手）。
+
+回测中 Broker 的同日动态可做空校验，就是这一实盘下单前重校验的仿真等价物：`SimBroker` 用成交日真实 `margin_secs` 集合（`shortable_by_date[fill_date]`，而非 Agent 冻结的决策日快照）对融券开仓 fill 设闸。实盘不得用决策时点的旧资格集合代替成交时刻的当日校验。
+
+### 4.3 实盘状态持久化
+
+回测中 `ctx.state_dir` 是每次 run 的临时 scratch（每次回测重置、不跨 run 保留），不能作为实盘的权威状态。实盘部署必须把在途委托、下单计划和持仓跟踪持久化在两处可恢复来源上：
+
+- QMT 自身查询：`query_stock_orders` / `query_stock_positions` / `query_stock_trades`，作为成交与持仓的权威对账来源。
+- executor 的持久状态：复用本文档已有的 `pending_orders`、`strategy_positions` 和 `inbox`/`archive` 处理（见 §3.1、§6.1），用于跨进程重启恢复策略 state 与待处理委托。
+
+任何实盘状态判断都不得依赖回测 `ctx.state_dir`。
 
 ## 5. 上线门槛
 
