@@ -940,7 +940,7 @@ class ShellToolTest(unittest.TestCase):
             events = [event for event in ctx.trace.read_events() if event["event_type"] == "shell"]
             self.assertEqual([event["command_kind"] for event in events[-3:]], ["list", "read", "write"])
 
-    def test_shell_timeout_seconds_can_only_shorten_run(self):
+    def test_shell_timeout_seconds_shortens_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp), with_strategy=False)
             result = SandboxShellTool(ctx).run(
@@ -955,6 +955,21 @@ class ShellToolTest(unittest.TestCase):
             events = [event for event in ctx.trace.read_events() if event["event_type"] == "shell"]
             self.assertEqual(events[-1]["timeout_seconds"], 1.0)
             self.assertTrue(events[-1]["timed_out"])
+
+    def test_shell_timeout_seconds_allows_above_default_up_to_hard_cap(self):
+        from autotrade.environment.tools.shell import DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp), with_strategy=False)
+            shell = SandboxShellTool(ctx)
+            # A heavy probe may opt above the 120s default, up to the hard cap.
+            above_default = int(DEFAULT_TIMEOUT_SECONDS) + 60
+            result = shell.run("echo ok", timeout_seconds=above_default)
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.timeout_seconds, float(above_default))
+            # ... but never beyond the hard cap.
+            with self.assertRaisesRegex(ToolError, "timeout_seconds"):
+                shell.run("echo hi", timeout_seconds=int(MAX_TIMEOUT_SECONDS) + 1)
 
     def test_shell_trace_and_large_output_files_redact_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:

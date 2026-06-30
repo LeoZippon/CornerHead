@@ -21,6 +21,10 @@ from .base import ActionField, ActionSpec, PHASE_TRAIN_VALID, ToolContext, ToolE
 OUTPUT_LIMIT_CHARS = 20_000
 OUTPUT_CAPTURE_LIMIT_CHARS = 200_000
 DEFAULT_TIMEOUT_SECONDS = 120.0
+# Hard upper bound the Agent may request for a single command. The default stays
+# 120s for quick probes, but a legitimate heavy probe (e.g. a long DuckDB scan)
+# may opt up to this cap — granting more exploration freedom without unbounding it.
+MAX_TIMEOUT_SECONDS = 600.0
 ABSOLUTE_PATH_RE = re.compile(r"(?<![\w.:\-/])/(?:[^\s'\";|&<>`$(){}]+)")
 # Advisory (not enforced): nudge the Agent away from hiding stderr, which breaks audit.
 STDERR_SUPPRESSION_RE = re.compile(r"2\s*>\s*/dev/null|&>\s*/dev/null|/dev/null\s+2\s*>\s*&\s*1")
@@ -210,8 +214,12 @@ class SandboxShellTool:
                 required=False,
                 default=int(DEFAULT_TIMEOUT_SECONDS),
                 min_value=1,
-                max_value=DEFAULT_TIMEOUT_SECONDS,
-                description="Per-command timeout in seconds; use smaller values for quick probes.",
+                max_value=MAX_TIMEOUT_SECONDS,
+                description=(
+                    f"Per-command timeout in seconds (default {int(DEFAULT_TIMEOUT_SECONDS)}, "
+                    f"max {int(MAX_TIMEOUT_SECONDS)}); use smaller values for quick probes and "
+                    "raise it only for a genuinely heavy scan."
+                ),
             ),
         ),
         read_only=False,
@@ -222,9 +230,18 @@ class SandboxShellTool:
         allowed_modes=("fold", "meta_learning"),
     )
 
-    def __init__(self, ctx: ToolContext, *, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self,
+        ctx: ToolContext,
+        *,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        max_timeout_seconds: float = MAX_TIMEOUT_SECONDS,
+    ) -> None:
         self.ctx = ctx
+        # ``timeout_seconds`` is the default used when a command omits one;
+        # ``max_timeout_seconds`` is the hard cap a command may opt up to.
         self.timeout_seconds = timeout_seconds
+        self.max_timeout_seconds = max_timeout_seconds
 
     def run(
         self,
@@ -237,7 +254,9 @@ class SandboxShellTool:
             raise ToolError("sandbox_shell_tool is closed in test/held-out phases")
         self.ctx.require_writable(tool=self.name)
         inline_limit = _validate_output_limit(max_output_chars)
-        timeout_limit = _validate_timeout(timeout_seconds, max_timeout_seconds=self.timeout_seconds)
+        timeout_limit = _validate_timeout(
+            timeout_seconds, default_seconds=self.timeout_seconds, max_seconds=self.max_timeout_seconds
+        )
         # Guards inspect the shell skeleton (heredoc bodies stripped) so interpreter
         # code is never parsed as shell syntax; the original command still executes.
         guard_command = _strip_heredoc_bodies(command)
@@ -445,13 +464,13 @@ def _validate_output_limit(value: int | None) -> int:
     return value
 
 
-def _validate_timeout(value: int | None, *, max_timeout_seconds: float) -> float:
+def _validate_timeout(value: int | None, *, default_seconds: float, max_seconds: float) -> float:
     if value is None:
-        return float(max_timeout_seconds)
+        return float(default_seconds)
     if isinstance(value, bool) or not isinstance(value, int):
         raise ToolError("timeout_seconds must be an integer")
-    if value < 1 or value > max_timeout_seconds:
-        raise ToolError(f"timeout_seconds must be between 1 and {int(max_timeout_seconds)}")
+    if value < 1 or value > max_seconds:
+        raise ToolError(f"timeout_seconds must be between 1 and {int(max_seconds)}")
     return float(value)
 
 

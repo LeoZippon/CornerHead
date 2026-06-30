@@ -397,6 +397,11 @@ class SnapshotBuilder:
             if start_key <= path.stem.split("=", 1)[1] <= end_key
         ]
         minutes = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if not minutes.empty:
+            # Match the frozen intraday schema (_build_intraday) so the Timeview rolls
+            # replay rows into the same columns and never NaN-backfills the auction
+            # correction; available_at is kept here as the row-level Timeview gate.
+            minutes = apply_open_auction_correction(minutes)
         return minutes, {"rows": int(len(minutes)), "datasets": ["stk_mins_1min_by_date"], "files": len(frames)}
 
     # ---- domain builders ----
@@ -485,6 +490,11 @@ class SnapshotBuilder:
             available = to_cn_timestamps(minute["available_at"])
             minute = minute[available <= decision_time].reset_index(drop=True)
             minute = apply_open_auction_correction(minute)
+            # For minute bars available_at == the bar close (trade_time), so it is an
+            # internal gating column, not agent information. Drop it (as daily does) to
+            # keep the agent-facing intraday schema clean; the replay slot keeps its own
+            # available_at as the Timeview gate.
+            minute = minute.drop(columns=["available_at", "available_at_rule"], errors="ignore")
         meta = {
             "rows": int(len(minute)),
             "datasets": ["stk_mins_1min_by_date"],

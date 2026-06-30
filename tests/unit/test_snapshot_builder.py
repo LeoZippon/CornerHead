@@ -142,6 +142,8 @@ class SnapshotBuilderTest(unittest.TestCase):
 
             intraday = pd.read_parquet(out / "intraday_1min.parquet")
             self.assertIn("auction_correction_rule", intraday.columns)
+            # available_at on minute bars == bar close, an internal gate, not agent info.
+            self.assertNotIn("available_at", intraday.columns)
 
             events = pd.read_parquet(out / "events.parquet")
             datasets = set(events["dataset"])

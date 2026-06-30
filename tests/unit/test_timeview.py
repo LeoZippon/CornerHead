@@ -130,5 +130,47 @@ class TimeviewTest(unittest.TestCase):
             self.assertEqual(list(daily["trade_date"].astype(str)).count("20220104"), 1)
 
 
+class TimeviewIntradaySchemaTest(unittest.TestCase):
+    """The frozen and replay intraday domains share one schema: no internal
+    available_at, and the auction-correction columns are never NaN-backfilled (R19-4)."""
+
+    def _minute(self, trade_date: str, available_at: str | None) -> pd.DataFrame:
+        from autotrade.environment.features.auction import apply_open_auction_correction
+
+        row = {
+            "ts_code": TS,
+            "trade_time": f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]} 09:30:00",
+            "trade_date": trade_date,
+            "open": 10.0, "high": 10.1, "low": 9.9, "close": 10.0, "vol": 20000.0, "amount": 200000.0,
+        }
+        if available_at is not None:
+            row["available_at"] = available_at
+        return apply_open_auction_correction(pd.DataFrame([row]))
+
+    def test_intraday_view_has_no_available_at_and_keeps_auction_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snap = _frozen_snapshot(root)
+            # Real frozen intraday: auction columns present, internal available_at dropped
+            # (mirrors snapshot._build_intraday).
+            _write(snap / "intraday_1min.parquet", self._minute("20211231", available_at=None))
+            replay = {
+                "daily": _replay_frames()["daily"],
+                # Replay intraday keeps available_at as the Timeview gate (mirrors
+                # snapshot._read_minutes_range).
+                "intraday_1min": self._minute("20220104", available_at="2022-01-04T09:30:00+08:00"),
+            }
+            tv = Timeview(host_dir=root / "asof", executor=FakeExecutor(), snapshot_dir=snap, replay_frames=replay)
+            # After the 20220104 evening node completes (~02:05 on 0105) the replay bar rolls in.
+            asof, _ = tv.refresh(_when("2022-01-05 09:10:00"))
+            intraday = pd.read_parquet(Path(asof) / "intraday_1min")
+            self.assertEqual(sorted(intraday["trade_date"].astype(str)), ["20211231", "20220104"])
+            self.assertNotIn("available_at", intraday.columns)
+            self.assertIn("auction_correction_rule", intraday.columns)
+            # The replay row carries real correction columns, not NaN-backfill.
+            self.assertFalse(intraday["auction_correction_rule"].isna().any())
+            self.assertFalse(intraday["vol_pit"].isna().any())
+
+
 if __name__ == "__main__":
     unittest.main()

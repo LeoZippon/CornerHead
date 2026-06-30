@@ -169,7 +169,9 @@ class StepTree:
         def walk(parent_id: str | None, depth: int) -> None:
             for node in children.get(parent_id, []):
                 marker = "  <- current" if node["node_id"] == self.data.get("current_node_id") else ""
-                failed_text = " [failed]" if node.get("complete_validation") is False else ""
+                # Mark only genuine failed attempts (record_failed_attempt sets
+                # status="failed"); a partial/debug validation node is not a failure.
+                failed_text = " [failed]" if node.get("status") == "failed" else ""
                 ret = node.get("metrics", {}).get("total_return")
                 ret_text = f" ret={ret:.4f}" if isinstance(ret, (int, float)) else ""
                 lines.append(f"{'  ' * depth}- {node['node_id']}{ret_text}{failed_text}{marker}")

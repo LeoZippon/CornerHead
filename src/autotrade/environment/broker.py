@@ -268,8 +268,10 @@ class WorkingOrder:
 
     A ``FIX_PRICE`` order fills without slippage when a bar reaches it, using a
     better open when the bar already crosses the limit; a
-    ``MARKET_PEER_PRICE_FIRST`` order fills at the bar open. ``remaining_bars`` is
-    the time-in-force countdown; at expiry the order auto-cancels.
+    ``MARKET_PEER_PRICE_FIRST`` order fills at the bar open with taker slippage,
+    except an auction order (``is_auction``), which clears at the single auction
+    price with no slippage. ``remaining_bars`` is the time-in-force countdown; at
+    expiry the order auto-cancels.
     """
 
     order_id: str
@@ -380,8 +382,11 @@ class SimBroker:
         ]
 
     def query_stock_orders(self, cancelable_only: bool = False) -> list[dict[str, object]]:
-        """Day's orders (xtquant ``query_stock_orders``): working (cancelable) orders,
-        plus settled/rejected ones unless ``cancelable_only``."""
+        """Orders (xtquant ``query_stock_orders``): the day's working (cancelable) book
+        — drained at each day's close — plus, unless ``cancelable_only``, the cumulative
+        settled/rejected orders for the whole replay. (Live xtquant returns only the
+        current trading day's orders; the sim keeps the full settled history because the
+        report/stats consumers aggregate over the whole backtest.)"""
         working = [order.to_record() for order in self._book]
         if cancelable_only:
             return working
@@ -481,7 +486,10 @@ class SimBroker:
                     time=minute_key,
                     reason=order.reason,
                     price_label="auction" if order.is_auction else f"{granularity}:{minute_key}",
-                    apply_slippage=not order.is_limit,
+                    # A call auction (open 09:25 / close 15:00) clears every order at one
+                    # uniform price, so it carries no taker spread; only continuous-session
+                    # market orders take slippage. Limit orders never take slippage.
+                    apply_slippage=not order.is_limit and not order.is_auction,
                     order_id=order.order_id,
                 )
             elif order.remaining_bars <= 1:

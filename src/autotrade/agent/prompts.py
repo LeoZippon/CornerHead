@@ -137,7 +137,7 @@ FOLD_ACTION_SECTION = """\
 
 | 工具 | 主要参数 | 用途 |
 |---|---|---|
-| `shell` | command, max_output_chars?, timeout_seconds? | 查看数据、调试、执行命令、写二进制模型权重；可选参数只能主动缩小内联输出和单次运行时间 |
+| `shell` | command, max_output_chars?, timeout_seconds? | 查看数据、调试、执行命令、写二进制模型权重；max_output_chars 只能缩小内联输出，timeout_seconds 默认 120s、可在硬上限（600s）内按需调大用于重活 |
 | `write_file` | root, path, content | 在 workspace/output/models 下创建或覆盖文本文件；维护正式策略代码优先用它而不是 shell heredoc |
 | `edit_file` | root, path, old_string, new_string, replace_all? | 精确编辑文本文件；`old_string` 必须与当前内容唯一匹配，否则用 `replace_all` |
 | `grep` | pattern, root?, path?, glob?, output_mode?, head_limit?, offset?, context?, case_insensitive?, multiline? | 结构化只读检索，不访问测试或隐藏路径；`root` 取值 agent\|workspace\|output\|models\|snapshot\|train\|valid\|artifacts\|parent_output\|parent_models\|results\|steps |

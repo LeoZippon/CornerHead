@@ -1,3 +1,10 @@
+2026-06-30 R19 小合规 + RA2 竞价无滑点（fix/minor-compliance）
+
+- 子代理审后逐项修，两处 check.md 断言被更正。R19-1 `step_tree` `[failed]` 标记改按 `status=="failed"`（仅 record_failed_attempt 设此字段），不再误标 `complete_validation is False` 的部分/调试节点。R19-2（证伪）：`artifacts.FORBIDDEN_CODE_REFERENCES` 不改——`/mnt/runtime/` 仍在 prompts/docs 须防硬编码、`/mnt/snapshot`（单数）是合法正式读根不可禁，加注释说明。R19-3 `broker.query_stock_orders` 文档串改准（当日可挂单簿 + 全回测累计已结/拒单；实盘 xtquant 仅返当日，差异已注）。
+- R19-4 分钟域 schema 对齐：`snapshot._read_minutes_range`（回放分片）补 `apply_open_auction_correction`，与冻结 `_build_intraday` 同列，Timeview 滚动回放行不再 NaN 回填 7 个竞价校正列；并从冻结分钟域丢弃内部 `available_at`（分钟 `available_at==trade_time`，是门控列非 agent 信息，与 daily 一致），回放分片仍保留 `available_at` 作 Timeview 门控。R19-5 `deepseek` 会话日志 append 加注（>PIPE_BUF 非原子，但调用串行，并行才需锁）。R19-6 `shell` timeout 硬上限 120→600s（默认仍 120），解耦“缺省值/硬上限”，重活可调大（原则#2 探索自由），prompt 工具表措辞改准并重导出 PROMPTS.md。
+- RA2（兼修 doc/code 漂移）：集合竞价（开 09:25/收 15:00）单一价清算无 taker 滑点——`match_bar` 改 `apply_slippage = not is_limit and not is_auction`；env_design §7.2 早已写“不计滑点”，本次代码对齐文档，更新 4 个竞价价格断言。
+- 验证：全套 377 OK（+2：shell 上限、Timeview 分钟 schema）；`git diff --check` clean；PROMPTS.md 同步。
+
 2026-06-30 R17 NL 性能（refactor/nl-perf）
 
 - 接续 check.md 剩余任务（R16–R19/RA1–RA5），子代理先审后改。R17.1（真问题）：`_StrategyNLService` 每次 `ctx.nl()` 都经 `build_company_contexts` 全量重读 `universe.parquet`+`fundamentals.parquet`；快照回测期冻结，故新增 `CompanyContextStore`（懒加载一次 + 按 ts_code 记忆化），服务持一份、`run()` 传 `{ts_code: store.context(ts_code)}`，行为不变、两文件每回测至多读一次。

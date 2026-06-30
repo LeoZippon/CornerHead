@@ -365,7 +365,9 @@ class MainCtxReplayTest(unittest.TestCase):
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "auction")
         self.assertEqual(buys[0]["trade_date"], "20220104")
-        self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.1, is_buy=True))
+        # A call auction clears at one price, so the fill is the raw auction price (10.1),
+        # with no taker slippage.
+        self.assertAlmostEqual(buys[0]["price"], 10.1)
 
     def test_substep_state_write_is_delayed_then_merged(self) -> None:
         # A plan written to ctx.state_dir inside a sub-step (B=2 min) is NOT visible
@@ -601,14 +603,14 @@ def main(ctx):
 
     def test_substep_large_budget_keeps_auction_fill(self) -> None:
         # A large budget no longer delays the fill bar: a 09:25 order in a
-        # budget_minutes=4 substep still fills at the 09:31 auction print (~10.1,
-        # price_label "auction"), identical to a small-budget or unwrapped order.
+        # budget_minutes=4 substep still fills at the 09:31 auction print (10.1,
+        # price_label "auction", no slippage), identical to a small-budget or unwrapped order.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_AUCTION_LARGE_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _auction_minutes())
         buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "auction")
-        self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.1, is_buy=True))
+        self.assertAlmostEqual(buys[0]["price"], 10.1)  # auction price, no slippage
 
     def test_substep_runtime_and_replay_metrics_in_result(self) -> None:
         # The replay aggregates per-sub-step wall-time and reports total runtime +
@@ -706,8 +708,8 @@ def main(ctx):
         self.assertEqual(len(buys), 1)  # the 09:15 guard requires ctx.price is None
         self.assertEqual(buys[0]["price_label"], "auction")
         self.assertEqual(buys[0]["trade_date"], "20220104")
-        # The blind 09:15 order fills at the 09:30 opening-auction print (10.0).
-        self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
+        # The blind 09:15 order fills at the 09:30 opening-auction print (10.0, no slippage).
+        self.assertAlmostEqual(buys[0]["price"], 10.0)
 
     def test_auction_buy_rejected_at_one_sided_limit_up_open(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(AUCTION_MAIN, encoding="utf-8")
@@ -805,8 +807,8 @@ def main(ctx):
         buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "auction")
-        # Fills at the 15:00 close (10.6), not the 15:00 open (10.5).
-        self.assertAlmostEqual(buys[0]["price"], BrokerProfile().slipped_price(10.6, is_buy=True))
+        # Fills at the 15:00 close (10.6), not the 15:00 open (10.5); auction, no slippage.
+        self.assertAlmostEqual(buys[0]["price"], 10.6)
 
     def test_cur_datetime_is_exposed(self) -> None:
         # ctx.cur_datetime carries the Beijing-time sim clock for the tick.

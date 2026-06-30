@@ -59,6 +59,11 @@ MODEL_ARTIFACT_ALLOWED_SUFFIXES = frozenset(
         ".yml",
     }
 )
+# Mount paths a formal strategy must never hardcode. "/mnt/snapshots/" (plural,
+# the staged alias root) and "/mnt/runtime/" are not mounted into the formal run
+# and are kept here to fail fast if the agent copies them from prompts/docs. The
+# singular "/mnt/snapshot" is intentionally absent: it is the legitimate formal
+# read root (see sandbox.py formal_strategy_read_roots).
 FORBIDDEN_CODE_REFERENCES = ("/mnt/snapshots/", "/mnt/runtime/", "/mnt/artifacts")
 MAX_PROMPT_CHARS = 8000
 

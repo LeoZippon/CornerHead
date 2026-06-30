@@ -434,6 +434,9 @@ class DeepSeekClient:
             return
         try:
             _ensure_log_parent(path)
+            # Append is not atomic for records over PIPE_BUF, but every caller (Runner,
+            # NL/explore host service) drives DeepSeek serially, so lines never interleave.
+            # Add a lock or O_APPEND-with-size-guard only if these calls are ever parallelized.
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         except OSError as exc:
