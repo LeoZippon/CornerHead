@@ -820,3 +820,8 @@
 - 7 parallel Opus auditors + own verification over `feat/24h-tick-replay`: 363 tests green, no PIT/look-ahead leak (Timeview predicate, prior-day-close anchor, sim-clock, W7 fill-day short gate, `ctx.nl()` cron-gating, agent-readable `run_manifest` redaction all verified). Findings recorded as R1–R19 in `check.md` (replaced the landed W-plan); decisions D-R7/D-R8/D-R16 resolved with the user.
 - Phase A `fix/audit-tier1-contracts` (commit c92aa81): R1 remove non-existent `ctx.cash` from prompts/docs/template, keep `ctx.broker.cash` (regenerated `PROMPTS.md`); R2 unify `offsession_tick_minutes` default to 15 (engine + tool fallback; explicit 0 still disables); R3 bind Timeview drift guard to `ops/cron/tushare_update.cron` launch times + assert every non-audit job has a node + evening `ready_at` fixture.
 - Validation: full suite 366 OK (was 363; +3 drift-guard cases); `git diff --check` clean. CPU-only unit work, RAM ~401Gi free, no GPU/training run.
+
+2026-06-30 Phase C — reporting + state-contract fixes (R9–R11)
+
+- Branch `fix/reporting-and-state-contract` (on Phase A). R9: experiment report now sets top-level `status="warning"` when benchmark data is missing (missing_raw_dir/missing_data/no_period_coverage); `ok`/`disabled` stay `ok`; `report_experiment.py` surfaces it. R10: inside `ctx.substep`, `ctx.state_dir` is seeded with a copy of the visible state so reads return the old visible value (contract), while writes still stage for delayed merge (capture only changed/new files). R11: `AcceptanceRules.min_return` now uses `<` (inclusive), matching the Sharpe/drawdown bounds.
+- Validation: full suite 368 OK (+2 cases: in-substep read, benchmark warning); `git diff --check` clean. CPU-only, no GPU/training.

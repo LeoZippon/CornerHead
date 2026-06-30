@@ -36,6 +36,11 @@ LEGACY_REPORT_FILES = ("fold_returns.png", "cumulative_test_return.png", "summar
 DEFAULT_BENCHMARK_CODE = "000300.SH"
 DEFAULT_BENCHMARK_LABEL = "CSI 300"
 
+# Benchmark sub-statuses that are NOT a warning: a fully-covered benchmark ("ok")
+# and an intentional --no-benchmark ("disabled"). Any other status means the
+# benchmark data is missing, which the report must flag (docs/pipeline_design.md 8.4/10.1).
+_BENCHMARK_OK_STATUSES = {"ok", "disabled"}
+
 
 def build_experiment_report(
     ledger_path: str | Path,
@@ -66,6 +71,9 @@ def build_experiment_report(
     _plot_epoch_comparison(rows, epoch_comparison)
     summary = _summarize(rows)
     summary["benchmark"] = benchmark_info
+    # Flag the whole report when benchmark data is missing (raw dir / data / period
+    # coverage) so downstream gates can react; "ok"/"disabled" are not warnings.
+    summary["status"] = "ok" if str(benchmark_info.get("status")) in _BENCHMARK_OK_STATUSES else "warning"
     summary["epoch_return_charts"] = [str(path) for path in epoch_files]
     summary["epoch_comparison_chart"] = str(epoch_comparison)
     return summary

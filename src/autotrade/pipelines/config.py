@@ -55,8 +55,8 @@ class AcceptanceRules:
 
     def evaluate(self, summary: dict[str, object]) -> tuple[bool, list[str]]:
         reasons: list[str] = []
-        if float(summary.get("total_return", -1.0)) <= self.min_return:
-            reasons.append(f"validation return {summary.get('total_return')} <= {self.min_return}")
+        if float(summary.get("total_return", -1.0)) < self.min_return:
+            reasons.append(f"validation return {summary.get('total_return')} < {self.min_return}")
         if float(summary.get("sharpe", -1.0)) < self.min_sharpe:
             reasons.append(f"sharpe {summary.get('sharpe')} < {self.min_sharpe}")
         if float(summary.get("max_drawdown", 1.0)) > self.max_drawdown:

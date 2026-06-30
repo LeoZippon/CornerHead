@@ -36,7 +36,10 @@ def main() -> int:
         benchmark_code=None if args.no_benchmark else args.benchmark_code,
         benchmark_raw_dir=args.benchmark_raw_dir,
     )
-    print(json.dumps({"status": "ok", "output_dir": str(output_dir), **summary}, ensure_ascii=False, sort_keys=True))
+    # build_experiment_report sets summary["status"] (ok|warning); default to ok.
+    result = {"output_dir": str(output_dir), **summary}
+    result.setdefault("status", "ok")
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 
 

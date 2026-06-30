@@ -52,7 +52,7 @@ _SUPPORTED_ACTIONS = {"buy", "sell", "short", "cover", "close"}
 
 
 _MAIN_DRIVER = """\
-import builtins, contextlib, importlib.util, json, os, re, sys, time, types, uuid
+import builtins, contextlib, filecmp, importlib.util, json, os, re, shutil, sys, time, types, uuid
 from pathlib import Path
 
 import pandas as pd
@@ -316,10 +316,15 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir, staging_root):
         broker._substep_names.add(step_name)
         prev = broker._cur_substep
         prev_active = state_holder["active"]
-        # Writes via ctx.state_dir inside the block land here; the host merges them
-        # into the visible state dir once ready_at = this tick + budget elapses.
+        # ctx.state_dir resolves to this staging dir inside the block. Seed it with a
+        # copy of the current visible state so reads see the old visible value (the
+        # contract: reads always see the visible directory); writes land here and the
+        # host merges them into the visible state dir once ready_at = this tick + B.
         staging_subdir = os.path.join(staging_root, tick_key, _safe_name(step_name))
         os.makedirs(staging_subdir, exist_ok=True)
+        visible_dir = state_holder["visible"]
+        if visible_dir and os.path.isdir(visible_dir):
+            shutil.copytree(visible_dir, staging_subdir, dirs_exist_ok=True)
         state_holder["active"] = staging_subdir
         broker._cur_substep = step_name
         start = time.monotonic()
@@ -331,12 +336,18 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir, staging_root):
                 "budget_minutes": budget,
                 "real_wall_s": time.monotonic() - start,
             })
+            # Stage only files the block created or changed vs the visible copy; the
+            # unchanged seeded copies are not writes and must not re-merge.
             for _root, _dirs, _files in os.walk(staging_subdir):
                 for _fn in _files:
                     _abs = os.path.join(_root, _fn)
+                    _state_rel = os.path.relpath(_abs, staging_subdir)
+                    _visible = os.path.join(visible_dir, _state_rel) if visible_dir else ""
+                    if _visible and os.path.exists(_visible) and filecmp.cmp(_abs, _visible, shallow=False):
+                        continue
                     broker._staged.append({
                         "staging_rel": os.path.relpath(_abs, staging_root),
-                        "state_rel": os.path.relpath(_abs, staging_subdir),
+                        "state_rel": _state_rel,
                         "substep": step_name,
                         "budget_minutes": budget,
                     })

@@ -417,6 +417,55 @@ def main(ctx):
         self.assertTrue(audit[0]["merged"])
         self.assertEqual(audit[0]["substep"], "screen")
 
+    def test_substep_read_sees_old_visible_state(self) -> None:
+        # R10: inside a sub-step, reading ctx.state_dir must return the OLD visible
+        # value, not the empty staging dir. The strategy writes "v1" to the visible
+        # state dir at 09:15 (outside a sub-step), then at 09:25 reads it from inside
+        # a sub-step (must be "v1") and stages "v2" (must NOT leak to visible this
+        # tick). It buys only when both hold; without the fix the in-substep read
+        # raises FileNotFoundError and the replay aborts.
+        stage_main = '''
+from pathlib import Path
+
+
+def main(ctx):
+    visible = Path(str(ctx.state_dir)) / "state.txt"   # outside a sub-step: visible dir
+    if ctx.cur_date == "20220104" and ctx.cur_time == "09:15":
+        visible.write_text("v1")
+    if ctx.cur_date == "20220104" and ctx.cur_time == "09:25":
+        with ctx.substep("read_old", budget_minutes=2):
+            staged = Path(str(ctx.state_dir)) / "state.txt"   # staging dir, seeded from visible
+            old = staged.read_text()
+            staged.write_text("v2")   # staged, delayed
+        if old == "v1" and visible.read_text() == "v1":
+            ctx.broker.buy("000001.SZ", weight=0.1, reason="read_old_ok")
+'''
+        (self.sandbox.paths.agent_output / "main.py").write_text(stage_main, encoding="utf-8")
+        replay = pd.DataFrame(
+            [
+                {"trade_date": "20220104", "ts_code": TS_CODE, "open": 10.0, "close": 10.2,
+                 "up_limit": 12.0, "down_limit": 8.0, "is_suspended": False},
+                {"trade_date": "20220105", "ts_code": TS_CODE, "open": 10.3, "close": 11.0,
+                 "up_limit": 12.0, "down_limit": 8.0, "is_suspended": False},
+                {"trade_date": "20220331", "ts_code": TS_CODE, "open": 12.0, "close": 12.5,
+                 "up_limit": 14.0, "down_limit": 9.0, "is_suspended": False},
+            ]
+        )
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=30.0,
+            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
+        ) as policy:
+            policy.validate_main()
+            result = run_main_ctx_replay(
+                replay, BrokerProfile(initial_cash=1_000_000.0),
+                shortable_codes=frozenset(), main_policy=policy,
+            )
+        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        staged = [a for a in (result.state_staging_audit or []) if a["substep"] == "read_old"]
+        self.assertEqual(len(staged), 1)   # only the changed "v2", not the seeded copy
+        self.assertTrue(staged[0]["merged"])
+
     def test_rolling_asof_view_excludes_today_and_future(self) -> None:
         snap = self.sandbox.paths.snapshot
         snap.mkdir(parents=True, exist_ok=True)

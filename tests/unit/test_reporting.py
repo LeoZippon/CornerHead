@@ -88,8 +88,28 @@ class ReportingTest(unittest.TestCase):
             self.assertAlmostEqual(summary["development"]["positive_test_rate"], 0.75)
             self.assertAlmostEqual(summary["heldout"]["mean_return"], 0.015)
             self.assertEqual(summary["benchmark"]["status"], "ok")
+            self.assertEqual(summary["status"], "ok")
             self.assertAlmostEqual(summary["development"]["mean_benchmark_return"], (0.05 + (110.0 / 105.0 - 1.0)) / 2)
             self.assertAlmostEqual(summary["development"]["mean_active_return"], ((0.02 - 0.05) + (-0.01 - (110.0 / 105.0 - 1.0)) + (0.03 - 0.05) + (0.04 - (110.0 / 105.0 - 1.0))) / 4)
+
+    def test_warns_when_benchmark_data_missing(self):
+        # R9: a missing benchmark must flag the report status as "warning"
+        # (docs/pipeline_design.md 8.4/10.1), while an intentional --no-benchmark
+        # ("disabled") and a covered benchmark ("ok") are not warnings.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            ledger = ExperimentLedger(tmp / "ledger.jsonl")
+            ledger.append(fold_record("fold_2022Q1", 0.03, 0.02))
+            (tmp / "raw").mkdir()  # exists but has no index_daily/000300.SH
+            summary = build_experiment_report(tmp / "ledger.jsonl", tmp / "reports", benchmark_raw_dir=tmp / "raw")
+            self.assertEqual(summary["benchmark"]["status"], "missing_data")
+            self.assertEqual(summary["status"], "warning")
+
+            disabled = build_experiment_report(
+                tmp / "ledger.jsonl", tmp / "reports_nb", benchmark_code=None
+            )
+            self.assertEqual(disabled["benchmark"]["status"], "disabled")
+            self.assertEqual(disabled["status"], "ok")
 
     def test_requires_fold_records(self):
         with tempfile.TemporaryDirectory() as tmp:
