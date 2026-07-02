@@ -1,10 +1,12 @@
 """finish_fold_tool: the Agent's no-argument way to end the current Fold.
 
-docs/environment_design.md 4.5: it verifies (1) the current formal artifact
-passed modification_check_tool and was not modified afterwards, and (2) the
-light backtest contract check. On success it records the fold end state, locks
-writes, and stops further Agent calls. Failures return a fixable reason; the
-deadline policy belongs to the Pipeline.
+It verifies (1) the current formal artifact passed modification_check_tool and
+was not modified afterwards, (2) the current output/models hash has at least one
+successful complete-validation backtest (replay_window debug runs do not count —
+mirrors the Pipeline freeze filter so a fold cannot be finished unvalidated), and
+(3) the light backtest contract check. On success it records the fold end state,
+locks writes, and stops further Agent calls. Failures return a fixable reason;
+the deadline policy belongs to the Pipeline.
 """
 
 from __future__ import annotations
@@ -23,8 +25,9 @@ class FinishFoldTool:
         action="finish_fold",
         tool_name=name,
         description=(
-            "End the current Fold after artifact hash, modification_check, and light strategy "
-            "contract checks pass; locks further writes in this session."
+            "End the current Fold. Requires a successful complete-validation backtest (no "
+            "replay_window) for the current output/models hash, a passing modification_check, "
+            "and the light strategy contract check; locks further writes in this session."
         ),
         read_only=False,
         destructive=False,
@@ -54,6 +57,27 @@ class FinishFoldTool:
         if not last.get("allowed_to_backtest"):
             raise ToolError(f"finish_fold rejected: modification check failed: {last.get('reasons')}")
         current_model_hash = str(last.get("model_artifact_hash"))
+
+        # Same filter the Pipeline freeze applies: without a complete validation of
+        # exactly these artifacts the fold can only fall back to its parent, so
+        # finishing now would silently waste the session.
+        summaries = self.ctx.manifest.get("backtest_summaries") or []
+        validated = [
+            s
+            for s in summaries
+            if isinstance(s, dict)
+            and s.get("mode") == "valid"
+            and s.get("status") == "ok"
+            and s.get("complete_validation")
+            and str(s.get("artifact_hash")) == current_hash
+            and str(s.get("model_artifact_hash")) == current_model_hash
+        ]
+        if not validated:
+            raise ToolError(
+                "finish_fold rejected: the current output/models hash has no successful complete "
+                "validation backtest (replay_window debug runs do not count). Run backtest without "
+                "replay_window on the current artifacts, or restore the best validated Step first."
+            )
 
         contract = BacktestTool(self.ctx).contract_check()
         post_hash = artifact_hash(self.ctx.paths.agent_output)

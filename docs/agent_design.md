@@ -160,7 +160,7 @@ Agent 只通过 Environment 提供的入口行动：
 | `web_search` | 元学习阶段检索外部资料 | 仅 Epoch 前元学习可用；普通 Fold 不可用 |
 | `modification_check` | 修改正式产物后主动检查 | 返回是否允许进入回测，并写审计摘要 |
 | `backtest` | 验证当前正式产物；可选参数只有 `replay_window` | 执行前自动复核最近一次修改检查和当前 hash；缺失或过期时自动补跑，然后执行 `output/main.py`，写入 `results/valid_<idx>/` |
-| `finish_fold` | 当前 Fold 准备结束时 | 锁定 Fold 写入并等待 Pipeline 冻结和测试 |
+| `finish_fold` | 当前 Fold 准备结束时 | 要求当前 hash 已有成功完整验证回测（`replay_window` 调试不算），否则直接拒绝；通过后锁定 Fold 写入并等待 Pipeline 冻结和测试 |
 
 普通 Fold Agent 的能力边界：不直接调用外部 LLM provider，不具备联网搜索入口，不直接访问真实券商，不修改 Environment 或 Pipeline；`shell` 会在普通 Fold 中拦截常见安装、下载和联网入口。
 

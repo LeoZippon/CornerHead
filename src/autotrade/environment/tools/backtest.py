@@ -51,7 +51,9 @@ class BacktestTool:
             "any single decision over backtest_max_seconds_per_decision is killed immediately, and a trade "
             "day over backtest_max_seconds_per_trading_day aborts (BacktestError, not accept-eligible). So "
             "first run a small replay_window pass, read the returned replay_wall_seconds + replayed_trade_days, "
-            "extrapolate to the full validation period, and only run the full backtest once it fits."
+            "extrapolate to the full validation period, and only run the full backtest once it fits. "
+            "replay_window passes are debug-only (complete_validation=false): freezing and finish_fold "
+            "both require a successful full-window run of the current artifacts."
         ),
         fields=(
             ActionField(

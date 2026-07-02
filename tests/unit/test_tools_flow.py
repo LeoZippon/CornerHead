@@ -322,6 +322,24 @@ class ToolFlowTest(unittest.TestCase):
             # The backtest opens an audit bracket (backtest_start) and closes it (backtest).
             self.assertLessEqual({"tool", "backtest_start", "backtest", "finish_fold"}, event_types)
 
+    def test_finish_fold_requires_complete_validation_of_current_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox, ctx = build_sandbox(Path(tmp))
+
+            ModificationCheckTool(ctx).run()
+            with self.assertRaisesRegex(ToolError, "complete validation"):
+                FinishFoldTool(ctx).run()
+
+            # replay_window debug passes stay non-qualifying for finishing.
+            summary = BacktestTool(ctx).run(mode="valid", replay_window=2)
+            self.assertFalse(summary["complete_validation"])
+            with self.assertRaisesRegex(ToolError, "complete validation"):
+                FinishFoldTool(ctx).run()
+
+            BacktestTool(ctx).run(mode="valid")
+            finish = FinishFoldTool(ctx).run()
+            self.assertEqual(finish["status"], "fold_finished")
+
     def test_modification_check_requires_parent_model_hash_when_parent_models_exist(self):
         # Audit fix: symmetric with the strategy diff base, when a parent model
         # artifact actually exists its hash must be recorded in the manifest — it may

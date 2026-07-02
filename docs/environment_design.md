@@ -367,7 +367,7 @@ Agent 可用入口：
 | `web_search` | 元学习联网检索 | 仅元学习可用；每次调用声明 engine、perspective、query 和 max_results；结果写 trace |
 | `modification_check` | 校验正式 `output` 修改量、`models` 格式/大小和父产物 hash | 无业务参数；不检查 `workspace` 或结果目录 |
 | `backtest` | 执行 `output/main.py` 并回放交易；Agent 可传的业务参数只有 `replay_window` | 消费并校验当前 snapshot；每次调用创建唯一结果目录 |
-| `finish_fold` | 当前 Fold 停止修改 | 无业务参数；轻量合同检查后锁定写入 |
+| `finish_fold` | 当前 Fold 停止修改 | 无业务参数；要求当前 hash 已有成功完整验证回测（`replay_window` 调试不算）+ 修改检查 + 轻量合同检查，通过后锁定写入 |
 
 所有 Tool trace 都记录当前 `tool_spec` 的 `schema_version` 和 `result_policy`。`shell` 额外记录 `command_kind`，取值如 `read`、`list`、`search`、`write`、`install`、`network` 或 `unknown`；该字段用于审计和后续统计，权限判断仍由 Sandbox、路径 guard 和阶段策略执行。
 
@@ -398,7 +398,7 @@ diff 基准必须可信才能测量修改量：`modification_check` 先校验父
 
 产物变更后必须重新检查。失败时只能缩小正式修改后重试。
 
-`finish_fold` 成功后，Runner 锁定 `output/` 和 `models/` 写入，并要求 Pipeline 复核最近一次修改检查、验证结果和当前策略/model hash 是否一致。
+`finish_fold` 在锁定前先做与 Pipeline 冻结同口径的把关：当前 `output`/`models` hash 必须已有一次成功的完整验证回测（`replay_window` 调试回放不算），否则直接拒绝并返回可修复原因（重跑完整 `backtest`，或先恢复最近已完整验证的 Step）。成功后，Runner 锁定 `output/` 和 `models/` 写入，Pipeline 再复核最近一次修改检查、验证结果和当前策略/model hash 是否一致。
 
 ## 6. 策略执行和 NL 服务
 
