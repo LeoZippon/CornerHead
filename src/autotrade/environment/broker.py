@@ -67,7 +67,7 @@ class BrokerProfile:
     maintenance_withdraw_ratio: float = 3.00
     max_single_name_weight: float | None = None
     profile_id: str = "citic_default_v3"
-    source: str = "docs/environment_design.md#73-回放profile"
+    source: str = "docs/environment_design.md#73-回放-profile"
     maintenance_source: str = "https://pb.citics.com/trading/xxgs/wcdbbl/"
 
     def __post_init__(self) -> None:
@@ -84,8 +84,8 @@ class BrokerProfile:
 
     @property
     def cost_model(self) -> CostModel:
-        """The deterministic fill-cost model SimBroker and the sandbox intra-tick view
-        share (single source of truth for commission/duty/slippage/short margin)."""
+        """SimBroker's deterministic fill-cost model (the host-side single source of
+        truth for commission/duty/slippage/short margin)."""
         return CostModel(
             commission_bps=self.commission_bps,
             min_commission_cny=self.min_commission_cny,
@@ -778,6 +778,9 @@ class SimBroker:
     ) -> Position:
         self.traded_notional += shares * price
         pos = self.positions.get(ts_code)
+        # T+1 lock bookkeeping is long-only: a short's sellable_quantity ignores
+        # locked_today (融券 permits same-day cover), so shorts leave it at its default.
+        is_long = side == "long"
         if pos is None:
             pos = Position(
                 ts_code=ts_code,
@@ -787,16 +790,17 @@ class SimBroker:
                 entry_date=trade_date,
                 entry_cost=cash_basis,
                 last_price=price,
-                locked_today=shares,
-                locked_date=trade_date,
+                locked_today=shares if is_long else 0,
+                locked_date=trade_date if is_long else "",
             )
             self.positions[ts_code] = pos
             return pos
         pos.entry_price = (pos.entry_price * pos.quantity + price * shares) / (pos.quantity + shares)
         pos.quantity += shares
         pos.entry_cost += cash_basis
-        pos.locked_today += shares
-        pos.locked_date = trade_date
+        if is_long:
+            pos.locked_today += shares
+            pos.locked_date = trade_date
         pos.last_price = price
         return pos
 
@@ -831,7 +835,8 @@ class SimBroker:
         pos.quantity -= shares
         pos.entry_cost -= basis_released
         pos.last_price = price
-        pos.locked_today = min(pos.locked_today, pos.quantity)
+        if pos.side == "long":  # short T+1 lock state is never maintained (see _add_to_position)
+            pos.locked_today = min(pos.locked_today, pos.quantity)
         self._ledger(
             pos.ts_code,
             side=pos.side,

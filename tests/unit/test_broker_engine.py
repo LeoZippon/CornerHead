@@ -120,6 +120,41 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual(sell.status, "rejected")
         self.assertEqual(sell.reject_reason, "t_plus_one_no_sellable")
 
+    def test_short_leaves_locked_today_untouched_while_long_t_plus_one_holds(self):
+        # Fix B: T+1 lock bookkeeping is long-only. A short never populates
+        # locked_today/locked_date — its sellable_quantity ignores them and 融券
+        # permits same-day cover — while the long T+1 lock is still recorded and lifts
+        # on the date roll exactly as before.
+        broker = self.make_broker()  # 000001.SZ (long), 000002.SZ shortable
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        long_pos = broker.positions["000001.SZ"]
+        self.assertEqual(long_pos.locked_today, 1000)  # long records the T+1 lock
+        self.assertEqual(long_pos.locked_date, "20220104")
+        self.assertEqual(long_pos.sellable_quantity, 0)  # locked on entry day
+
+        broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=500)
+        short_pos = broker.positions["000002.SZ"]
+        self.assertEqual(short_pos.locked_today, 0)  # short leaves the lock state untouched
+        self.assertEqual(short_pos.locked_date, "")
+        self.assertEqual(short_pos.sellable_quantity, 500)  # fully coverable same day
+        self.assertEqual(long_pos.sellable_quantity, 0)  # long still locked on D
+
+        # Adding to the short after the date roll still never touches its lock state,
+        # while the long's T+1 lock lifts on the new day exactly as before.
+        broker.execute("000002.SZ", "short", trade_date="20220105", raw_price=19.4, amount=500)
+        short_pos = broker.positions["000002.SZ"]
+        self.assertEqual(short_pos.locked_today, 0)
+        self.assertEqual(short_pos.locked_date, "")
+        self.assertEqual(short_pos.sellable_quantity, 1000)
+        self.assertEqual(long_pos.locked_today, 0)  # long unlocked on the D+1 roll
+        self.assertEqual(long_pos.sellable_quantity, 1000)
+
+        # A partial cover keeps the short lock state at its defaults.
+        broker.execute("000002.SZ", "cover", trade_date="20220105", raw_price=19.0, amount=500)
+        short_pos = broker.positions["000002.SZ"]
+        self.assertEqual(short_pos.locked_today, 0)
+        self.assertEqual(short_pos.locked_date, "")
+
     def test_partial_sell_clamps_to_sellable_balance(self):
         broker = self.make_broker()
         broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
@@ -343,6 +378,10 @@ class ReplayIntegrationTest(unittest.TestCase):
         self.assertEqual(stats["order_status_counts"].get("filled"), 1)
         self.assertGreater(stats["total_return"], 0.0)
         self.assertTrue(any(e["event_type"] == "position_closed" for e in replay.broker.events))
+        # Fix B: the stat counts fully-closed positions (one forced close here), not
+        # current holdings; it was renamed from the misleading "holdings_count".
+        self.assertEqual(stats["full_close_count"], 1)
+        self.assertNotIn("holdings_count", stats)
 
     def test_minute_replay_uses_minute_bars(self):
         # Decided on the 09:31 bar, the order fills at the NEXT minute bar (14:57)

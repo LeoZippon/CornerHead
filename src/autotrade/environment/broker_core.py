@@ -1,18 +1,19 @@
 """Dependency-light deterministic fill-projection core (docs/environment_design.md 7).
 
-Pure stdlib (no ``autotrade``/``pandas`` import) so this one module is shipped into
-the Agent sandbox image and shared by two callers:
+Pure stdlib (no ``autotrade``/``pandas`` import), but host-only: this module is NOT
+shipped into the Agent sandbox image. Its single consumer is the authoritative host
+:class:`~autotrade.environment.broker.SimBroker`, which projects every order's
+money/share outcome from the functions here (commission, stamp duty, slippage, lot
+sizing, the open/reduce cash deltas, and the short margin / locked-proceeds
+buying-power model). Only this deterministic math lives here; bar-level gates
+(suspension, price limits, shortable inventory, T+1 sellable) and position
+bookkeeping stay with the broker, which holds the market data and position state.
 
-* the authoritative host :class:`~autotrade.environment.broker.SimBroker`, and
-* the in-sandbox intra-tick broker view the Agent sees during ``main(ctx)``.
-
-Both compute an order's money/share outcome from the SAME functions here, so the
-agent-visible projection of cash/position after an order matches the broker's real
-fill (commission, stamp duty, slippage, lot sizing, the open/reduce cash deltas, and
-the short margin / locked-proceeds buying-power model). Only this deterministic math
-lives here; bar-level gates (suspension, price limits, shortable inventory, T+1
-sellable) and position bookkeeping stay with each caller, which holds the market data
-and position state.
+The sandbox driver (``main_ctx_driver.py`` — the only module baked into the image) is
+deliberately stdlib-only and does NO intra-tick fill projection: within a tick the
+agent sees the cash/positions filled as of the ENTERING tick, and the host settles
+the resulting orders on the next tick. There is no in-sandbox broker view projecting
+from this core, so nothing here needs to stay in sync with sandbox-visible state.
 """
 
 from __future__ import annotations

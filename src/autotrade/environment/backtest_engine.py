@@ -348,7 +348,7 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "sharpe": sharpe,
         "max_drawdown": max_drawdown,
         "win_rate": float(wins / len(realized)) if realized else 0.0,
-        "holdings_count": len(full_closes),
+        "full_close_count": len(full_closes),
         "trade_count": len(realized),
         "turnover": float(broker.traded_notional / initial) if initial else 0.0,
         "order_count": len(orders),
