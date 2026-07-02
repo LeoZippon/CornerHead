@@ -27,7 +27,12 @@ QUARTER_PATTERN = re.compile(r"^(\d{4})Q([1-4])$")
 # not an intraday moment. The decision-input view is frozen as of this time.
 RESEARCH_ANCHOR_TIME = time(23, 59, 59)
 DEFAULT_WINDOW_MONTHS = 21
-PERIOD_UNITS = ("day", "week", "month", "quarter", "year")
+PERIOD_UNITS = ("week", "month", "quarter", "year")
+# The replay engine reserves the final trade date of a region for forced
+# liquidation, so every validation/test/held-out region needs at least two
+# trading days to be backtestable at all. Guarded here at schedule build time
+# so a fold can never reach the (expensive) sandbox + LLM session doomed.
+MIN_REGION_TRADE_DAYS = 2
 
 
 @dataclass(frozen=True)
@@ -122,11 +127,13 @@ def build_fold_schedule(
 ) -> list[FoldSpec]:
     folds: list[FoldSpec] = []
     period = _normalize_period(period)
-    test_labels = _period_labels_for_schedule(first_test_period, last_test_period, trading_days, period)
+    test_labels = period_range(first_test_period, last_test_period, period=period)
     for test_label in test_labels:
-        validation_label = _previous_label_for_schedule(test_label, trading_days, period)
+        validation_label = previous_period(test_label, period=period)
         validation_start, validation_end = period_bounds(validation_label, period=period)
         test_start, test_end = period_bounds(test_label, period=period)
+        _require_min_trade_days(f"fold_{test_label} validation", validation_start, validation_end, trading_days)
+        _require_min_trade_days(f"fold_{test_label} test", test_start, test_end, trading_days)
         window_start = pd.Timestamp(validation_start) - pd.DateOffset(months=window_months)
         window_end = pd.Timestamp(validation_start) - pd.Timedelta(days=1)
         folds.append(
@@ -155,8 +162,9 @@ def heldout_periods(
     """Held-out replay periods at the configured cadence."""
     periods = []
     period = _normalize_period(period)
-    for label in _period_labels_for_schedule(first_period, last_period, trading_days, period):
+    for label in period_range(first_period, last_period, period=period):
         start, end = period_bounds(label, period=period)
+        _require_min_trade_days(f"held-out {label}", start, end, trading_days)
         periods.append(
             {
                 "label": label,
@@ -190,23 +198,13 @@ def load_sse_trading_days(raw_dir: str | Path) -> list[str]:
     return sorted(set(open_days))
 
 
-def _period_labels_for_schedule(first: str, last: str, trading_days: list[str], period: str) -> list[str]:
-    if period != "day":
-        return period_range(first, last, period=period)
-    start, end = period_bounds(first, period="day")[0], period_bounds(last, period="day")[1]
-    labels = [day for day in trading_days if start <= day <= end]
-    if not labels:
-        raise ValueError(f"no trading day inside day period range {start}..{end}")
-    return labels
-
-
-def _previous_label_for_schedule(label: str, trading_days: list[str], period: str) -> str:
-    if period != "day":
-        return previous_period(label, period=period)
-    days = sorted(day for day in trading_days if day < yyyymmdd(label))
-    if not days:
-        raise ValueError(f"no previous trading day before day period {label}")
-    return days[-1]
+def _require_min_trade_days(region: str, start: str, end: str, trading_days: list[str]) -> None:
+    count = sum(1 for day in trading_days if start <= day <= end)
+    if count < MIN_REGION_TRADE_DAYS:
+        raise ValueError(
+            f"{region} region {start}..{end} has {count} trading day(s); replay needs at least "
+            f"{MIN_REGION_TRADE_DAYS} (final day is reserved for forced liquidation)"
+        )
 
 
 def _decision_time(start: str, end: str, trading_days: list[str]) -> datetime:
@@ -235,7 +233,7 @@ def _prior_trading_day(day: str, trading_days: list[str]) -> str:
 
 def _normalize_period(period: str) -> str:
     value = str(period or "quarter").lower().strip()
-    aliases = {"daily": "day", "weekly": "week", "monthly": "month", "quarterly": "quarter", "yearly": "year", "annual": "year"}
+    aliases = {"weekly": "week", "monthly": "month", "quarterly": "quarter", "yearly": "year", "annual": "year"}
     value = aliases.get(value, value)
     if value not in PERIOD_UNITS:
         raise ValueError(f"unsupported fold period: {period!r}; expected one of {PERIOD_UNITS}")
@@ -252,8 +250,6 @@ def _period_start(label: str, period: str) -> pd.Timestamp:
 
 
 def _advance_period(value: pd.Timestamp, period: str, step: int) -> pd.Timestamp:
-    if period == "day":
-        return value + pd.Timedelta(days=step)
     if period == "week":
         return value + pd.Timedelta(weeks=step)
     if period == "month":

@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, field
+import hashlib
+import json
+import shutil
+import uuid
+from dataclasses import InitVar, asdict, dataclass, field, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Protocol
 
 from autotrade.environment.artifacts import ModificationConstraints
 from autotrade.environment.broker import BrokerProfile
-from autotrade.environment.sandbox import SandboxSpec
+from autotrade.environment.sandbox import SandboxSpec, link_copytree
 from autotrade.environment.snapshot import SnapshotBuilder, SnapshotConfig
 from autotrade.environment.tools import ToolContext
 
@@ -42,6 +46,66 @@ class RawSnapshotProvider:
 
     def replay_slot(self, start: str, end: str, out_dir: Path, *, label: str) -> dict[str, object]:
         return self.builder.build_replay_slot(start, end, out_dir, label=label, config=self.config)
+
+
+class CachingSnapshotProvider:
+    """Reuse identical snapshot builds within one experiment.
+
+    Adjacent folds and multi-epoch runs rebuild byte-identical views (fold N+1's
+    validation replay slot IS fold N's test slot; snapshots are epoch-invariant),
+    and each build is a pure function of (anchor/range, label, provider config)
+    over a raw lake that must not change mid-experiment. Entries are built once
+    under the experiment dir and hardlinked into each run's sandbox; snapshot
+    parquet views are write-once, so shared inodes are safe (the same pattern as
+    the step tree's link_copytree).
+    """
+
+    def __init__(self, provider: SnapshotProvider, cache_root: Path) -> None:
+        self._provider = provider
+        self._root = Path(cache_root)
+        config = getattr(provider, "config", None)
+        if is_dataclass(config):
+            self._config_key = json.dumps(asdict(config), sort_keys=True, default=str)
+        else:
+            self._config_key = "" if config is None else repr(config)
+
+    def decision_snapshot(self, decision_time: datetime, out_dir: Path) -> dict[str, object]:
+        return self._cached(
+            ("decision", decision_time.isoformat()),
+            lambda view: self._provider.decision_snapshot(decision_time, view),
+            out_dir,
+        )
+
+    def replay_slot(self, start: str, end: str, out_dir: Path, *, label: str) -> dict[str, object]:
+        # label lands inside the built manifest, so it is part of the key.
+        return self._cached(
+            ("replay", start, end, label),
+            lambda view: self._provider.replay_slot(start, end, view, label=label),
+            out_dir,
+        )
+
+    def _cached(
+        self,
+        parts: tuple[str, ...],
+        build: Callable[[Path], dict[str, object]],
+        out_dir: Path,
+    ) -> dict[str, object]:
+        key = hashlib.sha256("|".join((*parts, self._config_key)).encode("utf-8")).hexdigest()[:16]
+        entry = self._root / f"{parts[0]}_{key}"
+        manifest_path = entry / "cache_manifest.json"
+        if not manifest_path.exists():
+            staging = self._root / f".{parts[0]}_{key}.{uuid.uuid4().hex[:8]}"
+            manifest = build(staging / "view")
+            (staging / "cache_manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, sort_keys=True, default=str),
+                encoding="utf-8",
+            )
+            try:
+                staging.rename(entry)  # atomic publish; a concurrent builder may have won
+            except OSError:
+                shutil.rmtree(staging, ignore_errors=True)
+        link_copytree(entry / "view", out_dir)
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
 @dataclass(frozen=True)
@@ -171,6 +235,11 @@ class ExperimentConfig:
     # Optional experiment-level research direction injected only into the
     # Epoch-start meta-learning prompt.
     meta_learning_directive: str = ""
+    # Raw prior meta-learning traces handed to the next meta session are bounded
+    # to the most recent N epochs (0 disables raw memory). Unbounded concatenation
+    # grows O(epochs^2); older sessions persist via the Taste chain and the
+    # compact fold history instead.
+    meta_memory_max_epochs: int = 3
     step_constraints: ModificationConstraints = field(default_factory=ModificationConstraints)
     regularization_constraints: ModificationConstraints = field(default_factory=ModificationConstraints)
     acceptance: AcceptanceRules = field(default_factory=AcceptanceRules)

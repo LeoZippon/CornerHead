@@ -23,7 +23,7 @@ from autotrade.pipelines import (
     FrozenArtifact,
     build_fold_schedule,
 )
-from autotrade.pipelines.folds import period_bounds, quarter_bounds
+from autotrade.pipelines.folds import heldout_periods, period_bounds, quarter_bounds
 from scripts.experiments.run_experiment import _session_config_summary
 
 from .fixtures_sandbox import TEMPLATE_DIR, TRADING_DAYS, FakeSnapshotProvider, write_strategy
@@ -98,31 +98,40 @@ class FoldScheduleTest(unittest.TestCase):
         self.assertEqual(quarter_bounds("2022Q1"), ("20220101", "20220331"))
         self.assertEqual(quarter_bounds("2021Q4"), ("20211001", "20211231"))
 
-    def test_fold_period_can_be_month_week_day_or_year(self):
-        month = build_fold_schedule("202201", "202201", TRADING_DAYS, period="month")[0]
+    def test_fold_period_can_be_month_week_or_year(self):
+        # Denser purpose-built calendars: every validation/test region needs >=2
+        # trading days plus a prior-day anchor.
+        month_days = ["20211130", "20211201", "20211230", "20220104", "20220131"]
+        month = build_fold_schedule("202201", "202201", month_days, period="month")[0]
         self.assertEqual(month.fold_id, "fold_202201")
         self.assertEqual((month.validation_start, month.validation_end), ("20211201", "20211231"))
         self.assertEqual((month.test_start, month.test_end), ("20220101", "20220131"))
 
-        week = build_fold_schedule("20220104", "20220104", TRADING_DAYS, period="week")[0]
+        week_days = ["20211227", "20211228", "20220103", "20220104", "20220110"]
+        week = build_fold_schedule("20220104", "20220104", week_days, period="week")[0]
         self.assertEqual(week.fold_id, "fold_20220104")
         self.assertEqual((week.validation_start, week.validation_end), ("20211228", "20220103"))
         self.assertEqual((week.test_start, week.test_end), ("20220104", "20220110"))
-
-        # Day-period lists carry an extra leading day so the prior-day anchor resolves.
-        day = build_fold_schedule("20220104", "20220104", ["20211231", "20220103", "20220104"], period="day")[0]
-        self.assertEqual((day.validation_start, day.validation_end), ("20220103", "20220103"))
-        self.assertEqual((day.test_start, day.test_end), ("20220104", "20220104"))
-
-        day_after_weekend = build_fold_schedule("20220110", "20220110", ["20220106", "20220107", "20220110"], period="day")[0]
-        self.assertEqual((day_after_weekend.validation_start, day_after_weekend.validation_end), ("20220107", "20220107"))
-        self.assertEqual((day_after_weekend.test_start, day_after_weekend.test_end), ("20220110", "20220110"))
 
         year = build_fold_schedule("2022", "2022", TRADING_DAYS, period="year")[0]
         self.assertEqual(year.fold_id, "fold_2022")
         self.assertEqual((year.validation_start, year.validation_end), ("20210101", "20211231"))
         self.assertEqual((year.test_start, year.test_end), ("20220101", "20221231"))
-        self.assertEqual(period_bounds("20220104..20220110", period="day"), ("20220104", "20220110"))
+        self.assertEqual(period_bounds("20220104..20220110", period="week"), ("20220104", "20220110"))
+
+    def test_day_fold_period_is_rejected(self):
+        # Day folds always yield single-trading-day validation/test regions, which
+        # the replay engine categorically rejects (entry + forced-liquidation days).
+        with self.assertRaisesRegex(ValueError, "unsupported fold period"):
+            build_fold_schedule("20220104", "20220104", TRADING_DAYS, period="day")
+
+    def test_fold_regions_require_two_trade_days(self):
+        # Validation week 20211228..20220103 holds a single trading day here, so the
+        # schedule must fail fast instead of burning a doomed sandbox + LLM session.
+        with self.assertRaisesRegex(ValueError, "trading day"):
+            build_fold_schedule("20220104", "20220104", ["20211230", "20220104", "20220110"], period="week")
+        with self.assertRaisesRegex(ValueError, "trading day"):
+            heldout_periods("20220104", "20220104", ["20211230", "20220104"], period="week")
 
 
 class LedgerTest(unittest.TestCase):
@@ -634,6 +643,20 @@ class PipelineEndToEndTest(unittest.TestCase):
             heldout = pipeline.ledger.read("heldout")[0]
             self.assertEqual(heldout["strategy_artifact_id"], "strategy_epoch_002_fold_2022Q1")
 
+            # Agent-visible manifests must never carry the raw fold label; the
+            # epoch-2 fold inherits epoch-1's frozen artifact whose id embeds it.
+            manifests = sorted((config.experiment_dir / "artifacts").glob("run_*/run_manifest.json"))
+            self.assertTrue(manifests)
+            parent_ids = []
+            for path in manifests:
+                content = path.read_text(encoding="utf-8")
+                self.assertNotIn("fold_2022", content, msg=str(path))
+                record = json.loads(content)
+                if record.get("parent_strategy_artifact_id"):
+                    parent_ids.append(str(record["parent_strategy_artifact_id"]))
+            self.assertTrue(parent_ids)
+            self.assertTrue(all(pid.startswith("strategy_ref_") for pid in parent_ids))
+
     def test_meta_learning_injects_full_records_and_prior_epoch_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -679,6 +702,99 @@ class PipelineEndToEndTest(unittest.TestCase):
                     (config.experiment_dir / "meta_learning" / str(record["epoch_id"]) / "agent_trace.jsonl").exists()
                 )
 
+    def test_run_rejects_already_populated_experiment(self):
+        # Full re-runs would collide inside _freeze past the durable-ledger guard;
+        # they must fail fast at the entrypoint instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, fold, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+            )
+            pipeline.ledger.append(
+                {
+                    "record_type": "fold",
+                    "experiment_id": config.experiment_id,
+                    "epoch_id": "epoch_001",
+                    "fold_id": "fold_2022Q1",
+                    "run_id": "run_prior",
+                }
+            )
+            with self.assertRaisesRegex(RuntimeError, "not supported"):
+                pipeline.run(TRADING_DAYS)
+
+    def test_prior_meta_learning_logs_bounded_by_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp, meta_memory_max_epochs=2)
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, fold, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+            )
+            for index in range(1, 5):
+                run_dir = config.experiment_dir / "artifacts" / f"run_meta_{index}"
+                run_dir.mkdir(parents=True)
+                trace = run_dir / "agent_trace.jsonl"
+                trace.write_text(json.dumps({"marker": f"meta-mark-{index}"}) + "\n", encoding="utf-8")
+                pipeline.ledger.append(
+                    {
+                        "record_type": "meta_learning",
+                        "experiment_id": config.experiment_id,
+                        "epoch_id": f"epoch_{index:03d}",
+                        "fold_id": f"epoch_{index:03d}_meta_learning",
+                        "run_id": f"run_meta_{index}",
+                        "agent_trace_ref": str(trace),
+                    }
+                )
+            memory = pipeline._prior_meta_learning_logs("epoch_005")
+            self.assertNotIn("meta-mark-1", memory)
+            self.assertNotIn("meta-mark-2", memory)
+            self.assertIn("meta-mark-3", memory)
+            self.assertIn("meta-mark-4", memory)
+
+    def test_snapshot_builds_are_cached_within_an_experiment(self):
+        calls = {"decision": 0, "replay": 0}
+
+        class CountingProvider(FakeSnapshotProvider):
+            def decision_snapshot(self, decision_time, out_dir):
+                calls["decision"] += 1
+                return super().decision_snapshot(decision_time, out_dir)
+
+            def replay_slot(self, start, end, out_dir, *, label):
+                calls["replay"] += 1
+                return super().replay_slot(start, end, out_dir, label=label)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+            pipeline = ExperimentPipeline(
+                config,
+                CountingProvider(),
+                lambda ctx, fold, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+            )
+            folds = build_fold_schedule("2022Q1", "2022Q1", TRADING_DAYS)
+            first = pipeline.run_fold(folds[0], epoch_id="epoch_001", parent=None)
+            self.assertEqual(first.fold_status, "frozen")
+            decision_builds, replay_builds = calls["decision"], calls["replay"]
+            self.assertGreater(decision_builds, 0)
+            self.assertGreater(replay_builds, 0)
+
+            # The identical fold in the next epoch replays entirely from cache but
+            # still gets working hardlinked views (the scripted agent backtests
+            # against them).
+            second = pipeline.run_fold(folds[0], epoch_id="epoch_002", parent=first.frozen)
+            self.assertEqual(calls["decision"], decision_builds)
+            self.assertEqual(calls["replay"], replay_builds)
+            self.assertEqual(second.fold_status, "frozen")
+            cache_entries = [p for p in (config.experiment_dir / "snapshot_cache").iterdir() if not p.name.startswith(".")]
+            self.assertEqual(len(cache_entries), decision_builds + replay_builds)
+
     def test_failed_acceptance_falls_back_to_parent(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -699,7 +815,7 @@ class PipelineEndToEndTest(unittest.TestCase):
                 config, FakeSnapshotProvider(), lambda ctx, fold, manifest: IdleAgent(), proxy=ScriptedLLM([])
             )
             second = pipeline_idle.run_fold(folds[0], epoch_id="epoch_001b", parent=outcome.frozen)
-            self.assertEqual(second.fold_status, "no_update_timeout")
+            self.assertEqual(second.fold_status, "no_valid_backtest")
             self.assertEqual(second.frozen.artifact_id, outcome.frozen.artifact_id)
 
             # The step tree accumulated in fold 1 is handed to later folds and

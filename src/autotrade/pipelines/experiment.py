@@ -34,7 +34,15 @@ from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copy
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import PHASE_FROZEN, BacktestTool, ModificationCheckTool, ToolContext
 
-from .config import AgentFactory, ExperimentConfig, FoldOutcome, FrozenArtifact, MetaLearner, SnapshotProvider
+from .config import (
+    AgentFactory,
+    CachingSnapshotProvider,
+    ExperimentConfig,
+    FoldOutcome,
+    FrozenArtifact,
+    MetaLearner,
+    SnapshotProvider,
+)
 from .folds import FoldSpec, build_fold_schedule, heldout_periods
 from .ledger import ExperimentLedger
 
@@ -68,7 +76,10 @@ class ExperimentPipeline:
         meta_learner: MetaLearner | None = None,
     ) -> None:
         self.config = config
-        self.snapshots = snapshots
+        # Identical builds recur constantly (fold N+1's validation slot == fold N's
+        # test slot; multi-epoch reruns are snapshot-invariant) — cache them per
+        # experiment and hardlink into each run's sandbox.
+        self.snapshots = CachingSnapshotProvider(snapshots, config.experiment_dir / "snapshot_cache")
         self.agent_factory = agent_factory
         self.proxy = proxy
         self.nl_proxy = nl_proxy
@@ -95,6 +106,15 @@ class ExperimentPipeline:
     # ---- top-level run ----
 
     def run(self, trading_days: list[str]) -> dict[str, object]:
+        # Full runs are not resumable: freezing into an already-populated experiment
+        # raises FileExistsError deep inside _freeze, past the durable-ledger guard.
+        # Fail fast up front instead.
+        artifacts_root = self.config.experiment_dir / "strategy_artifacts"
+        if any(artifacts_root.glob("epoch_*/*")) or self.ledger.read("fold"):
+            raise RuntimeError(
+                f"experiment {self.config.experiment_id!r} already holds frozen artifacts or fold records; "
+                "re-running a full experiment in place is not supported — use a fresh experiment id"
+            )
         folds = build_fold_schedule(
             self.config.first_test_period,
             self.config.last_test_period,
@@ -844,18 +864,20 @@ class ExperimentPipeline:
         }
 
     def _prior_meta_learning_logs(self, current_epoch_id: str) -> str:
-        """Concatenated agent_trace logs of every meta-learning session before
-        ``current_epoch_id`` (ordered by epoch)."""
+        """Concatenated agent_trace logs of the most recent meta-learning sessions
+        before ``current_epoch_id`` (ordered by epoch, bounded by
+        ``meta_memory_max_epochs``; older epochs persist only through the Taste
+        chain and the compact fold history)."""
         current_index = _epoch_index(current_epoch_id)
         chunks: list[str] = []
         records = sorted(
             self.ledger.read("meta_learning"),
             key=lambda item: _epoch_index(str(item.get("epoch_id", ""))),
         )
+        records = [r for r in records if _epoch_index(str(r.get("epoch_id", ""))) < current_index]
+        keep = max(0, self.config.meta_memory_max_epochs)
+        records = records[-keep:] if keep else []
         for record in records:
-            epoch_id = str(record.get("epoch_id", ""))
-            if _epoch_index(epoch_id) >= current_index:
-                continue
             trace = self._meta_learning_trace_ref(record)
             if not trace.exists():
                 continue
@@ -1039,9 +1061,12 @@ class ExperimentPipeline:
 
         if parent is not None:
             # No accepted update: reuse the parent artifact; the fold counts as not improved.
+            # Distinguish "never validated anything" from "validated but not accepted" so
+            # audits do not need to reverse-engineer the reason list.
             copy_artifact(parent.path, ctx.paths.agent_output)
             copy_model_artifacts(parent.model_path, ctx.paths.model_artifacts)
-            return parent, "no_update_timeout", reasons, selected
+            status = "no_valid_backtest" if selected is None else "no_update"
+            return parent, status, reasons, selected
         if is_initial:
             raise RuntimeError(f"initial fold produced no acceptable baseline artifact: {reasons}")
         raise RuntimeError(f"fold has neither an accepted artifact nor a parent fallback: {reasons}")
