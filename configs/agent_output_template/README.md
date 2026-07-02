@@ -102,9 +102,11 @@ fixed cadence, and wraps up by `14:57` — rather than screening on every tick.
 - `ctx.price(ts_code)`, `ctx.bar(ts_code)`, `ctx.bars` — the current tick only
   (`None` at the 09:15 info tick and off-session ticks; future bars never visible).
 - `ctx.broker`: `.buy/sell/short/cover/close(ts_code, amount=None, weight=None,
-  limit=None, valid_bars=1)` returning `order_id`, `.cancel(order_id)`,
-  `.money`/`.cash`, `.position(ts_code)`, `.pending(ts_code=None)` (working orders;
-  no argument returns all). `limit=P` makes it a limit order.
+  limit=None, valid_bars=1, reason=None)` returning `order_id`,
+  `.cancel(order_id, reason=None)`, `.money`/`.cash`, `.position(ts_code)`,
+  `.pending(ts_code=None)` (working orders; no argument returns all). `limit=P`
+  makes it a limit order; the optional `reason=` is an audit annotation the driver
+  records without affecting matching.
 - `ctx.nl(ts_code, prompt="...")` — point-in-time NL Sub Agent (its text corpus
   also rolls on the refresh nodes; frozen research corpus always visible).
 - `ctx.asof_dir` — per-tick rolling point-in-time view; one directory per data

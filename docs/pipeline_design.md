@@ -94,13 +94,13 @@ flowchart TD
     FINAL --> HO["Held-out 按配置周期冻结测试"]
 ```
 
-Pipeline 不实现投资逻辑，也不改写 Agent 代码；它只做调度、冻结、校验和记录。完整流程是：每个 Epoch 先运行一次元学习会话，基于 development 历史、父产物、可见数据和联网检索生成非空 Taste，并可选产出小幅正则化后的父产物；随后 Pipeline 按配置周期依次启动普通 Fold Agent，把同一份 Taste 注入本 Epoch 所有 Fold Prompt，让它作为策略实现、NL 使用、交易取舍和正则化偏好的关键指导；策略产物和模型参数则按 Fold 链式继承，第一个 Fold 继承初始模板或元学习正则化后的父产物，之后每个 Fold 继承上一个 Fold 在测试前冻结的策略和模型产物，若没有可接受更新则继承 fallback 父产物；所有 development Fold 完成后固定最终策略产物，再执行 held-out 冻结测试。Taste 在同一 Epoch 内保持一致，下一 Epoch 可基于 development 结果生成新的 Taste。
+Pipeline 不实现投资逻辑，也不改写 Agent 代码；它只做调度、冻结、校验和记录。完整流程是：每个 Epoch 先运行一次元学习会话，基于 development 历史、父产物、可见数据和联网检索生成非空 Taste，并可选产出小幅正则化后的父产物；随后 Pipeline 按配置周期依次启动普通 Fold Agent，把同一份 Taste 注入本 Epoch 所有 Fold Prompt，让它作为策略实现、NL 使用、交易取舍和正则化偏好的关键指导；策略产物和模型参数则按 Fold 链式继承，第一个 Fold 继承初始模板或元学习正则化后的父产物，之后每个 Fold 继承上一个 Fold 在测试前冻结的策略和模型产物，若没有可接受更新则继承 fallback 父产物；所有 development Fold 完成后固定最终策略产物，再执行 held-out 冻结测试。Taste 在同一 Epoch 内保持一致，下一 Epoch 可基于 development 结果生成新的 Taste。完整实验运行不可原地续跑：`ExperimentPipeline.run()` 在目标 experiment 已存在冻结产物或 Fold 账本记录时直接 fail-fast，要求换用新的 experiment id，避免冻结写入落到已填充的实验目录。
 
 ## 2. Fold 时间定义
 
 ### 2.1 可配置周期滚动
 
-Pipeline 通过 `fold_period` 控制每个 Fold 的决策/测试周期，支持 `day`、`week`、`month`、`quarter`、`year`，默认 `quarter`。`day` 按 SSE 交易日推进，验证区间取前一个交易日；其他周期使用“测试周期的前一个同频周期”作为验证区间。上一 Fold 的测试区间会成为下一 Fold 的验证区间。以默认季度 `fold_2022Q1` 为例：
+Pipeline 通过 `fold_period` 控制每个 Fold 的决策/测试周期，支持 `week`、`month`、`quarter`、`year`，默认 `quarter`（CLI `--fold-period` 同此四选一）。每个周期用“测试周期的前一个同频周期”作为验证区间，上一 Fold 的测试区间会成为下一 Fold 的验证区间。以默认季度 `fold_2022Q1` 为例：
 
 | 项目 | 示例 |
 |---|---|
@@ -121,6 +121,8 @@ Pipeline 通过 `fold_period` 控制每个 Fold 的决策/测试周期，支持 
 | `fold_2022Q1` | 2020-01 到 2021-09 | 2021-10 到 2021-12 | 2022Q1 |
 | `fold_2022Q2` | 2020-04 到 2021-12 | 2022Q1 | 2022Q2 |
 | `fold_2022Q3` | 2020-07 到 2022-03 | 2022Q2 | 2022Q3 |
+
+每个验证、测试和 held-out 区间至少要有 2 个交易日（`folds.MIN_REGION_TRADE_DAYS`）：回放区间的最后一个交易日保留给强制清仓，只含单个交易日的区间根本无法回测。`build_fold_schedule` 和 `heldout_periods` 在排程构建时即校验，交易日不足的区间直接报错，不会浪费 Sandbox 和 LLM 会话。
 
 ### 2.2 泄漏边界
 
@@ -262,7 +264,7 @@ Pipeline 不为 Step 单独维护账本文件。Shell、LLM、Broker、NL 和回
 
 `finish_fold` 成功后，Runner 锁定 `output/` 和 `models/` 写入，并停止本 Fold 的 Agent 调用。Pipeline 选择最近一次通过完整验证且当前策略/model hash 未变的 Step。Agent 在结束前应确保当前 `output`/`models` 就是自己认为最好的已验证版本；若历史 Step 更优，应先恢复该版本、重新完成 modification check 和完整 `backtest`，再调用 `finish_fold`。若没有可接受 Step：
 
-1. 有父产物时沿用父产物，记录 `no_update_timeout` 或拒绝原因。
+1. 有父产物时沿用父产物，并按原因区分 `fold_status`：本 Fold 内从未产生成功的完整验证回测记 `no_valid_backtest`；已有完整验证但未被接受（未达 `AcceptanceRules`，或当前策略/model hash 与该验证不一致）记 `no_update`。两种情况都附带拒绝原因列表，供审计无需反推。
 2. 首个 Fold 没有父产物且无法产生可接受基线时，实验失败。
 
 ### 4.4 冻结测试
@@ -340,7 +342,7 @@ experiments/<experiment_id>/strategy_artifacts/<epoch_id>/<strategy_artifact_id>
 
 - compact `development_history.json`：紧凑的逐 Fold 验证摘要、接受/拒绝原因和验证回测明细。
 - `experiment_ledger_full.jsonl`：Agent 可见 development 账本（逐条 `fold` / `meta_learning` 记录，排除 held-out、测试期调度和测试结果）。
-- `meta_learning_memory.jsonl`：此前所有 Epoch 元学习会话的完整对话/工具日志，按 Epoch 顺序从账本中的 `agent_trace_ref` 拼接。
+- `meta_learning_memory.jsonl`：最近若干个 Epoch 元学习会话的完整对话/工具日志，按 Epoch 顺序从账本 `agent_trace_ref` 拼接。拼接的最近 Epoch 数由 `ExperimentConfig.meta_memory_max_epochs` 限制（默认 3，`0` 关闭拼接）；更早 Epoch 的原始记忆不再进入本文件，只通过 Taste 链和 compact 逐 Fold 历史保留。
 - 上一次 Taste。
 - 当前父策略产物和父模型参数产物。
 - 实验级 `meta_learning_directive`：研究者在实验启动前可选注入的探索方向，写入 run manifest 和 meta-learning 账本。
@@ -429,6 +431,7 @@ experiments/<experiment_id>/
     <epoch_id>/
   artifacts/
     <run_id>/
+  snapshot_cache/
   reports/
 ```
 
@@ -442,7 +445,10 @@ experiments/<experiment_id>/
 | `strategy_artifacts/` | Pipeline | 冻结策略产物和对应模型参数产物 |
 | `meta_learning/` | Pipeline | 元学习 Taste；trace 由账本 `agent_trace_ref` 指向 canonical run 目录 |
 | `artifacts/<run_id>/` | Environment | Sandbox run manifest、trace、results、logs |
+| `snapshot_cache/` | Pipeline | 实验内决策快照/回放槽构建缓存（见下） |
 | `reports/` | reporting 脚本 | 实验图表和汇总 |
+
+`CachingSnapshotProvider` 用 `snapshot_cache/` 复用同一实验内字节相同的快照构建：相邻 Fold 与多 Epoch 常重建完全一致的视图（Fold N+1 的验证回放槽就是 Fold N 的测试槽，决策快照与 Epoch 无关）。缓存条目按内容键（锚点/区间 + label + provider 配置）构建一次，再硬链接进每个 run 的 Sandbox；快照 parquet 视图 write-once，共享 inode 安全（与 Step 树的 `link_copytree` 同一模式）。
 
 ### 8.3 主账本
 
@@ -483,6 +489,8 @@ Fold 记录示例：
 }
 ```
 
+`fold_status` 取 `frozen`（本 Fold 冻结了新产物）、`no_update`（有完整验证但未接受，沿用父产物）或 `no_valid_backtest`（无成功完整验证，沿用父产物）；后两者的 `accept_reasons` 记录拒绝原因。
+
 `SnapshotConfig` 由实验 CLI / ExperimentConfig 构造。run manifest 写入生效后的 `snapshot_config.decision_windows`，字段为 `daily_months`、`fundamentals_months`、`events_months`、`macro_months`、`text_months` 和 `intraday_trade_days`；snapshot manifest 另写 `window_config` 和各域 `domain_windows`。CLI 参数 `--daily-window-months` 等未传时，各域回退到 `--window-months`。
 
 普通 Fold run manifest 直接记录 Fold、snapshot、Broker、验收、修改约束和 deadline。其余约定：
@@ -504,8 +512,10 @@ Fold 记录示例：
 - 缺基准数据时，summary status 必须标记 warning。
 - 输出 `reports/epoch_comparison_returns.png`。
 - 输出 `reports/epoch_returns/<epoch_id>_returns.png`。
-- `active_return` 是策略收益减 benchmark 收益。
-- 相对权益曲线以策略权益除以 benchmark 权益表示。
+- 逐 Fold `active_return` 是该 Fold 策略收益减 benchmark 收益。
+- 累计/复利 active return 统一用权益比口径 ∏(1+r)/∏(1+b)−1；汇总 `compound_active_return`、报告表 “Cum active” 列和 “Relative equity vs benchmark” 图三者口径一致。
+- development 汇总另含样本标准差 `std_test_return`、`std_active_return`（样本数 < 2 时为 null），以及逐 Fold active return 对零的单样本 t 统计量 `active_return_tstat`（样本数 < 2 或离散度为 0 时为 null）。
+- 相对权益曲线以策略权益除以 benchmark 权益表示，与上面的复利 active return 口径一致。
 
 ## 9. 失败条件
 
@@ -529,6 +539,7 @@ Pipeline 必须 fail fast：
 - 修改次数、文件数、diff 行数或字节数超约束。
 - 元学习读取 held-out 或反复正式回测调参。
 - `backtest`、Broker 或 artifact 校验显式失败。
+- 完整实验在已有冻结产物或 Fold 账本记录的 experiment 上重复运行（不支持原地续跑，须换新 experiment id）。
 
 失败不能被静默吞掉。Pipeline 应记录明确状态、错误原因、run manifest 引用和可追溯日志路径。
 

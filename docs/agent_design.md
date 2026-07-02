@@ -122,7 +122,7 @@ available_at <= decision_time
 
 正式策略执行时只能依赖 `/mnt/snapshot`、`output` 自身和 `/mnt/agent/models`。不能在正式代码中硬编码读取 `/mnt/snapshots/`、`/mnt/artifacts`、`/mnt/runtime`、主仓库路径或测试区间。
 
-Agent 系统提示词会注入一段 `当前实验事实`，这是 Environment 从 `/mnt/artifacts/run_manifest.json`、`runtime_env.json` 和 `data_summary.json` 抽取的低风险摘要，用于减少开局反复读取成本。三者仍是 Agent 可见事实源：public run manifest 只记录训练/验证可用配置、Broker/约束和可见 snapshot；runtime env 记录 Sandbox Python/CLI/网络；data summary 记录可见数据轻量索引。事实块不替代源 JSON；如果冲突，以源 JSON 为准。正式策略代码仍不得硬编码读取 `/mnt/artifacts`。
+Agent 系统提示词会注入一段 `当前实验事实`，这是 Environment 从 `/mnt/artifacts/run_manifest.json`、`runtime_env.json` 和 `data_summary.json` 抽取的低风险摘要，用于减少开局反复读取成本。三者仍是 Agent 可见事实源：public run manifest 只记录训练/验证可用配置、Broker/约束和可见 snapshot；runtime env 记录 Sandbox Python/CLI/网络；data summary 记录可见数据轻量索引。事实块不替代源 JSON；如果冲突，以源 JSON 为准。正式策略代码仍不得硬编码读取 `/mnt/artifacts`。父产物 ID 和 Fold 标签在 public run manifest 与事实块里都投影成不透明引用 `strategy_ref_*` / `fold_ref_*`，不暴露原始周期标签。
 
 ### 2.2 数据域和产物边界
 
@@ -252,7 +252,7 @@ models/
 
 支持常见参数/权重后缀（如 `.json`、`.txt`、`.csv`、`.joblib`、`.pkl`、`.npy`、`.npz`、`.pt`、`.pth`、`.onnx`、`.safetensors`、`.cbm`、`.ubj`、`.model`）。依赖包不写入 `models/`；新增 Python/npm/apt 依赖属于 Sandbox 镜像层，由元学习输出 `workspace/sandbox_environment.json` 后交给 Pipeline 构建派生镜像。禁止隐藏文件/目录、缓存、日志、数据 dump、notebook 和密钥。若策略选择每次回测在 `main.py` 内重新训练，可把训练入口写在 `main.py` 或 helper 中；需要跨 Fold 继承的参数写入 `models/`，临时训练中间产物留在内存。
 
-`main.py` 必须定义唯一正式入口，Environment 按回放分钟逐分钟调用一次：
+`main.py` 必须定义唯一正式入口，Environment 按回放 tick 逐 tick 调用一次：
 
 ```python
 def main(ctx) -> None:
@@ -277,10 +277,10 @@ ctx.cur_time          # "HH:MM"
 ctx.cur_datetime      # ISO 时间戳（含 +08:00 时区）；同一 main(ctx) 循环也驱动实盘
 ctx.account, ctx.positions                # 只读账户/持仓快照（可用现金见 ctx.broker.cash）
 ctx.price(ts_code), ctx.bar(ts_code), ctx.bars   # 仅当前 tick、PIT 可见的 bar（09:15 和 off-session 无价）
-ctx.broker.buy/short(ts_code, amount=None, weight=None, limit=None, valid_bars=1)  # 开多/开空，可用 weight 名义比例；返回 order_id
-ctx.broker.sell/cover(ts_code, amount=None, limit=None, valid_bars=1)              # 减多/平空，只接受 amount 股数（无 weight）
-ctx.broker.close(ts_code)                                                          # 市价平掉可平持仓（恒市价，无 limit）
-ctx.broker.cancel(order_id, reason=None)
+ctx.broker.buy/short(ts_code, amount=None, weight=None, limit=None, valid_bars=1, reason=None)  # 开多/开空，可用 weight 名义比例；返回 order_id
+ctx.broker.sell/cover(ts_code, amount=None, limit=None, valid_bars=1, reason=None)              # 减多/平空，只接受 amount 股数（无 weight）
+ctx.broker.close(ts_code, reason=None)                                             # 市价平掉可平持仓（恒市价，无 limit）
+ctx.broker.cancel(order_id, reason=None)                                           # reason= 为可选审计注记，driver 原样记录、不影响撮合
 ctx.broker.money, ctx.broker.cash         # 现金视图（每 tick 反映已成交结果，含真实成本；未成交计划不改变它）
 ctx.broker.available_cash                 # 可部署买力（现金扣融券保证金/冻结所得）
 ctx.broker.position(ts_code)
@@ -365,6 +365,8 @@ Agent 可以用验证结果和 `nl_tool/` 日志调整 prompt 或策略逻辑。
 - 只读文件修改。
 - 非法文件、隐藏文件/目录和缓存。
 - 模型参数文件数、总字节数、非法后缀、隐藏文件/目录和缓存。
+
+度量修改量前，`modification_check` 先确认 diff 基准可信：父策略产物 hash（初始 Fold 用初始模板 hash）必须与 run manifest 一致；父模型参数目录非空时还要求 manifest 记录并匹配父模型 hash（只有空目录才用计算出的空 hash）。任一基准不可信直接报错。
 
 默认策略：
 
