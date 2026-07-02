@@ -1,11 +1,12 @@
 """Agent session runner: the main conversation loop for one Fold or meta-learning run.
 
-docs/agent_design.md + docs/environment_design.md 3.4: one Agent session per
-Fold (one conversation_id), Steps share the session, only the four documented
-entrypoints are callable, the fold deadline is the master constraint, and a
-fixed wrap-up prompt fires at most once inside the finalize window. Main
-conversation calls and semantic compactions are logged in agent_trace.jsonl
-(docs/environment_design.md 6.3).
+docs/agent_design.md plus docs/environment_design.md §2.2 define the Agent
+session and tool-entrypoint contract: one Agent session per Fold (one
+conversation_id), Steps share the session, only documented ActionSpec tools are
+callable, the fold deadline is the master constraint, and a fixed wrap-up prompt
+fires at most once inside the finalize window. Main conversation calls and
+semantic compactions are logged in agent_trace.jsonl (docs/environment_design.md
+§2.4 and §4.2).
 """
 
 from __future__ import annotations
@@ -960,7 +961,7 @@ class AgentSessionRunner:
         payload: dict[str, object] = {
             "observation": "context_summary",
             "summary_kind": "deterministic_runner_summary",
-            "note": "Raw Shell/Tool/LLM details remain in /mnt/artifacts/agent_trace.jsonl and result artifacts.",
+            "note": "Raw tool and LLM details remain in /mnt/artifacts/agent_trace.jsonl and result artifacts.",
             "items": items,
         }
         text = json.dumps(payload, ensure_ascii=False, default=str)

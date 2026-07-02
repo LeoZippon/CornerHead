@@ -1,4 +1,4 @@
-"""Dependency-light deterministic fill-projection core (docs/environment_design.md 7).
+"""Dependency-light deterministic fill-projection core (docs/environment_design.md §3).
 
 Pure stdlib (no ``autotrade``/``pandas`` import), but host-only: this module is NOT
 shipped into the Agent sandbox image. Its single consumer is the authoritative host

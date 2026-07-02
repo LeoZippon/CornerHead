@@ -1,7 +1,7 @@
 """Sandbox runtime files: paths, run_manifest.json, and agent_trace.jsonl.
 
 Trusted logs are produced only by Runner / Execution Gateway / LLM Proxy /
-simulated Broker code paths (docs/environment_design.md chapter 7). Agent text
+simulated Broker code paths (docs/environment_design.md §4.1). Agent text
 never replaces these records.
 """
 
@@ -264,7 +264,7 @@ class RunManifest:
             self.save()
 
     def record_modification_check(self, summary: dict[str, object]) -> None:
-        """Keep only the latest check summary (docs/environment_design.md 3.2)."""
+        """Keep only the latest check summary (docs/environment_design.md §2.3)."""
         self.update(last_modification_check=summary)
 
     def append_backtest_summary(self, summary: dict[str, object]) -> None:

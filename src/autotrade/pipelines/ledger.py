@@ -1,4 +1,4 @@
-"""The single experiment ledger (docs/pipeline_design.md chapter 7).
+"""The single experiment ledger (docs/pipeline_design.md §4.1).
 
 One JSONL file per experiment. Records are distinguished by ``record_type``
 (``fold`` / ``meta_learning`` / ``heldout``); Steps are lightweight

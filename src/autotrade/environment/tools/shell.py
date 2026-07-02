@@ -1,6 +1,6 @@
 """sandbox_shell_tool: the managed non-root shell inside the Sandbox.
 
-docs/environment_design.md 4.2. Inside Docker the hard isolation comes from
+docs/environment_design.md §2.2. Inside Docker the hard isolation comes from
 the container (non-root user, --network none, read-only mounts). This module
 adds logged execution, output limits, and a light contract guard. The guard is
 not a full Bash parser; it gives fast, actionable feedback for clear policy

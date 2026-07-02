@@ -7,7 +7,7 @@ logic; trading strategies live in the Agent's ``output`` and drive these
 primitives during minute-by-minute replay.
 
 The Broker still enforces every A-share market rule (docs/environment_design.md
-chapter 7): cash, short margin, T+1 sellable balance, lot size, limit
+§3): cash, short margin, T+1 sellable balance, lot size, limit
 up/down, suspension, the configured short-inventory mode (default
 ``proxy_margin_secs``), optional run-config concentration limits, commission,
 stamp duty, slippage, borrow fee, and forced close. Every order/reject is
@@ -37,7 +37,7 @@ SHORT_INVENTORY_MODES = ("proxy_margin_secs", "broker_inventory", "theoretical_s
 
 @dataclass(frozen=True)
 class BrokerProfile:
-    """Default CITIC replay/Broker profile (docs/environment_design.md 7.3).
+    """Default CITIC replay/Broker profile (docs/environment_design.md §3.3).
 
     Maintenance lines follow the published CITIC base case (T-day 16:00
     维持担保比例 > 200%): closeout 130%, safety 140%, withdrawal 300%.
@@ -67,7 +67,7 @@ class BrokerProfile:
     maintenance_withdraw_ratio: float = 3.00
     max_single_name_weight: float | None = None
     profile_id: str = "citic_default_v3"
-    source: str = "docs/environment_design.md#73-回放-profile"
+    source: str = "docs/environment_design.md#33-回放-profile强制约束与做空模式"
     maintenance_source: str = "https://pb.citics.com/trading/xxgs/wcdbbl/"
 
     def __post_init__(self) -> None:
@@ -363,7 +363,7 @@ class SimBroker:
         self.reject_counts: dict[str, int] = {}
         self.current_date = ""
 
-    # ---- broker queries (docs/environment_design.md 7.1) ----
+    # ---- broker queries (docs/environment_design.md §3.2) ----
 
     def query_stock_asset(self) -> dict[str, object]:
         """Account snapshot (xtquant ``query_stock_asset``)."""

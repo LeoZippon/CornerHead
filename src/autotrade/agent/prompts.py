@@ -121,8 +121,8 @@ FOLD_ACTION_SECTION = """\
 | `shell` | command, max_output_chars?, timeout_seconds? | 查看数据、调试、执行命令、写二进制模型权重；max_output_chars 只能缩小内联输出，timeout_seconds 默认 120s、可在硬上限（600s）内按需调大用于重活 |
 | `write_file` | root, path, content | 在 workspace/output/models 下创建或覆盖文本文件；维护正式策略代码优先用它而不是 shell heredoc |
 | `edit_file` | root, path, old_string, new_string, replace_all? | 精确编辑文本文件；`old_string` 必须与当前内容唯一匹配，否则用 `replace_all` |
-| `grep` | pattern, root?, path?, glob?, output_mode?, head_limit?, offset?, context?, case_insensitive?, multiline? | 结构化只读检索，不访问测试或隐藏路径；`root` 取值 agent\|workspace\|output\|models\|snapshot\|train\|valid\|artifacts\|parent_output\|parent_models\|results\|steps |
-| `glob` | pattern, root?, path?, head_limit?, offset? | 结构化只读列文件，不访问测试或隐藏路径 |
+| `grep` | pattern, root?, path?, glob?, output_mode?, head_limit?, offset?, context?, case_insensitive?, multiline? | 按模式只读搜索可见路径或内容，不访问测试或隐藏路径；`root` 取值 agent\|workspace\|output\|models\|snapshot\|train\|valid\|artifacts\|parent_output\|parent_models\|results\|steps |
+| `glob` | pattern, root?, path?, head_limit?, offset? | 按模式只读列出可见文件，不访问测试或隐藏路径 |
 | `read` | root?, path, offset?, limit? | 按行号读取文件（可分页）；读要编辑的代码优先用它而非 shell `cat`/`head`，`cat`/`head` 仍可用于管道；不访问测试或隐藏路径 |
 | `explore` | task, max_rounds? | 委托只读数据探查 Sub Agent（更便宜模型）调查一个具体问题并返回简洁摘要，把大量 shell/grep 探查移出主上下文 |
 | `modification_check` | （无） | 主动检查正式产物改动是否在约束内；`backtest` 执行前也会自动复核 |
@@ -167,7 +167,7 @@ def cancel_stale_pending(ctx, max_age_minutes=1.0):
 以下是可行步骤，不是固定顺序；可以根据观察结果随时回到 grep/glob/shell 重新检查数据、代码、父产物和结果。
 - 当前 Sandbox 内的数据是当前 Fold 的样本窗口（如分钟线和回放区间可能较短）；后续 Fold 会按配置周期沿时间向后滚动，回放窗口由各 Fold 周期决定。据此写可迁移逻辑，不要因当前窗口短而过拟合或对数据规模下死结论。
 - 首个 Fold 的 `parent_output` 是初始模板、Step 树可能为空：不要追查不存在的历史，从模板和可见数据起步即可。
-- 先读 `/mnt/artifacts/data_summary.json`，再用 grep/glob 结构化检索 `/mnt/snapshots/train`、`/mnt/snapshots/valid`、父产物和历史验证结果；需要写临时代码或复杂数据探查时再用 shell。
+- 先读 `/mnt/artifacts/data_summary.json`，再用 grep/glob 按模式检索 `/mnt/snapshots/train`、`/mnt/snapshots/valid`、父产物和历史验证结果；需要写临时代码或复杂数据探查时再用 shell。
 - 写策略逻辑前，先据 `data_summary.json` / snapshot `manifest.json` / `runtime_env.json` 明确一份**最小数据契约**：关键文件、核心列、日期字段、数据规模量级、可用 Python 包；之后筛选与特征只引用该契约内已确认的字段与包，减少反复试错。
 - 文本证据（`ctx.nl()`）是价格/基本面之外的独立信息面：在研究/筛选子步骤里对少数候选票检索 PIT 文本证据并按置信度降权融入判断。是否使用由你权衡（配额有限、证据要可证伪），但这应当是明确的取舍而不是遗漏——若整个 Fold 不用 NL，应能说出价格/基本面信号为何已足够。
 - Shell 命令不要使用 `2>/dev/null` 等重定向隐藏错误；让 stderr 原样返回，便于 Environment 记录和审计。
@@ -216,7 +216,7 @@ WRAP_UP_PROMPT = """\
 本 Fold 时间即将用完。请立即收尾：
 1. 把当前最好的已验证版本写入 output/，需要继承的模型参数写入 models/；若最佳 Step 不是当前产物，先恢复它；
 2. 运行 modification_check；
-3. `finish_fold` 要求当前 hash 已有成功的完整验证回测：恢复的已验证 Step 无需重跑；若当前产物尚无完整验证且时间不够整段回放，恢复最近已完整验证的 Step；
+3. `finish_fold` 会拒绝当前 hash 没有成功完整验证回测的产物：恢复的已验证 Step 无需重跑；若当前产物尚无完整验证且时间不够整段回放，恢复最近已完整验证的 Step；
 4. 然后立刻调用 finish_fold。不要再开新的探索。\
 """
 
@@ -318,8 +318,8 @@ META_LEARNING_INSTRUCTION = """\
 | `shell` | command, max_output_chars?, timeout_seconds? | 阅读历史和产物、用 Python 做数据详细检查与分析、执行命令；元学习可在工作区内用 git/pip/npm/hf |
 | `write_file` | root, path, content | 写 `workspace/taste.md` 或对 output/models 做小幅正则化的文本写入 |
 | `edit_file` | root, path, old_string, new_string, replace_all? | 精确编辑；`old_string` 必须与当前内容唯一匹配，否则用 `replace_all` |
-| `grep` | pattern, root?, path?, glob?, output_mode?, head_limit?, offset?, context?, case_insensitive?, multiline? | 结构化只读检索，不访问测试或隐藏路径；`root` 取值 agent\|workspace\|output\|models\|snapshot\|train\|valid\|artifacts\|parent_output\|parent_models\|results\|steps |
-| `glob` | pattern, root?, path?, head_limit?, offset? | 结构化只读列文件，不访问测试或隐藏路径 |
+| `grep` | pattern, root?, path?, glob?, output_mode?, head_limit?, offset?, context?, case_insensitive?, multiline? | 按模式只读搜索可见路径或内容，不访问测试或隐藏路径；`root` 取值 agent\|workspace\|output\|models\|snapshot\|train\|valid\|artifacts\|parent_output\|parent_models\|results\|steps |
+| `glob` | pattern, root?, path?, head_limit?, offset? | 按模式只读列出可见文件，不访问测试或隐藏路径 |
 | `read` | root?, path, offset?, limit? | 按行号读取文件（可分页）；读要编辑的代码优先用它而非 shell `cat`/`head`，`cat`/`head` 仍可用于管道；不访问测试或隐藏路径 |
 | `explore` | task, max_rounds? | 委托只读数据探查 Sub Agent（更便宜模型）调查一个具体问题并返回简洁摘要 |
 | `web_search` | engine, perspective, query, max_results? | 配置允许时用于元学习联网检索；`engine` 和 `perspective` 按工具 schema 与 run manifest 选择 |

@@ -9,7 +9,7 @@
 - 完整实验编排见 `docs/pipeline_design.md`。
 - QMT 实盘流程见 `docs/QMT_documentation.md`。
 
-## 术语说明
+**术语说明**
 
 | 中文名 | 代码/英文名 | 含义 |
 |---|---|---|
@@ -21,36 +21,7 @@
 | 触顶风险 | `source cap risk` | 接口命中返回行数上限，可能被截断 |
 | 按时点可见 | PIT | 按决策时点过滤未来信息；数据层只保存支撑该规则的原始时间字段 |
 
-## 导航
-
-- [1. 数据层职责与数据域](#1-数据层职责与数据域)
-- [2. 数据表、单位和可见时间](#2-数据表单位和可见时间)
-  - [2.1 全局单位](#21-全局单位)
-  - [2.2 基础研究数据](#22-基础研究数据)
-  - [2.3 宏观与全球上下文](#23-宏观与全球上下文)
-  - [2.4 历史分钟线](#24-历史分钟线)
-  - [2.5 事件与资金数据](#25-事件与资金数据)
-  - [2.6 打板专题数据](#26-打板专题数据)
-  - [2.7 文本数据](#27-文本数据)
-- [3. 下载、更新和定时任务](#3-下载更新和定时任务)
-  - [3.1 初始下载顺序](#31-初始下载顺序)
-  - [3.2 日常更新规则](#32-日常更新规则)
-  - [3.3 定时任务](#33-定时任务)
-  - [3.4 限频和分页](#34-限频和分页)
-  - [3.5 代码入口](#35-代码入口)
-- [4. 审计与状态文件](#4-审计与状态文件)
-  - [4.1 顶层状态文件](#41-顶层状态文件)
-  - [4.2 通用审计规则](#42-通用审计规则)
-  - [4.3 各数据域审计](#43-各数据域审计)
-- [5. 原始数据时间可见性合同](#5-原始数据时间可见性合同)
-  - [5.1 原始层原则](#51-原始层原则)
-  - [5.2 可见时间速查](#52-可见时间速查)
-  - [5.3 Timeview 刷新节点](#53-timeview-刷新节点)
-  - [5.4 交给环境层的最小信息](#54-交给环境层的最小信息)
-- [6. 数据风险与口径修正](#6-数据风险与口径修正)
-- [7. 官方文档索引](#7-官方文档索引)
-
-## 1. 数据层职责与数据域
+**职责边界**
 
 数据层负责：
 
@@ -61,6 +32,29 @@
 - 说明原始数据是否足以支持后续按时间可见性构造。
 
 数据层不负责：构造最终交易信号或策略字段、选择股票、做回测、生成大模型提示词、判断 Agent 决策是否合理。
+
+**导航**
+
+- [1. 数据域与原始口径](#1-数据域与原始口径)
+  - [1.1 数据域总览](#11-数据域总览)
+  - [1.2 全局单位](#12-全局单位)
+  - [1.3 基础研究数据](#13-基础研究数据)
+  - [1.4 宏观与全球上下文](#14-宏观与全球上下文)
+  - [1.5 历史分钟线](#15-历史分钟线)
+  - [1.6 事件、资金与打板专题数据](#16-事件资金与打板专题数据)
+  - [1.7 文本数据](#17-文本数据)
+- [2. 下载、更新与落库任务](#2-下载更新与落库任务)
+  - [2.1 初始下载与日常更新](#21-初始下载与日常更新)
+  - [2.2 定时任务、限频与代码入口](#22-定时任务限频与代码入口)
+- [3. 状态文件、审计与可见时间](#3-状态文件审计与可见时间)
+  - [3.1 状态文件与审计规则](#31-状态文件与审计规则)
+  - [3.2 原始数据时间可见性合同](#32-原始数据时间可见性合同)
+  - [3.3 Timeview 刷新节点与环境层交接](#33-timeview-刷新节点与环境层交接)
+- [4. 数据风险、修正账本与官方索引](#4-数据风险修正账本与官方索引)
+
+## 1. 数据域与原始口径
+
+### 1.1 数据域总览
 
 数据在各层之间的流向：
 
@@ -85,9 +79,7 @@ flowchart LR
 | 打板专题数据 | 开盘啦、同花顺榜单、龙虎榜、热榜、连板概念 | `board_trading_status.json` |
 | 文本数据 | 公告、新闻、研报、政策法规、盈利预测 | `text_evidence_status.json` |
 
-## 2. 数据表、单位和可见时间
-
-### 2.1 全局单位
+### 1.2 全局单位
 
 | 数据 | 单位规则 |
 |---|---|
@@ -109,7 +101,7 @@ flowchart LR
 
 数据层只记录和审计原始单位，不改写原始字段。进入 Sandbox 可见数据、模型输入或回放输入前的单位统一规则见 `docs/environment_design.md` 的“单位合同”。
 
-### 2.2 基础研究数据
+### 1.3 基础研究数据
 
 基础研究数据包含三类：基础维表、日频行情与交易约束、财务与基本面。
 
@@ -157,7 +149,7 @@ flowchart LR
 
 财务原始层保留多版本、重复业务键和稀疏分区。环境层会把它们构造成 `fundamental_events` 后再按 `available_at <= decision_time` 选择可见版本。
 
-### 2.3 宏观与全球上下文
+### 1.4 宏观与全球上下文
 
 宏观/全球数据先作为市场背景和文本证据，不直接替代股票日频数据或策略信号。
 
@@ -177,7 +169,7 @@ flowchart LR
 
 只有日期或月份的数据不得用于同日开盘决策；进入环境层后应优先使用精确发布时间或保守延后时间。
 
-### 2.4 历史分钟线
+### 1.5 历史分钟线
 
 | 数据 | 接口/层 | 拉取方式 | 用途 |
 |---|---|---|---|
@@ -192,7 +184,7 @@ flowchart LR
 
 决策输入 snapshot 的分钟样本窗口由 `SnapshotConfig.intraday_trade_days` 控制，默认取最近 21 个交易日（约一个交易月），让 Agent 在决策输入里看到一整月分钟结构；valid/test 回放区间的分钟窗口由各 Fold 周期决定，与该字段无关。
 
-### 2.5 事件与资金数据
+### 1.6 事件、资金与打板专题数据
 
 | 数据 | 接口/文件 | 拉取方式 | 用途与边界 |
 |---|---|---|---|
@@ -208,9 +200,9 @@ flowchart LR
 
 `share_float_complete` 是解禁最终保留边界。普通 `share_float` 过程文件可归档，但 union 不得静默缩水。触顶分区使用 candidate 级补充；如果最细粒度仍正好 6000 行，只能标记 `source_cap_risk`。
 
-做空券源模式（默认 `proxy_margin_secs`：决策日 `margin_secs` 表内股票全部视为可融）的执行语义由 `docs/environment_design.md` 第 7.5 节（做空模式）定义；数据层只负责 `margin_secs` 表本身的可见性与口径。中信真实券源、费率和信用风控数据当前不可获得，相关数据合同待真实 broker 数据到位后再补充。
+做空券源模式（默认 `proxy_margin_secs`：决策日 `margin_secs` 表内股票全部视为可融）的执行语义由 `docs/environment_design.md` §3.3（做空模式）定义；数据层只负责 `margin_secs` 表本身的可见性与口径。中信真实券源、费率和信用风控数据当前不可获得，相关数据合同待真实 broker 数据到位后再补充。
 
-### 2.6 打板专题数据
+**打板专题数据。**
 
 打板专题数据用于日终标签、情绪和分钟回放。真实盘中打板不能提前使用日终汇总字段。
 
@@ -237,7 +229,7 @@ flowchart LR
 - `limit_list_d` 与 `limit_list_ths` 口径不同，不能互相覆盖。
 - `first_time/open_times/fd_amount/limit_amount` 等日终字段不能用于盘中决策。
 
-### 2.7 文本数据
+### 1.7 文本数据
 
 数据层只保存文本原始数据、发布时间、来源和 hash。进入 Agent 前，证据层再生成 `evidence_id`、截断正文、实体映射和来源质量。
 
@@ -257,9 +249,9 @@ flowchart LR
 ~/miniconda3/bin/conda run -n quant python scripts/data/tushare_download.py repair-text-available-at --datasets anns_d report_rc
 ```
 
-## 3. 下载、更新和定时任务
+## 2. 下载、更新与落库任务
 
-### 3.1 初始下载顺序
+### 2.1 初始下载与日常更新
 
 第一次建库按依赖顺序执行：
 
@@ -286,7 +278,7 @@ flowchart LR
 ~/miniconda3/bin/conda run -n quant python scripts/data/tushare_download.py download --tier text_evidence --start-date 20200101 --end-date <YYYYMMDD>
 ```
 
-### 3.2 日常更新规则
+**日常更新规则。**
 
 日常更新入口：
 
@@ -317,7 +309,7 @@ flowchart LR
 | 打板专题 | 晚间滚动强刷，08:50 回补关键榜单 | 官方历史起点前不视为缺失 |
 | 文本数据 | 晚间滚动强刷，08:55 回补短新闻 | 重复推送保留原始数据，Agent 层再去重 |
 
-### 3.3 定时任务
+### 2.2 定时任务、限频与代码入口
 
 TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_schedule.json`。
 
@@ -335,7 +327,7 @@ TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_sched
 | `cn_preopen_margin_backfill_0905` / `cn_preopen_margin_retry_0915` | 09:05 / 09:15 | 回补上一交易日两融汇总和明细 |
 | `cn_preopen_event_flow_audit_0920` | 09:20 | 盘前刷新事件/资金状态 |
 
-回测的逐 tick 滚动数据视图（Timeview）按这些落库 job 的真实完成时间放行数据，建模为 `REFRESH_NODES` 刷新节点；纯审计 job 不落新数据、刻意不作为节点。节点定义、门禁语义与纯审计 job 清单见 5.3。
+回测的逐 tick 滚动数据视图（Timeview）按这些落库 job 的真实完成时间放行数据，建模为 `REFRESH_NODES` 刷新节点；纯审计 job 不落新数据、刻意不作为节点。节点定义、门禁语义与纯审计 job 清单见 §3.3。
 
 runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
 
@@ -350,7 +342,7 @@ crontab -l
 
 不要直接 `crontab ops/cron/tushare_update.cron`，否则会替换当前用户整份 crontab。
 
-### 3.4 限频和分页
+**限频和分页。**
 
 - 10000 积分基础频次：常规数据 500 次/分钟，特色数据 300 次/分钟。
 - 独立文本权限：新闻 400 次/分钟，公告 500 次/分钟，政策法规 500 次/分钟。
@@ -362,7 +354,7 @@ crontab -l
 - `TUSHARE_TOKEN` 只允许存在于环境变量或 ignored `.env`。
 - 长任务必须有断点续跑、限频、重试和本地日志。
 
-### 3.5 代码入口
+**代码入口。**
 
 TuShare 下载、更新和审计保留少量外层入口，业务实现集中在 `src/autotrade/data_sources/tushare/`：
 
@@ -377,9 +369,9 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 | `cron_update.py` | cron job 调度业务实现（读 `configs/tushare_update_schedule.json`，被 `scripts/data/tushare_cron_update.py` 包装） |
 | `io.py` | Parquet、sidecar、JSONL 和分页探测等底层读写工具 |
 
-## 4. 审计与状态文件
+## 3. 状态文件、审计与可见时间
 
-### 4.1 顶层状态文件
+### 3.1 状态文件与审计规则
 
 `results/data_quality/` 顶层只维护 6 个当前状态文件：
 
@@ -396,7 +388,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 
 同目录还有两类文件不计入上述 6 个原始数据状态文件：
 
-- 修正账本 `revision_events.jsonl` / `revision_summary.json`，见第 6 章。
+- 修正账本 `revision_events.jsonl` / `revision_summary.json`，见第 4 章。
 - PIT 事件索引状态 `fundamental_events_status.json`，由 `cn_nightly_pit_event_build` 生成，供 Environment snapshot 做财报版本可见性过滤；启用 fundamentals 时该文件缺失或为 error 会阻断 snapshot 构造。Snapshot 读取财务事件时按决策窗口选择 `available_month` 分区，再用 `available_at` 二次过滤，避免短窗口扫描全历史分区。
 
 正式状态文件应由 cron 编排层生成并保持最新。数据门禁以文件内容为准：`status=ok` 或 `warning` 且没有 error finding 时可继续下游流程；`status=error`、文件缺失、无法解析或审计时间明显滞后时应阻断使用并重新下载/审计。
@@ -410,7 +402,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 | `board_trading_status.json` | 无 error finding，打板专题分区覆盖到最近应可见交易日 | 龙虎榜/榜单口径差异 |
 | `text_evidence_status.json` | 无 error finding，文本源覆盖到自然日窗口 | 新闻重复、文本时间语义提示 |
 
-### 4.2 通用审计规则
+**通用审计规则。**
 
 所有正式状态文件都检查：
 
@@ -439,7 +431,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 
 存在 `error` 时脚本返回非 0；只有 `warning` 时返回 0，但下游必须显式处理 warning 指向的语义风险。
 
-### 4.3 各数据域审计
+**各数据域审计。**
 
 | 数据域 | 入口 | 输出 | 核心检查 | 特殊风险 |
 |---|---|---|---|---|
@@ -458,18 +450,18 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 
 专项报告只用于过程排查，不写入顶层状态文件。
 
-## 5. 原始数据时间可见性合同
+### 3.2 原始数据时间可见性合同
 
-### 5.1 原始层原则
+**原始层原则。**
 
 - 原始层尽量保留 TuShare 原始字段，不派生 alpha 列。
 - 原始层不静默删除多版本财报、重复公告、稀疏事件和源端重复推送。
 - 每个 parquet 必须有旁路元数据，记录接口、请求参数、抓取时间和源数据 hash。
 - 原始审计只说明数据是否足以支持按时点可见，不声明某个策略无泄漏。
 
-### 5.2 可见时间速查
+**可见时间速查。**
 
-下表是行级 `available_at` 规则；回测的 Timeview 在此之上再叠加落库 job 延迟：一行要同时满足行级 `available_at` 门禁与落库节点 `ready_at` 才进入滚动视图（节点模型见 5.3）。
+下表是行级 `available_at` 规则；回测的 Timeview 在此之上再叠加落库 job 延迟：一行要同时满足行级 `available_at` 门禁与落库节点 `ready_at` 才进入滚动视图（节点模型见 §3.3）。
 
 | 数据 | 可见时间规则 |
 |---|---|
@@ -479,11 +471,11 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 | 分红 | 只用 `imp_ann_date/ann_date` 判断可见性，`ex_date/record_date/pay_date` 是未来事件属性 |
 | 宏观 | 优先发布时间或 `cn_schedule.publish_date`，否则保守延后；Timeview 随 `cn_evening_full` 落库 |
 | 全球事件 | 有具体 `time` 时使用 `date+time`，否则当日收盘后可见；Timeview 随 `cn_evening_full` 落库 |
-| 文本 | 优先 `rec_time/pub_time/pubtime/datetime/create_time`；有日期基准的字段须通过 -1~+3 天合理性检查，否则按日期保守回退（见 2.7）；`cctv_news/news` 盘前另由 `cn_preopen_text_backfill_0855` 回补 |
+| 文本 | 优先 `rec_time/pub_time/pubtime/datetime/create_time`；有日期基准的字段须通过 -1~+3 天合理性检查，否则按日期保守回退（见 §1.7）；`cctv_news/news` 盘前另由 `cn_preopen_text_backfill_0855` 回补 |
 | 两融 | `margin/margin_detail` 行级 `available_at` 为下一日 09:00，Timeview 经盘前 `cn_preopen_margin_backfill_0905`/`_retry_0915` 落库；`margin_secs` 为当日盘前 09:00，经 `cn_preopen_margin_secs_backfill_0903`/`_retry_0913` 落库 |
 | 资金/大宗 | `moneyflow` 当日 19:00、`block_trade` 当日 21:00 为行级 `available_at`；Timeview 实际随 `cn_evening_full`（约次日 02:05）落库，故当日盘中不可见 |
 
-### 5.3 Timeview 刷新节点
+### 3.3 Timeview 刷新节点与环境层交接
 
 回测的逐 tick 滚动数据视图（Timeview）复刻本地库的真实刷新节奏：一行数据只有在落库它的 cron job 写完之后才可见，建模为 `ready_at = job 启动时间 + 实测刷新时长`。共享节点表是 `src/autotrade/environment/data/contracts.py` 的 `REFRESH_NODES`，与 `configs/tushare_update_schedule.json` 一一对应（漂移守护测试断言每个节点都是真实 cron job、纯审计 job 不得成为节点）。该节点模型在已写入的 `available_at` 之上叠加落库延迟：`available_at` 仍是行级门禁，节点只把落库 job 的延迟加在其上，二者都满足才进入滚动视图。完整执行/回放语义见 `docs/environment_design.md`。
 
@@ -502,7 +494,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 
 纯审计 job（`cn_nightly_full_audit`、`cn_daily_revision_sentinel`、09:20 的 `cn_preopen_event_flow_audit_0920`）不落新数据，刻意不作为节点。
 
-### 5.4 交给环境层的最小信息
+**交给环境层的最小信息。**
 
 每个数据域必须能提供：
 
@@ -512,7 +504,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 - 单位：价格、成交量、成交额、股本、市值、财报金额、宏观口径。
 - 风险标记：分页触顶、空分区、源端缺失、重复推送和 revision 事件。
 
-## 6. 数据风险与口径修正
+## 4. 数据风险、修正账本与官方索引
 
 | 风险项 | 影响 | 当前处理 |
 |---|---|---|
@@ -529,7 +521,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 | 财务多版本和公告日缺失 | 财务按时点可见 | 原始数据保留多版本；环境层构造 `fundamental_events` 后选择可见版本 |
 | 宏观发布时间不精确 | 月度/季度数据 | 原始数据使用保守可见时间，环境层优先使用发布日程修正 |
 | 文本重复推送和转载 | 大模型证据 | 原始数据保留，证据层按 hash 和时间过滤 |
-| `anns_d.rec_time` / `report_rc.create_time` 对回填历史是 TuShare 采集时间（如 2025），不是发布时间 | 若直接使用会让历史公告/盈利预测在时间墙下不可见 | 入库按 -1~+3 天合理性检查回退（见 2.7）；存量分区必须满足该规则 |
+| `anns_d.rec_time` / `report_rc.create_time` 对回填历史是 TuShare 采集时间（如 2025），不是发布时间 | 若直接使用会让历史公告/盈利预测在时间墙下不可见 | 入库按 -1~+3 天合理性检查回退（见 §1.7）；存量分区必须满足该规则 |
 | 打板日终字段有盘中前视风险 | 打板策略 | 日终汇总字段不得用于盘中决策；真实盘中策略需分钟或盘口数据 |
 
 Revision ledger 路径：
@@ -550,9 +542,9 @@ results/data_quality/revision_summary.json
 - `stock_basic` 代码加载只接受合法 A 股代码模式 `\d{6}.(SH|SZ|BJ)`。
 - `bak_basic` 审计的预期交易日上限必须截到审计 `end_date`，不能把 `trade_cal` 的未来 lookahead 误报为缺失。
 
-Revision sentinel 监控 `daily`、`adj_factor`、`daily_basic`、`stk_limit`、`suspend_d`、`limit_list_d` 的全字段源端差异。抽样发现的字段级回写、空值回写或行键变化必须进入修正账本；其中 `limit_list_d.limit_amount` 属于易回写字段，在进入 snapshot 和冻结回测输入前必须排除、置为仅审计字段，或在未来引入字段级版本化后再使用。
+Revision sentinel 监控 `daily`、`adj_factor`、`daily_basic`、`stk_limit`、`suspend_d`、`limit_list_d` 的全字段源端差异；监控数据集与抽样规模的单一配置来源是 `tushare_update_schedule.json` 的 `revision_monitor.sentinel_datasets` / `sentinel_sample_size`（job `extra_args` 不再重复）。抽样发现的字段级回写、空值回写或行键变化必须进入修正账本；其中 `limit_list_d.limit_amount` 属于易回写字段，在进入 snapshot 和冻结回测输入前必须排除、置为仅审计字段，或在未来引入字段级版本化后再使用。
 
-## 7. 官方文档索引
+**官方文档索引。**
 
 - 权限说明：https://tushare.pro/document/1?doc_id=290
 - 权限表：https://tushare.pro/document/2?doc_id=108

@@ -39,7 +39,7 @@ DEFAULT_BENCHMARK_LABEL = "CSI 300"
 
 # Benchmark sub-statuses that are NOT a warning: a fully-covered benchmark ("ok")
 # and an intentional --no-benchmark ("disabled"). Any other status means the
-# benchmark data is missing, which the report must flag (docs/pipeline_design.md 8.4/10.1).
+# benchmark data is missing, which the report must flag (docs/pipeline_design.md §4.2).
 _BENCHMARK_OK_STATUSES = {"ok", "disabled"}
 
 

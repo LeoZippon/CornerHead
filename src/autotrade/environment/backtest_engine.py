@@ -302,7 +302,7 @@ def _daily_high(bar: pd.Series) -> float:
 
 
 def compute_return_stats(result: ReplayResult) -> dict[str, object]:
-    """The minimum return statistics from docs/environment_design.md 7.6."""
+    """The minimum return statistics from docs/environment_design.md §3.4."""
     broker = result.broker
     curve = result.equity_curve
     initial = broker.initial_equity

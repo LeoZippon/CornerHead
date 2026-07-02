@@ -1,6 +1,6 @@
 """Sandbox preparation: mount layout, snapshot-view binding, Docker rendering.
 
-docs/environment_design.md chapter 3: the isolation boundary is a non-root
+docs/environment_design.md §2.1: the isolation boundary is a non-root
 user, no network, read-only snapshots, a writable artifacts tree, a fold
 deadline, and basic resource guards. ``LocalSandbox`` reproduces the directory
 layout and binding semantics on the host for orchestration and tests; the
@@ -519,7 +519,7 @@ def _chmod_tree(root: Path, *, file_mode: int, dir_mode: int) -> None:
 
 
 class DockerSandbox:
-    """Container lifecycle for one Fold run (docs/environment_design.md 3.1).
+    """Container lifecycle for one Fold run (docs/environment_design.md §2.1).
 
     The container runs detached with the documented isolation flags; Agent
     commands execute inside via ``docker exec --user agent`` and the frozen

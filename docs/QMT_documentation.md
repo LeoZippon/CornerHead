@@ -6,7 +6,7 @@
 
 - 数据下载、单位和 raw 审计见 `docs/data_documentation.md`。
 - Agent 工作合同和策略产物格式见 `docs/agent_design.md`。
-- PIT 窗口、Sandbox、Tool 和回测见 `docs/environment_design.md`。
+- PIT 窗口、Sandbox、Agent 工具和回测见 `docs/environment_design.md`。
 - 研究侧 Pipeline、冻结和 held-out 流程见 `docs/pipeline_design.md`。
 
 ## 术语说明

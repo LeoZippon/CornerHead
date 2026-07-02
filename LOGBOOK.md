@@ -1,3 +1,11 @@
+2026-07-02 GPT 四文档结构合并的核验与修复
+
+- GPT 在外部把 data/env/agent/pipeline 四份 living docs 的章节大幅合并重编号（如 env 9 章→4 章；术语表降级为加粗块、导航改为紧凑 TOC），并同步改了 13 个源文件的文档引用与 PROMPTS.md。按用户要求核验三问：结构是否合理、是否引发 doc↔码不一致、是否遗漏实现细节。
+- 结构结论：**接受**。四位 Opus 审阅代理（每文档一位，逐条走查全部删除行 + 对源码抽验改写句）一致判定合并方案连贯：数据/管道/agent 三份为纯结构性改动（正文逐字保留、零漂移）；env 有若干处收敛到姊妹文档权威节（正确去重），且 Shell guard 移入 §2.2、可信日志移入 §4、LLM 边界并入 §2.4 属改进。改写句对码抽验（env 8 条、pipeline 14 条、agent 10 条）全部匹配，**零语义漂移**。
+- 已修复的问题：①GPT 自己的引用重编号内部错乱——12 处源码 docstring 指向其新结构中不存在的节（env §1.8/§2.5/§2.6/§2.8/§2.9/§3.5/§3.8、#35 锚点、broker queries 误指 §3.3、pipeline 8.4/10.1、units 的 data §2.1、runner 会话合同指向），全部重映射并经自动检查器复核为 0 问题；②env TOC 一处锚点笔误（#24-nllm→#24-nlllm）；③data 文档"见第 6 章"残留（→第 4 章）；④ledger.py 双重过期的 "chapter 7" docstring（→§4.1）。
+- 已回补的少量真实遗漏：pipeline 元学习可见数据 bullet 恢复显式挂载点与 test/held-out 排除声明；env §1.3 恢复紧凑"PIT 支撑机制"块（fundamental_events 行级 available_at=公告日 18:00【fundamental_events.py:361 核验】、build_pit_events.py 构建入口、status 文件 fail-fast 门禁指向 data §3.1、缺 available_at 列必须报错【snapshot.py:533 核验】、manifest 记录 build/data_profile）；env §1.4 补 units.py 实现指针；agent 提交自检补死代码条款（与 prompt 对齐）；data 哨兵段补 revision_monitor.sentinel_* 单源说明。
+- 验证：引用/锚点检查器 0 问题；full suite 422 OK；PROMPTS.md 重导出与 GPT 版本字节一致（幂等）；`git diff --check` clean。
+
 2026-07-01 轻量冗余清扫 + docs 四文档精修
 
 - 两个 Opus 只读扫描（src / scripts+configs+ops+tests）+ 本人对每个符号全仓 grep 复核后落地：

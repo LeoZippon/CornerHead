@@ -1,4 +1,4 @@
-"""PIT snapshot construction (docs/environment_design.md chapter 2).
+"""PIT snapshot construction (docs/environment_design.md §1).
 
 Builds the six domain files plus universe and manifest for one decision time:
 

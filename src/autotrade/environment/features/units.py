@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 # Percent -> decimal, 手 -> shares, 千元/万元 -> CNY
-# (docs/environment_design.md 2.4 单位与特殊口径; data_documentation.md 2.1).
+# (docs/environment_design.md §1.4 单位与特殊口径; data_documentation.md §1.2).
 DAILY_UNIT_CONVERSIONS: tuple[tuple[str, float, str], ...] = (
     ("vol", 100.0, "hands->shares"),
     ("amount", 1000.0, "thousand_cny->cny"),

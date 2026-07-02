@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PIT event-layer entrypoint (docs/environment_design.md 3).
+"""PIT event-layer entrypoint (docs/data_documentation.md §3.1).
 
 Subcommands are used by the nightly PIT event job:
 build-fundamental-events and audit-fundamental-events.

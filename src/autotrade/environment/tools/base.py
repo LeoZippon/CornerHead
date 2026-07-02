@@ -1,4 +1,4 @@
-"""Shared tool context and errors (docs/environment_design.md chapter 4).
+"""Shared tool context and errors (docs/environment_design.md §2).
 
 Every entrypoint resolves paths, decision times, fold info, and run settings
 from the run manifest. Tools reject agent-supplied absolute paths, future
