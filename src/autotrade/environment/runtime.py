@@ -372,6 +372,12 @@ def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
     }
     if "fold_id" in record:
         public["fold_id"] = _agent_visible_ref(record.get("fold_id"), prefix="fold_ref")
+    # Artifact ids embed the raw fold label (strategy_<epoch>_fold_<period>), so they
+    # must be projected exactly like the ledger view does.
+    if public.get("parent_strategy_artifact_id"):
+        public["parent_strategy_artifact_id"] = _agent_visible_ref(
+            public["parent_strategy_artifact_id"], prefix="strategy_ref"
+        )
     if isinstance(record.get("fold"), dict):
         public["fold"] = _agent_visible_fold_record(record["fold"])
     if isinstance(record.get("meta_learning_visible_fold"), dict):

@@ -219,6 +219,27 @@ class PhasePromptTest(unittest.TestCase):
         self.assertNotIn("test_decision_time", prompt)
         self.assertNotIn("20220101..20220331", prompt)
 
+    def test_fold_facts_opaque_parent_artifact_id(self):
+        # Frozen artifact ids embed the raw fold label of the fold that produced
+        # them (strategy_<epoch>_fold_<period>), so the facts must project them.
+        facts = build_experiment_facts(
+            manifest={
+                "experiment_id": "exp",
+                "run_id": "run_2",
+                "epoch_id": "epoch_001",
+                "fold_id": "fold_2022Q2",
+                "kind": "fold",
+                "is_initial_artifact": False,
+                "parent_strategy_artifact_id": "strategy_epoch_001_fold_2022Q1",
+                "parent_strategy_artifact_hash": "sha256:abc",
+            }
+        )
+        rendered = json.dumps(facts, ensure_ascii=False, sort_keys=True)
+        parent = facts["artifact_contract"]["parent"]
+        self.assertTrue(str(parent["id"]).startswith("strategy_ref_"))
+        self.assertNotIn("fold_2022Q1", rendered)
+        self.assertNotIn("fold_2022Q2", rendered)
+
     def test_meta_experiment_facts_do_not_inline_sample_dates(self):
         manifest = {
             "experiment_id": "exp",
