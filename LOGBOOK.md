@@ -1,3 +1,11 @@
+2026-07-01 三轮 fresh-eyes 审计 + 15 项整改落地（7 个 Opus 子代理）
+
+- 审计：5 维并行（docs↔码、执行核、Agent 层/沙箱、pipelines/scripts/ops、CPCV 优化评估）+ 最近两轮 Fold 取证复盘（`regular_fold_last_taste_gpu`/`cancel_prompt_audit_fold_day`，四方面均给证据结论）。全部 HIGH/CRITICAL 指控本人逐条核验；1 条证伪：data_summary date_ranges 并非“未门控源文件泄漏”，ranges 来自 PIT 门控快照视图（available_at 封顶正确），未来 ann_date/end_date 是合法前瞻披露字段。
+- HIGH 修复：① `parent_strategy_artifact_id`（=`strategy_<epoch>_fold_<period>`）在 agent 可见 run_manifest 白名单与系统提示词 facts 两处未去敏（ledger 视图早已去敏）——统一 `agent_visible_ref(prefix="strategy_ref")` + 泄漏测试（公开 manifest/渲染 facts 无 `fold_<label>` 子串）；② 折叠排期新增 ≥2 交易日守卫（valid/test/held-out 全覆盖，引擎末日强制清仓需两天）并删除结构性不可回测的 day 周期——cancel_prompt_audit 曾为此整轮报废（沙箱+LLM+冻结评估全空转）。
+- 其余整改：`no_update_timeout` 拆分 `no_valid_backtest`/`no_update`；`run()` 入口拒绝重跑已冻结实验（原在 `_freeze` 深处 FileExistsError 绕过 always-append ledger）；meta 原始 trace 记忆限最近 `meta_memory_max_epochs=3` 轮（原 O(epochs²) 级联）；新增 `CachingSnapshotProvider` 实验内容寻址缓存（fold N+1 valid slot == fold N test slot、epoch 不变量，命中硬链接进沙箱）；报告“主动收益”统一权益比值口径 ∏(1+r)/∏(1+b)−1（表/摘要/图一致）并新增 `std_test_return`/`std_active_return`/`active_return_tstat`；shell 守卫报错回映射 /mnt 命名空间（不再漏宿主路径）；modification_check 有父模型必须给 manifest hash（与策略侧对称 fail-fast）；broker_core/.dockerignore/broker 过期“烤入沙箱、投影一致”文案改正 + 空头死 T+1 记账清理 + `holdings_count`→`full_close_count`；run_experiment/run_audit_session ~130 行重复 CLI 收敛至 `scripts/experiments/_cli.py`（--help 字节一致）；Fold 提示词补两条（NL 证据要权衡而非遗漏；禁装饰性死代码，放弃方向须删残留并说明）；五份 living docs 同步本轮行为变化 + 可读性梳理（保完整度）。
+- CPCV 结论（用户定：本轮不实施、后续迭代引入）：不把 agent-in-the-loop Fold 改 CPCV（破坏 walk-forward 因果与 Taste 链、session 成本组合爆炸）；推荐对冻结策略做 CPCV 式多路径重评估层（纯算力零 token，~16 产物 × 8 块三角 OOS 矩阵 → PBO/DSR 进报告）。
+- 验证：full suite 420 OK（406→420，+14 测试）；`git diff --check` clean；PROMPTS.md 重导出幂等；CPU-only，RAM ~395Gi available。提交：b0a25e0（pipeline 加固）/ bcedab9（去敏+提示词）/ 40e3bf1（报告）/ de591cd（工具守卫）/ a92fde2（broker 文档+死码）/ 05ee5fe（CLI 提取）+ docs、logbook 提交。
+
 2026-07-01 二轮 fresh-eyes 全量审计 + 11 项整改落地并复核
 
 - 审计：7 个 Opus 子代理并行（agent/prompt、执行核、broker、tools/snapshot/NL、pipelines、data+docs、两轮单 Fold 复盘）+ 本人逐条核验。结论：核心撮合/PIT/隔离无高危缺陷——broker 撮合与前一交易日收盘锚点、Timeview 两层 PIT、沙箱隔离、meta finalize 顺序、fail-fast 列表、config 默认值均与文档一致，PROMPTS.md 与 prompts.py 字节一致。
