@@ -34,11 +34,13 @@ from _cli import (
     add_snapshot_window_arguments,
     add_web_search_arguments,
     build_meta_learning_sandbox_spec,
+    build_pipeline,
     build_proxies,
     build_session_builders,
     build_snapshot_config,
     build_web_search_providers,
     require_generic_period_args,
+    resolve_meta_learning_directive,
 )
 
 from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
@@ -46,9 +48,7 @@ from autotrade.environment.sandbox import DEFAULT_IMAGE, SandboxSpec
 from autotrade.pipelines import (
     AcceptanceRules,
     ExperimentConfig,
-    ExperimentPipeline,
     FrozenArtifact,
-    RawSnapshotProvider,
     load_sse_trading_days,
 )
 from autotrade.pipelines.folds import build_fold_schedule
@@ -109,8 +109,6 @@ def main() -> int:
         args.last_test_period = args.last_test_period or "2025Q4"
         args.heldout_first_period = args.heldout_first_period or "2026Q1"
         args.heldout_last_period = args.heldout_last_period or "2026Q1"
-    if args.meta_learning_directive and args.meta_learning_directive_file:
-        parser.error("pass only one of --meta-learning-directive or --meta-learning-directive-file")
     if args.parent_models and not args.parent_output:
         parser.error("--parent-models requires --parent-output")
     if args.mode == "meta-learning" and args.taste_file:
@@ -119,9 +117,7 @@ def main() -> int:
     if not args.local_dev and not args.skip_image_check:
         _require_docker_image(image)
 
-    meta_learning_directive = args.meta_learning_directive
-    if args.meta_learning_directive_file:
-        meta_learning_directive = args.meta_learning_directive_file.read_text(encoding="utf-8")
+    meta_learning_directive = resolve_meta_learning_directive(parser, args)
     taste_prompt = args.taste_file.read_text(encoding="utf-8") if args.taste_file else ""
 
     config = _build_config(repo_root, args, meta_learning_directive)
@@ -133,19 +129,7 @@ def main() -> int:
         web_search_providers=web_search_providers,
     )
 
-    pipeline = ExperimentPipeline(
-        config,
-        RawSnapshotProvider(
-            args.raw_dir.resolve(),
-            args.fundamental_events_root.resolve(),
-            config=config.snapshot_config,
-            fundamental_events_status=args.fundamental_events_status.resolve(),
-        ),
-        agent_factory,
-        proxy=proxies.proxy,
-        nl_proxy=proxies.nl_proxy,
-        meta_learner=meta_learner,
-    )
+    pipeline = build_pipeline(config, args, agent_factory, meta_learner, proxies)
     trading_days = load_sse_trading_days(args.raw_dir)
     folds = build_fold_schedule(
         config.first_test_period,

@@ -23,7 +23,6 @@ from autotrade.environment.llm.proxy import LLMProxy, LLMProxyError, ProviderRes
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.snapshot import to_cn_timestamps
 
-TERMINAL_STATES = ("completed", "failed_with_policy", "timeout", "failed")
 MAX_TOOL_ROUNDS = 3
 TEXT_RETRIEVE_TOOL = "text_retrieve"
 

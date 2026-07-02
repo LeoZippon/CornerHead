@@ -78,21 +78,11 @@
       "skip_if_already_ok": true
     },
     "cn_daily_revision_sentinel": {
-      "description": "Sample historical daily trade-date partitions, compare TuShare source responses with local raw files without overwriting raw data, and append revision events when differences are found.",
+      "description": "Sample historical daily trade-date partitions, compare TuShare source responses with local raw files without overwriting raw data, and append revision events when differences are found. Sample size and datasets come from revision_monitor.sentinel_* (single source).",
       "operation": "revision_sentinel",
       "end_date_offset_days": 1,
       "end_date_mode": "sse_open_on_or_before",
-      "extra_args": [
-        "--sample-size",
-        "12",
-        "--datasets",
-        "daily",
-        "adj_factor",
-        "daily_basic",
-        "stk_limit",
-        "suspend_d",
-        "limit_list_d"
-      ],
+      "extra_args": [],
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": true
     },

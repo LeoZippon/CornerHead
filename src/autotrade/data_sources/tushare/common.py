@@ -246,18 +246,6 @@ NEWS_SOURCES = [
     "yicai",
 ]
 
-MAJOR_NEWS_SOURCES = [
-    "新华网",
-    "凤凰财经",
-    "同花顺",
-    "新浪财经",
-    "华尔街见闻",
-    "中证网",
-    "财新网",
-    "第一财经",
-    "财联社",
-]
-
 BAK_BASIC_FIELDS = "trade_date,ts_code,name,industry,area,pe,float_share,total_share,total_assets,liquid_assets,fixed_assets,reserved,reserved_pershare,eps,bvps,pb,list_date,undp,per_undp,rev_yoy,profit_yoy,gpr,npr,holder_num"
 
 SEMANTIC_DOC_REFS = {

@@ -23,7 +23,7 @@ from autotrade.environment.sandbox import SandboxSpec
 from autotrade.environment.snapshot import SnapshotConfig
 from autotrade.environment.tools import ToolContext
 from autotrade.environment.web_search import SemanticScholarSearchProvider, TavilySearchProvider
-from autotrade.pipelines import ExperimentConfig
+from autotrade.pipelines import ExperimentConfig, ExperimentPipeline, RawSnapshotProvider
 
 
 DEFAULT_AGENT_MODEL = "deepseek-v4-pro"
@@ -57,6 +57,37 @@ def _opt_help(text: str, verbose_help: bool) -> str | None:
     leaves most shared flags help-less. Gating keeps each ``--help`` identical.
     """
     return text if verbose_help else None
+
+
+def resolve_meta_learning_directive(parser: argparse.ArgumentParser, args: argparse.Namespace) -> str:
+    if args.meta_learning_directive and args.meta_learning_directive_file:
+        parser.error("pass only one of --meta-learning-directive or --meta-learning-directive-file")
+    if args.meta_learning_directive_file:
+        return args.meta_learning_directive_file.read_text(encoding="utf-8")
+    return args.meta_learning_directive
+
+
+def build_pipeline(
+    config: ExperimentConfig,
+    args: argparse.Namespace,
+    agent_factory,
+    meta_learner,
+    proxies: "ProxyBundle",
+) -> ExperimentPipeline:
+    """Provider + pipeline wiring shared verbatim by both entrypoints."""
+    return ExperimentPipeline(
+        config,
+        RawSnapshotProvider(
+            args.raw_dir.resolve(),
+            args.fundamental_events_root.resolve(),
+            config=config.snapshot_config,
+            fundamental_events_status=args.fundamental_events_status.resolve(),
+        ),
+        agent_factory,
+        proxy=proxies.proxy,
+        nl_proxy=proxies.nl_proxy,
+        meta_learner=meta_learner,
+    )
 
 
 def require_generic_period_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:

@@ -69,5 +69,6 @@ RUN useradd --create-home --uid 61000 agent
 # Fixed mount points (populated by docker run -v).
 RUN mkdir -p /mnt/snapshots /mnt/artifacts /mnt/agent /mnt/runtime && chown root:root /mnt
 
-USER root
+# Image default user stays root (the build never switches away); the executor
+# selects the non-root agent user per-process at docker run time.
 WORKDIR /mnt/agent

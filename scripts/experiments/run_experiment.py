@@ -33,23 +33,19 @@ from _cli import (
     add_snapshot_window_arguments,
     add_web_search_arguments,
     build_meta_learning_sandbox_spec,
+    build_pipeline,
     build_proxies,
     build_session_builders,
     build_snapshot_config,
     build_web_search_providers,
     require_generic_period_args,
+    resolve_meta_learning_directive,
 )
 # Re-exported for the pipeline e2e test, which imports it from this module.
 from _cli import _session_config_summary  # noqa: F401
 
 from autotrade.environment.sandbox import SandboxSpec
-from autotrade.pipelines import (
-    AcceptanceRules,
-    ExperimentConfig,
-    ExperimentPipeline,
-    RawSnapshotProvider,
-    load_sse_trading_days,
-)
+from autotrade.pipelines import AcceptanceRules, ExperimentConfig, load_sse_trading_days
 
 
 def _resolve_period_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> tuple[str, str, str, str]:
@@ -117,11 +113,7 @@ def main() -> int:
     add_web_search_arguments(parser, verbose_help=True)
     add_meta_sandbox_arguments(parser, verbose_help=True, disable_rebuild_help=EXPERIMENT_META_REBUILD_HELP)
     args = parser.parse_args()
-    if args.meta_learning_directive and args.meta_learning_directive_file:
-        parser.error("pass only one of --meta-learning-directive or --meta-learning-directive-file")
-    meta_learning_directive = args.meta_learning_directive
-    if args.meta_learning_directive_file:
-        meta_learning_directive = args.meta_learning_directive_file.read_text(encoding="utf-8")
+    meta_learning_directive = resolve_meta_learning_directive(parser, args)
     first_test_period, last_test_period, heldout_first_period, heldout_last_period = _resolve_period_args(args, parser)
 
     snapshot_config = build_snapshot_config(args)
@@ -166,19 +158,7 @@ def main() -> int:
         web_search_providers=web_search_providers,
     )
 
-    pipeline = ExperimentPipeline(
-        config,
-        RawSnapshotProvider(
-            args.raw_dir.resolve(),
-            args.fundamental_events_root.resolve(),
-            config=config.snapshot_config,
-            fundamental_events_status=args.fundamental_events_status.resolve(),
-        ),
-        agent_factory,
-        proxy=proxies.proxy,
-        nl_proxy=proxies.nl_proxy,
-        meta_learner=meta_learner,
-    )
+    pipeline = build_pipeline(config, args, agent_factory, meta_learner, proxies)
     result = pipeline.run(load_sse_trading_days(args.raw_dir))
     print(json.dumps({"status": "ok", **result}, ensure_ascii=False, sort_keys=True))
     return 0

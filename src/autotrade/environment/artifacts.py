@@ -21,7 +21,6 @@ from autotrade.environment.runtime import RUNTIME_CACHE_DIR_NAMES, RUNTIME_CACHE
 REQUIRED_FILES = ("main.py",)
 ARTIFACT_METADATA_FILES = frozenset({"manifest.json"})
 READONLY_FILES = frozenset({"README.md"})
-DEFAULT_WRITABLE_FILES = frozenset({"main.py", "candidate.py", "trading.py"})
 ALLOWED_SUFFIXES = frozenset({".py", ".json", ".md", ".txt", ".toml", ".yaml", ".yml"})
 # Deny-by-default allowlist for the frozen, inheritable ``models/`` directory.
 # Covers mainstream parameter/weight/serialization formats; executables, shared
