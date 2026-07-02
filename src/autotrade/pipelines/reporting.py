@@ -14,6 +14,7 @@ Labels are English to stay font-safe on headless hosts.
 """
 
 from __future__ import annotations
+import math
 from pathlib import Path
 
 import matplotlib
@@ -443,7 +444,6 @@ def _epoch_metric_row(
     returns = [_num(row["test_return"]) for row in epoch_rows if _num(row["test_return"]) is not None]
     sharpes = [_num(row["test_sharpe"]) for row in epoch_rows if _num(row["test_sharpe"]) is not None]
     drawdowns = [_num(row["test_drawdown"]) for row in epoch_rows if _num(row["test_drawdown"]) is not None]
-    active_returns = [_num(row["active_return"]) for row in epoch_rows if _num(row["active_return"]) is not None]
     worst = min(epoch_rows, key=lambda row: _plot_num(row["test_return"])) if returns else None
     heldout_returns = [_num(row["test_return"]) for row in heldout_rows if _num(row["test_return"]) is not None]
     return [
@@ -454,7 +454,7 @@ def _epoch_metric_row(
         _fmt_pct(_compound_return(returns)),
         _fmt_pct(_mean([1.0 if value > 0 else 0.0 for value in returns])),
         _fmt(_mean(sharpes)),
-        _fmt_pct(_compound_return(active_returns)),
+        _fmt_pct(_compound_active_return(epoch_rows)),
         _fmt_pct(max(drawdowns) if drawdowns else None),
         str(worst["label"]) if worst else "-",
         _fmt_pct(_mean(heldout_returns)),
@@ -742,12 +742,18 @@ def _summarize(rows: list[dict[str, object]]) -> dict[str, object]:
         "development": {
             "mean_test_return": _mean(dev_tests),
             "median_test_return": _median(dev_tests),
+            "std_test_return": _std(dev_tests),
             "positive_test_rate": _mean([1.0 if value > 0 else 0.0 for value in dev_tests]),
             "worst_test_return": min(dev_tests) if dev_tests else None,
             "mean_test_sharpe": _mean([row["test_sharpe"] for row in dev if row["test_sharpe"] is not None]),
             "mean_benchmark_return": _mean(dev_benchmarks),
             "mean_active_return": _mean(dev_active),
-            "compound_active_return": _compound_return(dev_active),
+            "std_active_return": _std(dev_active),
+            # Ratio-standard compounded active return ∏(1+r)/∏(1+b)−1, matching the
+            # "Relative equity vs benchmark" chart and the "Cum active" table column.
+            "compound_active_return": _compound_active_return(dev),
+            # One-sample t-stat of per-fold active return vs zero; null when n<2 or std==0.
+            "active_return_tstat": _tstat(dev_active),
             "fold_status_counts": _counts([str(row["fold_status"]) for row in dev]),
         },
         "heldout": {
@@ -784,6 +790,25 @@ def _median(values: list[float]) -> float | None:
     return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
 
 
+def _std(values: list[float]) -> float | None:
+    """Sample standard deviation (ddof=1); None when fewer than two points."""
+    if len(values) < 2:
+        return None
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    return math.sqrt(variance)
+
+
+def _tstat(values: list[float]) -> float | None:
+    """One-sample t-statistic of the mean against zero: mean / (std/√n).
+    None when fewer than two points or the sample has zero dispersion."""
+    std = _std(values)
+    if std is None or std == 0:
+        return None
+    mean = sum(values) / len(values)
+    return mean / (std / math.sqrt(len(values)))
+
+
 def _compound_return(values: list[float]) -> float | None:
     if not values:
         return None
@@ -791,6 +816,26 @@ def _compound_return(values: list[float]) -> float | None:
     for value in values:
         current *= 1.0 + value
     return current - 1.0
+
+
+def _compound_active_return(rows: list[dict[str, object]]) -> float | None:
+    """Compounded active return as the strategy/benchmark equity ratio
+    ∏(1+rᵢ)/∏(1+bᵢ)−1, matching ``_active_curve``. Only folds carrying both a
+    strategy and a benchmark return contribute."""
+    strategy = 1.0
+    benchmark = 1.0
+    count = 0
+    for row in rows:
+        test_return = _num(row.get("test_return"))
+        bench = _num(row.get("benchmark_return"))
+        if test_return is None or bench is None:
+            continue
+        strategy *= 1.0 + test_return
+        benchmark *= 1.0 + bench
+        count += 1
+    if count == 0 or benchmark == 0:
+        return None
+    return strategy / benchmark - 1.0
 
 
 def _counts(values: list[str]) -> dict[str, int]:
