@@ -27,6 +27,7 @@ from autotrade.environment.artifacts import (
 )
 from autotrade.environment.data_summary import write_agent_data_summary
 from autotrade.environment.executor import DockerExecutor
+from autotrade.environment.identity import agent_visible_ref as _agent_visible_ref
 from autotrade.environment.llm.proxy import LLMProxy
 from autotrade.environment.runtime import AgentTraceWriter, RunManifest, new_id, utc_now_iso
 from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree
@@ -1461,11 +1462,6 @@ def _agent_visible_step_record(record: dict[str, object]) -> dict[str, object]:
         "summary",
     }
     return {key: value for key, value in record.items() if key in allowed}
-
-
-def _agent_visible_ref(value: object, *, prefix: str) -> str:
-    digest = hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:10]
-    return f"{prefix}_{digest}"
 
 
 def _read_json(path: Path) -> dict[str, object]:

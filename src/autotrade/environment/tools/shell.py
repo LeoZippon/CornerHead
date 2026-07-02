@@ -333,6 +333,8 @@ class SandboxShellTool:
         )
 
     def _guard_paths(self, command: str) -> None:
+        # Self-contained: strip heredoc bodies so this guard is safe for any caller
+        # (idempotent if the caller already stripped the skeleton).
         command = _strip_heredoc_bodies(command)
         tokens = _safe_split(command)
         segments = _command_segments(tokens) if tokens else [tokens]

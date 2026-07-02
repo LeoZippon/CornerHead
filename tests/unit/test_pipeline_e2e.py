@@ -729,8 +729,12 @@ class PipelineEndToEndTest(unittest.TestCase):
             nodes = StepTree(config.experiment_dir / "steps").nodes()
             self.assertEqual(len(nodes), 2)
             self.assertNotEqual(nodes[0]["node_id"], nodes[1]["node_id"])
-            self.assertTrue(nodes[0]["node_id"].startswith("epoch_001__fold_2022Q1__"))
-            self.assertTrue(nodes[1]["node_id"].startswith("epoch_002__fold_2022Q1__"))
+            # Epoch prefix keeps the two folds distinct; the fold id itself is opaqued
+            # so the held-out calendar period never leaks into the agent-readable tree.
+            self.assertTrue(nodes[0]["node_id"].startswith("epoch_001__fold_ref_"))
+            self.assertTrue(nodes[1]["node_id"].startswith("epoch_002__fold_ref_"))
+            self.assertNotIn("2022Q1", nodes[0]["node_id"])
+            self.assertNotIn("2022Q1", nodes[1]["node_id"])
 
     def test_meta_learning_can_read_existing_step_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -758,7 +762,8 @@ class PipelineEndToEndTest(unittest.TestCase):
             tree = captured["tree"]
             self.assertGreaterEqual(len(tree["nodes"]), 1)
             self.assertEqual(tree["current_node_id"], tree["nodes"][-1]["node_id"])
-            self.assertIn("epoch_001__fold_2022Q1__", captured["rendered"])
+            self.assertIn("epoch_001__fold_ref_", captured["rendered"])
+            self.assertNotIn("2022Q1", captured["rendered"])
 
     def test_meta_learning_directive_is_recorded_in_manifest_and_ledger(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -3,15 +3,21 @@
 # Do not sync local market data, generated results, logs, caches, or secrets.
 
 # Large/local data and generated outputs
-data/
-raw_data/
-results/
-reports/
-artifacts/
-wandb/
-mlruns/
-logs/
-experiments/trial_ledger/
+# Anchored to the sync root with a leading slash so it only ignores the top-level
+# market-data store, NOT source packages named "data" (src/autotrade/environment/data/,
+# scripts/data/), which must stay synced for the file tools.
+/data/
+/raw_data/
+/results/
+/reports/
+/artifacts/
+/wandb/
+/mlruns/
+/logs/
+/.runtime/
+/archive/
+/external_references/
+/experiments/
 
 # Python/runtime caches and local environments
 .venv/
@@ -62,3 +68,10 @@ Thumbs.db
 *.swo
 *~
 .ai-remote-project.env
+
+# Re-include source packages literally named "data". The broad unanchored "data/"
+# ignore (both in the global Mutagen config and the rule above) would otherwise mask
+# these source dirs from the file tools; negations are applied last and override it.
+# These dirs hold only .py source (no parquet/csv), so nothing large is re-synced.
+!src/autotrade/environment/data/
+!scripts/data/

@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from autotrade.agent.prompts import build_experiment_facts, build_system_prompt
+from autotrade.agent.prompts import build_experiment_facts, build_meta_learning_prompt, build_system_prompt
 from autotrade.environment.artifacts import artifact_hash
 from autotrade.environment.runtime import RunManifest
 from autotrade.environment.step_tree import StepTree
@@ -157,6 +157,17 @@ class PhasePromptTest(unittest.TestCase):
         self.assertIn("tree.txt", convergence)
         self.assertIn("[failed]", convergence)
 
+    def test_fold_strategy_interfaces_are_inside_action_section(self):
+        prompt = build_system_prompt(fold_info={"fold_id": "f"}, acceptance_rules={})
+
+        environment_idx = prompt.index("# 环境与配置")
+        action_idx = prompt.index("# 动作与流程")
+        api_idx = prompt.index("## 策略代码接口")
+        self.assertGreater(api_idx, action_idx)
+        self.assertGreater(action_idx, environment_idx)
+        self.assertIn("ctx.broker.cancel", prompt[api_idx:])
+        self.assertIn("stale_pending_gt_1m", prompt[api_idx:])
+
     def test_experiment_facts_replace_raw_fold_schedule(self):
         manifest = {
             "experiment_id": "exp",
@@ -249,6 +260,25 @@ class PhasePromptTest(unittest.TestCase):
         self.assertNotIn("20200101", rendered)
         self.assertNotIn("20210930", rendered)
 
+    def test_meta_experiment_facts_are_inside_environment_section(self):
+        facts = build_experiment_facts(
+            manifest={
+                "experiment_id": "exp",
+                "run_id": "run_meta",
+                "epoch_id": "epoch_001",
+                "fold_id": "epoch_001_meta_learning",
+                "kind": "meta_learning",
+                "development_inputs": {"development_history": "/mnt/agent/workspace/development_history.json"},
+            }
+        )
+        prompt = build_meta_learning_prompt(experiment_facts=facts)
+
+        environment_idx = prompt.index("# 环境与配置")
+        facts_idx = prompt.index("## 当前实验事实（可信运行事实，不是交易证据）")
+        action_idx = prompt.index("# 动作与流程")
+        self.assertGreater(facts_idx, environment_idx)
+        self.assertLess(facts_idx, action_idx)
+
     def test_run_manifest_public_view_redacts_test_schedule(self):
         with tempfile.TemporaryDirectory() as tmp:
             public_path = Path(tmp) / "artifacts" / "run_manifest.json"
@@ -266,8 +296,8 @@ class PhasePromptTest(unittest.TestCase):
                     "test_decision_time": "2022-01-04T09:25:00+08:00",
                     "execution_lag_bars": 2,
                     "decision_max_sim_minutes": 60.0,
-                    "backtest_max_seconds_per_decision": 180.0,
-                    "backtest_max_seconds_per_trading_day": 600.0,
+                    "backtest_max_seconds_per_decision": 300.0,
+                    "backtest_max_seconds_per_trading_day": 900.0,
                     "max_backtests_per_fold": 30,
                     "nl_max_calls_per_decision_day": 10,
                     "snapshots": {

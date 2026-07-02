@@ -121,9 +121,11 @@ class ExperimentConfig:
     execution_lag_bars: int = 2
     # Latency budgets. A ctx.substep(name, budget_minutes=B) is the block's real-wall
     # ceiling (the backtest aborts if real wall-time exceeds B) and the ctx.state_dir
-    # write-visibility gate (ready_at = tick + B); it does NOT move the order fill bar
-    # (orders fill at the default execution_lag_bars lag regardless of B). A declared
-    # B over decision_max_sim_minutes is rejected at ctx.substep() init (BacktestError).
+    # write-visibility gate (ready_at = tick + B). Broker actions inside a sub-minute
+    # block are submitted in the current decision minute; B>=1 waits until the first
+    # orderable tick at/after ready_at, then uses the normal execution_lag_bars fill
+    # mapping. A declared B over decision_max_sim_minutes is rejected at ctx.substep()
+    # init (BacktestError).
     # The two real-wall caps below are SYSTEM fail-fasts that scale with the replay
     # length instead of a fixed total: any single decision (one main(ctx) tick) over
     # backtest_max_seconds_per_decision is killed immediately, and a trade day whose
@@ -131,8 +133,8 @@ class ExperimentConfig:
     # (BacktestError, not accept-eligible) — forcing the Agent to cache heavy recompute
     # and bound rebalance/graph cost.
     decision_max_sim_minutes: float | None = 60.0
-    backtest_max_seconds_per_decision: float = 180.0
-    backtest_max_seconds_per_trading_day: float = 600.0
+    backtest_max_seconds_per_decision: float = 300.0
+    backtest_max_seconds_per_trading_day: float = 900.0
     # The two caps above are real wall-clock, hence load-dependent. To keep
     # acceptance reproducible (H2), they bound ONLY agent-iteration validation
     # backtests. The final evals (the per-fold frozen test_000 and held-out) must

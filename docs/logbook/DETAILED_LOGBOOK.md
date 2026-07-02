@@ -15674,3 +15674,504 @@ Three parallel Opus sub-agents audited the post-refactor repo across the user's 
   * Acceptable-as-is (documented): the projection is funds-only (it omits bar-level suspension/limit/shortable/holdings gates, which the host enforces at the real fill — the driver state has no limit/suspension columns); the short borrow fee is an explicit research assumption (intraday-closed shorts accrue none).
 - The driver changed, so the sandbox base image was rebuilt (cached layers reused) and re-verified; `DockerizedFoldE2ETest` runs the fixed driver end-to-end.
 - Validation: full suite 387 OK (+ side-mismatch test); `git diff --check` clean; PROMPTS.md in sync; image rebuilt. Memory ample, no GPU.
+
+2026-06-30 Audit follow-up — off-session orders, docs/tool contracts, audit CLI parity
+
+Task: act on the user's follow-up to the comprehensive audit while staying scoped. Decisions from the user: keep the `margin_secs` missing-day fallback, treat non-Docker isolation as local-dev-only risk, and handle "last complete valid" by telling the Agent to restore the best verified Step before `finish_fold` rather than changing Pipeline selection.
+
+- Confirmed the off-session tick finding as real: `_day_tick_plan` gave pre-open off-session ticks `activate_index=0`, so a 00:00-09:15 research/state tick could submit a broker action that filled at the first real bar, while config/prompt/docs said off-session ticks do not fill. Changed pre-open off-session ticks to `activate_index=None`/`is_auction=False`; explicit auction ticks keep their existing routing (09:15 -> 09:30 open auction, 09:25 -> first continuous bar, 14:57 -> 15:00 close auction). Added `test_preopen_offsession_tick_does_not_fill_at_open`; existing post-close off-session test still passes.
+- `scripts/experiments/run_audit_session.py` now mirrors `run_experiment.py`'s per-domain snapshot window flags: `--daily-window-months`, `--fundamentals-window-months`, `--events-window-months`, `--macro-window-months`, and `--text-window-months`; `_build_config()` passes them into `SnapshotConfig`. No shared builder refactor was introduced.
+- Updated Fold Prompt and living docs to the current function action names (`shell`, `web_search`, `modification_check`, `backtest`, `finish_fold`), removed the stale `backtest(mode="valid")` wording, and documented that `backtest`'s Agent-facing parameter is `replay_window`; Runner supplies valid mode.
+- Updated Agent/Pipeline docs and Prompt to require the Agent to make the current `output`/`models` the best verified Step before finishing; if a historical Step is better, restore it and re-run modification check + full `backtest` before `finish_fold`.
+- Clarified Timeview docs: `ctx.asof_dir` exposes five parquet parts domains (`daily`, `events`, `macro`, `fundamentals`, `intraday_1min`); text is not `ctx.asof_dir/text` and instead rolls through host `ctx.nl()` gating. Regenerated `configs/prompts/PROMPTS.md`.
+- Follow-up Prompt/template optimization after reading the current prompt closely: removed the "order at any tick" ambiguity, clarified that ordinary off-session ticks never call `ctx.broker`/`order_stock`, and documented the intended pre-open handoff (`off-session research -> ctx.state_dir plan -> 09:15/09:25 explicit pre-open submission`). `configs/agent_output_template/README.md` and `candidate.py` now call out the same pattern; `docs/QMT_documentation.md` states the live QMT contract mirrors this. Also softened the over-broad prohibition on `model_dir` access into the real hot-path rule: do not repeatedly call NL, reload models, or rebuild large tables every tick.
+- Meta-learning Prompt structure follow-up: moved `当前实验事实（可信运行事实，不是交易证据）` into the `# 环境与配置` section, before `# 动作与流程`, matching the Fold Agent prompt structure. Added `test_meta_experiment_facts_are_inside_environment_section` and regenerated `PROMPTS.md`.
+- Removed unused-looking but nonfunctional revision policy metadata from `configs/tushare_update_schedule.json`: `recent_force_refresh_datasets` and `dataset_policies`. Kept the actually consumed `sentinel_datasets`, `sentinel_sample_size`, and per-job `extra_args`.
+
+Validation:
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m json.tool configs/tushare_update_schedule.json`
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python scripts/experiments/run_audit_session.py --help` (confirmed the five new per-domain flags)
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/autotrade/agent/prompts.py scripts/experiments/run_audit_session.py src/autotrade/environment/main_ctx_engine.py`
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_main_ctx_replay` -> 33 OK
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_refresh_nodes` -> 14 OK
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest` -> 59 OK
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p 'test_*.py'` -> 388 OK
+- Follow-up validation for the meta-learning Prompt placement: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_step_tree` -> 11 OK; `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_sandbox_isolation.MetaLearningSessionTest.test_meta_learning_network_policy_is_inside_environment_section` -> 1 OK.
+- `git diff --check` -> clean
+- Old tool-name/doc drift scans and old Prompt semantics scans over living docs + prompt snapshots -> no matches. No GPU work.
+
+2026-06-30 Broker cancel API + Fold prompt/action split
+
+Task: open broker cancel for realistic live-trading semantics, add a stale-pending example, and reorganize the Fold Agent system prompt so environment facts and action primitives are clearly separated. After implementation, run a GPT-5.5 xhigh SubAgent audit, fix findings, then start one meta-learning Fold and one ordinary Fold formal test.
+
+Implementation:
+
+- `src/autotrade/environment/broker.py`
+  - `WorkingOrder` now carries `submitted_at`; `to_record()` exposes `submitted_at`, `remaining_bars`, and `reason`.
+  - `SimBroker.order_stock()` accepts a caller-provided `order_id` and `submitted_at`, so the driver can return stable IDs before host activation.
+- `src/autotrade/environment/main_ctx_driver.py`
+  - `ctx.broker.buy/sell/short/cover/close` now return `order_id`.
+  - Added `ctx.broker.cancel(order_id, reason=None)`.
+  - `ctx.broker.pending(ts_code=None)` supports all pending orders when `ts_code` is omitted and annotates same-tick records with `status="pending"` and `age_minutes=0.0`.
+  - Same-tick action records are normalized before exposure so `_substep` does not leak through `pending()`.
+- `src/autotrade/environment/main_ctx_engine.py`
+  - Added cancel action processing before ordinary order activation.
+  - Cancel can remove orders from the submit-lag queue or from the Broker working book; submit-lag cancels are recorded as `order_cancelled(... pending_stage="submit_lag")`.
+  - Same-tick order+cancel nets out of `main_actions`.
+  - After the last real bar of a trading day, day-end cancels are applied immediately so post-close off-session ticks do not see stale working orders.
+  - `_pending_view()` includes `submitted_at`, `status`, and computed `age_minutes`.
+- `src/autotrade/environment/state_staging.py`
+  - Formal Fold surfaced a runtime permission defect: host-created `.state`/`.state_staging` were 0775, while rootless Docker `agent` could not create tick subdirectories. `StateStager.__post_init__()` now chmods both scratch dirs to 0777.
+
+Prompt/docs/templates:
+
+- Fold prompt source (`src/autotrade/agent/prompts.py`) now keeps replay facts/rules in `# 环境与配置` and moves the trading primitives into `# 动作与流程 / ## 策略代码接口`.
+- Documented:
+  - `ctx.broker.cancel(order_id, reason=None)`
+  - `ctx.broker.pending(ts_code=None)`
+  - all order primitives return `order_id`
+  - `pending()` records expose `order_id`, `submitted_at`, `status`, `age_minutes`
+  - light stale-order hygiene should not be wrapped in `ctx.substep`
+  - ordinary off-session ticks should not submit new broker orders; pre-open plans should be written to `ctx.state_dir` and submitted from 09:15/09:25 or real-minute ticks.
+- Added prompt/template stale cancel example:
+  ```python
+  def cancel_stale_pending(ctx, max_age_minutes=1.0):
+      for order in ctx.broker.pending():
+          order_id = order.get("order_id")
+          age = float(order.get("age_minutes") or 0.0)
+          if order_id and age > max_age_minutes:
+              ctx.broker.cancel(order_id, reason="stale_pending_gt_1m")
+  ```
+- Regenerated `configs/prompts/PROMPTS.md`.
+- Updated `docs/environment_design.md`, `docs/agent_design.md`, `docs/QMT_documentation.md`, and `configs/agent_output_template/*` to match the new API and semantics.
+- Small audit-runner cleanup: the missing-image hint in `scripts/experiments/run_audit_session.py` now uses the correct repo-root Docker build context: `docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile .`.
+
+GPT-5.5 xhigh SubAgent audit:
+
+- SubAgent `019f1903-5dd6-7b51-8062-194ea21ed9de` reviewed the cancel implementation and prompt/docs.
+- Findings fixed:
+  - same-tick `pending()` records lacked the documented fields and leaked internal action metadata;
+  - post-close off-session hygiene could cancel a working order that should already have been day-end canceled;
+  - same-tick buy+cancel still left a misleading raw `main_actions` entry;
+  - README wording was too broad because it appeared to ban all `ctx.broker` calls off-session rather than just new order submission.
+
+Tests added/updated:
+
+- `tests/unit/test_main_ctx_replay.py`
+  - submit-lag cancel removes queued order before activation;
+  - working limit cancel removes broker working order;
+  - same-tick `pending()` record fields match the documented contract;
+  - same-tick buy+cancel produces no net `main_actions`;
+  - post-close hygiene does not override day-end cancel.
+- `tests/unit/test_step_tree.py`
+  - Fold strategy interfaces must live inside `# 动作与流程`.
+- `tests/unit/test_state_staging.py`
+  - `.state` and `.state_staging` must be world-writable for Docker agent compatibility.
+- `tests/unit/test_tools_flow.py`
+  - updated action assertions for returned order IDs / submitted time metadata.
+
+Formal test runs:
+
+- Rebuilt base sandbox image:
+  - `docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile .`
+  - cached layers reused; `main_ctx_driver.py` layer refreshed.
+- Meta-learning audit session:
+  - Command logged at `logs/audit_sessions/cancel_prompt_audit_20260630_2304_meta.log`
+  - Experiment: `experiments/cancel_prompt_audit_20260630_2304_meta`
+  - Result JSON: `status=ok`, `mode=meta-learning`, `taste_chars=5424`, visible fold `fold_2022Q1`.
+- Ordinary quarterly Fold diagnostic:
+  - Command logged at `logs/audit_sessions/cancel_prompt_audit_20260630_2320_fold.log`
+  - Runtime run `run_1035d8ca1531`.
+  - This run exposed the `.state_staging` Docker permission issue, then continued after the code fix was available to the process.
+  - Agent reached `fold_finished`; 3-day validation debug run `valid_001` succeeded with `order_count=19`, `trade_count=17`, `total_return=-1.1353%`, `state_staged_writes=0`, `state_unmerged_writes=0`.
+  - The CLI did not return a final experiment JSON because this initial-parent run had no complete validation and no parent fallback. It was treated as diagnostic evidence, not the closing formal ordinary Fold.
+- Ordinary day-period Fold rerun:
+  - Command logged at `logs/audit_sessions/cancel_prompt_audit_20260630_2359_fold_day.log`
+  - Experiment: `experiments/cancel_prompt_audit_20260630_2359_fold_day`
+  - Run: `run_f43ae3e0ced3`
+  - Fold: `fold_20220104` with validation period `20211231..20211231`.
+  - Result JSON: `status=ok`, `mode=fold`, `fold_status=no_update_timeout`, `frozen_strategy_artifact_id=template_cancel_parent`. This used an explicit parent artifact so runner fallback could close cleanly even without an accepted update.
+
+Validation:
+
+- Targeted related suite: `tests.unit.test_main_ctx_replay tests.unit.test_broker_engine tests.unit.test_step_tree tests.unit.test_tools_flow` -> 155 OK before the StateStager permission patch.
+- `tests.unit.test_state_staging` -> 7 OK after the permission patch.
+- Full suite: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p 'test_*.py'` -> 396 OK.
+- `git diff --check` -> clean.
+- Resource checks:
+  - before formal runs: memory ~398 GiB available; GPU 5 free, other GPUs occupied by existing Python jobs.
+  - after formal runs: memory ~397 GiB available; GPU 5 still free; no residual audit Docker container.
+
+2026-06-30 Backtest validation cap refresh + trace review
+
+Task:
+
+- Change validation backtest wall-clock caps from single tick 180s / single trading day 600s to 300s / 900s.
+- Review the just-run meta-learning and ordinary Fold artifacts for normal Agent IO and expected Agent Trace trajectory.
+- Remove older runtime sandboxes, keeping only the latest two.
+
+Implementation:
+
+- `src/autotrade/pipelines/config.py`
+  - `backtest_max_seconds_per_decision=300.0`.
+  - `backtest_max_seconds_per_trading_day=900.0`.
+- `src/autotrade/environment/tools/backtest.py`
+  - validation-mode missing-manifest fallback now uses 300s / 900s, so old/manual manifests do not silently lose the per-day cap.
+- `docs/environment_design.md`
+  - budget table now documents 300s / 900s for validation and keeps final eval at 900s / 3000s.
+- Test fixtures in `tests/unit/test_step_tree.py` and `tests/unit/test_tools_flow.py` updated to 300s / 900s.
+
+Sandbox cleanup:
+
+- Removed older `.runtime/sandboxes/run_*` directories with a Docker user-namespace cleanup where host `rm -rf` could not delete rootless-Docker-owned files.
+- Kept only:
+  - `.runtime/sandboxes/run_f43ae3e0ced3`
+  - `.runtime/sandboxes/run_1035d8ca1531`
+- Post-cleanup size: `.runtime/sandboxes` about 16G.
+
+Trace review:
+
+- Meta-learning formal run:
+  - Experiment: `experiments/cancel_prompt_audit_20260630_2304_meta`
+  - Run: `run_766797dac06a`
+  - Agent-visible inputs present: run manifest, data summary, train/valid snapshot views, development inputs.
+  - Trace counts: 14 `llm_call` all ok, 9 `web_search` calls (7 ok, 2 empty results), terminal `session_end` with `finish_status="meta_learning_done"`.
+  - Output: `meta_learning/epoch_001/taste.md`, ledger `status="taste_only"`, Taste length 5424 chars.
+- Ordinary day-period Fold formal run:
+  - Experiment: `experiments/cancel_prompt_audit_20260630_2359_fold_day`
+  - Run: `run_f43ae3e0ced3`
+  - Trace trajectory: input reads/search/explore -> output edits -> `modification_check` -> attempted `backtest` -> `finish_fold` -> pipeline frozen eval attempt.
+  - Agent IO was normal: run manifest/data summary/output files/trace/ledger were produced, and output template includes the new cancel/pending examples.
+  - All validation/frozen backtests failed with `replay region needs at least two trade dates for entry/exit`; the selected day-period validation slot had `20211231..20211231`, only one trading day. This is a period-selection limitation of that audit run, not a broken tool-call or prompt IO path.
+  - Pipeline closed by explicit parent fallback: ledger `fold_status="no_update_timeout"`, `frozen_strategy_artifact_id="template_cancel_parent"`.
+- Ordinary quarterly diagnostic run:
+  - Runtime only: `.runtime/sandboxes/run_1035d8ca1531`
+  - Trace trajectory followed the intended path after the StateStager permission fix: explore -> modification_check -> debug backtests -> `finish_fold` -> `session_end`.
+  - Initial debug backtests captured the permission defect (`PermissionError` on `.state_staging` / `.state/plan.json`); after the fix, `valid_000` and `valid_001` succeeded.
+  - `valid_001`: `replay_window=3`, `order_count=19`, `trade_count=17`, `total_return=-1.1353%`, `replay_wall_seconds=194.7`, `total_ticks=630`, `intraday_ticks=486`, `offsession_ticks=144`.
+  - It remains diagnostic because it had no complete validation and no parent fallback path.
+
+Default experiment parameters after this change:
+
+- Pipeline defaults: quarter folds, 1 epoch, 21-month decision window, 60-minute fold/meta deadline, 10 max Agent steps, 30 max backtests per Fold, Docker enabled.
+- Replay defaults: auction enabled, pre-open 09:15, auction decision 09:25, close auction 14:57, off-session tick every 15 minutes, execution lag 2 bars, Timeview enabled.
+- Budgets: Agent LLM per call 300s; validation backtest single tick 300s and single trading day 900s; final/frozen eval single tick 900s and single trading day 3000s; `ctx.substep` max declared sim budget 60 minutes.
+- Acceptance defaults: `min_return=0.0`, `min_sharpe=0.0`, `max_drawdown=0.25`, complete validation required.
+
+Validation:
+
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ToolFlowTest.test_wall_caps_are_tight_for_validation_and_generous_for_final_eval tests.unit.test_step_tree.PhasePromptTest.test_run_manifest_public_view_redacts_test_schedule tests.unit.test_step_tree.PhasePromptTest.test_fold_strategy_interfaces_are_inside_action_section tests.unit.test_step_tree.PhasePromptTest.test_meta_experiment_facts_are_inside_environment_section` -> 4 OK.
+- `git diff --check` -> clean.
+- `pytest` is not installed in the current `quant` environment (`No module named pytest`), so validation used `unittest`.
+
+2026-06-30 ctx.substep broker action delayed-submit semantics
+
+Task:
+
+- Change `ctx.substep(name, budget_minutes=B)` semantics so all substantive `main(ctx)` steps can be wrapped for wall-time accounting and limit enforcement without lying about simulated latency.
+- Desired contract: broker actions generated inside a substep wait until `ready_at = current tick + B`, submit on the first orderable tick at/after `ready_at`, then use the normal execution lag / auction matching path. Ordinary off-session ticks stay research/state only.
+
+Implementation:
+
+- `src/autotrade/environment/main_ctx_driver.py`
+  - Added per-tick substep budget tracking in the sandbox driver.
+  - Same-tick `ctx.broker.pending()` now includes substep-created broker actions with `pending_stage="substep_delay"`, `substep`, and `ready_at`.
+  - In-substep broker actions remain unprojected in the sandbox account/position view because they are delayed submit plans; non-substep immediate orders keep the existing intra-tick projection.
+- `src/autotrade/environment/main_ctx_engine.py`
+  - Added delayed-action queue and release path.
+  - At each tick, ready delayed actions are submitted before the next `main(ctx)` state is built, so the Agent sees them through the normal pending/position/account view after release.
+  - `_place_actions_at_tick()` now handles both immediate and delayed submissions, including `cancel` against delayed, submit-lag, and Broker working-book orders.
+  - Real/orderable ticks with no later fill bar now release the delayed action and record `main_actions_unfilled` with `reason="no_fill_bar_ahead"` instead of keeping it queued.
+  - Default `auction_close_time` aligned to `"14:57"` in both `run_main_ctx_replay()` and `_day_tick_plan()`.
+- `tests/unit/test_main_ctx_replay.py`
+  - Updated old substep-fill tests to the new submit-delay semantics.
+  - Added coverage for same-tick `pending_stage="substep_delay"` visibility, delayed-action cancel before ready, ready-on-final-real-tick no-fill, and default close-auction behavior.
+- Docs/prompts/templates:
+  - Updated `docs/environment_design.md`, `docs/agent_design.md`, `src/autotrade/agent/prompts.py`, `configs/agent_output_template/README.md`.
+  - Re-generated `configs/prompts/PROMPTS.md` with `scripts/dev/export_prompts.py`.
+  - Documented `age_minutes` stage semantics: `substep_delay` counts from generation tick; after ready submission, `submit_lag` counts from actual submit tick.
+
+SubAgent audit:
+
+- Spawned GPT-5.5 xhigh explorer `019f1991-585a-7903-b901-eda7e8f045be`.
+- Read-only audit findings were accepted and fixed:
+  - same-tick `pending()` visibility for substep-generated actions;
+  - ready delayed actions on real ticks without future fill bars must not silently roll forward;
+  - `auction_close_time` default mismatch with docs/config.
+
+Validation:
+
+- `PYTHONDONTWRITEBYTECODE=1 ~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_main_ctx_replay` -> 42 OK.
+- `~/miniconda3/envs/quant/bin/python -m py_compile src/autotrade/environment/main_ctx_engine.py src/autotrade/environment/main_ctx_driver.py tests/unit/test_main_ctx_replay.py` -> OK.
+- `rg -n 'B.*不改变成交|不改变成交 bar|不改变订单成交|does not move|not move.*fill|same default bar|keeps.*fill|不会延迟 broker action|不延迟 broker' src/autotrade docs configs tests -g '!docs/logbook/**' -g '!**/__pycache__/**'` -> no non-history hits.
+- `git diff --check` -> clean.
+- Full suite: `PYTHONDONTWRITEBYTECODE=1 ~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p 'test_*.py'` -> 400 OK.
+- Sandbox image: `docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile .` -> cached rebuild OK; refreshed `/opt/at_runtime/main_ctx_driver.py`.
+
+2026-06-30 ctx.substep coverage enforcement + GNN Fold rerun
+
+Task:
+
+- Make strategy wall-time accounting explicit by requiring all substantive `main(ctx)` work to be wrapped in `ctx.substep`.
+- Update Prompt/templates/living docs to teach the contract.
+- Delete the previous two Fold test sandboxes.
+- Rerun one meta-learning Fold with a user directive encouraging GNN / knowledge graph methods and one ordinary Fold with `--max-fold-minutes 30`.
+
+Implementation:
+
+- `src/autotrade/environment/main_ctx_driver.py`
+  - `ctx.broker.buy/sell/short/cover/close/cancel` now require an active substep.
+  - `ctx.state_dir` now raises outside an active substep.
+  - `ctx.nl()` now raises outside substep/import-time via the exposed `at_tools.nl` wrapper.
+  - Strategy import has an `AT_IMPORT_MAX_WALL_SECONDS` cap, default 30s, to keep expensive import-time work from bypassing substep accounting.
+  - The driver reports `main_wall_s` back to the host.
+  - State roots are driver-private: `AT_STATE_DIR` / `AT_STATE_STAGING_DIR` are read then removed from the strategy environment before import; `_guard_path` blocks direct strategy access to visible state and non-active staging roots.
+  - Substep `real_wall_s` now includes staging setup and merge/diff teardown so state staging overhead is not misclassified as untracked main time.
+  - `.state_staging` directories are chmod'd for host cleanup after Docker execution.
+- `src/autotrade/environment/main_ctx_engine.py`
+  - `run_main_ctx_replay()` added substep coverage enforcement: `main_wall_s - sum(substep.real_wall_s)` must stay below the small untracked threshold.
+  - `0 < budget_minutes < 1` remains a lightweight current-decision-minute block; `budget_minutes >= 1` delays staged state/broker plans until `ready_at`.
+- `src/autotrade/pipelines/config.py`
+  - Comments now describe the sub-minute/current-minute vs delayed-ready split.
+- Templates and prompts:
+  - `configs/agent_output_template/main.py` wraps the template strategy in `with ctx.substep("main_tick", budget_minutes=0.5)`.
+  - `candidate.py` wraps research and documents that manage/cancel helpers are called from an existing substep.
+  - `trading.py` and `README.md` document the same rule and include stale-pending cancellation inside a substep.
+  - `src/autotrade/agent/prompts.py` requires all broker/state/NL/research/screening/inference work to be in substeps and explains that broker actions inside a substep are delayed-submit plans, not immediate cash/position projections.
+  - Regenerated `configs/prompts/PROMPTS.md`.
+- Living docs:
+  - `docs/agent_design.md` and `docs/environment_design.md` updated for substep-only state/broker/NL access, private state roots, untracked wall-time rejection, and `B < 1` vs `B >= 1` timing.
+
+SubAgent audit:
+
+- GPT-5.5 xhigh explorer `019f19b9-e6b3-7803-9ba7-21251799cf36`.
+- Findings fixed:
+  - `AT_STATE_DIR` could let a strategy bypass `ctx.state_dir`; fixed by hiding env vars and path-guarding state roots.
+  - Import-time `ctx.nl()` and heavy import-time compute could bypass substeps; fixed by rejecting import-time NL and adding a 30s import wall cap.
+  - State staging setup/teardown was counted outside substep; fixed by including it in substep `real_wall_s`.
+  - Prompt/docs still implied intra-substep broker projection; rewritten to say broker actions are delayed-submit plans and account/position reflect filled state.
+  - `0 < B < 1` and `B >= 1` semantics needed explicit tests/docs; added.
+
+Tests:
+
+- Added coverage for:
+  - broker action outside substep is rejected;
+  - `ctx.state_dir` outside substep is rejected;
+  - hidden `AT_STATE_DIR` cannot be used for direct strategy access;
+  - import-time `ctx.nl()` is rejected;
+  - unwrapped strategy wall time is rejected;
+  - sub-minute budget submits on the current decision tick;
+  - substep actions do not project same-tick account/position state.
+- Full suite:
+  - `PYTHONDONTWRITEBYTECODE=1 ~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p 'test_*.py'` -> 406 tests OK, about 102s.
+- Dockerized Fold E2E passed after rebuilding the sandbox image.
+- `git diff --check` -> clean.
+- Cleaned generated caches:
+  - `rm -rf tests/unit/__pycache__ configs/agent_output_template/__pycache__`
+- Rebuilt image:
+  - `docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile .` -> OK.
+
+Sandbox cleanup:
+
+- Deleted previous Fold test sandboxes:
+  - `.runtime/sandboxes/run_f43ae3e0ced3`
+  - `.runtime/sandboxes/run_1035d8ca1531`
+- Host deletion needed a chmod pass for Docker-created read-only directories, then `rm -rf` succeeded.
+- New sandboxes retained for audit:
+  - `.runtime/sandboxes/run_a7c0c383d1ba` (~4.8G)
+  - `.runtime/sandboxes/run_fa55845aec77` (~9.8G)
+
+Resource checks:
+
+- Before formal experiments: about 397-398 GiB RAM available; GPU 5 free, other GPUs occupied by existing jobs.
+- After experiments: `free -h` showed 398 GiB available; `nvidia-smi` showed GPU 5 at 0 MiB / 0% utilization, other GPUs still occupied by pre-existing workloads.
+
+Meta-learning Fold:
+
+- Command:
+  - `~/miniconda3/envs/quant/bin/python scripts/experiments/run_audit_session.py --mode meta-learning --experiment-id substep_gnn_meta_20260630 --meta-learning-directive "...GNN/知识图谱...sandbox_environment.json..."`
+- Log:
+  - `logs/audit_sessions/substep_gnn_meta_20260630.log`
+- Result:
+  - JSON status `ok`, mode `meta-learning`, experiment dir `/Data/lzp/MacroQuant/experiments/substep_gnn_meta_20260630`, `taste_chars=4241`.
+  - Ledger: `experiments/substep_gnn_meta_20260630/ledgers/experiment_ledger.jsonl`, record status `taste_only`, `sandbox_image_update=null`.
+  - Taste: `experiments/substep_gnn_meta_20260630/meta_learning/epoch_001/taste.md`.
+- Taste conclusion:
+  - Current sandbox already has `networkx 3.6.1`, `scipy 1.17.1`, and `torch 2.5.1`.
+  - It recommends lightweight graph construction with existing `networkx/scipy/torch` primitives and does not request `torch-geometric`, because compile/version risk is not justified for this fold.
+  - It documents graph/knowledge-graph assumptions and substep usage, but writes only `sandbox_environment.example.json`, not an active derived-image `sandbox_environment.json`.
+
+Ordinary Fold:
+
+- Command:
+  - `~/miniconda3/envs/quant/bin/python scripts/experiments/run_audit_session.py --mode fold --experiment-id substep_gnn_fold_20260630 --taste-file experiments/substep_gnn_meta_20260630/meta_learning/epoch_001/taste.md --max-fold-minutes 30`
+- Log:
+  - `logs/audit_sessions/substep_gnn_fold_20260630.log`
+- Runtime:
+  - Sandbox `.runtime/sandboxes/run_fa55845aec77`.
+  - Trace `.runtime/sandboxes/run_fa55845aec77/artifacts/agent_trace.jsonl`.
+  - Generated strategy files under `.runtime/sandboxes/run_fa55845aec77/agent/output/`.
+  - Generated model artifacts under `.runtime/sandboxes/run_fa55845aec77/agent/models/`.
+- Strategy behavior:
+  - `main.py` uses `bookkeeping` (`budget_minutes=0.3`) to cancel stale pending orders, `check_plan` (`0.1`) to test state, `research(ctx, 15.0)` to build/write the graph plan, and `manage` (`0.5`) to submit orders.
+  - `graph.py` builds an industry co-membership graph with scipy sparse / sklearn Ridge / StandardScaler; no new external dependency was needed.
+  - The strategy imported successfully and passed modification checks.
+- Backtests completed before manual stop:
+  - `valid_000` 5-day: total_return `-0.0650678278`, sharpe `-68.2060`, max_drawdown `0.0370`, order_count `30`, replay_wall_seconds `376.67`.
+  - `valid_001` 5-day after fixing a feature-name bug: total_return `-0.0087820357`, sharpe `-4.9154`, max_drawdown `0.0111`, order_count `25`, replay_wall_seconds `378.99`.
+  - `valid_002` 5-day: total_return `0.0139566247`, sharpe `1.5550`, max_drawdown `0.00575`, order_count `25`, replay_wall_seconds `399.85`.
+- Substep runtime in `valid_002`:
+  - `bookkeeping`: count 1260, max about 0.017s, budget 0.3 min.
+  - `check_plan`: count 1260, max about 0.0067s, budget 0.1 min.
+  - `manage`: count 1260, max about 0.0119s, budget 0.5 min.
+  - `research`: count 1, max about 4.26s, budget 15 min.
+  - No substep timeout.
+- Full validation:
+  - Agent started `valid_003` complete validation with 61 trade days at `2026-06-30T19:43:27Z`.
+  - Agent itself estimated about 80 minutes based on the 5-day replay speed.
+  - The shell command timed out after about 3600s and the child Python/container were manually stopped.
+  - No finalized `experiments/substep_gnn_fold_20260630` directory was produced.
+- Conclusion:
+  - Agent input/output and substep trajectory were normal; it learned the substep/state/action contract and built a graph-style strategy.
+  - The ordinary Fold did not complete as a formal experiment because full validation wall time is not bounded by `--max-fold-minutes 30` in the current design. The replay cost is dominated by repeated timeview/strategy computation rather than any single substep overrun.
+
+## 2026-07-01 Second full audit (fresh eyes) + 11-item remediation
+
+**Audit.** 7 Opus sub-agents in parallel (agent/prompt, execution core, broker, tools/snapshot/NL, pipelines, data+cross-doc, two single-fold run analyses) plus own verification of the correctness-critical core (broker_core, state_staging, timeview, contracts, folds, config, main_ctx_driver, reporting, prompts). No High-severity correctness/PIT/isolation defect. Verified faithful: broker matching + prior-trading-day-close anchor (`folds._decision_time`), two-layer Timeview PIT (row `available_at` AND node `ready_at`, contracts.py), sandbox isolation, meta finalize order, §9.1 fail-fast list, config defaults vs env §7.2 budget table, PROMPTS.md byte-identical to prompts.py.
+
+**Findings + fixes (incl. the user's 11 items).**
+- M1 (PIT leak) — the agent-readable step tree (`steps/tree.txt|tree.json`) embedded `fold_<test_period>` (= the held-out quarter, e.g. `fold_2022Q1`); the run manifest already used the opaque `fold_ref_<sha10>` and data_summary was already opaqued, but the step tree was not. Added `src/autotrade/environment/identity.py` with the single `agent_visible_ref(value, prefix)` (deterministic sha256[:10]); repointed the three duplicate copies (runtime.py, pipelines/experiment.py, agent/prompts._opaque_fold_ref) at it (fixes L6 dedup). `tools/backtest.py` `record_step`/`record_failed_attempt` now wrap `manifest.require("fold_id")` in `agent_visible_ref(...,prefix="fold_ref")`. Host keeps the raw id (host_run_manifest). Verified `agent_visible_ref("fold_2022Q1")==fold_ref_be2515bf35`, matching existing pipeline output.
+- M2 (reproducibility) — `enforce_substep_coverage` (wall-clock `untracked_wall>0.05s`) was left `True` in frozen_eval unlike the per-substep timeout / hard caps, so load jitter could abort an accepted final/held-out eval (H2). `backtest.py` now passes `enforce_substep_coverage=enforce_substep_timeout` (== mode=="valid").
+- M3 (dead code / over-engineering) — after the substep delayed-submit refactor every `if self._cur_substep is None` branch in the sandbox `_Broker` is unreachable (`_require_substep` raises first). Removed `_project_open`/`_project_reduce`/`_cost_model` and the dead `_order`/`close` tails (~90 lines), the driver's `import broker_core`, and the `cost_model`/`initial_equity` fields from the engine per-tick payload (+ unused `asdict`). `main_ctx_driver.py` is now standard-library only. `ops/docker/sandbox.Dockerfile` no longer COPYs `broker_core.py`; executor.py + environment_design.md §4.1/§7.2 rationale updated. Also fixed B4 (cancel now unconditionally drops the id from the same-tick `pending()` view) and the stale `available_cash` docstring. `broker_core.py` stays — still imported by the host `SimBroker` (broker.py). Rebuilt `autotrade-sandbox:latest`; container-verified the driver imports stdlib-only and `broker_core` is no longer baked.
+- M4 — removed the inert/misleading `--allow-incomplete-validation` from both CLIs (the freeze pool hard-filters to `complete_validation` runs, so it could never freeze an incomplete run); both hardcode `require_complete_validation=True`; pipeline_design.md §4.1 updated.
+- item 5 — confirmed the design already keeps two separate dedicated timers (fold reasoning deadline with backtest wall credited back; per-decision 300s + per-day 900s backtest caps) and intentionally has NO single total backtest wall cap; added none.
+- L1 `artifacts._runtime_string_constants` guards `ast.parse` (SyntaxError→ArtifactError). L5 inline defaults for `auction_close_time` ("14:57") and frozen-eval per-day cap (3000). L7 removed dead `SNAPSHOT_FILES`. L8 timeview docstring five-domain, reporting y-axis "Fold return", data_documentation §3.5 lists `cron_update.py`, units.py cross-ref → §2.4. L9 modification_check hard-requires `initial_template_hash`. L2 agent_design §5.3 shows `weight` only on buy/short. L3 environment_design 09:25 auction relabeled (continuous taker, not batch auction). L4 `note` tool added to both docs' tool tables. L10 pipeline_design §8.3 clarifies the audit-session derived-image build.
+- Very-low — nested substeps tagged `nested` and excluded from the coverage sum (fail-fast still checks each); shell heredoc double-strip kept (defensive/idempotent — a direct-call test relies on it); `rolling_asof_enabled` + quarter InitVar compat aliases kept (resume-from-older-manifest is a real workflow).
+- item 8/9 — fold + meta prompts and the template forbid silent `except: pass` (fail-fast); added a "fixed daily schedule" bullet (research at a fixed pre-open time via `ctx.cur_time`, submit 09:15/09:25, wrap up 14:57) mirroring a real trader's routine, and gated the template `candidate.research()` on a fixed pre-open window; condensed agent_design §5.2 to defer execution/fill mechanics to env §7.2 (reduced 4-surface duplication); scrubbed the residual "投影/projection" wording on the money/cash view.
+
+**Two single-fold run analysis (regular_fold_last_taste_gpu / run_c6d6e61dd4cb; substep_gnn_fold / run_fa55845aec77).** Input reasonable and PIT-redacted (no test_period/held-out/≥2022 dates in the agent manifest; taste time-window-agnostic) modulo the M1 label leak; trajectory follows read→explore→write→modification_check→backtest→finish_fold in one conversation; environment interaction correct (broker in substeps on orderable ticks, plausible fills/rejects, no test-slot reads, PIT training boundaries); strategies PIT-safe and non-memorizing but money-losing (valid −6.3% / test −3.9%) with the GNN abandoned as overfit (frozen but unused). Red flags: fold deadline doesn't stop an un-completable full validation (R2 wasted the fold, no finish_fold), `pids_limit=512` thread exhaustion under heavy torch, and NL never called.
+
+**Item 11 (re-audit).** Opus sub-agent confirmed all 11 RESOLVED; its three residual nits (timeview six→five docstring miss, money/cash "投影" wording, mid-file identity import in runtime/experiment) were fixed and re-validated.
+
+**Validation.** full `unittest discover -t . -s tests` → 406 OK; `git diff --check` clean; PROMPTS.md regenerated and sha256-idempotent; base image rebuilt and container-verified; unused `hashlib` imports removed from runtime.py/prompts.py. New file `src/autotrade/environment/identity.py` (untracked). CPU-only; ~401Gi RAM free, GPU occupied by pre-existing tasks. Not committed — left as working-tree changes for review.
+
+## 2026-07-01 Formal torch-geometric meta-learning + ordinary Fold rerun
+
+**User request.** After Claude's modification/audit pass, rerun one meta-learning Fold and one ordinary Fold with formal experiment parameters. The meta-learning user directive must force torch-geometric usage.
+
+**Preparation.**
+
+- Rebuilt the base sandbox image:
+  - `docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile .`
+- Pre-run resources:
+  - RAM roughly 379-387 GiB available during launches.
+  - GPUs were mostly occupied by existing jobs; the ordinary Fold was allocated GPU 6.
+
+**Meta-learning run.**
+
+- Command:
+  - `~/miniconda3/envs/quant/bin/python scripts/experiments/run_audit_session.py --mode meta-learning --experiment-id torchgeo_formal_meta_20260701 --meta-learning-directive "...torch-geometric / PyTorch Geometric..."`
+- Log:
+  - `logs/audit_sessions/torchgeo_formal_meta_20260701.log`
+- Runtime sandbox:
+  - `.runtime/sandboxes/run_acf157809429`
+- Result:
+  - Final JSON `status=ok`, `mode=meta-learning`, `taste_chars=3926`.
+  - Ledger `experiments/torchgeo_formal_meta_20260701/ledgers/experiment_ledger.jsonl` recorded `status=taste_only`, `finish_status=meta_learning_done`, 18 LLM calls.
+  - Taste: `experiments/torchgeo_formal_meta_20260701/meta_learning/epoch_001/taste.md`.
+- Dependency transfer:
+  - Meta Agent wrote `workspace/sandbox_environment.json` with `python_packages=["torch-geometric>=2.6,<3"]`.
+  - Pipeline built `autotrade-sandbox:torchgeo_formal_meta_20260701-epoch_001-ed9e30de1151`.
+  - Build log shows `torch-geometric-2.8.0` installed successfully.
+  - Image list after the run included both `autotrade-sandbox:latest` and the derived torch-geometric image.
+
+**Ordinary Fold run.**
+
+- Command:
+  - `~/miniconda3/envs/quant/bin/python scripts/experiments/run_audit_session.py --mode fold --experiment-id torchgeo_formal_fold_20260701 --taste-file experiments/torchgeo_formal_meta_20260701/meta_learning/epoch_001/taste.md --sandbox-image autotrade-sandbox:torchgeo_formal_meta_20260701-epoch_001-ed9e30de1151`
+- Log:
+  - `logs/audit_sessions/torchgeo_formal_fold_20260701.log`
+- Runtime sandbox:
+  - `.runtime/sandboxes/run_caf370907b69`
+- Trace:
+  - `.runtime/sandboxes/run_caf370907b69/artifacts/agent_trace.jsonl`
+- Formal parameters confirmed from `run_manifest.json`:
+  - `fold_deadline_at=2026-07-01T11:08:11.877066+00:00` from a 60-minute ordinary Fold session.
+  - `fold_period=quarter`, validation `20211001..20211231`, input window `20200101..20210930`.
+  - `max_backtests_per_fold=30`, `max_steps=10`, `per_call_timeout_seconds=300`.
+  - `backtest_max_seconds_per_decision=300.0`, `backtest_max_seconds_per_trading_day=900.0`.
+  - Acceptance requires `require_complete_validation=true`.
+  - Sandbox image `autotrade-sandbox:torchgeo_formal_meta_20260701-epoch_001-ed9e30de1151`, Docker `network=none`, GPU `[6]`.
+- Dependency behavior:
+  - Ordinary Fold did not install packages; runtime policy says `install_packages_during_fold=false` and `network=none`.
+  - The Fold used the meta-derived image that already contained torch-geometric.
+  - Agent trained PyG-based scripts under `agent/workspace/train_gnn*.py` and generated model artifacts:
+    - `.runtime/sandboxes/run_caf370907b69/agent/models/gnn_model.pt`
+    - `.runtime/sandboxes/run_caf370907b69/agent/models/gnn_meta.json`
+- Final strategy shape:
+  - `output/main.py` wraps the whole tick in `ctx.substep("main_tick", budget_minutes=0.5)`.
+  - Fixed daily rhythm:
+    - `08:00` `gnn_research`, budget 15 min, selects candidates and writes a `ctx.state_dir` plan.
+    - `09:25` `gnn_execute`, budget 5 min, submits entries and rotated-out closes.
+    - `14:57` `gnn_exit`, budget 2 min.
+    - `10:00/11:00/13:30/14:00` `gnn_monitor`, budget 0.5 min, cancels stale pending orders.
+  - `gnn_core.py` defines a two-layer `GATConv` model (`IndustryGAT`) over stock nodes plus industry virtual nodes.
+  - Feature set: `ret_5d`, `ret_10d`, `ret_20d`, `vol_20d`, `turnover_rate`, valuation ranks, log market caps, and 5-day moneyflow.
+  - `gnn_meta.json` records 31 industry nodes, `in_dim=11`, `hidden_dim=64`, `heads=4`.
+  - Fallback path is an industry-neutral momentum/value composite.
+
+**Trace outcome.**
+
+- Initial attempts:
+  - First debug backtest failed with `main(ctx) at 20211008 08:00 spent 0.855s outside ctx.substep`; Agent then wrapped the main tick in a substep.
+  - Next debug backtest failed with `KeyError: 'ts_code'`; Agent fixed position/universe handling.
+- Successful non-accept-eligible validations:
+  - `valid_001`, 3 replay days:
+    - `total_return=0.0049090178`
+    - `sharpe=-1.2033453159`
+    - `max_drawdown=0.0061575095`
+    - `replay_wall_seconds=229.35015456285328`
+    - `order_count=24`, `trade_count=11`
+  - `valid_002`, 10 replay days:
+    - `complete_validation=false` in trace.
+    - `total_return=0.0300637197`
+    - `sharpe=5.5835947085`
+    - `max_drawdown=0.0070378903`
+    - `replay_wall_seconds=979.1696364944801`
+    - `order_count=108`, `trade_count=11`
+    - order statuses: 15 filled, 93 rejected.
+    - reject reasons: 84 `insufficient_cash`, 9 `amount_below_lot_size`.
+    - `phase_seconds`: `timeview_build=594.659`, `strategy_compute=271.421`, `broker_match=0.112`, `state_merge=0.026`.
+    - substep runtime: `gnn_research` 9 calls, max 19.43s, budget 15 min; execute/monitor/exit all sub-second and within budget.
+- Agent reasoning after `valid_002`:
+  - It extrapolated 10 replay days at 979s to the full 61-day validation at roughly 88 minutes.
+  - With about 3 minutes left before the ordinary Fold deadline, it chose to `finish_fold` without launching full validation.
+- Finish:
+  - `finish_fold` tool status was `fold_finished`.
+  - Final modification/contract check passed:
+    - strategy hash `sha256:9e06d860173dc69198f0031a2072b5c717f9e0e32eebf9b2062abfe03c845c62`
+    - model hash `sha256:fbad0d5f4bab288f8f0ae624ae0df7120f394334a22c78e9fccf7f8c991ba928`
+    - combined hash `sha256:288680f7aabe643600230820b9beecf18159da25e377a86c7d9c02eebf038b11`
+  - Agent session ended `finish_status=fold_finished`, 56 LLM calls, write locked.
+
+**Pipeline result.**
+
+- The ordinary Fold process exited with a traceback rather than a final success JSON:
+  - `RuntimeError: initial fold produced no acceptable baseline artifact: ['no successful complete validation backtest in this fold']`
+- No `experiments/torchgeo_formal_fold_20260701/` directory was produced.
+- This is consistent with the manifest: initial baseline acceptance requires a successful complete validation, while all completed backtests were replay-window partial validations.
+
+**Resource cleanup / final state.**
+
+- `docker ps` showed no running containers after the ordinary Fold exited.
+- Post-run resources:
+  - RAM: about 392 GiB available.
+  - GPU 6: about 7.8 GiB used, 0% utilization; other GPUs remained occupied by pre-existing workloads.
+- Runtime sandbox retained for audit:
+  - `.runtime/sandboxes/run_caf370907b69`
+
+**Conclusion.**
+
+- Meta-learning dependency declaration and derived-image construction worked.
+- Ordinary Fold successfully imported/used torch-geometric, trained a GAT-style model, produced strategy/model artifacts, learned the substep contract after fail-fast feedback, and followed the expected read/explore/write/check/backtest/finish trajectory.
+- Formal experiment still did not produce a frozen strategy because no complete validation finished. The blocker is not package transfer or Agent IO; it is the mismatch between full-quarter replay cost and the current Fold acceptance requirement for the initial baseline.

@@ -32,16 +32,6 @@ from autotrade.environment.features.fundamental_events import FUNDAMENTAL_EVENT_
 from autotrade.environment.features.units import normalize_daily_units
 from autotrade.environment.runtime import new_id, utc_now_iso
 
-SNAPSHOT_FILES = (
-    "daily.parquet",
-    "intraday_1min.parquet",
-    "fundamentals.parquet",
-    "events.parquet",
-    "macro.parquet",
-    "text_index.parquet",
-    "universe.parquet",
-)
-
 @dataclass(frozen=True)
 class SnapshotConfig:
     window_months: int = 21

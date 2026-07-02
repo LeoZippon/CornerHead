@@ -221,11 +221,6 @@ def main() -> int:
     parser.add_argument("--min-return", type=float, default=0.0, help="Minimum validation total return.")
     parser.add_argument("--min-sharpe", type=float, default=0.0, help="Minimum validation Sharpe.")
     parser.add_argument("--max-drawdown", type=float, default=0.25, help="Maximum validation drawdown.")
-    parser.add_argument(
-        "--allow-incomplete-validation",
-        action="store_true",
-        help="Allow freezing artifacts whose validation run did not complete main.py + broker replay.",
-    )
     parser.add_argument("--model", default=DEFAULT_AGENT_MODEL, help="Agent main-conversation model.")
     parser.add_argument(
         "--nl-model",
@@ -398,7 +393,9 @@ def main() -> int:
             min_return=args.min_return,
             min_sharpe=args.min_sharpe,
             max_drawdown=args.max_drawdown,
-            require_complete_validation=not args.allow_incomplete_validation,
+            # A fold only freezes a fully-completed validation (the freeze candidate
+            # pool hard-filters to complete_validation runs), so this stays strict.
+            require_complete_validation=True,
         ),
         sandbox_spec=sandbox_spec,
         meta_learning_sandbox_spec=meta_learning_sandbox_spec,

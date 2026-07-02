@@ -1,20 +1,20 @@
 """De-stringed persistent ``main(ctx)`` sandbox driver (R16; docs/environment_design.md).
 
-Loaded by file inside the Agent sandbox (``python main_ctx_driver.py <main.py> <marker>``)
-and shipped into the image alongside ``broker_core``. It serves one per-tick RPC over
+Loaded by file inside the Agent sandbox (``python main_ctx_driver.py <main.py> <marker>``).
+It serves one per-tick RPC over
 stdin/stdout: build a ``ctx``, call the Agent's ``main(ctx)``, and return the orders,
-declared sub-steps, and staged state writes. The intra-tick broker view projects fills
-with the SAME ``broker_core`` math the host SimBroker uses, so the agent-visible cash /
-buying power / position after an order match the broker's real fill.
+declared sub-steps, and staged state writes. Broker actions are only accepted inside
+``ctx.substep`` and are delayed-submit plans; the agent-visible cash / buying power /
+position view reflects filled broker state, while in-flight plans are visible through
+``ctx.broker.pending()``.
 
-This module imports only stdlib + the sibling ``broker_core`` (no ``autotrade`` or
-pandas import), so it runs unchanged in the dependency-light sandbox image.
+This module imports only the Python standard library (no ``autotrade``, ``pandas``, or
+``broker_core`` import), so it runs unchanged in the dependency-light sandbox image.
 """
 
 import builtins, contextlib, filecmp, importlib.util, json, os, re, shutil, sys, time, types, uuid
+from datetime import datetime, timedelta
 from pathlib import Path
-
-import broker_core
 
 _PROTOCOL_STDOUT = sys.stdout
 
@@ -54,23 +54,52 @@ def _path_roots(env_name):
 
 _FORBIDDEN_PATHS = _path_roots("AT_FORBIDDEN_PATHS")
 _WRITE_FORBIDDEN_PATHS = _path_roots("AT_WRITE_FORBIDDEN_PATHS")
+_STATE_VISIBLE_ROOTS = _path_roots("AT_STATE_DIR")
+_STATE_STAGING_ROOTS = _path_roots("AT_STATE_STAGING_DIR")
 _DISABLE_LINKS = os.environ.get("AT_DISABLE_LINKS", "") == "1"
+_STATE_GUARD = {"internal": 0, "active": ()}
 
 
 def _is_under(path, root):
     return path == root or root in path.parents
 
 
+def _is_under_any(path, roots):
+    return any(_is_under(path, root) for root in roots)
+
+
 def _guard_path(value, *, write=False):
     aliases = _path_aliases(value)
     if not aliases:
         return
+    if not _STATE_GUARD["internal"]:
+        active_state_roots = tuple(_STATE_GUARD.get("active") or ())
+        for path in aliases:
+            if _is_under_any(path, _STATE_VISIBLE_ROOTS):
+                raise PermissionError(
+                    "formal strategy cannot access managed state path directly; "
+                    "use ctx.state_dir inside ctx.substep(name, budget_minutes=B)"
+                )
+            if _is_under_any(path, _STATE_STAGING_ROOTS) and not _is_under_any(path, active_state_roots):
+                raise PermissionError(
+                    "formal strategy cannot access managed state staging path directly; "
+                    "use ctx.state_dir inside ctx.substep(name, budget_minutes=B)"
+                )
     roots = _FORBIDDEN_PATHS + (_WRITE_FORBIDDEN_PATHS if write else ())
     for path in aliases:
         for forbidden in roots:
             if _is_under(path, forbidden):
                 action = "write" if write else "access"
                 raise PermissionError(f"formal strategy cannot {action} forbidden path: {value}")
+
+
+@contextlib.contextmanager
+def _internal_state_access():
+    _STATE_GUARD["internal"] += 1
+    try:
+        yield
+    finally:
+        _STATE_GUARD["internal"] -= 1
 
 
 def _open_is_write(args, kwargs):
@@ -321,6 +350,7 @@ def _append_jsonl(path, record):
 
 
 _RESP_STATE = {"offset": 0, "responses": {}}
+_RUNTIME = {"active_substeps": 0}
 
 
 def _read_responses(path):
@@ -347,6 +377,11 @@ def _read_responses(path):
 
 
 def _nl(ts_code="", prompt="", *, timeout_seconds=None, content_only=False, **kwargs):
+    if _RUNTIME["active_substeps"] <= 0:
+        raise RuntimeError(
+            "ctx.nl() must be called inside ctx.substep(name, budget_minutes=B); "
+            "wrap text reads in a positive-budget substep so runtime is accounted consistently"
+        )
     request_path = os.environ.get("AT_NL_REQUESTS_PATH", "")
     response_path = os.environ.get("AT_NL_RESPONSES_PATH", "")
     if not request_path or not response_path:
@@ -384,54 +419,42 @@ def _bar_price(bar):
     return None
 
 
-def _cost_model(state):
-    """Rebuild the host CostModel from the per-tick state so the sandbox projection
-    uses identical commission/duty/slippage/short-margin economics."""
-    params = state.get("cost_model") or {}
-    return broker_core.CostModel(**params) if params else broker_core.CostModel()
-
-
 class _Broker:
     """Market-wide, ts_code-keyed view of the host Broker primitives.
 
     Calls are recorded as deferred actions applied by the trusted host Broker with full
-    market constraints. The intra-tick view of cash, buying power, and per-code position
-    is projected with the SAME shared ``broker_core`` math the host SimBroker fills with
-    (commission, slippage, lot sizing, short margin / locked proceeds), so several orders
-    in one tick stay self-consistent with the real fills: a second buy is sized against
-    buying power already reduced by the first buy's cost, and an order the broker would
-    reject for insufficient funds leaves the optimistic view unchanged."""
+    market constraints. Formal strategy actions must be issued inside ``ctx.substep``;
+    inside a substep they are submission plans, so cash, buying power, and position keep
+    reflecting filled state. The in-flight plans are exposed through ``pending()`` for
+    de-duplication and cancellation."""
 
-    def __init__(self, state, prices, cost):
+    def __init__(self, state):
         account = state.get("account") or {}
         self.account = account
         self.positions = state.get("positions") or []
-        self._cost = cost
-        self._trade_date = str(state.get("cur_date", "") or "")
+        self._cur_time = str(state.get("cur_time", "") or "")
+        self._cur_datetime = str(state.get("cur_datetime", "") or "")
+        self._tick_key = _safe_name(self._cur_datetime or self._cur_time or "tick")
+        self._client_seq = 0
+        # cash / available_cash / positions reflect the FILLED broker state at the
+        # start of this tick. Broker actions issued inside ctx.substep are delayed-submit
+        # plans (surfaced via pending()) that the host settles — they are NOT projected
+        # here — so these views stay at their entering-tick values for the whole tick.
         self._cash = float(state.get("cash", account.get("cash", 0.0)) or 0.0)
         self._available_cash = float(account.get("available_cash", self._cash) or 0.0)
-        self._initial_equity = float(state.get("initial_equity", 0.0) or 0.0)
-        self._prices = prices
         self._working = state.get("pending") or {}
         self._pos = {}
-        self._sellable = {}
-        self._short = {}
         for item in self.positions:
             code = str(item.get("ts_code"))
             qty = int(item.get("quantity", 0) or 0)
             side = str(item.get("side", "long"))
             self._pos[code] = qty if side == "long" else -qty
-            self._sellable[code] = int(item.get("sellable_quantity", qty) or 0)
-            if side == "short":
-                self._short[code] = {
-                    "qty": qty,
-                    "entry_cost": float(item.get("entry_cost", 0.0) or 0.0),
-                    "entry_price": float(item.get("entry_price", 0.0) or 0.0),
-                }
         self._actions = []
+        self._cancelled_this_tick = set()
         self._substeps = []      # [{name, budget_minutes, real_wall_s}] declared this tick
         self._substep_names = set()
-        self._cur_substep = None  # name of the open ctx.substep, tagged onto each order
+        self._substep_budgets = {}
+        self._cur_substep = None  # name of the open ctx.substep, used for host delayed-submit routing
         self._staged = []        # [{staging_rel, state_rel, substep, budget_minutes}] this tick
 
     @property
@@ -444,46 +467,133 @@ class _Broker:
 
     @property
     def available_cash(self):
-        """Deployable buying power (cash minus short margin and locked proceeds),
-        projected intra-tick so successive orders size against the real headroom."""
+        """Deployable buying power (cash minus short margin and locked proceeds) in the
+        FILLED broker state at the start of this tick. Substep broker actions are
+        delayed-submit plans that do NOT change this view within the tick, so size a
+        same-tick sequence of orders conservatively and let the host broker settle."""
         return self._available_cash
 
     def position(self, ts_code):
         return self._pos.get(str(ts_code), 0)
 
-    def pending(self, ts_code):
+    def pending(self, ts_code=None):
         """Still-working orders for ``ts_code`` — those queued on earlier ticks and
         not yet filled, plus any submitted this tick. Mirrors the live order query
         so re-entry/exit logic can skip codes with an order already in flight."""
-        code = str(ts_code)
-        working = list(self._working.get(code, []))
-        working.extend(action for action in self._actions if str(action.get("ts_code")) == code)
+        code = None if ts_code is None else str(ts_code)
+        if code is None:
+            working = [item for records in self._working.values() for item in records]
+        else:
+            working = list(self._working.get(code, []))
+        working = [
+            item for item in working
+            if str(item.get("order_id", "")) not in self._cancelled_this_tick
+        ]
+        working.extend(
+            self._pending_action_record(action)
+            for action in self._actions
+            if action.get("action") != "cancel"
+            and str(action.get("order_id", "")) not in self._cancelled_this_tick
+            and (code is None or str(action.get("ts_code")) == code)
+        )
         return working
 
+    def _pending_action_record(self, action):
+        record = {
+            key: value
+            for key, value in dict(action).items()
+            if key != "_substep"
+        }
+        substep = action.get("_substep")
+        if substep is not None:
+            step_name = str(substep)
+            budget = self._substep_budgets.get(step_name)
+            record["pending_stage"] = "substep_delay"
+            record["substep"] = step_name
+            if budget is not None:
+                record["ready_at"] = self._ready_at_iso(float(budget))
+        record.setdefault("status", "pending")
+        record.setdefault("age_minutes", 0.0)
+        return record
+
+    def _ready_at_iso(self, budget_minutes):
+        try:
+            base = datetime.fromisoformat(str(self._cur_datetime or ""))
+        except ValueError:
+            return ""
+        return (base + timedelta(minutes=float(budget_minutes or 0.0))).isoformat()
+
     def buy(self, ts_code, amount=None, weight=None, limit=None, valid_bars=None, reason=None, **kwargs):
-        self._order("buy", ts_code, amount, weight, limit, valid_bars, reason)
+        self._require_substep("buy")
+        return self._order("buy", ts_code, amount, weight, limit, valid_bars, reason)
 
     def sell(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None, **kwargs):
-        self._order("sell", ts_code, amount, None, limit, valid_bars, reason)
+        self._require_substep("sell")
+        return self._order("sell", ts_code, amount, None, limit, valid_bars, reason)
 
     def short(self, ts_code, amount=None, weight=None, limit=None, valid_bars=None, reason=None, **kwargs):
-        self._order("short", ts_code, amount, weight, limit, valid_bars, reason)
+        self._require_substep("short")
+        return self._order("short", ts_code, amount, weight, limit, valid_bars, reason)
 
     def cover(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None, **kwargs):
-        self._order("cover", ts_code, amount, None, limit, valid_bars, reason)
+        self._require_substep("cover")
+        return self._order("cover", ts_code, amount, None, limit, valid_bars, reason)
 
     def close(self, ts_code, reason=None, **kwargs):
+        self._require_substep("close")
         code = str(ts_code)
-        self._actions.append({"action": "close", "ts_code": code, "reason": reason, "_substep": self._cur_substep})
-        held = self._pos.get(code, 0)
-        price = self._prices.get(code)
-        if held == 0 or price is None or price <= 0:
+        order_id = self._new_order_id()
+        self._actions.append({
+            "action": "close", "ts_code": code, "reason": reason, "order_id": order_id,
+            "submitted_at": self._cur_datetime, "submitted_time": self._cur_time,
+            "_substep": self._cur_substep,
+        })
+        return order_id
+
+    def cancel(self, order_id, reason=None, **kwargs):
+        """Cancel a still-pending order returned by ``ctx.broker.pending()``.
+
+        Mirrors live ``cancel_order_stock(order_id)`` at the strategy layer. The host
+        removes the order across the substep-delay / submit-lag / working-order queues;
+        the cancelled id is also dropped from this tick's ``pending()`` view so a
+        same-tick re-scan does not re-see it.
+        """
+        oid = str(order_id or "").strip()
+        if not oid:
+            return False
+        self._require_substep("cancel")
+        self._cancelled_this_tick.add(oid)
+        self._actions.append({
+            "action": "cancel",
+            "order_id": oid,
+            "reason": reason or "agent_cancel",
+            "_substep": self._cur_substep,
+        })
+        return True
+
+    def _require_substep(self, op):
+        if self._cur_substep is not None:
             return
-        self._project_reduce("close", code, price, abs(held))
+        raise RuntimeError(
+            "ctx.broker.%s() must be called inside ctx.substep(name, budget_minutes=B); "
+            "wrap every broker action in a positive-budget substep so runtime and "
+            "submission latency are accounted consistently" % op
+        )
+
+    def _new_order_id(self):
+        self._client_seq += 1
+        return "C%s_%03d" % (self._tick_key, self._client_seq)
 
     def _order(self, action, ts_code, amount, weight, limit, valid_bars, reason):
         code = str(ts_code)
-        record = {"action": action, "ts_code": code}
+        order_id = self._new_order_id()
+        record = {
+            "action": action,
+            "ts_code": code,
+            "order_id": order_id,
+            "submitted_at": self._cur_datetime,
+            "submitted_time": self._cur_time,
+        }
         if amount is not None:
             record["amount"] = amount
         if weight is not None:
@@ -496,104 +606,66 @@ class _Broker:
             record["reason"] = reason
         record["_substep"] = self._cur_substep
         self._actions.append(record)
-        if limit is not None:
-            return  # a resting limit order may not fill; leave the optimistic view unchanged
-        price = self._prices.get(code)
-        if price is None or price <= 0:
-            return
-        shares = broker_core.resolve_shares(amount, weight, price, self._initial_equity)
-        if shares <= 0:
-            return
-        if action in ("buy", "short"):
-            self._project_open(action, code, price, shares)
-        else:
-            self._project_reduce(action, code, price, shares)
-
-    def _project_open(self, action, code, price, shares):
-        side = "long" if action == "buy" else "short"
-        held = self._pos.get(code, 0)
-        if (side == "long" and held < 0) or (side == "short" and held > 0):
-            return  # the broker rejects opening opposite to the held side
-        fill = broker_core.project_open(
-            self._cost, side=side, raw_price=price, shares=shares, trade_date=self._trade_date
-        )
-        if fill.required_cash > self._available_cash + 1e-6:
-            return  # the broker would reject for insufficient cash/margin; view unchanged
-        self._cash += fill.cash_delta
-        # Buying power gates on required_cash (margin+fee+duty for a short) but a short
-        # only LOCKS margin: its banked net proceeds offset the fee/duty, so available
-        # cash drops by margin, not required_cash — matching SimBroker.available_cash().
-        self._available_cash -= fill.margin if side == "short" else fill.required_cash
-        self._pos[code] = held + (shares if side == "long" else -shares)
-        if side == "short":
-            st = self._short.setdefault(code, {"qty": 0, "entry_cost": 0.0, "entry_price": fill.price})
-            total = st["qty"] + shares
-            st["entry_price"] = (st["entry_price"] * st["qty"] + fill.price * shares) / total if total else fill.price
-            st["qty"] = total
-            st["entry_cost"] += fill.cost_basis
-
-    def _project_reduce(self, action, code, price, shares):
-        held = self._pos.get(code, 0)
-        if held == 0 or shares <= 0:
-            return
-        if held > 0:
-            if action == "cover":
-                return  # the broker rejects cover on a long-held code (side mismatch)
-            # A code absent from the snapshot was opened earlier THIS tick, so it is
-            # T+1 locked (0 sellable) — default to 0, not the held count.
-            sellable = self._sellable.get(code, 0)
-            shares = min(shares, sellable, held)
-            if shares <= 0:
-                return  # T+1: shares acquired today are not yet sellable
-            fill = broker_core.project_reduce(
-                self._cost, side="long", raw_price=price, shares=shares, trade_date=self._trade_date
-            )
-            self._cash += fill.cash_delta
-            self._available_cash += fill.cash_delta  # selling a long frees its cash
-            self._pos[code] = held - shares
-            self._sellable[code] = sellable - shares  # consume the sellable balance this tick
-        else:
-            if action == "sell":
-                return  # the broker rejects sell on a short-held code (side mismatch)
-            shares = min(shares, -held)
-            fill = broker_core.project_reduce(
-                self._cost, side="short", raw_price=price, shares=shares, trade_date=self._trade_date
-            )
-            st = self._short.get(code) or {"qty": -held, "entry_cost": 0.0, "entry_price": price}
-            qty = st["qty"] or -held
-            released_proceeds = st["entry_cost"] * shares / qty if qty else 0.0
-            released_margin = st["entry_price"] * shares * self._cost.short_margin_ratio
-            self._cash += fill.cash_delta
-            # covering releases the locked proceeds + margin and pays the buyback.
-            self._available_cash += released_margin + released_proceeds + fill.cash_delta
-            self._pos[code] = held + shares
-            st["qty"] = qty - shares
-            st["entry_cost"] -= released_proceeds
-            self._short[code] = st
+        return order_id
 
 
 class _Ctx(types.SimpleNamespace):
-    """main(ctx) view. ``state_dir`` is a property so that, inside ctx.substep(),
-    it resolves to a hidden staging directory; outside it resolves to the managed,
-    visible state directory. Writing via ctx.state_dir therefore stages a heavy
-    block's output regardless of the write mechanism (json, parquet, native), and
-    the host merges it into the visible directory only once the block's declared
-    duration has elapsed (ready_at = tick + B)."""
+    """main(ctx) view. ``state_dir`` is available only inside ctx.substep(), where
+    it resolves to a hidden staging directory seeded from the visible state.
+    Writing via ctx.state_dir therefore stages a block's output regardless of the
+    write mechanism (json, parquet, native), and the host merges it into the
+    visible directory only once the declared duration has elapsed."""
 
     @property
     def state_dir(self):
         holder = self._state_holder
-        return holder["active"] or holder["visible"]
+        if not holder["active"]:
+            raise RuntimeError(
+                "ctx.state_dir is only available inside ctx.substep(name, budget_minutes=B); "
+                "wrap state reads/writes in a positive-budget substep so visibility latency "
+                "and wall time are accounted consistently"
+            )
+        return holder["active"]
 
 
 def _safe_name(text):
     return re.sub(r"[^0-9A-Za-z._-]", "_", str(text or "tick"))
 
 
+def _chmod_dirs_for_host_cleanup(path, stop_at):
+    """Make Docker-created staging dirs removable by the host-side test runner."""
+    try:
+        stop = os.path.abspath(stop_at)
+        cur = os.path.abspath(path)
+    except (TypeError, ValueError):
+        return
+    while cur.startswith(stop):
+        try:
+            os.chmod(cur, 0o777)
+        except OSError:
+            pass
+        if cur == stop:
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    for root, dirs, _files in os.walk(path):
+        try:
+            os.chmod(root, 0o777)
+        except OSError:
+            pass
+        for dirname in dirs:
+            try:
+                os.chmod(os.path.join(root, dirname), 0o777)
+            except OSError:
+                pass
+
+
 def _build_ctx(state, snapshot_dir, model_dir, state_dir, staging_root):
     bars = {str(b.get("ts_code", "")): dict(b) for b in (state.get("bars") or [])}
     prices = {code: _bar_price(bar) for code, bar in bars.items()}
-    broker = _Broker(state, prices, _cost_model(state))
+    broker = _Broker(state)
     state_holder = {"active": None, "visible": state_dir}
     tick_key = _safe_name(state.get("cur_datetime") or state.get("cur_time") or "tick")
 
@@ -605,13 +677,15 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir, staging_root):
 
     @contextlib.contextmanager
     def substep(name, budget_minutes=None):
-        # Declared compute duration (minutes) for a heavy block. B is the block's
+        # Declared compute duration (minutes) for a decision block. B is the block's
         # real-time ceiling (the host aborts the backtest if real wall-time exceeds B),
         # it is bounded by decision_max_sim_minutes, and it gates when in-block writes
-        # to ctx.state_dir become visible (ready_at = tick + B). It does NOT move the
-        # order fill bar: orders fill at the normal decision-bar lag regardless of B.
+        # to ctx.state_dir become visible (ready_at = tick + B). Broker actions issued
+        # inside the block are also tagged for host-side submission timing: sub-minute
+        # budgets finish inside the current decision minute, while B>=1 waits until
+        # the first orderable tick at/after ready_at before normal execution lag.
         # A wrapped block MUST declare B > 0; wrapping with 0 is identical to not
-        # wrapping, so it is rejected. Leave trivial per-tick code unwrapped.
+        # wrapping, so it is rejected. Use a small positive B for light per-tick code.
         try:
             budget = float(budget_minutes) if budget_minutes is not None else 0.0
         except (TypeError, ValueError):
@@ -620,7 +694,7 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir, staging_root):
             raise ValueError(
                 "ctx.substep(name, budget_minutes=B) requires B > 0 minutes (the time this "
                 "block may take, which is also its real-time ceiling); use a small value such "
-                "as 0.5 for light work. Leave trivial per-tick code unwrapped for the default lag."
+                "as 0.5 for light per-tick work."
             )
         _cap = os.environ.get("AT_DECISION_MAX_SIM_MINUTES", "")
         if _cap:
@@ -640,45 +714,61 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir, staging_root):
                 "for each decision block so its latency budget maps unambiguously to orders."
             )
         broker._substep_names.add(step_name)
+        broker._substep_budgets[step_name] = budget
         prev = broker._cur_substep
         prev_active = state_holder["active"]
+        prev_active_roots = tuple(_STATE_GUARD.get("active") or ())
         # ctx.state_dir resolves to this staging dir inside the block. Seed it with a
         # copy of the current visible state so reads see the old visible value (the
         # contract: reads always see the visible directory); writes land here and the
         # host merges them into the visible state dir once ready_at = this tick + B.
+        start = time.monotonic()
         staging_subdir = os.path.join(staging_root, tick_key, _safe_name(step_name))
-        os.makedirs(staging_subdir, exist_ok=True)
         visible_dir = state_holder["visible"]
-        if visible_dir and os.path.isdir(visible_dir):
-            shutil.copytree(visible_dir, staging_subdir, dirs_exist_ok=True)
+        with _internal_state_access():
+            os.makedirs(staging_subdir, exist_ok=True)
+            _chmod_dirs_for_host_cleanup(staging_subdir, staging_root)
+            if visible_dir and os.path.isdir(visible_dir):
+                shutil.copytree(visible_dir, staging_subdir, dirs_exist_ok=True)
+                _chmod_dirs_for_host_cleanup(staging_subdir, staging_root)
+        _STATE_GUARD["active"] = prev_active_roots + _path_aliases(staging_subdir)
         state_holder["active"] = staging_subdir
         broker._cur_substep = step_name
-        start = time.monotonic()
+        _RUNTIME["active_substeps"] += 1
         try:
             yield
         finally:
-            broker._substeps.append({
-                "name": step_name,
-                "budget_minutes": budget,
-                "real_wall_s": time.monotonic() - start,
-            })
-            # Stage only files the block created or changed vs the visible copy; the
-            # unchanged seeded copies are not writes and must not re-merge.
-            for _root, _dirs, _files in os.walk(staging_subdir):
-                for _fn in _files:
-                    _abs = os.path.join(_root, _fn)
-                    _state_rel = os.path.relpath(_abs, staging_subdir)
-                    _visible = os.path.join(visible_dir, _state_rel) if visible_dir else ""
-                    if _visible and os.path.exists(_visible) and filecmp.cmp(_abs, _visible, shallow=False):
-                        continue
-                    broker._staged.append({
-                        "staging_rel": os.path.relpath(_abs, staging_root),
-                        "state_rel": _state_rel,
-                        "substep": step_name,
-                        "budget_minutes": budget,
-                    })
-            state_holder["active"] = prev_active
-            broker._cur_substep = prev
+            try:
+                # Stage only files the block created or changed vs the visible copy; the
+                # unchanged seeded copies are not writes and must not re-merge.
+                with _internal_state_access():
+                    for _root, _dirs, _files in os.walk(staging_subdir):
+                        for _fn in _files:
+                            _abs = os.path.join(_root, _fn)
+                            _state_rel = os.path.relpath(_abs, staging_subdir)
+                            _visible = os.path.join(visible_dir, _state_rel) if visible_dir else ""
+                            if _visible and os.path.exists(_visible) and filecmp.cmp(_abs, _visible, shallow=False):
+                                continue
+                            broker._staged.append({
+                                "staging_rel": os.path.relpath(_abs, staging_root),
+                                "state_rel": _state_rel,
+                                "substep": step_name,
+                                "budget_minutes": budget,
+                            })
+                    _chmod_dirs_for_host_cleanup(staging_subdir, staging_root)
+            finally:
+                _RUNTIME["active_substeps"] -= 1
+                broker._substeps.append({
+                    "name": step_name,
+                    "budget_minutes": budget,
+                    "real_wall_s": time.monotonic() - start,
+                    # A nested substep's wall-time is already inside its parent's, so the
+                    # host excludes it from the coverage sum (still fail-fast-checked).
+                    "nested": prev is not None,
+                })
+                _STATE_GUARD["active"] = prev_active_roots
+                state_holder["active"] = prev_active
+                broker._cur_substep = prev
 
     return _Ctx(
         broker=broker,
@@ -718,13 +808,26 @@ def _serve():
     model_dir = os.environ.get("AT_MODEL_DIR", "/mnt/agent/models")
     state_dir = os.environ.get("AT_STATE_DIR", "/mnt/agent/workspace/.state")
     staging_root = os.environ.get("AT_STATE_STAGING_DIR", "/mnt/agent/workspace/.state_staging")
+    os.environ.pop("AT_STATE_DIR", None)
+    os.environ.pop("AT_STATE_STAGING_DIR", None)
     main_module = None
     main_load_error = None
+    import_start = time.monotonic()
     with contextlib.redirect_stdout(sys.stderr):
         try:
             main_module = _load_module(main_path, "agent_strategy_main")
         except Exception as exc:
             main_load_error = _sanitize_error("%s: %s" % (type(exc).__name__, exc))
+    import_wall_s = time.monotonic() - import_start
+    try:
+        import_cap = float(os.environ.get("AT_IMPORT_MAX_WALL_SECONDS", "30"))
+    except ValueError:
+        import_cap = 30.0
+    if main_load_error is None and import_wall_s > import_cap:
+        main_load_error = (
+            "strategy import exceeded its %.0fs wall-clock cap (%.1fs); "
+            "keep module top level to imports/constants and do strategy work inside ctx.substep"
+        ) % (import_cap, import_wall_s)
 
     main_fn = getattr(main_module, "main", None) if main_module is not None else None
 
@@ -739,19 +842,22 @@ def _serve():
             if request.get("op") == "validate":
                 if not callable(main_fn):
                     raise AttributeError("main.py must define main(ctx)")
-                response = {"request_id": request_id, "status": "ok"}
+                response = {"request_id": request_id, "status": "ok", "import_wall_s": import_wall_s}
             else:
                 if not callable(main_fn):
                     raise AttributeError("main.py must define main(ctx)")
                 ctx, broker = _build_ctx(request.get("state") or {}, snapshot_dir, model_dir, state_dir, staging_root)
+                main_start = time.monotonic()
                 with contextlib.redirect_stdout(sys.stderr):
                     main_fn(ctx)
+                main_wall_s = time.monotonic() - main_start
                 response = {
                     "request_id": request_id,
                     "status": "ok",
                     "actions": broker._actions,
                     "substeps": broker._substeps,
                     "staged": broker._staged,
+                    "main_wall_s": main_wall_s,
                 }
         except Exception as exc:
             response = {"request_id": request_id, "status": "error", "error": _sanitize_error("%s: %s" % (type(exc).__name__, exc))}

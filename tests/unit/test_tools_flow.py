@@ -55,13 +55,14 @@ import pandas as pd
 
 
 def main(ctx):
-    if ctx.cur_time != "09:25":  # decide once pre-open; fills next bar
-        return
-    snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
-    daily = pd.read_parquet(snapshot_dir / "daily.parquet")
-    code = sorted(daily["ts_code"].astype(str).unique())[0]
-    if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-        ctx.broker.buy(code, weight=0.1, reason="direct_long")
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        if ctx.cur_time != "09:25":  # decide once pre-open; fills next bar
+            return
+        snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
+        daily = pd.read_parquet(snapshot_dir / "daily.parquet")
+        code = sorted(daily["ts_code"].astype(str).unique())[0]
+        if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+            ctx.broker.buy(code, weight=0.1, reason="direct_long")
 '''
 
 MINUTE_STRATEGY_MAIN = '''
@@ -72,11 +73,12 @@ import pandas as pd
 
 
 def main(ctx):
-    snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
-    daily = pd.read_parquet(snapshot_dir / "daily.parquet")
-    code = sorted(daily["ts_code"].astype(str).unique())[0]
-    if ctx.cur_time == "09:31" and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-        ctx.broker.buy(code, weight=0.1, reason="minute_close_buy")
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
+        daily = pd.read_parquet(snapshot_dir / "daily.parquet")
+        code = sorted(daily["ts_code"].astype(str).unique())[0]
+        if ctx.cur_time == "09:31" and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+            ctx.broker.buy(code, weight=0.1, reason="minute_close_buy")
 '''
 
 MODEL_ARTIFACT_STRATEGY_MAIN = '''
@@ -89,17 +91,18 @@ _DONE = False
 
 
 def main(ctx):
-    global _DONE
-    if not _DONE:
-        model_dir = Path(str(ctx.model_dir))
-        model_dir.mkdir(parents=True, exist_ok=True)
-        (model_dir / "params.json").write_text(json.dumps({"threshold": 0.42}, sort_keys=True), encoding="utf-8")
-        _DONE = True
-    snapshot_dir = Path(str(ctx.snapshot_dir))
-    daily = pd.read_parquet(snapshot_dir / "daily.parquet")
-    code = sorted(daily["ts_code"].astype(str).unique())[0]
-    if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-        ctx.broker.buy(code, weight=0.1, reason="model_artifact_buy")
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        global _DONE
+        if not _DONE:
+            model_dir = Path(str(ctx.model_dir))
+            model_dir.mkdir(parents=True, exist_ok=True)
+            (model_dir / "params.json").write_text(json.dumps({"threshold": 0.42}, sort_keys=True), encoding="utf-8")
+            _DONE = True
+        snapshot_dir = Path(str(ctx.snapshot_dir))
+        daily = pd.read_parquet(snapshot_dir / "daily.parquet")
+        code = sorted(daily["ts_code"].astype(str).unique())[0]
+        if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+            ctx.broker.buy(code, weight=0.1, reason="model_artifact_buy")
 '''
 
 CUSTOM_POLICY_MAIN = '''
@@ -118,24 +121,26 @@ import pandas as pd
 
 
 def buy_if_dip(ctx):
-    snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
-    daily = pd.read_parquet(snapshot_dir / "daily.parquet")
-    code = sorted(daily["ts_code"].astype(str).unique())[0]
-    bar = ctx.bar(code) or {}
-    low = bar.get("low")
-    if low is not None and float(low) <= 9.95 and ctx.broker.position(code) == 0:
-        ctx.broker.buy(code, weight=0.1, reason="minute_dip")
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
+        daily = pd.read_parquet(snapshot_dir / "daily.parquet")
+        code = sorted(daily["ts_code"].astype(str).unique())[0]
+        bar = ctx.bar(code) or {}
+        low = bar.get("low")
+        if low is not None and float(low) <= 9.95 and ctx.broker.position(code) == 0:
+            ctx.broker.buy(code, weight=0.1, reason="minute_dip")
 '''
 
 INTRA_MINUTE_MAIN = '''
 def main(ctx):
-    code = "000001.SZ"
-    if ctx.cur_time != "09:25":  # optimistic dedup needs a priced tick
-        return
-    if ctx.broker.position(code) == 0:
-        ctx.broker.buy(code, weight=0.1, reason="first_weight_buy")
-    if ctx.broker.position(code) == 0:
-        ctx.broker.buy(code, weight=0.1, reason="duplicate_weight_buy")
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        code = "000001.SZ"
+        if ctx.cur_time != "09:25":  # optimistic dedup needs a priced tick
+            return
+        if ctx.broker.position(code) == 0:
+            ctx.broker.buy(code, weight=0.1, reason="first_weight_buy")
+        if ctx.broker.position(code) == 0:
+            ctx.broker.buy(code, weight=0.1, reason="duplicate_weight_buy")
 '''
 
 NOISY_POLICY_MAIN = '''
@@ -143,12 +148,13 @@ print("main import noise")
 
 
 def main(ctx):
-    print("strategy call noise")
-    code = "000001.SZ"
-    if ctx.cur_time != "09:25":  # noise prints every tick; order once
-        return
-    if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-        ctx.broker.buy(code, weight=0.1, reason="noisy_buy")
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        print("strategy call noise")
+        code = "000001.SZ"
+        if ctx.cur_time != "09:25":  # noise prints every tick; order once
+            return
+        if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+            ctx.broker.buy(code, weight=0.1, reason="noisy_buy")
 '''
 
 BROKEN_STRATEGY_MAIN = '''
@@ -214,16 +220,17 @@ _DONE = False
 
 
 def main(ctx):
-    global _DONE
-    if _DONE:
-        return
-    _DONE = True
-    result = nl("000001.SZ", prompt="score this fixture")
-    content = result.get("content", "")
-    code = "000001.SZ"
-    weight = 0.1 if "positive" in content else 0.0
-    if weight and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-        ctx.broker.buy(code, weight=weight, reason="nl_buy")
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        global _DONE
+        if _DONE:
+            return
+        _DONE = True
+        result = nl("000001.SZ", prompt="score this fixture")
+        content = result.get("content", "")
+        code = "000001.SZ"
+        weight = 0.1 if "positive" in content else 0.0
+        if weight and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+            ctx.broker.buy(code, weight=weight, reason="nl_buy")
 '''
 
 TEMPLATE_CANDIDATE_WITH_ROW = '''
@@ -234,13 +241,14 @@ import pandas as pd
 
 
 def main(ctx):
-    if ctx.cur_time != "09:25":  # decide once pre-open; fills next bar
-        return
-    snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
-    daily = pd.read_parquet(snapshot_dir / "daily.parquet")
-    code = sorted(daily["ts_code"].astype(str).unique())[0]
-    if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-        ctx.broker.buy(code, weight=0.1, reason="template_candidate")
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        if ctx.cur_time != "09:25":  # decide once pre-open; fills next bar
+            return
+        snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
+        daily = pd.read_parquet(snapshot_dir / "daily.parquet")
+        code = sorted(daily["ts_code"].astype(str).unique())[0]
+        if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+            ctx.broker.buy(code, weight=0.1, reason="template_candidate")
 '''
 
 
@@ -588,7 +596,7 @@ class ToolFlowTest(unittest.TestCase):
             self.assertEqual(summary["status"], "ok")
             self.assertEqual(summary["order_count"], 1)
 
-    def test_main_intra_minute_position_view(self):
+    def test_substep_actions_do_not_project_position_view(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
             (ctx.paths.agent_output / "main.py").write_text(INTRA_MINUTE_MAIN, encoding="utf-8")
@@ -599,11 +607,19 @@ class ToolFlowTest(unittest.TestCase):
             detailed = json.loads((Path(summary["result_path"]) / "detailed_return.json").read_text(encoding="utf-8"))
             actions = [event for event in detailed["broker_events"] if event.get("event_type") == "main_actions"]
             self.assertEqual(len(actions), 1)
+            # Broker actions created inside a substep are delayed-submit plans, so
+            # ctx.broker.position() still reflects filled positions only inside the
+            # same substep. Both buys are emitted and the host broker constrains them.
+            self.assertEqual(len(actions[0]["actions"]), 2)
+            action = actions[0]["actions"][0]
             self.assertEqual(
-                actions[0]["actions"],
-                [{"action": "buy", "ts_code": "000001.SZ", "weight": 0.1, "reason": "first_weight_buy"}],
+                {key: action.get(key) for key in ("action", "ts_code", "weight", "reason")},
+                {"action": "buy", "ts_code": "000001.SZ", "weight": 0.1, "reason": "first_weight_buy"},
             )
-            self.assertEqual(summary["order_count"], 1)
+            self.assertEqual(actions[0]["actions"][1].get("reason"), "duplicate_weight_buy")
+            self.assertTrue(str(action.get("order_id") or "").startswith("C"))
+            self.assertEqual(action.get("submitted_time"), "09:25")
+            self.assertEqual(summary["order_count"], 2)
 
     def test_main_cannot_read_artifacts_even_with_constructed_path(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -650,8 +666,8 @@ class ToolFlowTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             sandbox, ctx = build_sandbox(Path(tmp))
             ctx.manifest.update(
-                backtest_max_seconds_per_decision=180.0,
-                backtest_max_seconds_per_trading_day=600.0,
+                backtest_max_seconds_per_decision=300.0,
+                backtest_max_seconds_per_trading_day=900.0,
                 backtest_final_eval_max_seconds_per_decision=900.0,
                 backtest_final_eval_max_seconds_per_trading_day=3000.0,
             )
@@ -670,8 +686,8 @@ class ToolFlowTest(unittest.TestCase):
             ):
                 ModificationCheckTool(ctx).run()
                 BacktestTool(ctx).run(mode="valid")
-                self.assertEqual(captured["decision_cap"], 180.0)
-                self.assertEqual(captured["per_day_cap"], 600.0)
+                self.assertEqual(captured["decision_cap"], 300.0)
+                self.assertEqual(captured["per_day_cap"], 900.0)
 
                 ctx.phase = "frozen"
                 ctx.write_locked = True
@@ -720,7 +736,12 @@ class ToolFlowTest(unittest.TestCase):
             self.assertEqual(nodes[1]["parent_node_id"], nodes[0]["node_id"])
             self.assertEqual(tree.current_node_id, nodes[1]["node_id"])
             self.assertTrue((ctx.paths.steps / nodes[0]["node_id"] / "main.py").exists())
-            self.assertTrue(nodes[0]["node_id"].startswith("epoch_001__fold_2022Q1__valid_"))
+            # The fold id is opaqued in the agent-readable step tree so the calendar
+            # period (e.g. 2022Q1 = the held-out test quarter) cannot leak.
+            node_id = str(nodes[0]["node_id"])
+            self.assertTrue(node_id.startswith("epoch_001__fold_ref_"), node_id)
+            self.assertIn("__valid_", node_id)
+            self.assertNotIn("2022Q1", node_id)
 
     def test_artifact_rejects_runtime_cache_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1264,15 +1285,16 @@ _DONE = False
 
 
 def main(ctx):
-    global _DONE
-    if _DONE:
-        return
-    _DONE = True
-    result = nl("000001.SZ", prompt="fixture")
-    code = "000001.SZ"
-    weight = 0.1 if "positive" in result.get("content", "") else 0.0
-    if weight and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-        ctx.broker.buy(code, weight=weight, reason="nl_buy")
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        global _DONE
+        if _DONE:
+            return
+        _DONE = True
+        result = nl("000001.SZ", prompt="fixture")
+        code = "000001.SZ"
+        weight = 0.1 if "positive" in result.get("content", "") else 0.0
+        if weight and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+            ctx.broker.buy(code, weight=weight, reason="nl_buy")
 ''',
                 encoding="utf-8",
             )

@@ -50,6 +50,12 @@ class StateStager:
         for path in (self.visible_dir, self.staging_dir):
             shutil.rmtree(path, ignore_errors=True)
             path.mkdir(parents=True, exist_ok=True)
+            # Docker sandboxes run strategy code as the container ``agent`` user,
+            # which maps to a subuid under rootless Docker. These host-managed
+            # scratch directories therefore must be world-writable, like
+            # workspace/output/models, or ctx.state_dir writes fail before the
+            # strategy can be evaluated.
+            path.chmod(0o777)
 
     def register(self, staged: list[dict[str, object]], *, when: datetime) -> None:
         """Record this tick's staged writes; ready_at = ``when`` + declared budget."""

@@ -20,9 +20,10 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timedelta
 from collections.abc import Callable
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -46,13 +47,22 @@ from autotrade.environment.runtime import sanitize_for_log
 from autotrade.environment.state_staging import StateStager
 from autotrade.environment.timeview import Timeview
 
-_ACTION_ALIASES = {"long": "buy", "sell_short": "short", "close_long": "sell", "close_short": "cover", "exit": "close"}
-_SUPPORTED_ACTIONS = {"buy", "sell", "short", "cover", "close"}
+_ACTION_ALIASES = {
+    "long": "buy",
+    "sell_short": "short",
+    "close_long": "sell",
+    "close_short": "cover",
+    "exit": "close",
+    "cancel_order": "cancel",
+    "cancel_order_stock": "cancel",
+}
+_ORDER_ACTIONS = {"buy", "sell", "short", "cover", "close"}
+_SUPPORTED_ACTIONS = _ORDER_ACTIONS | {"cancel"}
 
 
 # The persistent per-tick driver is a real module (main_ctx_driver.py) shipped into
-# the sandbox image next to broker_core; it is launched by file (executor.runtime_path)
-# rather than as a -c string so it stays typed, testable, and shares the broker core.
+# the sandbox image; it is launched by file (executor.runtime_path) rather than as a
+# -c string so it stays typed and testable. It is standard-library only.
 _DRIVER_PATH = Path(__file__).with_name("main_ctx_driver.py")
 
 
@@ -64,6 +74,16 @@ class _TickResult:
     actions: list[dict[str, object]]
     substeps: list[dict[str, object]]
     staged: list[dict[str, object]]
+    main_wall_s: float | None = None
+
+
+@dataclass(frozen=True)
+class _DelayedAction:
+    seq: int
+    ready_at: datetime
+    action: dict[str, object]
+    substep: str
+    generated_at: str
 
 
 class MainPolicyRunner:
@@ -180,10 +200,16 @@ class MainPolicyRunner:
             raise BacktestError("main(ctx) returned non-list actions")
         substeps = response.get("substeps") or []
         staged = response.get("staged") or []
+        main_wall_raw = response.get("main_wall_s")
+        try:
+            main_wall_s = float(main_wall_raw) if main_wall_raw is not None else None
+        except (TypeError, ValueError):
+            main_wall_s = None
         return _TickResult(
             actions=[dict(action) for action in actions if isinstance(action, dict)],
             substeps=[dict(s) for s in substeps if isinstance(s, dict)],
             staged=[dict(s) for s in staged if isinstance(s, dict)],
+            main_wall_s=main_wall_s,
         )
 
     def close(self) -> None:
@@ -277,11 +303,13 @@ def run_main_ctx_replay(
     auction_enabled: bool = True,
     auction_preopen_time: str | None = "09:15",
     auction_decision_time: str = "09:25",
-    auction_close_time: str | None = None,
+    auction_close_time: str | None = "14:57",
     execution_lag_bars: int = 2,
     offsession_tick_minutes: int = 15,
     max_seconds_per_trading_day: float | None = None,
     enforce_substep_timeout: bool = True,
+    enforce_substep_coverage: bool = True,
+    max_untracked_substep_wall_s: float = 0.05,
     timeview_enabled: bool = False,
     snapshot_dir: Path | None = None,
     replay_dir: Path | None = None,
@@ -294,12 +322,15 @@ def run_main_ctx_replay(
     for matching. ``execution_lag_bars`` (default 2) sets the gap from the
     decision bar to the activation bar — 1 = the immediate next bar, 2 = one bar
     of submit latency then matching on the following bar — which removes
-    within-bar look-ahead. A sub-step's declared budget no longer moves the fill bar
-    (orders fill at this lag regardless of ``budget_minutes``). A decision with no bar
-    ``execution_lag_bars`` ahead (near the close) cannot fill and is recorded
-    ``main_actions_unfilled``. The final trade date is reserved for mandatory
-    liquidation; minute bars drive the replay when present, else a daily 09:30/15:00
-    fallback is synthesized.
+    within-bar look-ahead. Broker actions issued inside ``ctx.substep`` with a
+    sub-minute budget are treated as submitted in the current decision minute while
+    retaining ``ready_at`` metadata for audit; actions with ``B>=1`` are first held
+    until the block's ``ready_at`` and submitted on the first later orderable tick.
+    From that submit tick they use the same ``execution_lag_bars`` mapping. A
+    decision with no bar ``execution_lag_bars`` ahead (near the close) cannot fill
+    and is recorded ``main_actions_unfilled``. The final trade date is reserved for
+    mandatory liquidation; minute bars drive the replay when present, else a daily
+    09:30/15:00 fallback is synthesized.
 
     The tick grid spans the whole day on the same ``main(ctx)`` entry, so the loop
     drives both backtest and live. ``auction_enabled`` leads each day with a 09:15
@@ -308,15 +339,18 @@ def run_main_ctx_replay(
     14:57) makes that bar's decision fill at the day's final bar (the 15:00 close
     auction). These batch-auction fills are labelled ``price_label="auction"``.
     ``offsession_tick_minutes`` (0 = off) adds a research-only tick grid outside the
-    session: pre-open off-session orders fill at the opening auction, post-close ones
-    do not fill. ``ctx.broker.pending(ts_code)`` exposes still-working orders so the
-    Agent can avoid re-submitting before a fill (parity with the live order query).
+    session; off-session orders do not fill. ``ctx.broker.pending(ts_code)`` exposes
+    still-working orders so the Agent can avoid re-submitting before a fill (parity
+    with the live order query).
 
     ``enforce_substep_timeout`` (default True) keeps the per-substep wall fail-fast
     that aborts the replay when a declared ``ctx.substep`` block runs over its budget
     B; the final/frozen (held-out) eval passes False so a reproducible eval of an
     already-accepted strategy is not aborted by transient load. The per-substep
     runtime statistics are aggregated either way; only the raise is skipped.
+    ``enforce_substep_coverage`` rejects substantive Python-side ``main(ctx)`` time
+    outside declared substeps (with a small overhead grace), so heavy unwrapped work
+    cannot hide in the tick's aggregate wall time.
     """
     market = MarketData(replay_daily)
     if len(market.trade_dates) < 2:
@@ -357,6 +391,8 @@ def run_main_ctx_replay(
     # matching. The NL-service share of step wall is split out from strategy compute.
     phase_wall = {"strategy_step": 0.0, "timeview_build": 0.0, "state_merge": 0.0, "broker_match": 0.0}
     tick_counts = {"total": 0, "intraday": 0, "offsession": 0}
+    delayed_actions: list[_DelayedAction] = []
+    delayed_seq = 0
     total_days = len(market.trade_dates)
     last_progress_idx = 0
     last_progress_time = replay_start
@@ -387,8 +423,9 @@ def run_main_ctx_replay(
                 real_index = {tick.minute_key: i for i, tick in enumerate(t for t in plan if t.is_real)}
                 n_real = len(real_index)
                 # Decisions wait out the submit lag, then enter the Broker's order book
-                # (order_stock) at their activation bar. The sub-step budget no longer
-                # shifts that bar: orders fill at the decision's activation bar.
+                # (order_stock) at their activation bar. Substep-wrapped broker actions
+                # are first delayed until ready_at, then treated as submitted at the
+                # ready/orderable tick and mapped through this same activation logic.
                 incoming: dict[int, list[tuple[dict[str, object], bool, bool]]] = {}
                 for tick in plan:
                     tick_counts["total"] += 1
@@ -403,6 +440,8 @@ def run_main_ctx_replay(
                                     action=_jsonable(action), reason="unsupported_or_missing_ts_code",
                                 )
                         broker.match_bar(trade_date, tick.minute_key, tick.group, granularity)
+                        if index == n_real - 1:
+                            _cancel_day_end_orders(broker, trade_date=trade_date, minute_key=tick.minute_key)
                         phase_wall["broker_match"] += time.monotonic() - _match_t0
                     when = sim_datetime(trade_date, tick.minute_key)
                     if timeview is not None:
@@ -417,6 +456,24 @@ def run_main_ctx_replay(
                         _merge_t0 = time.monotonic()
                         stager.merge_ready(when)  # surface staged writes whose ready_at has arrived
                         phase_wall["state_merge"] += time.monotonic() - _merge_t0
+                    released_actions = _release_delayed_actions(
+                        delayed_actions,
+                        broker=broker,
+                        incoming=incoming,
+                        tick=tick,
+                        trade_date=trade_date,
+                        when=when,
+                        n_real=n_real,
+                    )
+                    if released_actions:
+                        broker.record_event(
+                            "main_actions",
+                            trade_date=trade_date,
+                            minute_key=tick.minute_key,
+                            action_count=len(released_actions),
+                            actions=_jsonable(released_actions),
+                            delayed_from_substep=True,
+                        )
                     state = _market_state(
                         broker,
                         trade_date=trade_date,
@@ -424,7 +481,7 @@ def run_main_ctx_replay(
                         minute_group=tick.group,
                         asof_dir=asof_dir,
                         asof_version=asof_version,
-                        pending=_pending_view(broker, incoming),
+                        pending=_pending_view(broker, incoming, delayed_actions=delayed_actions, now=when),
                         cur_datetime=when.isoformat(),
                     )
                     # A single decision (one main(ctx) tick) over the per-decision real
@@ -432,7 +489,7 @@ def run_main_ctx_replay(
                     # the day's compute and fail-fast when it exceeds the per-day budget
                     # (scales with replay length, unlike a fixed total cap).
                     _tick_t0 = time.monotonic()
-                    actions, substeps, staged = _normalize_tick(main_policy.step(state))
+                    actions, substeps, staged, main_wall_s = _normalize_tick(main_policy.step(state))
                     _tick_wall = time.monotonic() - _tick_t0
                     day_compute_wall += _tick_wall
                     phase_wall["strategy_step"] += _tick_wall
@@ -467,35 +524,94 @@ def run_main_ctx_replay(
                         agg["total_real_wall_s"] += real_wall
                         agg["max_real_wall_s"] = max(agg["max_real_wall_s"], real_wall)
                         agg["budget_minutes"] = budget_min
-                    placed = 0
+                    strategy_wall = float(main_wall_s if main_wall_s is not None else _tick_wall)
+                    # Only top-level substeps count toward coverage: a nested substep's
+                    # wall-time is already inside its parent's real_wall_s, so summing all
+                    # of them would over-count and let genuine unwrapped compute hide.
+                    covered_wall = sum(
+                        float(sub.get("real_wall_s", 0.0) or 0.0)
+                        for sub in substeps
+                        if not sub.get("nested")
+                    )
+                    untracked_wall = max(0.0, strategy_wall - covered_wall)
+                    if enforce_substep_coverage and untracked_wall > max_untracked_substep_wall_s:
+                        raise BacktestError(
+                            f"main(ctx) at {trade_date} {tick.minute_key} spent {untracked_wall:.3f}s outside "
+                            "ctx.substep; wrap every strategy step in ctx.substep(name, budget_minutes=B)"
+                        )
+                    substep_budgets = {
+                        str(sub.get("name")): float(sub.get("budget_minutes", 0.0) or 0.0)
+                        for sub in substeps
+                    }
+                    immediate_actions: list[dict[str, object]] = []
                     for action in actions:
-                        # _substep is an internal routing tag; drop it so the recorded
-                        # order stays clean (its budget is enforced above, not here).
-                        action.pop("_substep", None)
-                        fill_index = tick.activate_index
-                        if fill_index is None or fill_index >= n_real:
-                            broker.record_event(
-                                "main_actions_unfilled", trade_date=trade_date, minute_key=tick.minute_key,
-                                action=_jsonable(action), reason="no_fill_bar_ahead",
-                            )
+                        substep_name = action.get("_substep")
+                        if substep_name is None:
+                            immediate_actions.append(action)
                             continue
-                        incoming.setdefault(fill_index, []).append((action, tick.is_auction, tick.is_close_auction))
-                        placed += 1
-                    if placed:
+                        substep_key = str(substep_name)
+                        if substep_key not in substep_budgets:
+                            raise BacktestError(
+                                f"broker action referenced unknown ctx.substep {substep_key!r}"
+                            )
+                        budget_minutes = substep_budgets[substep_key]
+                        ready_at = when + timedelta(minutes=budget_minutes)
+                        delayed_action = dict(action)
+                        delayed_action.pop("_substep", None)
+                        delayed_action.setdefault("decision_at", delayed_action.get("submitted_at", ""))
+                        delayed_action.setdefault("decision_time", delayed_action.get("submitted_time", ""))
+                        if 0.0 < budget_minutes < 1.0:
+                            # Sub-minute work completes inside the current decision
+                            # minute. Treat it as submitted on this tick while still
+                            # auditing the substep and preserving ready_at metadata.
+                            delayed_action["substep"] = substep_key
+                            delayed_action["substep_generated_at"] = when.isoformat()
+                            delayed_action["substep_ready_at"] = ready_at.isoformat()
+                            immediate_actions.append(delayed_action)
+                            continue
+                        delayed_actions.append(
+                            _DelayedAction(
+                                seq=delayed_seq,
+                                ready_at=ready_at,
+                                action=delayed_action,
+                                substep=substep_key,
+                                generated_at=when.isoformat(),
+                            )
+                        )
+                        delayed_seq += 1
+                    placed_actions = _place_actions_at_tick(
+                        immediate_actions,
+                        broker=broker,
+                        incoming=incoming,
+                        delayed_actions=delayed_actions,
+                        tick=tick,
+                        trade_date=trade_date,
+                        n_real=n_real,
+                    )
+                    if placed_actions:
                         broker.record_event(
                             "main_actions", trade_date=trade_date, minute_key=tick.minute_key,
-                            action_count=placed, actions=_jsonable(actions),
+                            action_count=len(placed_actions), actions=_jsonable(placed_actions),
                         )
-                for order in broker.query_stock_orders(cancelable_only=True):  # day order auto-voids at the close
-                    broker.cancel_order_stock(
-                        str(order["order_id"]), reason="day_end_unfilled", trade_date=trade_date
-                    )
+                _cancel_day_end_orders(broker, trade_date=trade_date)
 
         equity = broker.mark_to_market(trade_date)
         if trade_date == exit_date and broker.positions:
             broker.close_all(trade_date)
             equity = broker.equity()
         equity_by_date[trade_date] = equity
+
+    for delayed in delayed_actions:
+        broker.record_event(
+            "main_actions_unfilled",
+            trade_date=market.trade_dates[-1],
+            minute_key="",
+            action=_jsonable(delayed.action),
+            reason="substep_delayed_action_not_released",
+            substep=delayed.substep,
+            generated_at=delayed.generated_at,
+            ready_at=delayed.ready_at.isoformat(),
+        )
 
     return ReplayResult(
         equity_curve=pd.Series(equity_by_date).sort_index(),
@@ -551,7 +667,7 @@ def _day_tick_plan(
     execution_lag_bars: int,
     *,
     offsession_tick_minutes: int = 15,
-    close_auction_time: str | None = None,
+    close_auction_time: str | None = "14:57",
 ) -> list[_Tick]:
     """Ordered decision ticks for one day, each tagged with the real-bar index its
     orders reach the book at (``activate_index``).
@@ -564,9 +680,9 @@ def _day_tick_plan(
     open activating at the first continuous bar (09:31). ``close_auction_time`` (e.g.
     14:57) makes that bar's decision activate at the day's final bar (the 15:00 close
     auction) instead of the default lag. ``offsession_tick_minutes`` (0 = off) adds a
-    research-only grid outside the session: pre-open off-session ticks activate at the
-    opening auction (no price), post-close ones never fill. Pre-open and close-auction
-    activations are fixed and independent of ``execution_lag_bars``.
+    research-only grid outside the session: off-session ticks never fill orders. The
+    explicit pre-open auction ticks and close-auction tick have fixed activations
+    independent of ``execution_lag_bars``.
     """
     real_keys = sorted({str(key) for key in minute_rows["minute_key"]}, key=_minute_sort)
     if not real_keys:
@@ -578,10 +694,10 @@ def _day_tick_plan(
     # ends at the last real bar; ticks outside [open, close] are research-only.
     session_open = preopen_time if (auction_enabled and preopen_time) else (decision_time if auction_enabled else real_keys[0])
     open_min, close_min = _minute_sort(session_open), _minute_sort(real_keys[-1])
-    # Pre-open off-session ticks: no price, orders fill at the first real bar (the
-    # opening auction when auctions are on, else a plain market-on-open).
+    # Pre-open off-session ticks are research/state only. Actual auction order
+    # entry starts at the explicit pre-open auction tick below.
     for key in _offsession_keys(0, open_min, offsession_tick_minutes):
-        plan.append(_Tick(key, _empty_minute_rows(), 0, False, auction_enabled, True))
+        plan.append(_Tick(key, _empty_minute_rows(), None, False, False, True))
     if auction_enabled:
         first = minute_rows.sort_values("minute_sort", kind="stable").drop_duplicates("ts_code", keep="first").copy()
         open_group = first.assign(high=first["open"], low=first["open"], close=first["open"])
@@ -629,13 +745,120 @@ def _phase_seconds(phase_wall: dict[str, float], nl_wall: float) -> dict[str, fl
     }
 
 
-def _normalize_tick(result: object) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+def _normalize_tick(result: object) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]], float | None]:
     """A ``MainPolicyRunner`` step returns a ``_TickResult``; test fakes return a
     plain action list (no sub-steps or staged writes = current next-bar behavior)."""
     if isinstance(result, _TickResult):
-        return result.actions, result.substeps, result.staged
+        return result.actions, result.substeps, result.staged, result.main_wall_s
     actions = [dict(a) for a in (result or []) if isinstance(a, dict)]
-    return actions, [], []
+    return actions, [], [], None
+
+
+def _release_delayed_actions(
+    delayed_actions: list[_DelayedAction],
+    *,
+    broker: SimBroker,
+    incoming: dict[int, list[tuple[dict[str, object], bool, bool]]],
+    tick: "_Tick",
+    trade_date: str,
+    when: datetime,
+    n_real: int,
+) -> list[dict[str, object]]:
+    """Submit substep-produced broker actions once their declared compute is ready.
+
+    A substep action is not a broker order until this release point. If ready_at
+    falls between replay ticks, it is submitted on the first later orderable tick.
+    Off-session ticks are research/state only, so they keep ready actions queued.
+    Real market ticks are orderable even when no fill bar remains; those submissions
+    follow the normal no-fill path instead of silently rolling forward.
+    """
+    if not _is_orderable_tick(tick):
+        return []
+    ready = sorted((item for item in delayed_actions if item.ready_at <= when), key=lambda item: item.seq)
+    if not ready:
+        return []
+    ready_ids = {item.seq for item in ready}
+    delayed_actions[:] = [item for item in delayed_actions if item.seq not in ready_ids]
+    actions: list[dict[str, object]] = []
+    for item in ready:
+        action = dict(item.action)
+        original_submitted_at = str(action.get("submitted_at") or "")
+        original_submitted_time = str(action.get("submitted_time") or "")
+        if original_submitted_at:
+            action.setdefault("decision_at", original_submitted_at)
+        if original_submitted_time:
+            action.setdefault("decision_time", original_submitted_time)
+        action["submitted_at"] = when.isoformat()
+        action["submitted_time"] = tick.minute_key
+        action["substep"] = item.substep
+        action["substep_generated_at"] = item.generated_at
+        action["substep_ready_at"] = item.ready_at.isoformat()
+        actions.append(action)
+    return _place_actions_at_tick(
+        actions,
+        broker=broker,
+        incoming=incoming,
+        delayed_actions=delayed_actions,
+        tick=tick,
+        trade_date=trade_date,
+        n_real=n_real,
+    )
+
+
+def _is_orderable_tick(tick: "_Tick") -> bool:
+    return not tick.is_offsession and (tick.is_real or tick.activate_index is not None)
+
+
+def _place_actions_at_tick(
+    actions: list[dict[str, object]],
+    *,
+    broker: SimBroker,
+    incoming: dict[int, list[tuple[dict[str, object], bool, bool]]],
+    delayed_actions: list[_DelayedAction],
+    tick: "_Tick",
+    trade_date: str,
+    n_real: int,
+) -> list[dict[str, object]]:
+    """Route broker actions submitted at this tick into cancel/order queues."""
+    placed_actions: list[dict[str, object]] = []
+    for raw_action in actions:
+        action = dict(raw_action)
+        action.pop("_substep", None)
+        name = _action_name(action)
+        if name == "cancel":
+            order_id = str(action.get("order_id") or "").strip()
+            if order_id and _cancel_pending_order(
+                broker,
+                incoming,
+                order_id,
+                trade_date=trade_date,
+                minute_key=tick.minute_key,
+                reason=str(action.get("reason") or "agent_cancel"),
+                delayed_actions=delayed_actions,
+            ):
+                placed_actions = [
+                    placed for placed in placed_actions
+                    if str(placed.get("order_id") or "") != order_id
+                ]
+                continue
+            broker.record_event(
+                "main_action_ignored",
+                trade_date=trade_date,
+                minute_key=tick.minute_key,
+                action=_jsonable(action),
+                reason="cancel_order_not_found" if order_id else "cancel_missing_order_id",
+            )
+            continue
+        fill_index = tick.activate_index
+        if fill_index is None or fill_index >= n_real:
+            broker.record_event(
+                "main_actions_unfilled", trade_date=trade_date, minute_key=tick.minute_key,
+                action=_jsonable(action), reason="no_fill_bar_ahead",
+            )
+            continue
+        incoming.setdefault(fill_index, []).append((action, tick.is_auction, tick.is_close_auction))
+        placed_actions.append(dict(action))
+    return placed_actions
 
 
 def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool, is_close_auction: bool = False) -> bool:
@@ -645,9 +868,9 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
     bars (default 1); otherwise a ``MARKET_PEER_PRICE_FIRST`` order valid that bar.
     ``close`` is always a market exit. ``is_close_auction`` marks a 15:00 close-auction
     order so it fills at the activation bar's close. Returns False if unsupported."""
-    name = _ACTION_ALIASES.get(str(action.get("action", "")).lower().strip(), str(action.get("action", "")).lower().strip())
+    name = _action_name(action)
     ts_code = str(action.get("ts_code", "")).strip()
-    if name not in _SUPPORTED_ACTIONS or not ts_code:
+    if name not in _ORDER_ACTIONS or not ts_code:
         return False
     limit = _float_or_none(action.get("limit")) if name != "close" else None
     if limit is not None and limit <= 0:
@@ -666,27 +889,169 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
         is_auction=is_auction,
         auction_close=is_close_auction,
         reason=str(action.get("reason") or name),
+        order_id=str(action.get("order_id") or "") or None,
+        submitted_at=str(action.get("submitted_at") or ""),
     )
     return True
 
 
-def _pending_view(broker: SimBroker, incoming: dict[int, list[tuple[dict[str, object], bool, bool]]]) -> dict[str, list[dict[str, object]]]:
+def _cancel_day_end_orders(broker: SimBroker, *, trade_date: str, minute_key: str | None = None) -> None:
+    """Auto-void any still-working day orders after the final matchable bar."""
+    for order in broker.query_stock_orders(cancelable_only=True):
+        broker.cancel_order_stock(
+            str(order["order_id"]),
+            reason="day_end_unfilled",
+            trade_date=trade_date,
+            minute_key=minute_key,
+        )
+
+
+def _action_name(action: dict[str, object]) -> str:
+    raw = str(action.get("action", "")).lower().strip()
+    return _ACTION_ALIASES.get(raw, raw)
+
+
+def _cancel_pending_order(
+    broker: SimBroker,
+    incoming: dict[int, list[tuple[dict[str, object], bool, bool]]],
+    order_id: str,
+    *,
+    trade_date: str,
+    minute_key: str,
+    reason: str,
+    delayed_actions: list[_DelayedAction] | None = None,
+) -> bool:
+    """Cancel a live working order, submit-lag order, or unreleased substep action."""
+    if broker.cancel_order_stock(order_id, reason=reason, trade_date=trade_date, minute_key=minute_key):
+        return True
+    for index, items in list(incoming.items()):
+        kept: list[tuple[dict[str, object], bool, bool]] = []
+        removed: list[dict[str, object]] = []
+        for item in items:
+            action, is_auction, is_close_auction = item
+            if str(action.get("order_id") or "") == order_id:
+                removed.append(action)
+            else:
+                kept.append((action, is_auction, is_close_auction))
+        if removed:
+            if kept:
+                incoming[index] = kept
+            else:
+                incoming.pop(index, None)
+            for action in removed:
+                broker.record_event(
+                    "order_cancelled",
+                    trade_date=trade_date,
+                    minute_key=minute_key,
+                    ts_code=str(action.get("ts_code") or ""),
+                    order_id=order_id,
+                    reason=reason,
+                    pending_stage="submit_lag",
+                )
+            return True
+    if delayed_actions is not None:
+        kept_delayed: list[_DelayedAction] = []
+        removed_delayed: list[_DelayedAction] = []
+        for item in delayed_actions:
+            if str(item.action.get("order_id") or "") == order_id:
+                removed_delayed.append(item)
+            else:
+                kept_delayed.append(item)
+        if removed_delayed:
+            delayed_actions[:] = kept_delayed
+            for item in removed_delayed:
+                broker.record_event(
+                    "order_cancelled",
+                    trade_date=trade_date,
+                    minute_key=minute_key,
+                    ts_code=str(item.action.get("ts_code") or ""),
+                    order_id=order_id,
+                    reason=reason,
+                    pending_stage="substep_delay",
+                    substep=item.substep,
+                    generated_at=item.generated_at,
+                    ready_at=item.ready_at.isoformat(),
+                )
+            return True
+    return False
+
+
+def _pending_view(
+    broker: SimBroker,
+    incoming: dict[int, list[tuple[dict[str, object], bool, bool]]],
+    *,
+    delayed_actions: list[_DelayedAction] | None = None,
+    now: datetime | None = None,
+) -> dict[str, list[dict[str, object]]]:
     """Working orders the Agent can see via ``ctx.broker.pending(ts_code)``: the
-    Broker's cancelable book plus decisions still inside the submit lag, so de-dup
-    holds across the whole decision-to-fill window (mirrors ``query_stock_orders``)."""
-    records = list(broker.query_stock_orders(cancelable_only=True))
+    Broker's cancelable book plus decisions still inside the submit lag or delayed
+    by a substep, so de-dup holds across the whole decision-to-fill window."""
+    records = [_pending_record(record, now=now) for record in broker.query_stock_orders(cancelable_only=True)]
+    for item in delayed_actions or []:
+        action = item.action
+        code = str(action.get("ts_code", ""))
+        if not code:
+            continue
+        records.append(
+            _pending_record(
+                {
+                    "order_id": action.get("order_id"),
+                    "ts_code": code,
+                    "action": str(action.get("action", "")),
+                    "order_volume": action.get("amount"),
+                    "weight": action.get("weight"),
+                    "price": action.get("limit"),
+                    "status": "pending",
+                    "submitted_at": action.get("submitted_at"),
+                    "reason": action.get("reason"),
+                    "pending_stage": "substep_delay",
+                    "substep": item.substep,
+                    "ready_at": item.ready_at.isoformat(),
+                },
+                now=now,
+            )
+        )
     for items in incoming.values():
         for action, _is_auction, _is_close_auction in items:
             code = str(action.get("ts_code", ""))
             if code:
                 records.append(
-                    {"ts_code": code, "action": str(action.get("action", "")), "order_volume": action.get("amount"),
-                     "weight": action.get("weight"), "price": action.get("limit"), "status": "pending"}
+                    _pending_record(
+                        {
+                            "order_id": action.get("order_id"),
+                            "ts_code": code,
+                            "action": str(action.get("action", "")),
+                            "order_volume": action.get("amount"),
+                            "weight": action.get("weight"),
+                            "price": action.get("limit"),
+                            "status": "pending",
+                            "submitted_at": action.get("submitted_at"),
+                            "reason": action.get("reason"),
+                            "pending_stage": "submit_lag",
+                        },
+                        now=now,
+                    )
                 )
     grouped: dict[str, list[dict[str, object]]] = {}
     for record in records:
         grouped.setdefault(str(record.get("ts_code", "")), []).append(record)
     return grouped
+
+
+def _pending_record(record: dict[str, object], *, now: datetime | None) -> dict[str, object]:
+    out = dict(record)
+    submitted_at = str(out.get("submitted_at") or "")
+    out.setdefault("submitted_at", submitted_at)
+    if now is not None and submitted_at:
+        try:
+            submitted = datetime.fromisoformat(submitted_at)
+        except ValueError:
+            submitted = None
+        if submitted is not None:
+            out["age_minutes"] = max(0.0, (now - submitted).total_seconds() / 60.0)
+    out.setdefault("age_minutes", 0.0)
+    out.setdefault("status", "pending")
+    return out
 
 
 def _timeview_replay_frames(
@@ -738,10 +1103,6 @@ def _market_state(
         "account": _jsonable(broker.query_stock_asset()),
         "positions": _jsonable(broker.query_stock_positions()),
         "cash": float(broker.cash),
-        "initial_equity": float(broker.initial_equity),
-        # The deterministic cost model so the in-sandbox view projects fills with the
-        # same commission/duty/slippage/short-margin math the host broker fills with.
-        "cost_model": asdict(broker.profile.cost_model),
         "bars": bars,
         "asof_dir": asof_dir,
         "asof_version": asof_version,

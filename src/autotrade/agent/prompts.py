@@ -8,9 +8,10 @@ keys for stable parsing. Rendered copies for human audit are exported by
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping
+
+from autotrade.environment.identity import agent_visible_ref
 
 EXPERIMENT_FACTS_SCHEMA_VERSION = 1
 META_SEARCH_PERSPECTIVES = (
@@ -82,23 +83,21 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - `models/`：可选，保存需要跨 Fold 继承的模型参数、权重或轻量元数据；可按模型/组件分子目录。每次回测重训的临时中间产物留在内存；需要复用或继承的参数写入 `models/`。依赖包不写入 `models/`，应通过 Sandbox 镜像安装。
 - 正式产物不得包含 `__pycache__`、`.pyc`、`.pyo`、临时数据文件、日志、数据 dump、notebook 或密钥；模型权重只能放在 `models/`，不能放进 `output/`。
 
-## 交易规则（写入回测流程，无法绕过）
-- 入口：Environment 按回放 tick 逐 tick 调用一次 `main(ctx)`（一次覆盖全市场）。时序完全由你控制：每个 tick 管理已有持仓、在你选定的时点筛选并开新仓。无需返回 `trade_intents`，直接调用 `ctx.broker` 原语下单即可在任意时点开/平仓。
-- 下单与成交（对齐实盘 QMT `order_stock`，无券商侧条件单/止损单）：在某根 bar 决策的单默认于其后第 `execution_lag_bars`（默认 2）根 bar 起进入撮合，杜绝 bar 内前视（如 09:35 决策、09:37 起成交）。**市价单**（默认，对应 `MARKET_PEER_PRICE_FIRST`）按进入 bar 的开盘价 + 滑点成交；**限价单**（`limit=P`，对应 `FIX_PRICE`）挂单，无滑点；若进入 bar 开盘价已优于 P，则按开盘价成交，否则盘中 `[low, high]` 触及 P 时按 P 成交，`valid_bars` 根 bar 内未触及则自动撤单。临近收盘、其后无可成交 bar 的决策无法成交。
-- 24h 切片网格与竞价：Environment 在整日时间网格上调用 `main(ctx)`——盘中 09:15–15:00 为 1 分钟粒度，非交易时段按 `offsession_tick_minutes`（默认 15 分钟）唤醒只做研究/状态的切片（不撮合）。每日盘前有 `09:15` 信息 tick（竞价未撮合，`ctx.price` 为 None，用于筛选 + NL）和 `09:25` tick（`ctx.price` 为撮合开盘价）；`09:15` 单成交于 09:30 开盘竞价、`09:25` 单成交于首根连续 bar（09:31）；`14:57` 尾盘竞价 tick 的单成交于当日 15:00 收盘。均按当日涨跌停成交（一字涨停买单/跌停空单被拒）。同一套 `main(ctx)` 循环也用于实盘。
-- 决策延迟与子步骤（声明式预算）：用 `with ctx.substep(name, budget_minutes=B):` 包裹一段重决策，声明该代码块的运算耗时 `B`（分钟，必须 `>0`）。`B` 有两重作用：(1) 真实墙钟上限——实测耗时超过 `B` 立即 fail-fast；(2) `ctx.state_dir` 写可见性门控——子步骤内写入 `ctx.state_dir` 的数据要到 `ready_at = 当前 tick + B` 后才对外可见（见“跨 tick 状态”）。`B` **不改变成交 bar**：无论 `B` 多大，委托都在常规 `execution_lag_bars`（默认 2）生效 bar 撮合。`B` 超过 `decision_max_sim_minutes` 会在 substep 初始化即被拒；同一 tick 内 `name` 必须唯一。轻量逐 tick 代码无需包裹（按默认 lag 成交、无逐块上限）。
-- 预算即承诺（fail-fast，不可低报）：Environment 实测每个 substep 的真实墙钟，一旦 `real > B·60s` 立即中止本次回测并返回精确失败（哪个 substep、哪天、声明 B vs 实测）。低报会硬报错、不可利用。重 IO、复杂运算、大模型调用统一放进 substep，让 `B` 如实覆盖开销，并跨 Fold 拟合一个留有余量的稳定预算。
-- 独立计时与回测成本：`backtest` 独立计时（不计入 Fold 推理 deadline），单 Fold 最多 `max_backtests_per_fold` 次。系统对真实墙钟有两道硬上限：单个决策（一次 `main(ctx)` tick，含其中的 NL）超过 `backtest_max_seconds_per_decision`（默认 180s）会被**立即终止**；某交易日累计计算超过 `backtest_max_seconds_per_trading_day`（默认 600s）会中止本次回测（`BacktestError`，不可接受/冻结）。两道上限随回放天数伸缩。先用小 `replay_window` 试探、读 `replay_wall_seconds` / `replayed_trade_days` 外推完整耗时再跑整段。跨 tick 复用的重计算（全表 reload、全市场 group-by、相关性/图构建）必须缓存到首次或调仓时点、不要每个决策 tick 重算。回测 summary 返回逐 substep 的 `real_wall_s`、分阶段耗时 `phase_seconds`（策略/大模型/时序视图/状态合并/券商撮合）与盘中/非交易切片数，帮你定位 24h 回放的额外开销。
-- 推荐节奏：在一个研究 substep 内读 `ctx.asof_dir` 筛选、把带状态标记的委托计划（每条标记 pending/filled/cancelled）写入 `ctx.state_dir`（就绪后可见）；后续切片只遍历未完成条目，结合 Broker 真实持仓/在途核对成交、撤销过期计划、对 pending 条目下单。闲置/管理切片只用常驻基础信号，不每个 tick 重新筛选。
-- 下单口径：`amount` 是股数（按 100 股，即 1 手，向下对齐），`weight` 是初始权益的名义比例。策略只表达意图，Broker 强制现金、做空保证金、T+1 可卖余额、手数、涨跌停、停牌和可融券。最大持仓数、单票权重上限和集中度默认由你控制；回放末日强制清仓剩余持仓。
-- 跨 tick 状态（`ctx.state_dir`）：托管的跨 tick 暂存目录，只存你自己的规则/计划，不是持仓/委托账本（Broker 才是真相源）。子步骤内的写入会被暂存，到 `ready_at = tick + B` 才合并进可见目录（任何写法都适用，含 parquet）；子步骤外的写入实时可见；读取始终读可见目录。每次回测重置——需跨回测继承的参数写入 `models/`。
-- 成本与 NL 配额：`main(ctx)` 每个 tick 都会被调用，但筛选、模型推理和 `ctx.nl()` 等重操作应只在你选定的少数时点执行，不要每个 tick 跑；模型在首个 tick 加载/缓存，不要每次重训。`ctx.nl()` 受 run manifest 的 NL 配额约束——按 `nl_max_calls_per_decision_day`（日均上限 × 决策天数）得到每次回测总配额，可被 `nl_max_calls_per_backtest` 进一步收紧；超出返回 `budget_exhausted`，需自行降级。NL 调用由宿主串行服务，substep 的真实墙钟约等于其中各 NL 时延之和，请据此（而非假设并发）设定 `B`。
-- NL 工具：`ctx.nl(ts_code, prompt=...)`（等价 `from at_tools import nl`）在宿主侧启动可调用 `text_retrieve` 的 Sub Agent，返回 result dict（含 `status`、`content`、`tool_calls`、`evidence`、`error`）；内容不限定格式，需要数值或标签时在 `main`/`candidate`/helper 中自行解析。其文本语料按数据落库节点滚动（见“数据可见性”），公告/新闻跨过各自节点后才可被检索到。
-- NL 风险：存在发布时间/入库时间、检索召回、模型常识、自由文本解析和前视泄露风险。使用 NL 时必须按 PIT evidence 降权或过滤证据不足的结论；不要把自由文本当作稳定结构，也不要让 NL 覆盖现金、可交易性、成本和回放约束。
-- 做空：默认 `proxy_margin_secs` 模式下，可做空标的由**成交当日**真实 `margin_secs` 集合决定——委托在成交日撮合时按该日融券清单校验，无当日数据时回退到决策日快照集合（`/mnt/snapshot/events.parquet` 的 `margin_secs`）；不可融券返回 `margin_secs_not_shortable`。`broker_inventory` 在未接入真实券源时拒绝做空，`theoretical_short` 是显式研究模式。
+## 回放与交易环境规则（写入回测流程，无法绕过）
+- 入口：Environment 按 24h tick 网格逐 tick 调用一次 `main(ctx)`（一次覆盖全市场），盘中 09:15–15:00 为 1 分钟粒度，非交易时段按 `offsession_tick_minutes` 唤醒但只用于研究、状态和计划维护。无需返回 `trade_intents`。
+- 可报单时点：只有显式可报单 tick（`09:15`/`09:25`/`14:57`）或有真实行情的交易分钟 tick 才能向 Broker 提交开/平仓；普通 off-session tick 不报单。盘外若想准备盘前订单，先写 `ctx.state_dir` 计划，后续在 09:15/09:25 读取并提交。
+- 固定日内时间表（贴近真实交易员的日常例程）：为策略选定少数**固定的每日时钟时点**，用 `ctx.cur_time` 门控，而不是每个 tick 或随机时点行动。典型安排：盘前某个固定 off-session 时点（如 `08:00`）做研究/选股并写 `ctx.state_dir` 计划 → `09:15`/`09:25` 读取计划下单 → 盘中在固定节奏做持仓管理/做 T → `14:57` 收盘竞价前收尾。同一套时点在每个交易日重复触发，使重操作（横截面筛选、模型推理、`ctx.nl()`）落在可预期的少数时刻，成本可控、可复现，也贴近实盘执行。
+- 成交延迟：在某根 bar 决策的单默认于其后第 `execution_lag_bars`（默认 2）根 bar 起进入撮合，杜绝 bar 内前视（如 09:35 决策、09:37 起成交）。临近收盘、其后无可成交 bar 的决策无法成交。
+- 竞价：`09:15` 信息 tick 无价格，盲下单成交于 09:30 开盘竞价；`09:25` 暴露撮合开盘价，下单成交于首根连续 bar（09:31，按 taker 滑点）；`14:57` 下单成交于 15:00 收盘价。真正开/收盘集合竞价成交不计滑点。
+- 订单类型：市价单按进入 bar 的 open + 滑点成交，单 bar 有效；限价单（FIX_PRICE）挂单，若 open 已优于限价则按 open 成交，否则 `[low, high]` 触及限价时成交，`valid_bars` 内未触及自动撤单。策略也可主动撤销 `pending()` 返回的未成交委托。
+- Broker 约束：策略只表达意图，Broker 强制现金、可部署买力、做空保证金、T+1 可卖余额、手数、涨跌停、停牌、可融券和回放末日强制清仓。最大持仓数、单票权重和集中度默认由你控制。
+- 子步骤预算：所有会访问 `ctx.state_dir`、调用 `ctx.broker`、调用 `ctx.nl()`、读写策略状态或做实质筛选/推理的策略步骤，都必须放进 `ctx.substep(name, budget_minutes=B)`；`B>0`、tick 内 name 唯一、低报会 fail-fast。`ctx.broker` 原语和 `ctx.state_dir` 在子步骤外会被拒绝；宿主还会用 `main(ctx)` 总耗时减去 substep 耗时，拒绝实质未包裹计算。`B<1` 的轻量块在回测中视为本决策分钟内完成（仍统计/限时并带 `ready_at` 元数据）；`B>=1` 的块内 `ctx.state_dir` 写入和 `ctx.broker` 动作延迟到 `ready_at = tick + B` 后才可见/提交。延迟中的 broker 动作会立刻出现在 `pending()`，`pending_stage="substep_delay"`，用于同 tick/跨 tick 去重或撤销。
+- 回测成本：`backtest` 独立计时，不计入 Fold 推理 deadline，但单 Fold 次数受 `max_backtests_per_fold` 限制；单 tick 与单交易日真实墙钟硬上限由 run manifest 给出。先用小 `replay_window` 试探，再外推完整耗时。
+- 跨 tick 状态：`ctx.state_dir` 只存你的规则、计划和轻量状态，不是持仓/委托账本；Broker 才是真相源。`ctx.state_dir` 只能在 `ctx.substep` 内访问，块内读到进入该块前的可见状态，写入按 `ready_at` 延迟合并；每次回测重置，需继承的参数写入 `models/`。
+- NL 与做空：`ctx.nl()` 文本按数据节点 PIT 滚动且受配额限制，证据必须降权使用；默认做空券源由成交当日 `margin_secs` 校验，缺失当日集合时回退决策日冻结集合，不可融券会拒单。
 
 ## 数据可见性（逐 tick 时序视图）
-`ctx.asof_dir` 是逐 tick 滚动的时点视图：某行数据只有在“把它写入本地库的定时任务在仿真时钟下已完成”后才可见，严格复刻实盘本地库的刷新节奏。六大数据域各按其落库节点滚动：
+`ctx.asof_dir` 是逐 tick 滚动的时点视图：某行数据只有在“把它写入本地库的定时任务在仿真时钟下已完成”后才可见，严格复刻实盘本地库的刷新节奏。五个 parquet 域各按其落库节点滚动，文本语料经 `ctx.nl()` 按同一时钟门控：
 
 | 数据域 | 落库节点（北京时间，含刷新耗时） | 对回测的可见性 |
 |---|---|---|
@@ -108,27 +107,8 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 | 上一交易日两融 `margin`/`margin_detail` | 盘前 `cn_preopen_margin_*` 约 09:05/09:15 | 次日盘前可见 |
 | 短讯/新闻联播（cctv_news/news） | 盘前 `cn_preopen_text_backfill` 约 09:00 | 当日盘前可见 |
 
-按域以 parquet 目录提供，用 `pd.read_parquet(ctx.asof_dir / "daily")` 读取（域名 `daily`/`events`/`macro`/`fundamentals`/`intraday_1min`）。盘中无刷新节点跨越，视图冻结、`ctx.asof_version` 不变——按它缓存读取、变化时再重算。`ctx.nl()` 文本语料同样按上表节点滚动（冻结研究语料始终可见）。`ctx.snapshot_dir` 是 Fold 决策时点（区间前一交易日收盘）冻结的研究基准快照。
+`ctx.asof_dir` 只包含 parquet parts 目录，用 `pd.read_parquet(ctx.asof_dir / "daily")` 读取（域名 `daily`/`events`/`macro`/`fundamentals`/`intraday_1min`）。盘中无刷新节点跨越，视图冻结、`ctx.asof_version` 不变——按它缓存读取、变化时再重算。`ctx.nl()` 文本语料不在 `ctx.asof_dir` 下，通过宿主检索服务按上表节点滚动（冻结研究语料始终可见）。`ctx.snapshot_dir` 是 Fold 决策时点（区间前一交易日收盘）冻结的研究基准快照。
 
-## Broker 交易接口
-`ctx.broker` 是持仓真相源；下单只表达意图，Broker 强制现金、做空保证金、T+1 可卖、手数、涨跌停、停牌和可融券。`amount?/weight?` 二选一；`limit=P` 为限价单（FIX_PRICE），缺省为市价单。
-
-| 接口 | 主要参数 | 用途 |
-|---|---|---|
-| `ctx.broker.buy` / `sell` | ts_code, amount?/weight?, limit?, valid_bars? | 多头开/减仓 |
-| `ctx.broker.short` / `cover` | ts_code, amount?/weight?, limit?, valid_bars? | 融券做空/买入平空（受可融券约束） |
-| `ctx.broker.close` | ts_code | 市价平掉该票全部持仓（恒市价，无 `limit`） |
-| `ctx.broker.position` | ts_code | 已成交持仓（不含在途），是持仓真相源 |
-| `ctx.broker.pending` | ts_code | 在途已报未成单（实盘委托查询口径），对在途代码跳过重复下单 |
-| `ctx.broker.money` / `.cash` | （无） | 现金视图（盘中随每笔成交按真实佣金/滑点投影更新） |
-| `ctx.broker.available_cash` | （无） | 可部署买力（现金扣融券保证金与冻结所得）；同一 tick 多笔下单据此定量与宿主真实成交一致 |
-
-## ctx 接口与数据视图
-- `ctx`（市场级，每个 tick 重建）：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`（只读快照）；可用现金见 `ctx.broker.cash`。
-- `ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`：只含当前 tick、PIT 可见的 bar（未来 bar 不可见；09:15 与非交易切片无价）。
-- `ctx.substep(name, budget_minutes=B)`：上下文管理器，声明一段重决策的运算耗时 `B>0`（实时上限 + `state_dir` 写可见性门控，不改变成交 bar；见“决策延迟与子步骤”）。
-- `ctx.asof_dir`（逐 tick 滚动时点视图，按域为 parquet 目录，见“数据可见性”）、`ctx.asof_version`（视图滚动时才变的版本号，用于缓存）、`ctx.snapshot_dir`（决策时点冻结的研究基准快照）、`ctx.model_dir`、`ctx.state_dir`（托管跨 tick 暂存，子步骤内写入延时可见）、`ctx.params`。
-- `ctx.nl(ts_code, prompt=...)`：见“NL 工具”。
 """
 
 FOLD_ACTION_SECTION = """\
@@ -153,6 +133,36 @@ FOLD_ACTION_SECTION = """\
 一轮可以发起多个工具调用：相互独立的只读检索（如多个 grep/glob）应在同一轮并行发起以省时；`write_file`/`edit_file`/`explore`/`modification_check`/`backtest`/`finish_fold` 等有状态工具按因果顺序单独调用。每个工具调用都会单独返回一条结果。
 工具失败时优先读取结果中的 `error_type`、`reason`、`retry_hint`、`blocked_target`；修正命令或参数后继续，不要反复提交同一个失败调用。
 
+## 策略代码接口
+这些接口只在正式 `output/main.py` 及其 helper 运行时可用；Agent 工具调用和策略运行是两层不同动作。
+
+| 接口 | 主要参数 | 用途 |
+|---|---|---|
+| `ctx.broker.buy` / `sell` | ts_code, amount?/weight?, limit?, valid_bars?, reason? | 多头开/减仓；返回可用于撤单的 `order_id` |
+| `ctx.broker.short` / `cover` | ts_code, amount?/weight?, limit?, valid_bars?, reason? | 融券做空/买入平空；返回 `order_id` |
+| `ctx.broker.close` | ts_code, reason? | 市价平掉该票全部持仓；返回 `order_id` |
+| `ctx.broker.cancel` | order_id, reason? | 撤销 `pending()` 返回的未成交委托（substep 延迟队列、提交延迟队列或 Broker 当日订单簿） |
+| `ctx.broker.pending` | ts_code? | 有参返回该票在途单；无参返回全部在途单。记录含 `order_id`、`submitted_at`、`age_minutes`、`status`，可能含 `pending_stage`；`substep_delay` 的 age 从生成 tick 起算，ready 后进入 `submit_lag` 则从实际提交 tick 起算 |
+| `ctx.broker.position` | ts_code | 已成交持仓（不含在途），是持仓真相源 |
+| `ctx.broker.money` / `.cash` | （无） | 现金视图，每 tick 反映已成交结果（含真实佣金/滑点）；substep 内未成交计划不改变它 |
+| `ctx.broker.available_cash` | （无） | 当前已成交状态下的可部署买力（现金扣融券保证金与冻结所得）；substep 内新发出的 broker action 是提交计划，不会立刻改变 cash/position/available_cash |
+
+`amount` 是股数（按 100 股向下对齐），`weight` 是初始权益的名义比例；二者择一。`limit=P` 为限价单，缺省为市价单。只在显式可报单/交易分钟 tick 提交新订单；off-session tick 写计划。`ctx.broker` 下单/撤单原语必须在 `ctx.substep` 内调用：`0 < B < 1` 的轻量块按当前决策分钟提交并统计耗时，`B>=1` 的动作等到 `ready_at` 后第一个可报单 tick 才提交，再按常规成交延迟撮合。
+
+`ctx` 其他字段：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`、`ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`、`ctx.substep(name, budget_minutes=B)`、`ctx.asof_dir`、`ctx.asof_version`、`ctx.snapshot_dir`、`ctx.model_dir`、`ctx.state_dir`、`ctx.params`、`ctx.nl(ts_code, prompt=...)`。
+
+轻量委托管理例子（每个 tick 可运行，用小预算子步骤统一统计耗时和撤单提交时点）：
+
+```python
+def cancel_stale_pending(ctx, max_age_minutes=1.0):
+    with ctx.substep("cancel_stale_pending", budget_minutes=0.5):
+        for order in ctx.broker.pending():
+            order_id = order.get("order_id")
+            age = float(order.get("age_minutes") or 0.0)
+            if order_id and age > max_age_minutes:
+                ctx.broker.cancel(order_id, reason="stale_pending_gt_1m")
+```
+
 ## 工作步骤
 以下是可行步骤，不是固定顺序；可以根据观察结果随时回到 grep/glob/shell 重新检查数据、代码、父产物和结果。
 - 当前 Sandbox 内的数据是当前 Fold 的样本窗口（如分钟线和回放区间可能较短）；后续 Fold 会按配置周期沿时间向后滚动，回放窗口由各 Fold 周期决定。据此写可迁移逻辑，不要因当前窗口短而过拟合或对数据规模下死结论。
@@ -168,7 +178,8 @@ FOLD_ACTION_SECTION = """\
 ## 推理与风格要求
 - 每次关键决策前，先从机制假设、可见数据、执行约束、反证路径和失败模式做充分推理，不要停留在表层相关性或短期收益；最终工具调用、代码和复盘仍保持简洁，把复杂思考落实为可验证的下一步。
 - 主语言使用中文；代码标识、库名、论文标题和英文专有名词可以保留原文。
-- 避免硬编码具体股票、月份、题材结论，写可迁移的逻辑；NL prompt 和交易规则要简短、可检索、可证伪，引用证据类型而不是个案。\
+- 避免硬编码具体股票、月份、题材结论，写可迁移的逻辑；NL prompt 和交易规则要简短、可检索、可证伪，引用证据类型而不是个案。
+- 策略代码遵循 fail-fast：不要用 `except: pass` 或裸 `except` 静默吞掉数据缺失、模型加载失败或计算异常。缺数据或坏状态应显式报错，或按“证据不足”明确降级（如跳过该票、清空目标），不要静默回退到掩盖问题的默认路径；`ctx.model_dir` 里加载的参数若与当前特征不匹配，应显式失败或重建，而不是 `strict=False` + `except: pass` 用随机初始化冒充。\
 """
 
 FOLD_SUBMIT_CONTRACT = """\
@@ -176,6 +187,7 @@ FOLD_SUBMIT_CONTRACT = """\
 finish_fold 只表示你停止本 Fold 的修改，是否冻结仍由 Pipeline 复核。调用前确认：
 - `output/main.py` 存在并定义 `main(ctx)`，能驱动 `ctx.broker` 原语下单，所有正式 helper 都在 `output/` 树内。
 - 需要跨 Fold 继承的模型参数已写入 `models/`；只在本次回测使用的中间产物留在内存。
+- 当前 `output`/`models` 就是你想提交的最好已验证版本；若历史 Step 中有更优版本，先把它恢复为当前产物再检查和回测。
 - 最近一次 `modification_check` 已通过，且之后 `output`/`models` 未再改动。
 - 最近一次 `backtest`（valid）成功，且对应的就是当前 `output`/`models` hash。
 - `output`/`models` 不含缓存、隐藏文件/目录、日志、数据 dump、notebook 或密钥。
@@ -191,7 +203,7 @@ FOLD_PROHIBITIONS = """\
 - 在 `output/` 写入缓存、日志、数据 dump、notebook、密钥或模型权重（权重只进 `models/`）。
 - 修改只读 `README.md`、父产物、结果目录或 Step 树。
 - 用验证或测试收益硬编码具体股票、月份、题材或行情事件。
-- 在逐 tick 交易函数内调用 `nl` 或访问 `model_dir`/`workspace_dir`。\
+- 在每个 tick 的热路径里反复调用 `nl`、重读 `model_dir` 或全量重算大表；NL、模型加载和横截面筛选只放在少数选定决策时点并缓存结果。\
 """
 
 PROTOCOL_INSTRUCTION = "\n\n".join(
@@ -200,7 +212,7 @@ PROTOCOL_INSTRUCTION = "\n\n".join(
 
 WRAP_UP_PROMPT = """\
 本 Fold 时间即将用完。请立即收尾：
-1. 把当前最好的版本写入 output/，需要继承的模型参数写入 models/；
+1. 把当前最好的已验证版本写入 output/，需要继承的模型参数写入 models/；若最佳 Step 不是当前产物，先恢复它；
 2. 运行 modification_check；
 3. 若来得及，跑一次 backtest；
 4. 然后立刻调用 finish_fold。不要再开新的探索。\
@@ -260,6 +272,7 @@ META_LEARNING_INSTRUCTION = """\
 - 策略产物和模型参数按普通 Fold 链式继承：首个普通 Fold 继承初始模板或元学习正则化后的父产物；之后每个普通 Fold 继承上一个普通 Fold 在测试前冻结的策略和模型产物；如果某个普通 Fold 没有可接受更新，则继承 Pipeline 选择的 fallback 父产物。
 - 如果 `tree.txt` 显示 `(empty step tree)`、`tree.json.nodes` 为空、development 账本为空或 `meta_learning_memory.jsonl` 为空，按首轮处理：不要追查缺失历史、编造已验证结论或正则化不存在的过拟合经验；应理解初始 `output/`、`models/`、run manifest、runtime env 和可见数据结构，结合配置允许时的联网检索提出首个可执行 Taste。
 - 因此 Taste 应清晰、可执行、可迁移，不能只是摘要或随意建议。
+- Taste 可以包含跨周期通用的**执行先验**，例如建议策略采用固定的日内决策时间表（盘前固定时点研究/选股、`09:15`/`09:25` 下单、盘中固定节奏管理、`14:57` 收尾），以及 fail-fast 的实现纪律（不用 `except: pass` 静默吞异常，缺数据/坏状态显式降级）。这些是与具体日期/题材无关的执行方法论，可写进 Taste 指导后续 Fold。
 
 ## 可读写文件
 | 路径 | 权限 | 内容 | 用途 |
@@ -794,13 +807,9 @@ def _visible_file_names(data_summary: Mapping[str, object]) -> set[str]:
 
 
 def _opaque_fold_ref(value: object) -> str | None:
-    if value is None:
+    if value is None or str(value) == "":
         return None
-    text = str(value)
-    if not text:
-        return None
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
-    return f"fold_ref_{digest}"
+    return agent_visible_ref(value, prefix="fold_ref")
 
 
 def _as_mapping(value: object) -> dict[str, object]:
@@ -848,9 +857,14 @@ def build_meta_learning_prompt(
     experiment_directive: str = "",
     experiment_facts: dict[str, object] | None = None,
 ) -> str:
-    sections = [META_LEARNING_INSTRUCTION]
+    instruction = META_LEARNING_INSTRUCTION
     if experiment_facts:
-        sections.append(render_experiment_facts_section(experiment_facts))
+        facts_section = render_experiment_facts_section(experiment_facts)
+        marker = "\n# 动作与流程\n"
+        if marker not in instruction:
+            raise RuntimeError("META_LEARNING_INSTRUCTION missing action section marker")
+        instruction = instruction.replace(marker, f"\n{facts_section}\n\n# 动作与流程\n", 1)
+    sections = [instruction]
     directive_section = build_meta_learning_directive_section(experiment_directive)
     if directive_section:
         sections.append(directive_section)

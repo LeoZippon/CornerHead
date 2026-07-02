@@ -71,7 +71,7 @@ flowchart LR
     RAW -->|cn_nightly_pit_event_build| PIT["fundamental_events\n财务事件可见性索引"]
     RAW --> SNAP["Environment PIT snapshot\n裸数据窗口 + 标准单位 + 可见性过滤"]
     PIT --> SNAP
-    SNAP --> AGENT[Agent / backtest_tool]
+    SNAP --> AGENT[Agent / backtest]
 ```
 
 当前维护 6 个数据域：
@@ -339,7 +339,7 @@ TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_sched
 
 runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
 
-当前 crontab 必须通过 `ops/cron/install_tushare_cron.py` 安装，使用 `/home/lzp/miniconda3/envs/quant/bin/python` 和 `scripts/data/tushare_cron_update.py`。旧的 `stock` 环境和 `scripts/tushare/cron_update.py` 不再作为正式调度入口。
+当前 crontab 必须通过 `ops/cron/install_tushare_cron.py` 安装，使用 `/home/lzp/miniconda3/envs/quant/bin/python` 和 `scripts/data/tushare_cron_update.py`。
 
 安装或刷新 cron：
 
@@ -374,6 +374,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 | `common.py` | 数据集定义、接口策略、可见时间、限频和共享业务逻辑 |
 | `download.py` | 下载、更新、修正监控和数据重组实现 |
 | `audit.py` | 顶层状态文件和专项审计实现 |
+| `cron_update.py` | cron job 调度业务实现（读 `configs/tushare_update_schedule.json`，被 `scripts/data/tushare_cron_update.py` 包装） |
 | `io.py` | Parquet、sidecar、JSONL 和分页探测等底层读写工具 |
 
 ## 4. 审计与状态文件

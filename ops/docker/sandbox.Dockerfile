@@ -52,15 +52,14 @@ RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 -
     && rm /tmp/duckdb_cli.zip \
     && duckdb -c "select 1"
 
-# Trusted host-side runtime modules baked in (R16): the de-stringed per-tick
-# main(ctx) driver and the dependency-light broker_core it shares with the host
-# SimBroker. Loaded by file (executor.runtime_path -> CONTAINER_RUNTIME_DIR), with
-# broker_core resolved as a sibling on the driver's sys.path[0]. Must match
+# Trusted host-side runtime module baked in (R16): the de-stringed per-tick
+# main(ctx) driver, loaded by file (executor.runtime_path -> CONTAINER_RUNTIME_DIR).
+# It is standard-library only (broker actions are delayed-submit plans settled by the
+# host, so the driver no longer needs broker_core). Must match
 # autotrade.environment.executor.CONTAINER_RUNTIME_DIR.
 RUN mkdir -p /opt/at_runtime
-COPY src/autotrade/environment/broker_core.py /opt/at_runtime/broker_core.py
 COPY src/autotrade/environment/main_ctx_driver.py /opt/at_runtime/main_ctx_driver.py
-# COPY preserves the source mode (0600 on the host), so make the trusted modules
+# COPY preserves the source mode (0600 on the host), so make the trusted module
 # world-readable for the non-root `agent` user that runs the driver.
 RUN chmod 0644 /opt/at_runtime/*.py
 

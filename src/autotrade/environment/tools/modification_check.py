@@ -51,13 +51,15 @@ class ModificationCheckTool:
         if constraints.is_initial_artifact:
             base_root = self.ctx.paths.parent_output
             base_model_root = self.ctx.paths.parent_model_artifacts
-            expected = manifest.get("initial_template_hash")
-            if expected is not None:
-                actual = artifact_hash(base_root)
-                if actual != str(expected):
-                    raise ToolError(
-                        f"initial template hash mismatch: manifest={expected} actual={actual}; diff base is not trusted"
-                    )
+            # Hard-check the diff base like the parent path: the initial template hash
+            # must be present and match, so the modification diff can never be measured
+            # against an untrusted base.
+            expected = str(manifest.require("initial_template_hash"))
+            actual = artifact_hash(base_root)
+            if actual != expected:
+                raise ToolError(
+                    f"initial template hash mismatch: manifest={expected} actual={actual}; diff base is not trusted"
+                )
         else:
             base_root = self.ctx.paths.parent_output
             base_model_root = self.ctx.paths.parent_model_artifacts

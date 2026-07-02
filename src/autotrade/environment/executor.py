@@ -26,8 +26,8 @@ from autotrade.environment.runtime import SandboxPaths
 # slightly-longer backstop in case the container-side guard ever fails.
 _HOST_TIMEOUT_BUFFER_SECONDS = 15.0
 
-# Where the sandbox image bakes trusted host-side runtime modules (the de-stringed
-# main_ctx driver and broker_core). Must match ops/docker/sandbox.Dockerfile.
+# Where the sandbox image bakes the trusted host-side runtime module (the de-stringed
+# main_ctx driver). Must match ops/docker/sandbox.Dockerfile.
 CONTAINER_RUNTIME_DIR = "/opt/at_runtime"
 
 
@@ -64,8 +64,8 @@ class LocalExecutor:
         return str(host_path)
 
     def runtime_path(self, host_path: Path | str) -> str:
-        """Path to a trusted host-side runtime module (e.g. the main_ctx driver). Runs
-        the repo file directly; its sibling ``broker_core`` is found on sys.path[0]."""
+        """Path to a trusted host-side runtime module (the main_ctx driver). Runs the
+        repo file directly (local-dev executor uses the live source)."""
         return str(host_path)
 
     def kill_marker(self, marker: str, *, user: str = "agent") -> None:
@@ -153,8 +153,8 @@ class DockerExecutor:
         self.python = python
 
     def runtime_path(self, host_path: Path | str) -> str:
-        """Container path of a trusted runtime module baked into the image at
-        ``CONTAINER_RUNTIME_DIR`` (its sibling ``broker_core`` sits there too)."""
+        """Container path of the trusted runtime module (the main_ctx driver) baked
+        into the image at ``CONTAINER_RUNTIME_DIR``."""
         return str(Path(CONTAINER_RUNTIME_DIR) / Path(host_path).name)
 
     def map_path(self, host_path: Path | str) -> str:

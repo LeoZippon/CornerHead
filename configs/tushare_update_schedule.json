@@ -18,26 +18,8 @@
   "revision_monitor": {
     "ledger_path": "results/data_quality/revision_events.jsonl",
     "summary_path": "results/data_quality/revision_summary.json",
-    "recent_force_refresh_datasets": ["daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d", "limit_list_d"],
     "sentinel_datasets": ["daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d", "limit_list_d"],
-    "sentinel_sample_size": 12,
-    "dataset_policies": {
-      "daily": {"severity": "high", "recent_force_refresh": true, "sentinel": true, "downstream": ["pit_daily_snapshot", "labels", "backtests"]},
-      "adj_factor": {"severity": "medium", "recent_force_refresh": true, "sentinel": true, "downstream": ["adjusted_prices", "return_checks"]},
-      "daily_basic": {"severity": "medium", "recent_force_refresh": true, "sentinel": true, "downstream": ["valuation_fields", "liquidity_fields"]},
-      "stk_limit": {"severity": "high", "recent_force_refresh": true, "sentinel": true, "downstream": ["trading_constraints", "execution_replay"]},
-      "suspend_d": {"severity": "high", "recent_force_refresh": true, "sentinel": true, "downstream": ["tradability_filters", "execution_replay"]},
-      "limit_list_d": {
-        "severity": "medium",
-        "recent_force_refresh": true,
-        "sentinel": true,
-        "downstream": ["board_labels", "event_evidence"],
-        "unstable_fields": ["limit_amount"],
-        "field_policy": {
-          "limit_amount": "raw_audit_only_until_field_versioned"
-        }
-      }
-    }
+    "sentinel_sample_size": 12
   },
   "jobs": {
     "cn_evening_full": {

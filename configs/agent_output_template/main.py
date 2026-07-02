@@ -9,12 +9,12 @@ placeholder screen in ``_screen`` with your own signal.
 Key ``ctx`` surface (advanced helpers in ``candidate.py`` / ``trading.py`` + ``README.md``):
   ``ctx.positions`` / ``ctx.account``                 current holdings / account state (cash: ``ctx.broker.cash``)
   ``ctx.price(code)`` / ``ctx.bar(code)``              this tick's price/bar (None pre-auction)
-  ``ctx.broker.buy/sell/short/cover/close(code, weight=...|amount=...)``  place orders
-  ``ctx.broker.pending(code)``                         still-working orders for a code
+  ``ctx.broker.buy/sell/short/cover/close(code, weight=...|amount=...)``  place orders; returns ``order_id``
+  ``ctx.broker.pending(code=None)`` / ``ctx.broker.cancel(order_id)``      query/cancel working orders
   ``ctx.asof_dir`` / ``ctx.asof_version``              rolling point-in-time data view + its version
   ``ctx.snapshot_dir`` / ``ctx.model_dir``             frozen research snapshot / model artifacts
-  ``ctx.state_dir``                                    managed cross-tick state (staged inside a substep)
-  ``ctx.substep(name, budget_minutes=B)``              declare a heavy block's latency budget
+  ``ctx.state_dir``                                    managed cross-tick state (only available inside substep)
+  ``ctx.substep(name, budget_minutes=B)``              required wrapper for broker/state actions; B<1 submits this tick, B>=1 after ready_at
   ``ctx.nl(code, prompt=...)``                         optional LLM text read
 
 ``ctx.asof_dir`` holds one directory per data domain (``daily``, ``events``, ``macro``,
@@ -25,9 +25,9 @@ that version and recompute only when it changes (the daily cross-section is only
 through the prior trading day intraday; the live bar is ``ctx.bars`` / ``ctx.price``).
 
 Orders fill a LATER bar (``execution_lag_bars`` ahead), never within the decision
-bar, so re-submitting before a fill double-buys — ``ctx.broker.pending(code)``
-guards against that until the order lands. None of the latency / ``nl()`` helpers
-are required — this file uses only the core primitives.
+bar. Broker actions and ``ctx.state_dir`` access must run inside a positive-budget
+``ctx.substep``; even light per-tick management should use a small budget such as
+0.5 minutes so runtime and submit latency are accounted uniformly.
 """
 
 from __future__ import annotations
@@ -58,10 +58,11 @@ def _screen(ctx) -> list[str]:
 
 
 def main(ctx) -> None:
-    if ctx.positions:  # already holding the basket — hold to final-day liquidation
-        return
-    for code in _screen(ctx):
-        # Skip a code with a price unavailable this tick or an order still in flight
-        # (the fill lands a later bar, so re-submitting before then would double-buy).
-        if ctx.price(code) is not None and not ctx.broker.pending(code):
-            ctx.broker.buy(code, weight=1.0 / TOP_N, reason="equal_weight_basket")
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        if ctx.positions:  # already holding the basket — hold to final-day liquidation
+            return
+        for code in _screen(ctx):
+            # Skip a code with a price unavailable this tick or an order still in flight
+            # (the fill lands a later bar, so re-submitting before then would double-buy).
+            if ctx.price(code) is not None and not ctx.broker.pending(code):
+                ctx.broker.buy(code, weight=1.0 / TOP_N, reason="equal_weight_basket")

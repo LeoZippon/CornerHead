@@ -1,3 +1,29 @@
+2026-07-01 二轮 fresh-eyes 全量审计 + 11 项整改落地并复核
+
+- 审计：7 个 Opus 子代理并行（agent/prompt、执行核、broker、tools/snapshot/NL、pipelines、data+docs、两轮单 Fold 复盘）+ 本人逐条核验。结论：核心撮合/PIT/隔离无高危缺陷——broker 撮合与前一交易日收盘锚点、Timeview 两层 PIT、沙箱隔离、meta finalize 顺序、fail-fast 列表、config 默认值均与文档一致，PROMPTS.md 与 prompts.py 字节一致。
+- 已修复（含用户 11 项）：
+  - M1 PIT 泄漏：step tree 节点名把 `fold_<period>`（=held-out 季度）透给 Agent。新增 `environment/identity.py` 单一 `agent_visible_ref`（去重 runtime/experiment/prompts 三处 sha256 副本），backtest 记录 step 时 opaque fold_id；data_summary 早前已 opaque，`host_run_manifest` 保留明文。
+  - M2 复现性：`enforce_substep_coverage` 改为随 `mode=="valid"` 分档，frozen/held-out 不再因负载抖动的墙钟覆盖检查误杀已接受策略。
+  - M3 死代码/过度设计：substep 延迟提交改造后 driver 的 tick 内成交投影全不可达——删 `_project_open/_reduce`、`_cost_model`、`_order/close/cancel` 的 `_cur_substep` 死分支（约 90 行）及 driver 对 `broker_core` 的依赖；镜像不再烤入 `broker_core`（Dockerfile/executor/env docs 同步），driver 变纯标准库；顺带修好同 tick cancel 不进 `pending()`（B4）与 `available_cash` 过时 docstring。`broker_core.py` 仍供宿主 SimBroker。
+  - M4 误导开关：删无效 `--allow-incomplete-validation`（冻结候选池本就只取完整验证），两 CLI 恒 `require_complete_validation=True`。
+  - item5：确认无需为单次回测新增全局墙钟总上限（现状=探索 deadline + 回测按天上限两套独立计时），未新增。
+  - L1–L10 + 极低项：helper SyntaxError→ArtifactError；`auction_close_time`/final-eval 上限内联默认；删死常量 `SNAPSHOT_FILES`；timeview docstring 六→五域；报告 y 轴 Fold return；data doc 补 `cron_update.py`；units 交叉引用改 §2.4；`initial_template_hash` 硬校验；agent_design §5.3 只 buy/short 带 weight；env §7.2 09:25 竞价标注更正；两 doc 工具表补 `note`；audit-session 派生镜像说明澄清；嵌套 substep 覆盖不重复计时；shell heredoc 二次剥离确认为防御性保留；rolling_asof/quarter 兼容别名作为 resume 兼容保留。
+  - item8/9 fail-fast + prompt：Fold/meta prompt + 模板禁止 `except: pass` 静默兜底；新增“固定日内时间表”（贴近真人交易日常：`ctx.cur_time` 门控 08:00 研究→09:15/09:25 下单→14:57 收尾），模板 `candidate.research()` 加固定盘前时点门控；agent_design §5.2 收敛为要点并指向 env §7.2、去四处重复；现金视图措辞去“投影”。
+- 复核（item11）：Opus 子代理二次审计确认 11 项全部 RESOLVED，仅 3 处遗漏/风格（timeview 六→五 docstring、money/cash “投影”措辞、runtime/experiment mid-file import）已一并修好。
+- 两轮单 Fold 复盘（`regular_fold_last_taste_gpu` / `substep_gnn_fold`）：Agent 输入合理、轨迹合规、环境交互正确、策略 PIT 安全但收益为负且 GNN 过拟合回落简单因子；暴露 fold deadline 不覆盖完整回放墙钟、`pids_limit` 触顶、NL 全程未用（后续单独治理）。
+- 验证：full `unittest discover -t . -s tests` 406 OK；`git diff --check` clean；PROMPTS.md 重新导出且 sha256 幂等；`autotrade-sandbox:latest` 重建（driver 纯标准库、镜像不含 broker_core、容器内 import OK）。CPU-only；内存约 401Gi available，GPU 为既有任务占用。
+
+2026-06-30 审计跟进：盘外 tick、工具合同与 audit 入口对齐
+
+- 用户复核后定案：`margin_secs` 缺失回退保持不动，`use_docker=False` 仅本地开发风险不处理；Fold 冻结“最近完整 valid”通过 Prompt/docs 要求 Agent 结束前恢复自己认为最好的已验证 Step。
+- 盘外 tick 问题确认真实存在：盘前 off-session tick 原会把订单排到首根真实 bar。修为所有 off-session tick 仅研究/状态、不成交；显式 09:15/09:25/14:57 竞价 tick 语义不变；新增 06:00 回归测试。
+- `run_audit_session.py` 补齐正式入口已有的 per-domain snapshot window 参数（daily/fundamentals/events/macro/text）并传入 `SnapshotConfig`；不做脚本架构重抽象。
+- living docs + Fold Prompt 改为实际 function action 名（`shell`/`web_search`/`modification_check`/`backtest`/`finish_fold`），修正 `backtest(mode="valid")` 旧写法、`ctx.asof_dir` 五个 parquet 域 + `ctx.nl()` 文本滚动说明；PROMPTS.md 重新导出。
+- 追加 Prompt/模板优化：明确普通 off-session tick 不调用 `ctx.broker`/`order_stock`，盘前下单走 `ctx.state_dir` 计划交接后在 09:15/09:25 显式盘前 tick 提交；修正“任意时点下单”和逐 tick 热路径禁用 `model_dir` 的歧义。
+- 元学习 Prompt 结构微调：`当前实验事实（可信运行事实，不是交易证据）` 改为插入 `# 环境与配置` 内、`# 动作与流程` 前，与 Fold Agent 系统提示词一致；新增位置回归测试。
+- 简单清理 `tushare_update_schedule.json` 中未被代码消费的 `recent_force_refresh_datasets` / `dataset_policies`，保留真实生效的 `sentinel_datasets` 和 job `extra_args`。
+- 验证：全套 388 OK；`git diff --check` clean；JSON/py_compile/run_audit_session --help/旧工具名与旧 Prompt 语义扫描 OK；无 GPU。
+
 2026-06-30 最终综合审计 + 修复（RA5；chore/post-audit-reaudit）
 
 - 三个并行 Opus 子代理按用户要求审计：docs↔源一致性、业务/设计逻辑正确性、冗余/重复/命名。维度1（docs↔码）全绿；维度3（冗余/命名）除两处死 import 外全绿。
@@ -889,3 +915,46 @@
 
 - Branch `docs/post-audit-sync` (on Phase E). R12: `environment_design.md` §6.1/§7.2 now describe the per-tick 24h grid (was "逐分钟"), document the 14:57 close-auction tick (fills at the 15:00 bar close, no slippage), and add `offsession_tick_minutes`/`auction_enabled`/`auction_close_time` to the budget table (defaults verified vs config.py); the QMT 14:57 reference is now grounded. R13: de-chronicled the `rolling_asof_enabled→timeview_enabled` rename note, removed the "旧 09:25" anchor comparison in `pipeline_design.md`, fixed a leftover "逐分钟" claim in §4.2, and clarified `fundamental_events.available_at`=公告日18:00 is the row-level rule (distinct from the ~03:50 PIT landing node).
 - Docs only; `git diff --check` clean.
+
+2026-06-30 Broker cancel API + Fold prompt/action split
+
+- 开放 `ctx.broker.cancel(order_id, reason=None)`；`buy/sell/short/cover/close` 返回 `order_id`，委托记录携带 `submitted_at`/`submitted_time`，`pending(ts_code=None)` 可查全部 pending 并返回 `status`、`age_minutes`。cancel 同时支持尚未进入 Broker 的 submit-lag 队列和已在 Broker 工作簿里的限价单；同 tick 下单后 cancel 会从本 tick `main_actions` 中净掉。
+- 优化 Fold Agent Prompt：把 broker/ctx 交易原语从“环境与配置”移入“动作与流程 / 策略代码接口”，保留环境章节只描述规则事实；补充每分钟取消 `age_minutes > 1` pending 订单的子步骤示例，并提示非交易时间不能直接下单、盘前计划应先写 `ctx.state_dir`，后续在 09:15/09:25 等可报单 tick 提交。模板策略同步加入 `cancel_stale_pending()`。
+- GPT-5.5 xhigh SubAgent 审计后修复：same-tick `pending()` 记录补齐文档化字段且不泄漏 `_substep`；最后一个真实 bar 后立即做 day-end cancel，避免 post-close off-session 再看到可取消 working order；同 tick buy+cancel 的 `main_actions` 只记录净订单；README 的 off-session wording 改为“不提交新订单”而非禁止轻量 hygiene。
+- 正式 Fold 暴露并修复一个 runtime 权限问题：Docker 内 `agent` 写 `.state_staging` 时 host 创建目录为 0775，导致 `PermissionError`；`StateStager` 初始化后显式 chmod 0777，并新增权限合同单测。
+- 重新构建 `autotrade-sandbox:latest`。正式测试：meta-learning audit `cancel_prompt_audit_20260630_2304_meta` 返回 `status=ok`，Taste 5424 chars；普通 Fold day-period `cancel_prompt_audit_20260630_2359_fold_day` 返回 `status=ok`、`fold_status=no_update_timeout`、run `run_f43ae3e0ced3`（显式 parent fallback）。季度普通 Fold 诊断 run `run_1035d8ca1531` 到 `fold_finished`，3-day valid 回测成功（19 orders / 17 trades），但因初始无 parent 且无完整 validation 不形成正式 experiment 目录，改用 day-period rerun 闭环。
+- Validation: full suite `unittest discover -t . -s tests -p 'test_*.py'` -> 396 OK; `git diff --check` clean. 资源复查：内存约 397 GiB available；GPU 5 空闲，其他 GPU 为既有任务占用。
+
+2026-06-30 Backtest validation cap refresh + trace review
+
+- 将验证回测默认硬上限从单 tick 180s / 单交易日 600s 调整为 300s / 900s；`ExperimentConfig`、`BacktestTool` 缺省兜底、`environment_design.md` 和相关单测 fixture 已对齐。最终评估兜底仍为 900s / 3000s。
+- 清理 `.runtime/sandboxes`，仅保留最新两个 sandbox：`run_f43ae3e0ced3` 与 `run_1035d8ca1531`；目录大小降至约 16G。
+- Trace 审计：meta-learning run `run_766797dac06a` 输入/输出正常，`session_end=meta_learning_done`；day-period Fold run `run_f43ae3e0ced3` Agent IO 正常并 `fold_finished`，但验证/冻结回放因 day-period 只有 1 个交易日被 `replay region needs at least two trade dates for entry/exit` 拒绝，最终走 parent fallback；季度诊断 run `run_1035d8ca1531` 在权限修复后 3-day debug backtest 正常成交。
+- Validation: `python -m unittest` targeted 4 tests OK；`git diff --check` clean。`pytest` 在当前 `quant` 环境中不可用，未使用。
+
+2026-06-30 ctx.substep broker action delayed-submit semantics
+
+- 将 `ctx.substep(name, budget_minutes=B)` 内的 broker action 改为真实延迟提交：块内 `buy/sell/short/cover/close/cancel` 等到 `ready_at=tick+B` 后第一个可报单 tick 才提交，然后再走常规 `execution_lag_bars` / 竞价撮合。
+- `ctx.broker.pending()` 现在同 tick 即可看到 substep 延迟单，记录 `pending_stage="substep_delay"` 和 `ready_at`；块内下单不再投影同 tick 现金/持仓，ready 后由宿主 Broker 真实约束。`auction_close_time` 默认与文档/配置对齐为 `"14:57"`。
+- GPT-5.5 xhigh 子代理审计后修复边界：同 tick pending 可见性、delayed cancel、ready 落在无后续成交 bar 的真实 tick 时记录 `main_actions_unfilled/no_fill_bar_ahead` 而非静默顺延。
+- 更新 `environment_design.md` / `agent_design.md` / Fold Prompt / 模板 README，并重新导出 `configs/prompts/PROMPTS.md`。
+- Validation: `tests.unit.test_main_ctx_replay` -> 42 OK；full `PYTHONDONTWRITEBYTECODE=1 ~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p 'test_*.py'` -> 400 OK；旧语义 grep 无非历史命中；`git diff --check` clean；`docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile .` cached rebuild OK。
+
+2026-06-30 ctx.substep coverage enforcement + GNN Fold rerun
+
+- 将策略执行约束收紧为“实质策略步骤必须进入 `ctx.substep`”：`ctx.broker` action、`ctx.state_dir`、`ctx.nl()` 均拒绝在 substep 外使用；宿主按 `main_wall_s - sum(substep.real_wall_s)` 检查未覆盖策略耗时，超过阈值 fail-fast；strategy import 也有 30s 上限。`0 < budget_minutes < 1` 作为轻量当前分钟步骤，`budget_minutes >= 1` 才延迟到 `ready_at`。
+- Prompt、模板和 living docs 已更新：要求所有 research/screening/inference/state/broker/NL 步骤分段包裹；说明 substep 内 broker action 是提交计划，不立即投影现金/持仓；`ctx.state_dir` 只在 substep 内可见，直接访问宿主 state 路径会被 path guard 拒绝。
+- GPT-5.5 xhigh 子代理审计发现并已修复：`AT_STATE_DIR` 环境变量绕过、import-time `ctx.nl()`/重计算绕过、state staging 开销被误算为 untracked、Prompt/文档仍残留旧 broker projection 语义、B<1/B>=1 边界缺测试。
+- 清理旧测试 sandbox：删除 `.runtime/sandboxes/run_f43ae3e0ced3` 和 `.runtime/sandboxes/run_1035d8ca1531`。新运行保留 `.runtime/sandboxes/run_a7c0c383d1ba` 与 `.runtime/sandboxes/run_fa55845aec77` 供审计。
+- Validation: full `PYTHONDONTWRITEBYTECODE=1 ~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p 'test_*.py'` -> 406 OK；Dockerized Fold E2E OK；`git diff --check` clean；`autotrade-sandbox:latest` rebuilt.
+- Meta-learning formal run `substep_gnn_meta_20260630` -> `status=ok`, `taste_chars=4241`; Taste 建议用现有 `networkx/scipy/torch` 做轻量图/知识图谱，不新增派生镜像依赖。
+- Regular Fold `substep_gnn_fold_20260630` 生成并导入图策略，3 个 5-day valid 分别为 -6.51%、-0.88%、+1.40%，substep 预算均未超时；完整 61-day validation 估算约 80 分钟且实际未在本次 shell 会话内完成，已手动停止容器。结论：Agent IO/substep 轨迹正常，但当前 Fold deadline 不覆盖完整 backtest 墙钟，回放性能/总时限仍需单独治理。
+
+2026-07-01 Formal torch-geometric meta + regular Fold rerun
+
+- 按正式参数重跑一轮元学习和一轮普通 Fold；先重建 `autotrade-sandbox:latest`，再启动 `torchgeo_formal_meta_20260701` 和 `torchgeo_formal_fold_20260701`。普通 Fold 使用默认 60 分钟探索 deadline、季度 Fold、`max_backtests_per_fold=30`、`per_call_timeout_seconds=300`、单 tick 300s、单交易日 900s；普通 Fold Docker `network=none`，GPU 6，镜像来自元学习派生镜像。
+- Meta-learning 用户级注入要求使用 torch-geometric。结果 `status=ok`，Taste 3926 chars，并写出 `workspace/sandbox_environment.json` 请求 `torch-geometric>=2.6,<3`；Pipeline 成功构建 `autotrade-sandbox:torchgeo_formal_meta_20260701-epoch_001-ed9e30de1151`，pip 安装 `torch-geometric 2.8.0` 成功。日志 `logs/audit_sessions/torchgeo_formal_meta_20260701.log`，Taste 位于 `experiments/torchgeo_formal_meta_20260701/meta_learning/epoch_001/taste.md`。
+- 普通 Fold 成功使用派生镜像和 torch-geometric，训练出 `gnn_model.pt`/`gnn_meta.json`，最终策略为行业虚拟节点 + GATConv 的横截面排序：08:00 `gnn_research` 写计划、09:25 `gnn_execute` 下单、14:57 `gnn_exit` 轮出、固定监控时点 `gnn_monitor` 撤 stale pending。首轮 debug 暴露并修复了未完整 substep 包裹和 `KeyError: ts_code`；最终产物通过 modification/contract check。
+- 普通 Fold 只完成非验收 replay：3-day `valid_001` return 0.49%、Sharpe -1.20、回放 229s；10-day `valid_002` return 3.01%、Sharpe 5.58、max drawdown 0.70%、replay_wall_seconds 979s、108 orders / 11 trades / 93 rejects（主要 `insufficient_cash`）。`valid_002` 的 substep 预算未超时，`gnn_research` 9 次、最大约 19.43s，预算 15 分钟。
+- 正式实验最终失败且未生成 `experiments/torchgeo_formal_fold_20260701`：Agent 在 deadline 前 `finish_fold`，但没有完整 2021Q4 valid 回测；pipeline 按 `require_complete_validation=true` 拒绝初始 baseline，报 `RuntimeError: initial fold produced no acceptable baseline artifact: ['no successful complete validation backtest in this fold']`。结论与上一轮一致：Agent IO、依赖传递、substep 轨迹正常；阻塞仍是完整季度回放耗时约远超 60 分钟探索窗口/当前流程未保证完成验收回测。
+- 资源复查：无运行中 Docker 容器；内存约 392 GiB available；GPU 6 回到约 7.8 GiB / 0%（其余 GPU 为既有任务占用）。本轮保留 runtime sandbox `.runtime/sandboxes/run_caf370907b69` 供审计。

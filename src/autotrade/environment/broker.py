@@ -295,6 +295,7 @@ class WorkingOrder:
     remaining_bars: int
     is_auction: bool
     reason: str
+    submitted_at: str = ""
     # A close (15:00) call-auction order fills at the activation bar's CLOSE; an
     # open (09:25) auction or a continuous order fills at its bar OPEN.
     auction_close: bool = False
@@ -314,6 +315,9 @@ class WorkingOrder:
             "price_type": self.price_type,
             "price": self.price,
             "status": "working",
+            "submitted_at": self.submitted_at,
+            "remaining_bars": self.remaining_bars,
+            "reason": self.reason,
         }
 
 
@@ -427,6 +431,8 @@ class SimBroker:
         is_auction: bool = False,
         auction_close: bool = False,
         reason: str = "",
+        order_id: str | None = None,
+        submitted_at: str = "",
     ) -> str:
         """Submit an order to the day's book and return its ``order_id``.
 
@@ -436,7 +442,7 @@ class SimBroker:
         before calling ``order_stock``)."""
         action = _ORDER_TYPE_TO_ACTION.get(order_type, str(order_type))
         self._order_seq += 1
-        order_id = "O%06d" % self._order_seq
+        order_id = str(order_id or ("O%06d" % self._order_seq))
         is_limit = str(price_type) == xtconstant.FIX_PRICE
         self._book.append(
             WorkingOrder(
@@ -451,6 +457,7 @@ class SimBroker:
                 is_auction=bool(is_auction),
                 auction_close=bool(auction_close),
                 reason=str(reason or action),
+                submitted_at=str(submitted_at or ""),
             )
         )
         return order_id

@@ -28,6 +28,7 @@ from autotrade.environment.broker import BrokerProfile, load_shortable_by_date, 
 from autotrade.environment.main_ctx_engine import MainPolicyRunner, run_main_ctx_replay
 from autotrade.environment.nl.context import CompanyContextStore
 from autotrade.environment.nl.engine import NLSubAgentConfig, NLSubAgentEngine, TextRetriever
+from autotrade.environment.identity import agent_visible_ref
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.snapshot import load_snapshot_manifest
 from autotrade.environment.step_tree import StepTree
@@ -203,11 +204,11 @@ class BacktestTool:
         # the coarse caps below.
         enforce_substep_timeout = mode == "valid"
         if mode == "valid":
-            decision_cap = float(manifest.get("backtest_max_seconds_per_decision", 180))
-            per_day_cap = _optional_float(manifest.get("backtest_max_seconds_per_trading_day"))
+            decision_cap = float(manifest.get("backtest_max_seconds_per_decision", 300))
+            per_day_cap = _optional_float(manifest.get("backtest_max_seconds_per_trading_day", 900))
         else:
             decision_cap = float(manifest.get("backtest_final_eval_max_seconds_per_decision", 900))
-            per_day_cap = _optional_float(manifest.get("backtest_final_eval_max_seconds_per_trading_day"))
+            per_day_cap = _optional_float(manifest.get("backtest_final_eval_max_seconds_per_trading_day", 3000))
         tmp_nl_dir = self.ctx.paths.workspace / f".{new_id('nl_tool')}"
         requests_host = self.ctx.paths.workspace / f".{new_id('nl_requests')}.jsonl"
         responses_host = self.ctx.paths.workspace / f".{new_id('nl_responses')}.jsonl"
@@ -255,11 +256,17 @@ class BacktestTool:
                     auction_enabled=bool(manifest.get("auction_enabled", True)),
                     auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
                     auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
-                    auction_close_time=(manifest.get("auction_close_time") or None),
+                    auction_close_time=(manifest.get("auction_close_time", "14:57") or None),
                     execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
                     offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 15)),
                     max_seconds_per_trading_day=per_day_cap,
                     enforce_substep_timeout=enforce_substep_timeout,
+                    # The unwrapped-compute coverage check is also a real-wall measure,
+                    # so it follows the same valid/final split as the timeout: only the
+                    # tight iteration-validation gate enforces it. The frozen/held-out
+                    # final eval must stay reproducible under load (H2), so a transient
+                    # deschedule outside a substep cannot abort an accepted strategy.
+                    enforce_substep_coverage=enforce_substep_timeout,
                     timeview_enabled=timeview_enabled,
                     snapshot_dir=snapshot_dir,
                     replay_dir=replay_dir,
@@ -348,7 +355,9 @@ class BacktestTool:
             StepTree(self.ctx.paths.steps).record_step(
                 self.ctx.paths.agent_output,
                 epoch_id=str(manifest.get("epoch_id", "")) or None,
-                fold_id=str(manifest.require("fold_id")),
+                # Opaque the fold id so the step-tree node names the Agent reads
+                # (steps/tree.txt|tree.json) never leak the held-out calendar period.
+                fold_id=agent_visible_ref(manifest.require("fold_id"), prefix="fold_ref"),
                 result_name=result_dir.name,
                 artifact_hash=artifact.artifact_hash,
                 model_artifact_hash=model_artifacts.artifact_hash,
@@ -462,7 +471,7 @@ class BacktestTool:
                 failed_hash = None
             StepTree(self.ctx.paths.steps).record_failed_attempt(
                 epoch_id=str(manifest.get("epoch_id", "")) or None,
-                fold_id=str(manifest.require("fold_id")),
+                fold_id=agent_visible_ref(manifest.require("fold_id"), prefix="fold_ref"),
                 result_name=new_id("failed"),
                 error=error,
                 artifact_hash=failed_hash,

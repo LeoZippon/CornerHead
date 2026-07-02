@@ -472,7 +472,13 @@ def _has_hidden_part(relpath: str | Path) -> bool:
 
 
 def _runtime_string_constants(main_py: Path) -> list[str]:
-    tree = ast.parse(main_py.read_text(encoding="utf-8"))
+    try:
+        tree = ast.parse(main_py.read_text(encoding="utf-8"))
+    except SyntaxError as exc:
+        # Surface a fixable ArtifactError (as main.py does) rather than a raw
+        # SyntaxError, so modification_check reports a clear reason for any helper
+        # file (candidate.py / trading.py / ...), not just main.py.
+        raise ArtifactError(f"{main_py.name} has a syntax error: {exc}") from exc
     docstring_constants = _docstring_constant_ids(tree)
     return [
         node.value

@@ -68,6 +68,15 @@ def main() -> int:
     parser.add_argument("--heldout-first-period", default="2026Q1")
     parser.add_argument("--heldout-last-period", default="2026Q1")
     parser.add_argument("--window-months", type=int, default=21)
+    parser.add_argument("--daily-window-months", type=int, help="Override daily decision-input window in months.")
+    parser.add_argument(
+        "--fundamentals-window-months",
+        type=int,
+        help="Override fundamentals decision-input window in months.",
+    )
+    parser.add_argument("--events-window-months", type=int, help="Override events decision-input window in months.")
+    parser.add_argument("--macro-window-months", type=int, help="Override macro decision-input window in months.")
+    parser.add_argument("--text-window-months", type=int, help="Override text decision-input window in months.")
     parser.add_argument("--intraday-trade-days", type=int, default=SnapshotConfig().intraday_trade_days)
     parser.add_argument("--max-fold-minutes", type=int, default=60)
     parser.add_argument("--model", default=rex.DEFAULT_AGENT_MODEL)
@@ -98,7 +107,12 @@ def main() -> int:
     parser.add_argument("--meta-learning-env", action="append", default=[], metavar="NAME")
     parser.add_argument("--meta-learning-add-host-gateway", action="store_true")
     parser.add_argument("--meta-learning-host-proxy", action="store_true")
-    parser.add_argument("--disable-meta-sandbox-rebuild", action="store_true")
+    parser.add_argument(
+        "--disable-meta-sandbox-rebuild",
+        action="store_true",
+        help="In --mode meta-learning, do NOT build a derived Docker image even if the "
+        "session writes workspace/sandbox_environment.json (enabled by default).",
+    )
     parser.add_argument("--meta-learning-directive", default="")
     parser.add_argument("--meta-learning-directive-file", type=Path)
     parser.add_argument(
@@ -125,7 +139,6 @@ def main() -> int:
     parser.add_argument("--min-return", type=float, default=0.0)
     parser.add_argument("--min-sharpe", type=float, default=0.0)
     parser.add_argument("--max-drawdown", type=float, default=0.25)
-    parser.add_argument("--allow-incomplete-validation", action="store_true")
     args = parser.parse_args()
     if args.meta_learning_directive and args.meta_learning_directive_file:
         parser.error("pass only one of --meta-learning-directive or --meta-learning-directive-file")
@@ -287,6 +300,11 @@ def main() -> int:
 def _build_config(repo_root: Path, args: argparse.Namespace, meta_learning_directive: str) -> ExperimentConfig:
     snapshot_config = SnapshotConfig(
         window_months=args.window_months,
+        daily_window_months=args.daily_window_months,
+        fundamentals_window_months=args.fundamentals_window_months,
+        events_window_months=args.events_window_months,
+        macro_window_months=args.macro_window_months,
+        text_window_months=args.text_window_months,
         intraday_trade_days=args.intraday_trade_days,
     )
     sandbox_overrides: dict[str, object] = {}
@@ -340,7 +358,7 @@ def _build_config(repo_root: Path, args: argparse.Namespace, meta_learning_direc
             min_return=args.min_return,
             min_sharpe=args.min_sharpe,
             max_drawdown=args.max_drawdown,
-            require_complete_validation=not args.allow_incomplete_validation,
+            require_complete_validation=True,
         ),
         sandbox_spec=sandbox_spec,
         meta_learning_sandbox_spec=meta_learning_sandbox_spec,
@@ -405,7 +423,7 @@ def _require_docker_image(image: str) -> None:
     if result.returncode != 0:
         raise SystemExit(
             f"missing Docker image {image!r}. Build it first, for example: "
-            "docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile ops/docker"
+            "docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile ."
         )
 
 

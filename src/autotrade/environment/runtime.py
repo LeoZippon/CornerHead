@@ -8,13 +8,14 @@ never replaces these records.
 from __future__ import annotations
 
 import json
-import hashlib
 import re
 import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+from autotrade.environment.identity import agent_visible_ref as _agent_visible_ref
 
 SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer [redacted]"),
@@ -458,11 +459,6 @@ def _agent_visible_backtest_summary(record: dict[str, object]) -> dict[str, obje
         )
         if key in record
     }
-
-
-def _agent_visible_ref(value: object, *, prefix: str) -> str:
-    digest = hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:10]
-    return f"{prefix}_{digest}"
 
 
 class AgentTraceWriter:

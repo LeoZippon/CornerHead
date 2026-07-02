@@ -45,7 +45,7 @@ _DOMAINS: tuple[tuple[str, str, str | None], ...] = (
 
 
 class Timeview:
-    """Builds and rolls the per-tick six-domain as-of view for one replay."""
+    """Builds and rolls the per-tick five-domain as-of view for one replay."""
 
     def __init__(
         self,

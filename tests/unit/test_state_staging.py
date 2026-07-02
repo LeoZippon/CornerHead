@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from stat import S_IMODE
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -30,6 +31,12 @@ class StateStagerTest(unittest.TestCase):
             (tmp / ".state" / "stale.txt").write_text("old", encoding="utf-8")
             stager = _stager(tmp)
             self.assertFalse((stager.visible_dir / "stale.txt").exists())
+
+    def test_state_directories_are_world_writable_for_docker_agent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stager = _stager(Path(tmp))
+            self.assertEqual(S_IMODE(stager.visible_dir.stat().st_mode), 0o777)
+            self.assertEqual(S_IMODE(stager.staging_dir.stat().st_mode), 0o777)
 
     def test_write_not_visible_before_ready_then_merges(self):
         with tempfile.TemporaryDirectory() as tmp:

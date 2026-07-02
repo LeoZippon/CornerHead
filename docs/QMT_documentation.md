@@ -67,10 +67,11 @@
 
 实盘执行沿用回测的统一逐 tick 模型，不另起一套下单逻辑：
 
-- 本地 executor 在 Asia/Shanghai 真实时钟上按与回测相同的 24h tick 网格逐时间片推进，每个 tick 调用同一个 `main(ctx)`，并通过同一套 `ctx.broker.*` 原语（`buy`/`sell`/`short`/`cover`/`close`）下单。
-- 回测的 `SimBroker` 已实现 `TraderProtocol`，其 `order_stock` / `cancel_order_stock` / `query_stock_*` 接口与 miniQMT `xt_trader` 1:1 对齐；因此实盘只需一个包装 `xt_trader` 的 `QMTBroker`，即可在同一 protocol 下 drop-in 替换回测 broker，策略代码无需改动。
+- 本地 executor 在 Asia/Shanghai 真实时钟上按与回测相同的 24h tick 网格逐时间片推进，每个 tick 调用同一个 `main(ctx)`，并通过同一套 `ctx.broker.*` 原语（`buy`/`sell`/`short`/`cover`/`close`/`cancel`）下单和撤销未成交委托。
+- 回测的 `SimBroker` 已实现 `TraderProtocol`，其 `order_stock` / `cancel_order_stock` / `query_stock_*` 接口与 miniQMT `xt_trader` 1:1 对齐；因此实盘只需一个包装 `xt_trader` 的 `QMTBroker`，即可在同一 protocol 下 drop-in 替换回测 broker，策略代码无需改动。`ctx.broker.pending()` 对应可撤委托查询，返回的 `order_id` 可传给 `ctx.broker.cancel(order_id)`。
 - `QMTBroker` 连接的是 §6 部署的 Windows 节点上的 miniQMT `xt_trader`。
 - 盘前集合竞价（09:15 info tick / 09:25 撮合开盘）与 14:57 收盘集合竞价从回测原样沿用，实盘 tick 网格在这些节点上的决策与下单语义与回测一致。
+- 普通非交易 off-session tick 不调用 `order_stock`；它只更新本地研究状态、策略 state 或待报计划。若需要盘前下单，应先在 off-session 生成计划，再在 09:15/09:25 这类交易所接收委托的节点提交。
 
 本节描述目标契约，本轮不落地 live 代码（见 §1）。
 

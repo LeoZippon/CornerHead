@@ -11,10 +11,21 @@ Shows the recommended cadence for a heavier strategy under the 24h tick model:
   reads the plan once it has landed. Read the data domains from ``ctx.asof_dir``
   (rolling, point-in-time) and the frozen history from ``ctx.snapshot_dir``;
   ``ctx.nl(code, prompt=...)`` is optional and the main API cost — keep it rare.
-* ``manage(ctx)`` runs every tick on the resident plan (no re-screening): it submits
-  still-pending entries, marks entries filled against the real broker position,
-  cancels entries that have gone stale, and persists the updated plan. Status updates
-  written OUTSIDE a sub-step land immediately, so plan bookkeeping stays live.
+  Broker actions issued inside a sub-step are also delayed until ready_at, but this
+  template still writes an explicit plan first so execution and reconciliation are
+  easy to audit.
+* ``manage(ctx)`` runs every tick on the resident plan (no re-screening) and must be
+  called from inside a light ``ctx.substep`` by ``main``. It submits still-pending
+  entries, marks entries filled against the real broker position, cancels plan
+  entries or stale Broker pending orders, and persists the updated plan. Status
+  updates are staged like any other ``ctx.state_dir`` write and become visible after
+  that management substep's ``ready_at``.
+  Ordinary off-session ticks must not submit broker orders; use them to update the
+  plan, then submit from an explicit orderable tick or a tick with a live bar. This
+  template's ``manage`` keeps a ``ctx.price(code) is None`` guard, so it naturally
+  waits until 09:25 or continuous trading. If a strategy intentionally uses blind
+  09:15 auction orders, adapt that guard deliberately and ensure sizing is valid
+  without a current price.
 
 Each plan entry carries a status (``pending`` / ``filled`` / ``cancelled``); only
 unfinished entries are acted on, reconciled against ``ctx.broker`` truth, mirroring
@@ -36,16 +47,20 @@ def _plan_path(ctx) -> Path:
     return Path(str(ctx.state_dir), _PLAN)
 
 
-def research(ctx, *, budget_minutes: float = 5.0) -> None:
+def research(ctx, *, budget_minutes: float = 5.0, screen_time: str = "08:00") -> None:
     """Screen the cross-section in a sub-step and stage the day's plan to state_dir.
 
-    The template selects nothing; a strategy ranks ``ctx.asof_dir`` and writes a
-    ``{ts_code: {"status": "pending", "weight": w}}`` map. The write is staged and
-    surfaces in ``ctx.state_dir`` only after ``budget_minutes`` elapse, so call this
-    once per research window and let a later tick execute it."""
-    if _plan_path(ctx).exists():  # already have a live plan; manage it instead
-        return
+    Anchored to a FIXED daily pre-open time (a real trader's routine): the
+    ``ctx.cur_time`` gate runs the heavy screen once per day in the pre-open window,
+    not every tick. The template selects nothing; a strategy ranks ``ctx.asof_dir`` and
+    writes a ``{ts_code: {"status": "pending", "weight": w}}`` map. The write is staged
+    and surfaces in ``ctx.state_dir`` only after ``budget_minutes`` elapse, so a later
+    orderable tick (09:15 / 09:25) executes it."""
+    if ctx.cur_time < screen_time or ctx.cur_time >= "09:15":
+        return  # only screen in the fixed pre-open window [screen_time, 09:15)
     with ctx.substep("research", budget_minutes=budget_minutes):
+        if _plan_path(ctx).exists():  # already have a live plan; manage it instead
+            return
         daily = pd.read_parquet(Path(str(ctx.asof_dir)) / "daily")
         codes = sorted(daily["ts_code"].astype(str).unique())[:TOP_N]
         plan = {code: {"status": "pending", "weight": 1.0 / TOP_N} for code in codes}
@@ -55,7 +70,10 @@ def research(ctx, *, budget_minutes: float = 5.0) -> None:
 
 
 def manage(ctx) -> None:
-    """Act on the resident plan: submit pending entries, reconcile fills, persist."""
+    """Act on the resident plan: submit pending entries, reconcile fills, persist.
+
+    Caller contract: run this inside ``ctx.substep(...)``.
+    """
     path = _plan_path(ctx)
     if not path.exists():  # the staged plan has not become visible yet
         return
@@ -72,5 +90,4 @@ def manage(ctx) -> None:
             continue  # an order is already in flight, or no price to size/submit yet
         ctx.broker.buy(code, weight=float(entry["weight"]), reason="plan_entry")
     if changed:
-        # Outside a sub-step this write lands immediately, keeping plan status live.
         path.write_text(json.dumps(plan), encoding="utf-8")
