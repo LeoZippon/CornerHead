@@ -448,7 +448,7 @@ experiments/<experiment_id>/
 | `snapshot_cache/` | Pipeline | 实验内决策快照/回放槽构建缓存（见下） |
 | `reports/` | reporting 脚本 | 实验图表和汇总 |
 
-`CachingSnapshotProvider` 用 `snapshot_cache/` 复用同一实验内字节相同的快照构建：相邻 Fold 与多 Epoch 常重建完全一致的视图（Fold N+1 的验证回放槽就是 Fold N 的测试槽，决策快照与 Epoch 无关）。缓存条目按内容键（锚点/区间 + label + provider 配置）构建一次，再硬链接进每个 run 的 Sandbox；快照 parquet 视图 write-once，共享 inode 安全（与 Step 树的 `link_copytree` 同一模式）。
+`CachingSnapshotProvider` 用 `snapshot_cache/` 复用同一实验内字节相同的快照构建：相邻 Fold 共享昂贵的决策快照（Fold N+1 的验证锚点就是 Fold N 的测试锚点），多 Epoch 重跑的全部视图与 Epoch 无关。缓存条目按内容键（锚点/区间 + label + provider 配置）构建一次，再硬链接进每个 run 的 Sandbox；回放槽的 label 写进视图 manifest，因此同区间的 valid/test 回放槽按 label 各构建一次、不跨 label 复用。快照 parquet 视图 write-once，共享 inode 安全（与 Step 树的 `link_copytree` 同一模式）。
 
 ### 8.3 主账本
 

@@ -76,9 +76,9 @@ class ExperimentPipeline:
         meta_learner: MetaLearner | None = None,
     ) -> None:
         self.config = config
-        # Identical builds recur constantly (fold N+1's validation slot == fold N's
-        # test slot; multi-epoch reruns are snapshot-invariant) — cache them per
-        # experiment and hardlink into each run's sandbox.
+        # Identical builds recur constantly (adjacent folds share the decision
+        # snapshot anchor; multi-epoch reruns are snapshot-invariant) — cache
+        # them per experiment and hardlink into each run's sandbox.
         self.snapshots = CachingSnapshotProvider(snapshots, config.experiment_dir / "snapshot_cache")
         self.agent_factory = agent_factory
         self.proxy = proxy

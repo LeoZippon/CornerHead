@@ -51,13 +51,15 @@ class RawSnapshotProvider:
 class CachingSnapshotProvider:
     """Reuse identical snapshot builds within one experiment.
 
-    Adjacent folds and multi-epoch runs rebuild byte-identical views (fold N+1's
-    validation replay slot IS fold N's test slot; snapshots are epoch-invariant),
-    and each build is a pure function of (anchor/range, label, provider config)
-    over a raw lake that must not change mid-experiment. Entries are built once
-    under the experiment dir and hardlinked into each run's sandbox; snapshot
-    parquet views are write-once, so shared inodes are safe (the same pattern as
-    the step tree's link_copytree).
+    Adjacent folds share the expensive decision snapshot (fold N+1's validation
+    anchor equals fold N's test anchor) and multi-epoch reruns rebuild every
+    view identically; each build is a pure function of (anchor/range, label,
+    provider config) over a raw lake that must not change mid-experiment.
+    Replay slots are label-specific — the label lands inside the built
+    manifest — so same-range valid/test slots build once per label rather than
+    sharing. Entries are built once under the experiment dir and hardlinked
+    into each run's sandbox; snapshot parquet views are write-once, so shared
+    inodes are safe (the same pattern as the step tree's link_copytree).
     """
 
     def __init__(self, provider: SnapshotProvider, cache_root: Path) -> None:
