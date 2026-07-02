@@ -335,7 +335,7 @@ TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_sched
 | `cn_preopen_margin_backfill_0905` / `cn_preopen_margin_retry_0915` | 09:05 / 09:15 | 回补上一交易日两融汇总和明细 |
 | `cn_preopen_event_flow_audit_0920` | 09:20 | 盘前刷新事件/资金状态 |
 
-回测的逐 tick 滚动数据视图（Timeview）按这些落库 job 的真实完成时间放行数据，建模为 `REFRESH_NODES` 刷新节点，节点定义与门禁语义见 5.3。纯审计 job（`cn_nightly_full_audit`、`cn_daily_revision_sentinel`、`cn_preopen_event_flow_audit_0920`）不落新数据，刻意不作为节点。
+回测的逐 tick 滚动数据视图（Timeview）按这些落库 job 的真实完成时间放行数据，建模为 `REFRESH_NODES` 刷新节点；纯审计 job 不落新数据、刻意不作为节点。节点定义、门禁语义与纯审计 job 清单见 5.3。
 
 runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
 
@@ -469,7 +469,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 
 ### 5.2 可见时间速查
 
-下表是行级 `available_at` 规则。回测的 Timeview 在此之上再叠加落库 job 延迟（见 5.3）：一行要同时满足行级 `available_at` 门禁与落库节点 `ready_at` 才进入滚动视图，节点不替代 `available_at`，只在其上叠加落库延迟。
+下表是行级 `available_at` 规则；回测的 Timeview 在此之上再叠加落库 job 延迟：一行要同时满足行级 `available_at` 门禁与落库节点 `ready_at` 才进入滚动视图（节点模型见 5.3）。
 
 | 数据 | 可见时间规则 |
 |---|---|
@@ -498,7 +498,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 | `cn_preopen_margin_secs_backfill_0903` / `_retry_0913` | 09:03 / 09:13 → 约 09:05 / 09:15 | 当日融资融券标的 `margin_secs`（做空券源池） |
 | `cn_preopen_margin_backfill_0905` / `_retry_0915` | 09:05 / 09:15 → 约 09:07 / 09:17 | 前一交易日 `margin` / `margin_detail` |
 
-关键后果：`cn_evening_full` 在 23:35 才启动、约次日 02:05 才写完，所以在一个交易日内，横截面日频视图只到上一交易日（D-1），当日 `daily` 等要到次日约 02:05 才落库可见。分钟历史同样在晚间节点滚动落库；当日实时分钟 bar 不走持久化视图，由引擎单独提供（`ctx.bars`）。
+关键后果：因 `cn_evening_full` 约次日 02:05 才写完，交易日内横截面日频视图只到上一交易日（D-1），当日 `daily` 等次日约 02:05 才落库可见；分钟历史同样在晚间节点滚动落库，当日实时分钟 bar 不走持久化视图、由引擎单独提供（`ctx.bars`）。
 
 纯审计 job（`cn_nightly_full_audit`、`cn_daily_revision_sentinel`、09:20 的 `cn_preopen_event_flow_audit_0920`）不落新数据，刻意不作为节点。
 

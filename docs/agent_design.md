@@ -86,7 +86,7 @@ Agent 不负责：
 
 如果某个历史区间在当前 Fold 中成为验证区间，Agent 只能读取当前 Fold 重新生成的验证结果；不能复用它在上一 Fold 作为测试区间时保存的结果文件。
 
-当同一个 Fold 会话变长时，Runner 可以用低成本 compact 模型把较早对话压缩为结构化 continuation state，并保留最近原始消息继续主对话。compact 默认在估算上下文达到 200,000 tokens 后触发；摘要锚定目标、约束、进度、关键决策、错误修复、下一步和相关文件。它不改变 `conversation_id`、数据可见范围、写权限或测试隔离，只替代旧的对话上下文，完整可信记录仍以 trace 和 provider conversation log 为准。
+当同一个 Fold 会话变长时，Runner 可以用低成本 compact 模型把较早对话压缩为结构化 continuation state，并保留最近原始消息继续主对话（触发阈值与摘要锚点见 `environment_design.md` §4.3）。它不改变 `conversation_id`、数据可见范围、写权限或测试隔离，只替代旧的对话上下文，完整可信记录仍以 trace 和 provider conversation log 为准。
 
 可信日志只能由 Environment / Pipeline 记录。Agent 可以输出解释、理由和结构化策略结果，但不能替代 Shell、Tool、回测、Broker 和 LLM 调用日志。
 
@@ -300,11 +300,11 @@ ctx.model_dir, ctx.params
 
 `ctx.asof_dir` 是逐 tick 滚动、按各数据集真实刷新节点门控的 PIT 视图，包含五个 parquet parts 域：`daily`、`events`、`macro`、`fundamentals` 和 `intraday_1min` 分钟历史。用 `pd.read_parquet(ctx.asof_dir / "<域名>")` 读出拼接（域名如 `"daily"`、`"events"`、`"macro"`、`"fundamentals"`、`"intraday_1min"`）。文本语料不在 `ctx.asof_dir` 下；公告/新闻经宿主侧 `ctx.nl()` 检索，并按同一刷新节点门控，冻结研究语料始终可见。可见性合同：一个 tick 只看到落库它的 cron job 已跑完的数据——交易日内横截面日频只到上一交易日（当日实时行情走 `ctx.bars`/`ctx.price`）。每个数据集的可见时点见 `data_documentation.md` §5.3，执行/Timeview 滚动机制见 `environment_design.md` §7.2。`ctx.asof_version` 只在视图真正滚动（跨过节点）时变化，策略据此缓存一次 asof 读取、仅在版本变化时重算（模板即如此）。`ctx.snapshot_dir` 是不随回放滚动的冻结研究基线。
 
-`ctx.state_dir` 是宿主托管的跨 tick 状态目录，只能在 `ctx.substep(name, B)` 内访问：进入 substep 时会以当前可见状态为种子，块内读取看的是进入该块前的可见值；块内写入被暂存，`ready_at = 该 tick + B` 才并入可见目录（建模重计算块产出可用前的时延）。块内 broker action 也按同一预算建模：`0 < B < 1` 视为本决策分钟内完成，`B>=1` 延迟到 `ready_at` 后第一个可报单 tick 提交，并在等待期通过 `pending_stage="substep_delay"` 暴露。`state_dir` 每次回测都清空重建，需跨回测持久的数据应放 `ctx.model_dir`/`models`；完整机制见 `environment_design.md` §7.2。
+`ctx.state_dir` 是宿主托管的跨 tick 状态目录，只能在 `ctx.substep(name, B)` 内访问：进入 substep 时会以当前可见状态为种子，块内读取看的是进入该块前的可见值；块内写入被暂存，`ready_at = 该 tick + B` 才并入可见目录（建模重计算块产出可用前的时延）。块内 broker action 按同一预算延迟提交（见 §5.2 与 `environment_design.md` §7.2）。`state_dir` 每次回测都清空重建，需跨回测持久的数据应放 `ctx.model_dir`/`models`；完整机制见 `environment_design.md` §7.2。
 
 Broker 原语和 `ctx` 完整语义由 `docs/environment_design.md` 第 7 章定义。`ctx.bars` 只含当前 tick、bar close 时点已可见的行情，未来 bar 不可见（09:15 信息 tick 与 off-session tick 无价）；off-session tick 不报单，只写研究状态或 `ctx.state_dir` 计划。正式回放进程只读加载 `output/` 中的策略代码，禁止写 `output/`、创建软/硬链接，且按真实路径阻断经链接访问测试槽或 `/mnt/artifacts`。
 
-`amount` 是股数（按 100 股，即 1 手，向下对齐），`weight` 是初始权益名义比例。函数只表达意图；现金、做空保证金、T+1 可卖余额、手数、涨跌停、停牌和券源由 Broker 执行。最大持仓数、单票权重上限和仓位集中度默认由 Agent 自行控制；只有 run config 显式设置 Broker 附加风控时才由 Broker 额外拦截。代码应无死循环、网络访问或不可控写入。
+`amount` 是股数（按 100 股，即 1 手，向下对齐），`weight` 是初始权益名义比例。函数只表达意图；现金、做空保证金、T+1 可卖余额、手数、涨跌停、停牌和券源由 Broker 执行。最大持仓数、单票权重上限和仓位集中度默认由 Agent 自行控制；只有 run config 显式设置 Broker 附加风控时才由 Broker 额外拦截（正式代码不得有死循环、网络访问或不可控写入，见 §5.4）。
 
 ### 5.4 正式代码边界
 
@@ -366,7 +366,7 @@ Agent 可以用验证结果和 `nl_tool/` 日志调整 prompt 或策略逻辑。
 - 非法文件、隐藏文件/目录和缓存。
 - 模型参数文件数、总字节数、非法后缀、隐藏文件/目录和缓存。
 
-度量修改量前，`modification_check` 先确认 diff 基准可信：父策略产物 hash（初始 Fold 用初始模板 hash）必须与 run manifest 一致；父模型参数目录非空时还要求 manifest 记录并匹配父模型 hash（只有空目录才用计算出的空 hash）。任一基准不可信直接报错。
+度量修改量前，`modification_check` 先确认 diff 基准可信：父策略产物 hash（初始 Fold 用初始模板 hash）、非空父模型参数目录的父模型 hash 都必须与 run manifest 一致，否则直接报错（对称规则与空目录例外见 `environment_design.md` §5.2）。
 
 默认策略：
 
