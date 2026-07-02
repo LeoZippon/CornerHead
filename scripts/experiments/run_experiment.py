@@ -37,6 +37,7 @@ from _cli import (
     build_session_builders,
     build_snapshot_config,
     build_web_search_providers,
+    require_generic_period_args,
 )
 # Re-exported for the pipeline e2e test, which imports it from this module.
 from _cli import _session_config_summary  # noqa: F401
@@ -53,18 +54,7 @@ from autotrade.pipelines import (
 
 def _resolve_period_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> tuple[str, str, str, str]:
     if args.fold_period != "quarter":
-        missing = [
-            flag
-            for flag, value in (
-                ("--first-test-period", args.first_test_period),
-                ("--last-test-period", args.last_test_period),
-                ("--heldout-first-period", args.heldout_first_period),
-                ("--heldout-last-period", args.heldout_last_period),
-            )
-            if not value
-        ]
-        if missing:
-            parser.error(f"--fold-period {args.fold_period} requires explicit generic period args: {', '.join(missing)}")
+        require_generic_period_args(parser, args)
         return args.first_test_period, args.last_test_period, args.heldout_first_period, args.heldout_last_period
     first_test_period = args.first_test_period or args.first_test_quarter
     last_test_period = args.last_test_period or args.last_test_quarter

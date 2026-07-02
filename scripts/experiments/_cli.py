@@ -59,6 +59,28 @@ def _opt_help(text: str, verbose_help: bool) -> str | None:
     return text if verbose_help else None
 
 
+def require_generic_period_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Non-quarter fold periods have no safe defaults: demand explicit labels.
+
+    Quarter labels like 2022Q1 silently mis-parse under other cadences, so both
+    entrypoints must fail fast here instead of deep inside schedule building.
+    """
+    if args.fold_period == "quarter":
+        return
+    missing = [
+        flag
+        for flag, value in (
+            ("--first-test-period", args.first_test_period),
+            ("--last-test-period", args.last_test_period),
+            ("--heldout-first-period", args.heldout_first_period),
+            ("--heldout-last-period", args.heldout_last_period),
+        )
+        if not value
+    ]
+    if missing:
+        parser.error(f"--fold-period {args.fold_period} requires explicit generic period args: {', '.join(missing)}")
+
+
 # ---------------------------------------------------------------------------
 # argparse argument groups shared by both entrypoints
 # ---------------------------------------------------------------------------

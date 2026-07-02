@@ -185,6 +185,19 @@ class ExperimentCliTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("requires explicit generic period args", result.stderr)
 
+    def test_audit_session_non_quarter_period_requires_explicit_generic_periods(self):
+        # The audit CLI must share the production guard instead of silently
+        # feeding its quarter defaults into a non-quarter schedule.
+        script = Path(__file__).resolve().parents[2] / "scripts" / "experiments" / "run_audit_session.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--mode", "fold", "--experiment-id", "x", "--fold-period", "month"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires explicit generic period args", result.stderr)
+
     def test_session_config_summary_records_context_token_thresholds(self):
         config = AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc))
         summary = _session_config_summary(config, compact_enabled=True)

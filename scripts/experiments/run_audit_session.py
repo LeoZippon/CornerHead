@@ -38,6 +38,7 @@ from _cli import (
     build_session_builders,
     build_snapshot_config,
     build_web_search_providers,
+    require_generic_period_args,
 )
 
 from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
@@ -62,10 +63,10 @@ def main() -> int:
     parser.add_argument("--fold-index", type=int, default=0, help="0-based Fold index to run; default first Fold.")
     add_path_arguments(parser, repo_root)
     parser.add_argument("--fold-period", choices=("week", "month", "quarter", "year"), default="quarter")
-    parser.add_argument("--first-test-period", default="2022Q1")
-    parser.add_argument("--last-test-period", default="2025Q4")
-    parser.add_argument("--heldout-first-period", default="2026Q1")
-    parser.add_argument("--heldout-last-period", default="2026Q1")
+    parser.add_argument("--first-test-period", help="default 2022Q1 for quarter folds; required otherwise")
+    parser.add_argument("--last-test-period", help="default 2025Q4 for quarter folds; required otherwise")
+    parser.add_argument("--heldout-first-period", help="default 2026Q1 for quarter folds; required otherwise")
+    parser.add_argument("--heldout-last-period", help="default 2026Q1 for quarter folds; required otherwise")
     add_snapshot_window_arguments(parser, verbose_help=False)
     parser.add_argument("--max-fold-minutes", type=int, default=60)
     add_model_arguments(parser, verbose_help=False)
@@ -102,6 +103,12 @@ def main() -> int:
     )
     add_acceptance_arguments(parser, verbose_help=False)
     args = parser.parse_args()
+    require_generic_period_args(parser, args)
+    if args.fold_period == "quarter":
+        args.first_test_period = args.first_test_period or "2022Q1"
+        args.last_test_period = args.last_test_period or "2025Q4"
+        args.heldout_first_period = args.heldout_first_period or "2026Q1"
+        args.heldout_last_period = args.heldout_last_period or "2026Q1"
     if args.meta_learning_directive and args.meta_learning_directive_file:
         parser.error("pass only one of --meta-learning-directive or --meta-learning-directive-file")
     if args.parent_models and not args.parent_output:
