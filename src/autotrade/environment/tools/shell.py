@@ -361,27 +361,38 @@ class SandboxShellTool:
         if raw in {"", "/", DEV_NULL}:
             return
         if raw in {"/mnt", "/mnt/"}:
-            self._guard_host_path(self.ctx.paths.root, write_like=write_like)
+            self._guard_host_path(self.ctx.paths.root, write_like=write_like, agent_ref=raw)
             return
         if raw.startswith("/mnt/"):
             host_path = _container_to_host_path(raw, self.ctx.paths.root)
-            self._guard_host_path(host_path, write_like=write_like, allow_snapshot_binding=raw.startswith("/mnt/snapshot"))
+            self._guard_host_path(
+                host_path,
+                write_like=write_like,
+                allow_snapshot_binding=raw.startswith("/mnt/snapshot"),
+                agent_ref=raw,
+            )
             return
         path = Path(raw)
         if not path.is_absolute():
             path = (self.ctx.paths.agent / raw).resolve()
         else:
             path = path.resolve()
-        self._guard_host_path(path, write_like=write_like)
+        self._guard_host_path(path, write_like=write_like, agent_ref=raw)
 
-    def _guard_host_path(self, path: Path, *, write_like: bool, allow_snapshot_binding: bool = False) -> None:
+    def _guard_host_path(
+        self, path: Path, *, write_like: bool, allow_snapshot_binding: bool = False, agent_ref: str
+    ) -> None:
+        # Blocking decisions below key off the resolved host ``path``; the strings the
+        # Agent sees must stay in the /mnt sandbox namespace (like search/artifact_io),
+        # so every message and blocked_target uses ``display`` instead of the host path.
+        display = self._agent_visible_path(path, agent_ref)
         if _is_relative_to(path, self.ctx.paths.test):
             raise ToolError(
-                f"command references a forbidden path: {path}",
+                f"command references a forbidden path: {display}",
                 error_type="path_guard",
                 reason="test/held-out snapshot data is not visible to the Agent",
                 retry_hint="Use /mnt/snapshot, /mnt/snapshots/train, or /mnt/snapshots/valid when they are visible in this phase.",
-                blocked_target=str(path),
+                blocked_target=display,
             )
         if str(path) == "/var/run/docker.sock":
             raise ToolError(
@@ -394,14 +405,14 @@ class SandboxShellTool:
         if _is_relative_to(path, self.ctx.paths.root / "runtime"):
             if allow_snapshot_binding and _is_relative_to(path, self.ctx.paths.current_snapshot):
                 if write_like:
-                    raise _read_only_path_error(path)
+                    raise _read_only_path_error(display)
                 return
             raise ToolError(
-                f"command references a forbidden runtime path: {path}",
+                f"command references a forbidden runtime path: {display}",
                 error_type="path_guard",
                 reason="runtime internals are managed by the Environment",
                 retry_hint="Read the mounted /mnt/snapshot view or /mnt/artifacts/run_manifest.json instead of runtime internals.",
-                blocked_target=str(path),
+                blocked_target=display,
             )
         writable_roots = self.ctx.paths.writable_roots
         if any(_is_relative_to(path, root) for root in writable_roots):
@@ -415,28 +426,44 @@ class SandboxShellTool:
         )
         if any(_is_relative_to(path, root) for root in read_only_roots):
             if write_like:
-                raise _read_only_path_error(path)
+                raise _read_only_path_error(display)
             return
         if _is_relative_to(path, self.ctx.paths.root):
             if write_like:
                 raise ToolError(
-                    f"write-like command references an unmanaged sandbox path: {path}",
+                    f"write-like command references an unmanaged sandbox path: {display}",
                     error_type="path_guard",
                     reason="writes are only part of the experiment contract under workspace, output, or models",
                     retry_hint=(
                         "Write scratch files to /mnt/agent/workspace/..., strategy code to "
                         "/mnt/agent/output/..., or model parameters to /mnt/agent/models/..."
                     ),
-                    blocked_target=str(path),
+                    blocked_target=display,
                 )
             return
         raise ToolError(
-            f"command references a path outside the sandbox boundary: {path}",
+            f"command references a path outside the sandbox boundary: {display}",
             error_type="path_guard",
             reason="absolute host/system paths are outside the Agent sandbox",
             retry_hint="Use the documented /mnt/... sandbox paths.",
-            blocked_target=str(path),
+            blocked_target=display,
         )
+
+    def _agent_visible_path(self, path: Path, agent_ref: str) -> str:
+        """Agent-facing path for guard errors, kept in the /mnt sandbox namespace.
+
+        Map the resolved host ``path`` back through the executor (the pattern used by
+        search/artifact_io). When the path has no sandbox mapping (e.g.
+        /var/run/docker.sock or host-absolute probes) fall back to the exact token the
+        Agent supplied, so a guard error never leaks a host filesystem path.
+        """
+        executor = self.ctx.executor
+        if executor is not None:
+            try:
+                return executor.map_path(path)
+            except Exception:  # noqa: BLE001 - unmapped host path; use the Agent's own token
+                return agent_ref
+        return agent_ref
 
     def _guard_install_or_network_command(self, command: str, tokens: list[str]) -> None:
         if _is_meta_learning_run(self.ctx.manifest.get("kind")):
@@ -476,13 +503,13 @@ def _validate_timeout(value: int | None, *, default_seconds: float, max_seconds:
     return float(value)
 
 
-def _read_only_path_error(path: Path) -> ToolError:
+def _read_only_path_error(display: str) -> ToolError:
     return ToolError(
-        f"write-like command references a read-only path: {path}",
+        f"write-like command references a read-only path: {display}",
         error_type="path_guard",
         reason="the target is mounted or managed as read-only",
         retry_hint="Copy the file into /mnt/agent/workspace before editing, or write formal changes under /mnt/agent/output or /mnt/agent/models.",
-        blocked_target=str(path),
+        blocked_target=display,
     )
 
 

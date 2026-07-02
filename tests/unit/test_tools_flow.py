@@ -13,6 +13,7 @@ import pandas as pd
 from autotrade.agent import AgentSessionConfig, AgentSessionRunner, ContextCompactionConfig, ContextCompactor
 from autotrade.environment.artifacts import ModificationConstraints, artifact_hash
 from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.executor import DockerExecutor
 from autotrade.environment.llm.proxy import (
     LLMProxyError,
     ProviderResponse,
@@ -320,6 +321,42 @@ class ToolFlowTest(unittest.TestCase):
             event_types = {event["event_type"] for event in ctx.trace.read_events()}
             # The backtest opens an audit bracket (backtest_start) and closes it (backtest).
             self.assertLessEqual({"tool", "backtest_start", "backtest", "finish_fold"}, event_types)
+
+    def test_modification_check_requires_parent_model_hash_when_parent_models_exist(self):
+        # Audit fix: symmetric with the strategy diff base, when a parent model
+        # artifact actually exists its hash must be recorded in the manifest — it may
+        # not be trivially trusted against its own recomputed hash.
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            parent_models = ctx.paths.parent_model_artifacts
+            parent_models.chmod(0o755)
+            (parent_models / "params.json").write_text('{"threshold": 0.4}', encoding="utf-8")
+            ctx.manifest.update(
+                is_initial_artifact=False,
+                parent_strategy_artifact_hash=artifact_hash(ctx.paths.parent_output),
+                modification_constraints=ModificationConstraints(is_initial_artifact=False).to_record(),
+            )
+            self.assertNotIn("parent_model_artifact_hash", ctx.manifest.data)
+
+            with self.assertRaises(KeyError) as raised:
+                ModificationCheckTool(ctx).run()
+            self.assertIn("parent_model_artifact_hash", str(raised.exception))
+
+    def test_modification_check_trusts_empty_parent_models_without_manifest_hash(self):
+        # The empty/absent parent models root carries the canonical empty-model hash,
+        # so a non-initial fold with no parent model artifact still verifies without a
+        # parent_model_artifact_hash manifest field (byte-identical to the old default).
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            ctx.manifest.update(
+                is_initial_artifact=False,
+                parent_strategy_artifact_hash=artifact_hash(ctx.paths.parent_output),
+                modification_constraints=ModificationConstraints(is_initial_artifact=False).to_record(),
+            )
+            self.assertNotIn("parent_model_artifact_hash", ctx.manifest.data)
+
+            check = ModificationCheckTool(ctx).run()
+            self.assertTrue(check["allowed_to_backtest"])
 
     def test_preflight_tool_error_not_recorded_as_aborted(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -892,6 +929,36 @@ class ShellToolTest(unittest.TestCase):
             self.assertEqual(result["error_type"], "path_guard")
             self.assertIn("workspace", str(result["retry_hint"]))
             self.assertIn("stray", str(result["blocked_target"]))
+
+    def test_shell_guard_errors_stay_in_mnt_namespace(self):
+        # Audit fix: a blocked path must be surfaced in the /mnt sandbox namespace
+        # (mapped back via the executor, like search/artifact_io), never as the
+        # resolved host filesystem path.
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp), with_strategy=False)
+            ctx.executor = DockerExecutor("dummy", ctx.paths)
+            shell = SandboxShellTool(ctx)
+            host_root = str(ctx.paths.root)
+
+            with self.assertRaises(ToolError) as blocked:
+                shell._guard_paths("echo hi > /mnt/artifacts/forbidden")
+            message = str(blocked.exception)
+            self.assertIn("read-only path", message)
+            self.assertIn("/mnt/artifacts/forbidden", message)
+            self.assertNotIn(host_root, message)
+            self.assertEqual(blocked.exception.blocked_target, "/mnt/artifacts/forbidden")
+
+            # A path with no sandbox mapping (resolves outside the sandbox root) falls
+            # back to the exact token the Agent supplied, so the resolved host path is
+            # never leaked.
+            probe = "/mnt/agent/workspace/" + "../" * 16 + "etc/passwd"
+            with self.assertRaises(ToolError) as escaped:
+                shell._guard_paths(f"cat {probe}")
+            escaped_message = str(escaped.exception)
+            self.assertIn("outside the sandbox boundary", escaped_message)
+            self.assertIn(probe, escaped_message)
+            self.assertNotIn(host_root, escaped_message)
+            self.assertEqual(escaped.exception.blocked_target, probe)
 
     def test_shell_can_read_step_tree_from_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:

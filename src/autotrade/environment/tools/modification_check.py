@@ -13,6 +13,7 @@ from autotrade.environment.artifacts import (
     ModificationConstraints,
     artifact_hash,
     combined_artifact_hash,
+    load_model_artifacts,
     load_strategy_artifact,
     modification_delta,
     model_artifact_delta,
@@ -69,8 +70,16 @@ class ModificationCheckTool:
                 raise ToolError(
                     f"parent_output hash mismatch: manifest={expected} actual={actual}; diff base is not trusted"
                 )
-            expected_model = str(manifest.get("parent_model_artifact_hash", model_artifact_hash(base_model_root)))
             actual_model = model_artifact_hash(base_model_root)
+            # Symmetric fail-fast with the strategy diff base: when a parent model
+            # artifact actually exists, its hash must be recorded in the manifest and
+            # match. Only an empty/absent parent models root — whose canonical
+            # empty-model hash equals ``actual_model`` — may be trusted without the
+            # manifest field.
+            if load_model_artifacts(base_model_root).files:
+                expected_model = str(manifest.require("parent_model_artifact_hash"))
+            else:
+                expected_model = model_artifact_hash(base_model_root)
             if actual_model != expected_model:
                 raise ToolError(
                     "parent_models hash mismatch: "
