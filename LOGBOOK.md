@@ -1,3 +1,13 @@
+2026-07-01 轻量冗余清扫 + docs 四文档精修
+
+- 两个 Opus 只读扫描（src / scripts+configs+ops+tests）+ 本人对每个符号全仓 grep 复核后落地：
+  - 死代码约 45 行：`pit.py` 弃用的按分区可见性簇（`assert_visible`/`latest_visible_trade_date`/`iter_visible_trade_dates`/`_normalize_decision_time`；现行 PIT 模型 = contracts 刷新节点 + `available_at` 列过滤）；`contracts.py` 死 `tradable_from` + 只写字段 `tradable_lag_days`（含 6 处构造 kwargs）；孤儿常量 `MAJOR_NEWS_SOURCES`/`DEFAULT_WRITABLE_FILES`/`TERMINAL_STATES`。
+  - scripts 残留重复：`_cli.py` 新增 `build_pipeline` + `resolve_meta_learning_directive`，两入口各删约 17 行字节相同的 provider/pipeline 接线与 directive 解析。
+  - 配置单源：`cn_daily_revision_sentinel.extra_args` 硬编码的 `--sample-size/--datasets` 删除，`revision_monitor.sentinel_*` 成为唯一生效来源（cron_update 回退分支生成完全相同命令；仅下次 cron 一次非 skip 重跑）；Dockerfile 无效 `USER root` 改为语义注释（镜像行为不变，无需重建）。
+  - 有意保留：`DatasetContract.partition_key/pit_notes/unit_rules`（内联 PIT 注释）、schedule JSON `interfaces` 数组（人读权限参考清单）、两处 2 行 CN_TZ 归一化（低于抽 helper 阈值）。
+- docs 精修（data/env/agent/pipeline，Opus 单代理跨文档统一裁决）：9 处保守去重——compact 阈值/锚点收敛至 env §4.3、三视角检索收敛至 pipeline §6.2、diff 基准信任规则收敛至 env §5.2、agent §5.3 substep 预算复述删、data §3.3/§5.2/§5.3 复述合并、env §7.2 竞价自引用段删；标题与编号零变化、交叉引用全部核验可达、无事实丢失（每条被删内容在权威节逐字保留）。pipeline_design 无可删。结论：四份文档经五轮迭代已收敛，本轮净减约 500 字符，再无可安全去除的冗余。
+- 验证：full suite 422 OK；`git diff --check` clean；两个实验 CLI `--help` 正常；PROMPTS.md 无变化（本轮不涉 prompt）。
+
 2026-07-01 GPT 复审三项跟进（经核验均属实，已修）
 
 - finish_fold 硬门槛：原只查修改检查+轻合同，Agent 只跑过 `replay_window` 调试回放（甚至零回测）也能结束 Fold，整轮静默回退父产物。现与 Pipeline 冻结同口径把关：当前 `output`/`models` hash 必须已有成功**完整验证**回测，否则 ToolError 可修复拒绝（runner 仅在成功时视为终止，会话可继续修复）；提交合同、工具表、wrap-up 提示词同步（恢复已完整验证的 Step 可免重跑），backtest 工具描述澄清 replay_window 仅调试、不满足冻结/finish_fold，PROMPTS.md 重导出。

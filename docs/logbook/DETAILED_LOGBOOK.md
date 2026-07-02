@@ -16213,3 +16213,22 @@ Ordinary Fold:
 3. Snapshot-cache comments/docs overpromised cross-fold replay-slot reuse: the replay cache key includes `label` (embedded in the built view manifest), so same-range valid/test slots do not share. The genuine cross-fold reuse is the decision snapshot (fold N+1's validation anchor == fold N's test anchor). Comments in `config.py`/`experiment.py`, pipeline_design §8.2, and the prior LOGBOOK line corrected; implementation unchanged (cross-label sharing would require rewriting embedded manifests/snapshot ids for marginal savings).
 
 **Validation.** Full `unittest discover -t . -s tests`: 422 OK (420 -> 422; +finish_fold gate test in test_tools_flow, +audit CLI guard test in test_pipeline_e2e). `git diff --check` clean. PROMPTS.md export idempotent after prompt edits.
+
+## 2026-07-01 Lightweight redundancy sweep + four-doc refinement
+
+**User request.** One more lightweight system-wide pass to eliminate redundant scripts/code/over-engineering, then refine docs/ (data/environment/agent/pipeline) for intra- and cross-document repetition and empty wording while keeping all technical detail, ahead of the user's own follow-up audit.
+
+**Method.** Two read-only Opus finder agents (src/ and scripts+configs+ops+tests) with the accepted-trade-offs do-not-reflag list; every proposed removal re-verified by me with whole-repo greps before applying. One Opus doc agent refined all four docs together (single mind for consistent cross-doc dedup) under hard constraints: no heading/numbering changes, every 见-pointer must resolve, all facts preserved in their authority section.
+
+**Code changes (~72 net lines removed).**
+- `src/autotrade/environment/data/pit.py`: removed the superseded per-partition visibility cluster (`assert_visible`, `latest_visible_trade_date`, `iter_visible_trade_dates`, `_normalize_decision_time`, unused `Iterable` import). The live PIT model is REFRESH_NODES cutoffs (contracts.py) + `available_at` column filtering (snapshot.py); zero callers repo-wide.
+- `src/autotrade/environment/data/contracts.py`: removed dead `tradable_from` and write-only `tradable_lag_days` (field + six constructor kwargs).
+- Orphaned constants removed: `MAJOR_NEWS_SOURCES` (tushare/common.py), `DEFAULT_WRITABLE_FILES` (artifacts.py), `TERMINAL_STATES` (nl/engine.py).
+- `scripts/experiments/_cli.py`: added `build_pipeline` + `resolve_meta_learning_directive`; both entrypoints drop their byte-identical provider/pipeline wiring and directive resolution (~17 lines each) and now import them.
+- `configs/tushare_update_schedule.json`: `cn_daily_revision_sentinel.extra_args` no longer hardcodes `--sample-size 12` / the 6-dataset `--datasets` list; `revision_monitor.sentinel_sample_size`/`sentinel_datasets` become the single live source via the cron_update fallback (identical resulting command; one benign non-skip re-run on the next cron due to command-hash change).
+- `ops/docker/sandbox.Dockerfile`: no-op `USER root` replaced by a comment stating the real contract (image default user stays root; executor picks the agent user at docker run time). No image rebuild required.
+- Intentionally kept: `DatasetContract.partition_key/pit_notes/unit_rules` (inline PIT annotations), schedule JSON `interfaces` array (human-facing permission reference), two 2-line CN_TZ normalizations (below helper-extraction threshold).
+
+**Docs refinement.** 9 conservative dedups: compact trigger/anchors → env §4.3 authority (agent §1.2 pointer); three-perspective web_search requirement → pipeline §6.2 (env §8.1 pointer); modification_check diff-base trust rule → env §5.2 (agent §7.1 summary+pointer); agent §5.3 substep budget recap removed (kept in §5.2/env §7.2); data §3.3/§5.2/§5.3 restatements merged; env §7.2 self-referencing auction recap removed. Headings/numbering unchanged; all pointers verified; every removed statement survives verbatim in its authority. pipeline_design.md needed no change. Honest conclusion: after five successive passes the four docs are converged — only ~500 characters of removable redundancy remained.
+
+**Validation.** Full suite 422 OK; `git diff --check` clean; `run_experiment.py --help` and `run_audit_session.py --help` OK; PROMPTS.md untouched.
