@@ -180,6 +180,8 @@ class SandboxSpecTest(unittest.TestCase):
             self.assertNotIn("gh-secret-for-test", command)
             allocation = docker.allocation_record()
             self.assertEqual(allocation["env_passthrough"], ["HF_TOKEN", "GITHUB_TOKEN", "MISSING_SECRET"])
+            self.assertEqual(allocation["requested_env_passthrough"], ["HF_TOKEN", "GITHUB_TOKEN", "MISSING_SECRET"])
+            self.assertEqual(allocation["active_env_passthrough"], ["HF_TOKEN", "GITHUB_TOKEN"])
             self.assertTrue(allocation["add_host_gateway"])
 
     def test_docker_sandbox_proxy_aliases_are_not_active_standard_envs(self):
@@ -224,13 +226,41 @@ class SandboxSpecTest(unittest.TestCase):
             self.assertEqual(run_env["AT_PROXY_ALL"], "socks5h://host.docker.internal:1080")
             allocation = docker.allocation_record()
             self.assertEqual(
-                allocation["env_aliases"],
+                allocation["requested_env_aliases"],
                 [
                     {"container_env": "AT_PROXY_HTTPS", "host_env": "HTTPS_PROXY"},
                     {"container_env": "AT_PROXY_ALL", "host_env": "ALL_PROXY"},
                     {"container_env": "AT_PROXY_MISSING", "host_env": "MISSING_PROXY"},
                 ],
             )
+            self.assertEqual(
+                allocation["active_env_aliases"],
+                [
+                    {"container_env": "AT_PROXY_HTTPS", "host_env": "HTTPS_PROXY"},
+                    {"container_env": "AT_PROXY_ALL", "host_env": "ALL_PROXY"},
+                ],
+            )
+            self.assertEqual(allocation["env_aliases"], allocation["requested_env_aliases"])
+
+    def test_docker_sandbox_can_pin_host_gateway_ip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            sandbox.prepare_layout()
+            docker = DockerSandbox(
+                sandbox,
+                SandboxSpec(gpu=None, network="bridge", add_host_gateway=True, host_gateway_ip="10.10.0.1"),
+            )
+
+            class Completed:
+                returncode = 0
+                stderr = ""
+
+            with patch("subprocess.run", return_value=Completed()) as run:
+                docker.start()
+            command = run.call_args.args[0]
+            self.assertIn("--add-host", command)
+            self.assertIn("host.docker.internal:10.10.0.1", command)
+            self.assertNotIn("host.docker.internal:host-gateway", command)
 
     def test_runtime_env_artifact_records_local_and_docker_contracts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -960,6 +990,22 @@ class ExecutorTest(unittest.TestCase):
                     ["docker", "exec", "--user", "agent", "cont1", "pkill", "-KILL", "-f", "at_driver_abc"],
                     ["docker", "exec", "--user", "agent", "cont1", "pkill", "-KILL", "-u", "agent"],
                 ],
+            )
+
+    def test_docker_executor_cleanup_user_processes_sweeps_agent_user(self):
+        import subprocess as sp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SandboxPaths(Path(tmp) / "mnt")
+            executor = DockerExecutor("cont1", paths)
+            with patch(
+                "autotrade.environment.executor.subprocess.run",
+                return_value=sp.CompletedProcess([], 0),
+            ) as run:
+                executor.cleanup_user_processes()
+            self.assertEqual(
+                run.call_args.args[0],
+                ["docker", "exec", "--user", "agent", "cont1", "pkill", "-KILL", "-u", "agent"],
             )
 
 

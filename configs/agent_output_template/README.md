@@ -141,15 +141,17 @@ the start of that sub-step; writes are STAGED and become visible only after `B`
 minutes (`ready_at = tick + B`), so write a plan in one tick and read it in a later
 one. Broker actions issued inside `0 < B < 1` light sub-steps are submitted in the
 current decision minute; actions inside `B>=1` sub-steps are delayed to `ready_at`
-before submission. It resets per backtest — durable parameters belong in `ctx.model_dir`.
+before submission. It resets per backtest — durable parameters belong in
+`models/`, written before `backtest`; `ctx.model_dir` is read-only during
+formal replay.
 
 ## Cost discipline
 
 `main(ctx)` runs every tick, but heavy work — cross-sectional screening, model
 inference, and `ctx.nl()` — should run only on the few ticks you choose (e.g.
 pre-open or near close), never every tick, or API cost and wall-clock blow up.
-Load or cache model parameters from `ctx.model_dir` once; do not retrain every
-minute.
+Load or cache model parameters from `ctx.model_dir` once; do not write or
+retrain into `ctx.model_dir` during replay.
 
 `ctx.nl(ts_code, prompt="...")` (equivalently `from at_tools import nl`) starts a
 host-side NL Sub Agent with a point-in-time `text_retrieve` tool and returns a

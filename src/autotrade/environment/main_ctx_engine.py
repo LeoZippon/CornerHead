@@ -138,7 +138,9 @@ class MainPolicyRunner:
                 "AT_FORBIDDEN_PATHS": _executor_pathsep_join(
                     self.executor, [self.paths.train, self.paths.valid, self.paths.test, self.paths.artifacts]
                 ),
-                "AT_WRITE_FORBIDDEN_PATHS": self.executor.map_path(self.paths.agent_output),
+                "AT_WRITE_FORBIDDEN_PATHS": _executor_pathsep_join(
+                    self.executor, [self.paths.agent_output, self.paths.model_artifacts]
+                ),
                 "AT_DISABLE_LINKS": "1",
             }
             if self.decision_max_sim_minutes is not None:

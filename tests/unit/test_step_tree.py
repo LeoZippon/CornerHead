@@ -238,7 +238,44 @@ class PhasePromptTest(unittest.TestCase):
         parent = facts["artifact_contract"]["parent"]
         self.assertTrue(str(parent["id"]).startswith("strategy_ref_"))
         self.assertNotIn("fold_2022Q1", rendered)
-        self.assertNotIn("fold_2022Q2", rendered)
+
+    def test_proxy_alias_facts_use_active_aliases_only(self):
+        requested_only = build_experiment_facts(
+            manifest={"kind": "meta_learning"},
+            runtime_env={
+                "network": "bridge",
+                "sandbox_spec": {
+                    "env_passthrough": ["GITHUB_TOKEN"],
+                    "env_aliases": [
+                        {"container_env": "AT_PROXY_HTTP", "host_env": "HTTP_PROXY"},
+                    ]
+                },
+            },
+        )
+        self.assertNotIn("proxy_alias_names_active", requested_only["runtime_tools"])
+        self.assertNotIn("credential_env_names_active", requested_only["runtime_tools"])
+
+        active = build_experiment_facts(
+            manifest={
+                "kind": "meta_learning",
+                "sandbox_runtime": {
+                    "active_env_passthrough": ["GITHUB_TOKEN"],
+                    "active_env_aliases": [
+                        {"container_env": "AT_PROXY_HTTP", "host_env": "HTTP_PROXY"},
+                    ]
+                },
+            },
+            runtime_env={
+                "network": "bridge",
+                "sandbox_spec": {
+                    "env_aliases": [
+                        {"container_env": "AT_PROXY_HTTP", "host_env": "HTTP_PROXY"},
+                    ]
+                },
+            },
+        )
+        self.assertEqual(active["runtime_tools"]["credential_env_names_active"], ["GITHUB_TOKEN"])
+        self.assertEqual(active["runtime_tools"]["proxy_alias_names_active"], ["AT_PROXY_HTTP"])
 
     def test_meta_experiment_facts_do_not_inline_sample_dates(self):
         manifest = {

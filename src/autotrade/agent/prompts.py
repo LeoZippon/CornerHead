@@ -73,14 +73,14 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - 正式回测会在执行前自动复核最近一次 `modification_check` 与当前 `output`/`models` hash；若检查缺失或过期，`backtest` 会自动补跑。你仍应在修改后主动调用 `modification_check`，便于提前看到格式或约束问题。
 - `/mnt/snapshots/test` 不可读；不能直接调用外部 LLM/网络；`/mnt/artifacts` 对 Shell/检索只读。
 - 正式策略代码只能读取 `/mnt/snapshot`（由环境绑定）、`/mnt/agent/output` 自身和 `/mnt/agent/models`，不得硬编码引用 train/valid/test 阶段目录、`/mnt/artifacts` 或回测结果目录。
-- Shell guard 是轻量合同层，不是完整 Bash 解析器；明确越界、写只读根或普通 Fold 安装下载会被拒绝。工具失败时读取 `error_type`、`reason` 和 `retry_hint` 后修正命令。
+- Shell 命令自身失败会以 `exit_code`、`stderr`、`stdout_path` / `stderr_path` 返回；Tool 层拒绝才会返回 `error_type`、`reason` 和 `retry_hint`。不要用 `2>/dev/null` 隐藏错误，stderr 是审计输入。
 
 ## 正式产物格式（modification_check 按此校验）
 - `main.py`：必须定义唯一正式入口 `main(ctx) -> None`，由 Environment 每个回放分钟调用一次。
 - `candidate.py`：推荐用于横截面筛选与开仓逻辑，可读取 `ctx.asof_dir`（逐 tick 时点视图）和 `ctx.snapshot_dir`（冻结研究基准），可调用 `ctx.nl(code, prompt="...")`；由 `main` 在选定时点调用。
 - `trading.py`：推荐用于按 `ts_code` 管理持仓的交易/做T/平仓函数（`def 名字(ctx, ts_code): ...`）；由 `main` 每个 tick 调用。Agent 可修改或新增。
 - `nl_prompt.md`：可选，保存策略复用的 NL 提示片段；也可以直接在 `main.py` 或 `candidate.py` 中传入 prompt。
-- `models/`：可选，保存需要跨 Fold 继承的模型参数、权重或轻量元数据；可按模型/组件分子目录。每次回测重训的临时中间产物留在内存；需要复用或继承的参数写入 `models/`。依赖包不写入 `models/`，应通过 Sandbox 镜像安装。
+- `models/`：可选，保存需要跨 Fold 继承的模型参数、权重或轻量元数据；可按模型/组件分子目录。需要复用或继承的参数必须在 `backtest` 前由工具阶段写入 `models/`，正式 `main(ctx)` 回放中 `ctx.model_dir` 只读；回放中产生的临时中间产物留在内存或 `ctx.state_dir`。依赖包不写入 `models/`，应通过 Sandbox 镜像安装。
 - 正式产物不得包含 `__pycache__`、`.pyc`、`.pyo`、临时数据文件、日志、数据 dump、notebook 或密钥；模型权重只能放在 `models/`，不能放进 `output/`。
 
 ## 回放与交易环境规则（写入回测流程，无法绕过）
@@ -93,7 +93,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - Broker 约束：策略只表达意图，Broker 强制现金、可部署买力、做空保证金、T+1 可卖余额、手数、涨跌停、停牌、可融券和回放末日强制清仓。最大持仓数、单票权重和集中度默认由你控制。
 - 子步骤预算：所有会访问 `ctx.state_dir`、调用 `ctx.broker`、调用 `ctx.nl()`、读写策略状态或做实质筛选/推理的策略步骤，都必须放进 `ctx.substep(name, budget_minutes=B)`；`B>0`、tick 内 name 唯一、低报会 fail-fast。`ctx.broker` 原语和 `ctx.state_dir` 在子步骤外会被拒绝；宿主还会用 `main(ctx)` 总耗时减去 substep 耗时，拒绝实质未包裹计算。`B<1` 的轻量块在回测中视为本决策分钟内完成（仍统计/限时并带 `ready_at` 元数据）；`B>=1` 的块内 `ctx.state_dir` 写入和 `ctx.broker` 动作延迟到 `ready_at = tick + B` 后才可见/提交。延迟中的 broker 动作会立刻出现在 `pending()`，`pending_stage="substep_delay"`，用于同 tick/跨 tick 去重或撤销。
 - 回测成本：`backtest` 独立计时，不计入 Fold 推理 deadline，但单 Fold 次数受 `max_backtests_per_fold` 限制；单 tick 与单交易日真实墙钟硬上限由 run manifest 给出。先用小 `replay_window` 试探，再外推完整耗时。
-- 跨 tick 状态：`ctx.state_dir` 只存你的规则、计划和轻量状态，不是持仓/委托账本；Broker 才是真相源。`ctx.state_dir` 只能在 `ctx.substep` 内访问，块内读到进入该块前的可见状态，写入按 `ready_at` 延迟合并；每次回测重置，需继承的参数写入 `models/`。
+- 跨 tick 状态：`ctx.state_dir` 只存你的规则、计划和轻量状态，不是持仓/委托账本；Broker 才是真相源。`ctx.state_dir` 只能在 `ctx.substep` 内访问，块内读到进入该块前的可见状态，写入按 `ready_at` 延迟合并；每次回测重置，需继承的参数在回测前写入 `models/`。
 - NL 与做空：`ctx.nl()` 文本按数据节点 PIT 滚动且受配额限制，证据必须降权使用；默认做空券源由成交当日 `margin_secs` 校验，缺失当日集合时回退决策日冻结集合，不可融券会拒单。
 
 ## 数据可见性（逐 tick 时序视图）
@@ -127,11 +127,11 @@ FOLD_ACTION_SECTION = """\
 | `explore` | task, max_rounds? | 委托只读数据探查 Sub Agent（更便宜模型）调查一个具体问题并返回简洁摘要，把大量 shell/grep 探查移出主上下文 |
 | `modification_check` | （无） | 主动检查正式产物改动是否在约束内；`backtest` 执行前也会自动复核 |
 | `backtest` | replay_window? | 验证回测；Environment 逐 tick 回放当前 `output/main.py` 的 `main(ctx)`；可选 `replay_window` 只回放前 N 个交易日做快速调试（标记非完整验证、不可冻结、不满足 `finish_fold`），默认整段回放 |
-| `finish_fold` | （无） | 结束本 Fold；调用前先按“提交合同”自检 |
+| `finish_fold` | （无） | 结束本 Fold；调用前先按“提交合同”自检；成功后 `output/` 和 `models/` 只读锁定，Sandbox 内 Agent 后台进程会被清理 |
 | `note` | text? | 记录推理，不执行任何操作 |
 
 一轮可以发起多个工具调用：相互独立的只读检索（如多个 grep/glob）应在同一轮并行发起以省时；`write_file`/`edit_file`/`explore`/`modification_check`/`backtest`/`finish_fold` 等有状态工具按因果顺序单独调用。每个工具调用都会单独返回一条结果。
-工具失败时优先读取结果中的 `error_type`、`reason`、`retry_hint`、`blocked_target`；修正命令或参数后继续，不要反复提交同一个失败调用。
+工具失败时优先读取结果中的 `error_type`、`reason`、`retry_hint`、`blocked_target`；Shell 结果若 `exit_code != 0`，先读 `stderr`，输出被截断时再读 `stdout_path` / `stderr_path`；修正命令或参数后继续，不要反复提交同一个失败调用。
 
 ## 策略代码接口
 这些接口只在正式 `output/main.py` 及其 helper 运行时可用；Agent 工具调用和策略运行是两层不同动作。
@@ -185,7 +185,7 @@ def cancel_stale_pending(ctx, max_age_minutes=1.0):
 
 FOLD_SUBMIT_CONTRACT = """\
 ## 提交合同（finish_fold 前自检）
-finish_fold 只表示你停止本 Fold 的修改，是否冻结仍由 Pipeline 复核。调用前确认：
+finish_fold 只表示你停止本 Fold 的修改，是否冻结仍由 Pipeline 复核；成功后正式产物会被只读锁定，Sandbox 内 Agent 后台进程会被清理。调用前确认：
 - `output/main.py` 存在并定义 `main(ctx)`，能驱动 `ctx.broker` 原语下单，所有正式 helper 都在 `output/` 树内。
 - 需要跨 Fold 继承的模型参数已写入 `models/`；只在本次回测使用的中间产物留在内存。
 - 当前 `output`/`models` 就是你想提交的最好已验证版本；若历史 Step 中有更优版本，先把它恢复为当前产物再检查和回测。
@@ -302,10 +302,10 @@ META_LEARNING_INSTRUCTION = """\
 - run manifest 是实验参数事实源；runtime env 是 Python 包、CLI 工具、网络和安装策略事实源。Prompt 与 manifest 冲突时，以 manifest 为准。
 - `data_summary.json` 是可见数据的轻量索引，只保留文件规模、行数、列数、关键列和日期覆盖。需要完整 schema 或更细字段时，用 snapshot manifest、Parquet metadata 或 DuckDB 按需查询。对 `events.parquet`、`text_index.parquet`、`intraday_1min.parquet` 等大表，优先使用 DuckDB `count(*)` / `limit`、Parquet metadata、按列读取或按日期过滤；不要在未知规模时直接 `pd.read_parquet()` 全量读取。
 - Prompt 只描述稳定协议，不承载当前数据事实。当前行数、关键列、日期覆盖和完整 schema 以本 run 动态生成的 `data_summary.json`、`run_manifest.json`、snapshot `manifest.json` 和 parquet metadata 为准；未来数据变动后由 Pipeline 重新生成。
-- 后续普通 Fold 不允许联网或安装新包。元学习 Fold 是唯一可配置联网的阶段；配置允许时，可在工作区内使用 Docker 网络、`git`、`pip`、`npm`、`hf` 下载公开资料、代码或模型。只放在 `workspace` 的临时安装不会继承。若希望后续 Fold 使用新增依赖，可参考 `/mnt/agent/workspace/sandbox_environment.example.json`，并写入 `/mnt/agent/workspace/sandbox_environment.json`，由 Pipeline 基于该文件构建派生 Sandbox 镜像。
-- 具体网络模式、透传环境变量名和代理别名变量名以 `/mnt/artifacts/runtime_env.json` 的 `network` / `sandbox_spec` 以及 `/mnt/artifacts/run_manifest.json` 的实验配置为准；不要依赖额外 Prompt 片段推断运行时配置。
-- 默认先使用直连网络。只有直连失败、明显卡顿，或任务明确需要代理时，才在单条命令前临时把 runtime env 中列出的 `AT_PROXY_*` 别名映射为标准代理变量；如果 runtime env 没有列出代理别名，不要自行设置代理。
-- 如果 runtime env 没有列出 `GITHUB_TOKEN`、`HF_TOKEN` 或其他凭据环境变量名，不要假设它们可用。凭据和代理值只能通过环境变量使用；不要打印、复制、写入文件、写入 Taste、写入产物或写入日志。
+- 后续普通 Fold 不允许联网或安装新包。元学习 Fold 是唯一可配置联网的阶段；当前实验事实允许联网时，可在工作区内用 `git`、`pip`、`npm`、`hf` 下载公开资料、代码或模型。只放在 `workspace` 的临时安装不会继承。若希望后续 Fold 使用新增依赖，可参考 `/mnt/agent/workspace/sandbox_environment.example.json`，并写入 `/mnt/agent/workspace/sandbox_environment.json`，由 Pipeline 基于该文件构建派生 Sandbox 镜像。
+- 网络可用性、代理别名和凭据变量名以当前实验事实为准；不要依赖额外 Prompt 片段推断运行时配置。
+- 默认先使用直连网络。只有直连失败、明显卡顿，或任务明确需要代理时，才在单条命令前临时把当前实验事实中 `proxy_alias_names_active` 列出的 `AT_PROXY_*` 别名映射为标准代理变量；如果没有 active 代理别名，不要自行设置代理。
+- 只有当前实验事实中 `credential_env_names_active` 列出的凭据环境变量名可视为已注入；未列出的 `GITHUB_TOKEN`、`HF_TOKEN` 或其他凭据不要假设可用。凭据和代理值只能通过环境变量使用；不要打印、复制、写入文件、写入 Taste、写入产物或写入日志。
 - 下载缓存、外部仓库、日志、数据 dump、notebook 或密钥不要放进 `output/` 或 `models/`。如果确实要让后续 Fold 复用外部代码，整理成最小、可审计的自包含源码放入 `output/` 并通过修改检查；如果需要新增 Python/npm/apt 依赖，写入 `workspace/sandbox_environment.json` 交给 Pipeline 构建镜像，不要把包目录塞进产物。
 - 只有 `sandbox_environment.json` 是正式请求文件；`sandbox_environment.example.json` 只是模板，不会触发构建。正式请求只接受 JSON object：`python_packages`、`apt_packages`、`npm_packages` 三个字符串列表，以及可选 `reason` / `notes`。只写明确必要的稳定依赖和版本，不写 shell 命令、URL、token、缓存路径或临时实验文件。
 
@@ -328,7 +328,7 @@ META_LEARNING_INSTRUCTION = """\
 | `done` | （无） | 写好 Taste、必要修改通过 modification_check 后结束会话 |
 
 一轮可以发起多个工具调用：相互独立的只读检索（grep/glob/web_search）可在同一轮并行发起；有状态修改按因果顺序单独调用。每个工具调用都会单独返回一条结果。
-工具失败时优先读取结果中的 `error_type`、`reason`、`retry_hint`、`blocked_target`；修正命令或参数后继续，不要反复提交同一个失败调用。
+工具失败时优先读取结果中的 `error_type`、`reason`、`retry_hint`、`blocked_target`；Shell 结果若 `exit_code != 0`，先读 `stderr`，输出被截断时再读 `stdout_path` / `stderr_path`；修正命令或参数后继续，不要反复提交同一个失败调用。
 
 ## 工作步骤
 以下步骤是可行路径，不是固定顺序；你可以根据新发现随时重新调用 `shell`、`grep/glob` 或 `web_search`，再修正判断。
@@ -739,10 +739,16 @@ def _runtime_tool_facts(
     available = sorted(name for name, record in tools.items() if _as_mapping(record).get("available") is True)
     missing = sorted(name for name, record in tools.items() if _as_mapping(record).get("available") is False)
     sandbox_spec = _as_mapping(runtime_env.get("sandbox_spec")) or _as_mapping(manifest.get("sandbox_spec"))
+    sandbox_runtime = _as_mapping(manifest.get("sandbox_runtime"))
     proxy_aliases = [
         str(item.get("container_env"))
-        for item in _as_list(sandbox_spec.get("env_aliases"))
+        for item in _as_list(sandbox_runtime.get("active_env_aliases"))
         if isinstance(item, Mapping) and str(item.get("container_env", "")).startswith("AT_PROXY_")
+    ]
+    active_env_passthrough = [
+        str(name)
+        for name in _as_list(sandbox_runtime.get("active_env_passthrough"))
+        if str(name).strip()
     ]
     network = runtime_env.get("network") or sandbox_spec.get("network")
     web_search_engines = manifest.get("web_search_engines") if is_meta else None
@@ -754,9 +760,10 @@ def _runtime_tool_facts(
             "cli_tools_missing": missing,
             "network_mode": network,
             "web_search_engines": web_search_engines,
-            "proxy_alias_names_available": proxy_aliases,
+            "credential_env_names_active": active_env_passthrough,
+            "proxy_alias_names_active": proxy_aliases,
             "network_install_policy": {
-                "ordinary_fold": "block",
+                "ordinary_fold": "no_network_prebuilt_dependencies_only",
                 "meta_learning": (
                     "workspace_only_if_network_enabled"
                     if is_meta and str(network or "none") != "none"

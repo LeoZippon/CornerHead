@@ -235,7 +235,7 @@ Pipeline 不为 Step 单独维护账本文件。Shell、LLM、Broker、NL 和回
 - 收敛阶段优先保护收益和风险指标，其次压缩 `output` 代码、helper、参数、prompt 和模型参数。
 - 当验证效果接近或边际收益很小时，优先保留更小、更简单、更可解释的版本。
 
-`finish_fold` 成功后，Runner 锁定 `output/` 和 `models/` 写入，并停止本 Fold 的 Agent 调用。Pipeline 选择最近一次通过完整验证且当前策略/model hash 未变的 Step。Agent 在结束前应确保当前 `output`/`models` 就是自己认为最好的已验证版本；若历史 Step 更优，应先恢复该版本、重新完成 modification check 和完整 `backtest`，再调用 `finish_fold`。若没有可接受 Step：
+`finish_fold` 成功后，Runner 只读锁定 `output/` 和 `models/`、清理 Sandbox 内 Agent 后台进程，并停止本 Fold 的 Agent 调用。Pipeline 选择最近一次通过完整验证且当前策略/model hash 未变的 Step。Agent 在结束前应确保当前 `output`/`models` 就是自己认为最好的已验证版本；若历史 Step 更优，应先恢复该版本、重新完成 modification check 和完整 `backtest`，再调用 `finish_fold`。若没有可接受 Step：
 
 1. 有父产物时沿用父产物，并按原因区分 `fold_status`：本 Fold 内从未产生成功的完整验证回测记 `no_valid_backtest`；已有完整验证但未被接受（未达 `AcceptanceRules`，或当前策略/model hash 与该验证不一致）记 `no_update`。两种情况都附带拒绝原因列表，供审计无需反推。
 2. 首个 Fold 没有父产物且无法产生可接受基线时，实验失败。
@@ -337,7 +337,7 @@ experiments/<experiment_id>/strategy_artifacts/<epoch_id>/<strategy_artifact_id>
 - 元学习使用独立 run/session，不复用普通 Fold Agent 会话。
 - 实验级 `meta_learning_directive` 只进入元学习 Prompt，不直接进入普通 Fold Agent；元学习必须把它当作待检验假设，可采纳、细化、降级或拒绝，并在 Taste 中给出可执行方向。
 - `web_search` 只在元学习会话开放；普通 Fold Agent 不联网。元学习 action 使用 `engine` 选择本次配置的搜索引擎；`perspective` 只记录研究视角。
-- 元学习默认 Docker `bridge` 直连并按配置透传环境变量名以支持 `git`/`pip`/`npm`/`hf`，代理默认关闭。该能力用于研究探索和依赖可行性验证，不改变普通 Fold/回测的默认离线可复现边界；secret 值不写入 manifest、账本或 prompt。网络模式、host-proxy 与 `AT_PROXY_*` 代理别名的配置细节见 `environment_design.md` §2.1。
+- 元学习默认 Docker `bridge` 网络，经宿主 NAT 访问公网，并按配置透传环境变量名以支持 `git`/`pip`/`npm`/`hf`；只有实际注入容器的 active 凭据名进入当前实验事实。代理别名机制默认启用但不自动接管命令。若 `.env.xray.json` 或 `.env` 提供托管 XRay 配置，Pipeline 会为每个元学习 Sandbox 默认启动一次宿主 XRay、随机选择空闲端口、加入随机 inbound 认证并在结束后清理；只有实际注入容器的 active `AT_PROXY_*` 别名会进入当前实验事实。secret 值不写入 manifest、账本或 prompt。网络模式、host-proxy 与 `AT_PROXY_*` 代理别名的配置细节见 `environment_design.md` §2.1。
 - 元学习 Prompt 要求 Agent 先读 `data_summary.json`，再用 shell 调 Python 对可见 snapshot 做只读详细检查和分析，至少理解本次数据 schema、日期覆盖、行数、关键空值和单位约束；大表优先用 DuckDB、Parquet metadata、按列读取或过滤读取。
 - 启用联网搜索时，元学习必须在结束前分别完成金融/量化/经济、其他自然科学/工程、哲学/方法论三类视角的非空成功检索，并把结论收敛到一个创新但可执行的简洁 Taste。若某个引擎限流、失败或返回空结果，Agent 应换引擎或重试同一视角。
 - Pipeline 只在真实 Runner summary 显示 `meta_learning_done` 且 `taste.md` 非空时采纳 Taste 或正则化改动；否则 fail-fast，不沿用旧 Taste 伪装本轮完成。

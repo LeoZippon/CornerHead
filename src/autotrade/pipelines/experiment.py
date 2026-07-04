@@ -29,6 +29,7 @@ from autotrade.environment.data_summary import write_agent_data_summary
 from autotrade.environment.executor import DockerExecutor
 from autotrade.environment.identity import agent_visible_ref as _agent_visible_ref
 from autotrade.environment.llm.proxy import LLMProxy
+from autotrade.environment.managed_proxy import ManagedProxySession
 from autotrade.environment.runtime import AgentTraceWriter, RunManifest, new_id, utc_now_iso
 from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree
 from autotrade.environment.step_tree import StepTree
@@ -194,6 +195,17 @@ class ExperimentPipeline:
         docker.start()
         manifest.update(sandbox_runtime=docker.allocation_record())
 
+    def _start_meta_learning_proxy(self, sandbox: LocalSandbox, manifest: RunManifest) -> ManagedProxySession:
+        if not self.config.use_docker:
+            session = ManagedProxySession(record={"enabled": False, "status": "local_mode"})
+            manifest.update(meta_learning_proxy_runtime=session.record)
+            return session
+        session = self.config.meta_learning_managed_proxy.start(
+            sandbox.paths.root / "runtime" / "managed_proxy"
+        )
+        manifest.update(meta_learning_proxy_runtime=session.record)
+        return session
+
     def _experiment_parameter_summary(self) -> dict[str, object]:
         return {
             "fold_period": self.config.fold_period,
@@ -222,6 +234,7 @@ class ExperimentPipeline:
                 if self.config.meta_learning_sandbox_spec is not None
                 else None
             ),
+            "meta_learning_managed_proxy": self.config.meta_learning_managed_proxy.to_record(),
         }
 
     def _replay_config_fields(self) -> dict[str, object]:
@@ -589,8 +602,10 @@ class ExperimentPipeline:
                 "conversation_id": str(manifest.require("conversation_id")),
             },
         )
-        self._start_container(docker, manifest)
+        managed_proxy = self._start_meta_learning_proxy(sandbox, manifest)
         try:
+            with managed_proxy.applied_to_environ():
+                self._start_container(docker, manifest)
             ctx = ToolContext(
                 paths=paths,
                 manifest=manifest,
@@ -614,6 +629,7 @@ class ExperimentPipeline:
         finally:
             if docker is not None:
                 docker.stop()
+            managed_proxy.stop()
         taste = _read_text(paths.workspace / "taste.md").strip()
         status = "taste_only"
         frozen = parent

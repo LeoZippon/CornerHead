@@ -8,6 +8,7 @@ return statistics, the order log, and the NL audit trail.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import time
@@ -17,6 +18,7 @@ import pandas as pd
 
 from autotrade.environment.artifacts import (
     ArtifactError,
+    READONLY_FILES,
     artifact_hash,
     combined_artifact_hash,
     load_model_artifacts,
@@ -118,14 +120,15 @@ class BacktestTool:
         decision_time = str(self.ctx.manifest.require("valid_decision_time"))
         replay_minutes = _read_replay_minutes(self.ctx.paths.valid)
         replay_granularity = "minute" if replay_minutes is not None else "daily"
-        with MainPolicyRunner(
-            self.ctx.executor,
-            self.ctx.paths,
-            timeout_seconds=float(self.ctx.manifest.get("per_call_timeout_seconds", 300)),
-            decision_time=decision_time,
-            replay_granularity=replay_granularity,
-        ) as policy:
-            policy.validate_main()
+        with _formal_artifacts_readonly(self.ctx.paths, restore_writable=not self.ctx.write_locked):
+            with MainPolicyRunner(
+                self.ctx.executor,
+                self.ctx.paths,
+                timeout_seconds=float(self.ctx.manifest.get("per_call_timeout_seconds", 300)),
+                decision_time=decision_time,
+                replay_granularity=replay_granularity,
+            ) as policy:
+                policy.validate_main()
         summary = {
             "tool": self.name,
             "tool_spec": self.spec.to_record(),
@@ -236,44 +239,45 @@ class BacktestTool:
             # map from the replay slot drives the broker's real same-day short gate (W7).
             shortable = load_shortable_codes(snapshot_dir, _decision_date(decision_time))
             shortable_by_date = load_shortable_by_date(replay_dir)
-            with MainPolicyRunner(
-                self.ctx.executor,
-                self.ctx.paths,
-                timeout_seconds=decision_cap,
-                decision_time=decision_time,
-                replay_granularity=replay_granularity,
-                nl_service=nl_service,
-                requests_path=requests_host,
-                responses_path=responses_host,
-                decision_max_sim_minutes=_optional_float(manifest.get("decision_max_sim_minutes")),
-            ) as policy:
-                policy.validate_main()
-                replay = run_main_ctx_replay(
-                    replay_daily,
-                    profile,
-                    shortable_codes=shortable,
-                    shortable_by_date=shortable_by_date,
-                    main_policy=policy,
-                    replay_intraday_1min=replay_minutes,
-                    auction_enabled=bool(manifest.get("auction_enabled", True)),
-                    auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
-                    auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
-                    auction_close_time=(manifest.get("auction_close_time", "14:57") or None),
-                    execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
-                    offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 15)),
-                    max_seconds_per_trading_day=per_day_cap,
-                    enforce_substep_timeout=enforce_substep_timeout,
-                    # The unwrapped-compute coverage check is also a real-wall measure,
-                    # so it follows the same valid/final split as the timeout: only the
-                    # tight iteration-validation gate enforces it. The frozen/held-out
-                    # final eval must stay reproducible under load (H2), so a transient
-                    # deschedule outside a substep cannot abort an accepted strategy.
-                    enforce_substep_coverage=enforce_substep_timeout,
-                    timeview_enabled=timeview_enabled,
-                    snapshot_dir=snapshot_dir,
-                    replay_dir=replay_dir,
-                    on_progress=_on_progress,
-                )
+            with _formal_artifacts_readonly(self.ctx.paths, restore_writable=(mode == "valid")):
+                with MainPolicyRunner(
+                    self.ctx.executor,
+                    self.ctx.paths,
+                    timeout_seconds=decision_cap,
+                    decision_time=decision_time,
+                    replay_granularity=replay_granularity,
+                    nl_service=nl_service,
+                    requests_path=requests_host,
+                    responses_path=responses_host,
+                    decision_max_sim_minutes=_optional_float(manifest.get("decision_max_sim_minutes")),
+                ) as policy:
+                    policy.validate_main()
+                    replay = run_main_ctx_replay(
+                        replay_daily,
+                        profile,
+                        shortable_codes=shortable,
+                        shortable_by_date=shortable_by_date,
+                        main_policy=policy,
+                        replay_intraday_1min=replay_minutes,
+                        auction_enabled=bool(manifest.get("auction_enabled", True)),
+                        auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
+                        auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
+                        auction_close_time=(manifest.get("auction_close_time", "14:57") or None),
+                        execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
+                        offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 15)),
+                        max_seconds_per_trading_day=per_day_cap,
+                        enforce_substep_timeout=enforce_substep_timeout,
+                        # The unwrapped-compute coverage check is also a real-wall measure,
+                        # so it follows the same valid/final split as the timeout: only the
+                        # tight iteration-validation gate enforces it. The frozen/held-out
+                        # final eval must stay reproducible under load (H2), so a transient
+                        # deschedule outside a substep cannot abort an accepted strategy.
+                        enforce_substep_coverage=enforce_substep_timeout,
+                        timeview_enabled=timeview_enabled,
+                        snapshot_dir=snapshot_dir,
+                        replay_dir=replay_dir,
+                        on_progress=_on_progress,
+                    )
             stats = compute_return_stats(replay)
             artifact = load_strategy_artifact(self.ctx.paths.agent_output)
             model_artifacts = load_model_artifacts(self.ctx.paths.model_artifacts)
@@ -629,6 +633,39 @@ def _optional_float(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+@contextlib.contextmanager
+def _formal_artifacts_readonly(paths, *, restore_writable: bool):
+    """Make output/models filesystem-read-only while formal replay imports/runs."""
+    _make_formal_artifacts_readonly(paths)
+    try:
+        yield
+    finally:
+        if restore_writable:
+            _restore_formal_artifacts_writable(paths)
+
+
+def _make_formal_artifacts_readonly(paths) -> None:
+    _chmod_tree(paths.agent_output, file_mode=0o444, dir_mode=0o555)
+    _chmod_tree(paths.model_artifacts, file_mode=0o444, dir_mode=0o555)
+
+
+def _restore_formal_artifacts_writable(paths) -> None:
+    _chmod_tree(paths.agent_output, file_mode=0o666, dir_mode=0o777)
+    _chmod_tree(paths.model_artifacts, file_mode=0o666, dir_mode=0o777)
+    for relpath in READONLY_FILES:
+        target = paths.agent_output / relpath
+        if target.exists():
+            target.chmod(0o444)
+
+
+def _chmod_tree(root: Path, *, file_mode: int, dir_mode: int) -> None:
+    if not root.exists():
+        return
+    for path in sorted(root.rglob("*"), reverse=True):
+        path.chmod(dir_mode if path.is_dir() else file_mode)
+    root.chmod(dir_mode if root.is_dir() else file_mode)
 
 
 def _nl_call_budget(manifest, replay_daily) -> int | None:

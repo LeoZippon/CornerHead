@@ -82,28 +82,46 @@ def main(ctx):
             ctx.broker.buy(code, weight=0.1, reason="minute_close_buy")
 '''
 
-MODEL_ARTIFACT_STRATEGY_MAIN = '''
+MODEL_READ_STRATEGY_MAIN = '''
 import json
 from pathlib import Path
 
 import pandas as pd
 
-_DONE = False
+
+def main(ctx):
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        model_dir = Path(str(ctx.model_dir))
+        params = json.loads((model_dir / "params.json").read_text(encoding="utf-8"))
+        snapshot_dir = Path(str(ctx.snapshot_dir))
+        daily = pd.read_parquet(snapshot_dir / "daily.parquet")
+        code = sorted(daily["ts_code"].astype(str).unique())[0]
+        if params.get("threshold") == 0.42 and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+            ctx.broker.buy(code, weight=0.1, reason="model_artifact_buy")
+'''
+
+MODEL_WRITE_STRATEGY_MAIN = '''
+import json
+from pathlib import Path
 
 
 def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
-        global _DONE
-        if not _DONE:
-            model_dir = Path(str(ctx.model_dir))
-            model_dir.mkdir(parents=True, exist_ok=True)
-            (model_dir / "params.json").write_text(json.dumps({"threshold": 0.42}, sort_keys=True), encoding="utf-8")
-            _DONE = True
-        snapshot_dir = Path(str(ctx.snapshot_dir))
-        daily = pd.read_parquet(snapshot_dir / "daily.parquet")
-        code = sorted(daily["ts_code"].astype(str).unique())[0]
-        if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-            ctx.broker.buy(code, weight=0.1, reason="model_artifact_buy")
+        model_dir = Path(str(ctx.model_dir))
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "params.json").write_text(json.dumps({"threshold": 0.42}, sort_keys=True), encoding="utf-8")
+'''
+
+MODEL_SUBPROCESS_WRITE_STRATEGY_MAIN = '''
+import subprocess
+
+
+def main(ctx):
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        subprocess.run(
+            ["/bin/sh", "-lc", f"echo x > {ctx.model_dir}/subprocess.txt"],
+            check=True,
+        )
 '''
 
 CUSTOM_POLICY_MAIN = '''
@@ -312,9 +330,13 @@ class ToolFlowTest(unittest.TestCase):
             self.assertTrue((result_dir / "detailed_return.json").exists())
             self.assertTrue((result_dir / "orders.parquet").exists())
 
-            finish = FinishFoldTool(ctx).run()
+            with patch.object(ctx.executor, "cleanup_user_processes", wraps=ctx.executor.cleanup_user_processes) as cleanup:
+                finish = FinishFoldTool(ctx).run()
             self.assertEqual(finish["status"], "fold_finished")
+            cleanup.assert_called_once_with(user="agent")
             self.assertTrue(ctx.write_locked)
+            self.assertEqual(ctx.paths.agent_output.stat().st_mode & 0o222, 0)
+            self.assertEqual(ctx.paths.model_artifacts.stat().st_mode & 0o222, 0)
             with self.assertRaisesRegex(ToolError, "locked"):
                 BacktestTool(ctx).run(mode="valid")
 
@@ -329,12 +351,18 @@ class ToolFlowTest(unittest.TestCase):
             ModificationCheckTool(ctx).run()
             with self.assertRaisesRegex(ToolError, "complete validation"):
                 FinishFoldTool(ctx).run()
+            self.assertFalse(ctx.write_locked)
+            self.assertNotEqual(ctx.paths.agent_output.stat().st_mode & 0o222, 0)
+            self.assertNotEqual(ctx.paths.model_artifacts.stat().st_mode & 0o222, 0)
 
             # replay_window debug passes stay non-qualifying for finishing.
             summary = BacktestTool(ctx).run(mode="valid", replay_window=2)
             self.assertFalse(summary["complete_validation"])
             with self.assertRaisesRegex(ToolError, "complete validation"):
                 FinishFoldTool(ctx).run()
+            self.assertFalse(ctx.write_locked)
+            self.assertNotEqual(ctx.paths.agent_output.stat().st_mode & 0o222, 0)
+            self.assertNotEqual(ctx.paths.model_artifacts.stat().st_mode & 0o222, 0)
 
             BacktestTool(ctx).run(mode="valid")
             finish = FinishFoldTool(ctx).run()
@@ -542,10 +570,13 @@ class ToolFlowTest(unittest.TestCase):
             self.assertEqual(fill["price_label"], "minute:14:57")
             self.assertAlmostEqual(fill["price"], BrokerProfile().slipped_price(10.1, is_buy=True))
 
-    def test_main_persists_model_artifacts(self):
+    def test_main_reads_prebuilt_model_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
-            (ctx.paths.agent_output / "main.py").write_text(MODEL_ARTIFACT_STRATEGY_MAIN, encoding="utf-8")
+            (ctx.paths.agent_output / "main.py").write_text(MODEL_READ_STRATEGY_MAIN, encoding="utf-8")
+            (ctx.paths.model_artifacts / "params.json").write_text(
+                json.dumps({"threshold": 0.42}, sort_keys=True), encoding="utf-8"
+            )
 
             summary = BacktestTool(ctx).run(mode="valid")
 
@@ -574,6 +605,24 @@ class ToolFlowTest(unittest.TestCase):
 
             finish = FinishFoldTool(ctx).run()
             self.assertEqual(finish["status"], "fold_finished")
+
+    def test_main_cannot_write_model_artifacts_during_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(MODEL_WRITE_STRATEGY_MAIN, encoding="utf-8")
+
+            with self.assertRaisesRegex(ToolError, "formal strategy cannot write forbidden path"):
+                BacktestTool(ctx).run(mode="valid")
+
+    def test_main_subprocess_cannot_write_model_artifacts_during_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(
+                MODEL_SUBPROCESS_WRITE_STRATEGY_MAIN, encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ToolError, "returned non-zero exit status|Permission denied"):
+                BacktestTool(ctx).run(mode="valid")
 
     def test_custom_trading_function_runs_during_minute_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -850,7 +899,7 @@ class ShellToolTest(unittest.TestCase):
             clean = SandboxShellTool(ctx).run("echo hi").to_record()
             self.assertNotIn("stderr_suppression_reminder", clean)
 
-    def test_shell_runs_and_logs_and_guards_test_dir(self):
+    def test_shell_runs_and_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp), with_strategy=False)
             result = SandboxShellTool(ctx).run("echo hello")
@@ -860,79 +909,14 @@ class ShellToolTest(unittest.TestCase):
             self.assertEqual(Path(cwd.stdout.strip()), ctx.paths.agent)
             SandboxShellTool(ctx).run("touch workspace/ok")
             self.assertTrue((ctx.paths.workspace / "ok").exists())
-            with self.assertRaisesRegex(ToolError, "forbidden path"):
-                SandboxShellTool(ctx).run(f"cat {ctx.paths.test}/daily.parquet")
-            with self.assertRaisesRegex(ToolError, "outside the sandbox"):
-                SandboxShellTool(ctx).run("cat /etc/passwd")
-            with self.assertRaisesRegex(ToolError, "read-only path"):
-                SandboxShellTool(ctx).run(f"touch {ctx.paths.steps}/agent_write")
             SandboxShellTool(ctx).run('rg "a>b" /mnt/snapshots/train')
-            shell = SandboxShellTool(ctx)
-            shell._guard_paths("ls /mnt/snapshot/ 2>&1; echo '---'")
-            shell._guard_paths("ls -la /mnt/artifacts 2>/dev/null")
-            shell._guard_paths("python3 -c \"import os; print(os.listdir('/mnt'))\"")
-            shell._guard_paths("rg -i nodes /mnt/snapshots/train")
-            shell._guard_paths("cat /mnt/artifacts/run_manifest.json > /mnt/agent/workspace/manifest.copy")
-            shell._guard_paths("cp /mnt/artifacts/run_manifest.json /mnt/agent/workspace/run_manifest.copy")
-            with self.assertRaisesRegex(ToolError, "read-only path"):
-                shell._guard_paths("echo hi > /mnt/artifacts/forbidden")
-            with self.assertRaisesRegex(ToolError, "read-only path"):
-                shell._guard_paths("ls /mnt/snapshot &>/mnt/artifacts/forbidden")
-            with self.assertRaisesRegex(ToolError, "read-only path"):
-                shell._guard_paths("true; touch /mnt/artifacts/forbidden")
-            # Interpreter code is not shell syntax: Python comparisons/slices in a
-            # heredoc body or a quoted ``-c`` payload must not be read as redirects
-            # or paths (regression for the ``>150`` / ``[:5]`` false positives).
-            shell._guard_paths(
-                "cd /mnt/snapshot && python3 << 'EOF'\nfor d in xs[:5]:\n  if n > 150:\n    print(d)\nEOF"
-            )
-            shell._guard_paths("python3 -c \"y = a[:5]; z = b > 150; p = '/5'\"")
-            with self.assertRaisesRegex(ToolError, "unmanaged sandbox path"):
-                shell._guard_paths("touch stray")
-            with self.assertRaisesRegex(ToolError, "unmanaged sandbox path"):
-                shell._guard_paths("printf x > stray")
-            with self.assertRaisesRegex(ToolError, "unmanaged sandbox path"):
-                shell._guard_paths("printf x>stray")
-            with self.assertRaisesRegex(ToolError, "unmanaged sandbox path"):
-                shell._guard_paths("cp /mnt/artifacts/run_manifest.json stray")
-            with self.assertRaisesRegex(ToolError, "read-only path"):
-                SandboxShellTool(ctx).run(f"sed -i.bak s/a/b/ {ctx.paths.steps}/tree.json")
-            with self.assertRaisesRegex(ToolError, "unmanaged sandbox path"):
-                SandboxShellTool(ctx).run("touch /mnt/agent/workspace_evil/file")
-            with self.assertRaisesRegex(ToolError, "forbidden path"):
-                SandboxShellTool(ctx).run("cat /mnt/agent/workspace/../../snapshots/test/daily.parquet")
-            with self.assertRaisesRegex(ToolError, "forbidden path"):
-                SandboxShellTool(ctx).run("cat $PWD/../snapshots/test/daily.parquet")
-            with self.assertRaisesRegex(ToolError, "forbidden runtime path"):
-                SandboxShellTool(ctx).run("ls ../runtime/snapshot_views")
-            with self.assertRaisesRegex(ToolError, "cannot install packages or download"):
-                SandboxShellTool(ctx).run("python3 -m pip install requests")
-            with self.assertRaisesRegex(ToolError, "cannot install packages or download"):
-                SandboxShellTool(ctx).run("echo ok && pip install requests")
-            with self.assertRaisesRegex(ToolError, "cannot install packages or download"):
-                SandboxShellTool(ctx).run("true; curl https://example.test")
-            with self.assertRaisesRegex(ToolError, "cannot install packages or download"):
-                SandboxShellTool(ctx).run("printf ok | wget https://example.test")
-            with self.assertRaisesRegex(ToolError, "cannot install packages or download"):
-                SandboxShellTool(ctx).run("bash -lc 'git clone https://example.test/repo.git'")
-            with self.assertRaisesRegex(ToolError, "cannot install packages or download"):
-                SandboxShellTool(ctx).run("env FOO=1 curl https://example.test")
-            with self.assertRaisesRegex(ToolError, "cannot install packages or download"):
-                SandboxShellTool(ctx).run("true & curl https://example.test")
-            with self.assertRaisesRegex(ToolError, "cannot install packages or download"):
-                SandboxShellTool(ctx).run("echo $(curl https://example.test)")
-            with self.assertRaisesRegex(ToolError, "cannot install packages or download"):
-                SandboxShellTool(ctx).run("echo `curl https://example.test`")
-            with self.assertRaisesRegex(ToolError, "cannot install packages or download"):
-                SandboxShellTool(ctx).run("find /mnt/artifacts -exec curl https://example.test \\;")
-            with self.assertRaisesRegex(ToolError, "cannot install packages or download"):
-                SandboxShellTool(ctx).run("find /mnt/artifacts -exec sh -c 'curl https://example.test' sh {} \\;")
             events = [e for e in ctx.trace.read_events() if e["event_type"] == "shell"]
             self.assertEqual(len(events), 4)
 
-    def test_shell_guard_error_returns_retry_hint_to_agent(self):
+    def test_shell_rejects_after_write_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp), with_strategy=False)
+            ctx.write_locked = True
             runner = AgentSessionRunner(
                 ctx,
                 ScriptedLLM([]),
@@ -941,42 +925,10 @@ class ShellToolTest(unittest.TestCase):
                 acceptance_rules={},
             )
 
-            result = runner._dispatch("shell", {"action": "shell", "command": "touch stray"})
+            result = runner._dispatch("shell", {"action": "shell", "command": "echo locked"})
 
             self.assertEqual(result["observation"], "error")
-            self.assertEqual(result["error_type"], "path_guard")
-            self.assertIn("workspace", str(result["retry_hint"]))
-            self.assertIn("stray", str(result["blocked_target"]))
-
-    def test_shell_guard_errors_stay_in_mnt_namespace(self):
-        # Audit fix: a blocked path must be surfaced in the /mnt sandbox namespace
-        # (mapped back via the executor, like search/artifact_io), never as the
-        # resolved host filesystem path.
-        with tempfile.TemporaryDirectory() as tmp:
-            _, ctx = build_sandbox(Path(tmp), with_strategy=False)
-            ctx.executor = DockerExecutor("dummy", ctx.paths)
-            shell = SandboxShellTool(ctx)
-            host_root = str(ctx.paths.root)
-
-            with self.assertRaises(ToolError) as blocked:
-                shell._guard_paths("echo hi > /mnt/artifacts/forbidden")
-            message = str(blocked.exception)
-            self.assertIn("read-only path", message)
-            self.assertIn("/mnt/artifacts/forbidden", message)
-            self.assertNotIn(host_root, message)
-            self.assertEqual(blocked.exception.blocked_target, "/mnt/artifacts/forbidden")
-
-            # A path with no sandbox mapping (resolves outside the sandbox root) falls
-            # back to the exact token the Agent supplied, so the resolved host path is
-            # never leaked.
-            probe = "/mnt/agent/workspace/" + "../" * 16 + "etc/passwd"
-            with self.assertRaises(ToolError) as escaped:
-                shell._guard_paths(f"cat {probe}")
-            escaped_message = str(escaped.exception)
-            self.assertIn("outside the sandbox boundary", escaped_message)
-            self.assertIn(probe, escaped_message)
-            self.assertNotIn(host_root, escaped_message)
-            self.assertEqual(escaped.exception.blocked_target, probe)
+            self.assertIn("fold writes are locked", result["error"])
 
     def test_shell_can_read_step_tree_from_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1038,7 +990,7 @@ class ShellToolTest(unittest.TestCase):
 
             listed = shell.run("ls /mnt/agent")
             read = shell.run("cat /mnt/artifacts/run_manifest.json", max_output_chars=80)
-            written = shell.run("printf hi > /mnt/agent/workspace/kind.txt")
+            written = shell.run("touch workspace/kind.txt")
 
             self.assertEqual(listed.command_kind, "list")
             self.assertEqual(read.command_kind, "read")

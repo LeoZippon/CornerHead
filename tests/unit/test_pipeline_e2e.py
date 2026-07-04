@@ -1,5 +1,6 @@
 import json
 import re
+import argparse
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,13 @@ from autotrade.pipelines import (
 )
 from autotrade.pipelines.folds import heldout_periods, period_bounds, quarter_bounds
 from scripts.experiments.run_experiment import _session_config_summary
+from scripts.experiments._cli import (
+    EXPERIMENT_META_REBUILD_HELP,
+    add_meta_sandbox_arguments,
+    build_meta_learning_managed_proxy_spec,
+    build_meta_learning_sandbox_spec,
+)
+from autotrade.environment.sandbox import SandboxSpec
 
 from .fixtures_sandbox import TEMPLATE_DIR, TRADING_DAYS, FakeSnapshotProvider, write_strategy
 
@@ -161,6 +169,11 @@ class ImportSmokeNamesTest(unittest.TestCase):
 
 
 class ExperimentCliTest(unittest.TestCase):
+    def _meta_parser(self) -> argparse.ArgumentParser:
+        parser = argparse.ArgumentParser()
+        add_meta_sandbox_arguments(parser, verbose_help=True, disable_rebuild_help=EXPERIMENT_META_REBUILD_HELP)
+        return parser
+
     def test_help_exposes_meta_learning_network_options(self):
         script = Path(__file__).resolve().parents[2] / "scripts" / "experiments" / "run_experiment.py"
         result = subprocess.run(
@@ -173,6 +186,80 @@ class ExperimentCliTest(unittest.TestCase):
         self.assertIn("--meta-learning-network", result.stdout)
         self.assertIn("--meta-learning-env", result.stdout)
         self.assertIn("--meta-learning-host-proxy", result.stdout)
+        self.assertIn("--disable-meta-learning-host-proxy", result.stdout)
+        self.assertIn("--disable-meta-learning-managed-proxy", result.stdout)
+
+    def test_meta_learning_sandbox_exposes_proxy_aliases_by_default(self):
+        parser = self._meta_parser()
+        args = parser.parse_args([])
+        class Completed:
+            returncode = 0
+            stdout = "45: docker0    inet 10.10.0.1/24 brd 10.10.0.255 scope global docker0\\n"
+            stderr = ""
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("scripts.experiments._cli.subprocess.run", return_value=Completed()):
+                spec = build_meta_learning_sandbox_spec(args, SandboxSpec(gpu=None), repo_root=Path(tmp))
+                managed_proxy = build_meta_learning_managed_proxy_spec(
+                    args,
+                    repo_root=Path(tmp),
+                    sandbox_spec=spec,
+                )
+
+        aliases = {container for container, _host in spec.env_aliases}
+        self.assertEqual(spec.network, "bridge")
+        self.assertTrue(spec.add_host_gateway)
+        self.assertEqual(spec.host_gateway_ip, "10.10.0.1")
+        self.assertTrue(managed_proxy.enabled)
+        self.assertEqual(managed_proxy.listen_host, "10.10.0.1")
+        self.assertEqual(managed_proxy.container_host, "10.10.0.1")
+        self.assertIn("AT_PROXY_HTTP", aliases)
+        self.assertIn("AT_PROXY_HTTPS", aliases)
+        self.assertIn("AT_PROXY_ALL", aliases)
+
+    def test_meta_learning_network_none_disables_proxy_aliases_and_managed_proxy(self):
+        parser = self._meta_parser()
+        args = parser.parse_args(["--meta-learning-network", "none"])
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = build_meta_learning_sandbox_spec(args, SandboxSpec(gpu=None), repo_root=Path(tmp))
+            managed_proxy = build_meta_learning_managed_proxy_spec(
+                args,
+                repo_root=Path(tmp),
+                sandbox_spec=spec,
+            )
+
+        self.assertEqual(spec.network, "none")
+        self.assertEqual(spec.env_aliases, ())
+        self.assertFalse(spec.add_host_gateway)
+        self.assertFalse(managed_proxy.enabled)
+        self.assertEqual(managed_proxy.disabled_status, "disabled_by_network_none")
+
+    def test_meta_learning_proxy_aliases_can_be_disabled(self):
+        parser = self._meta_parser()
+        args = parser.parse_args(["--disable-meta-learning-host-proxy"])
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = build_meta_learning_sandbox_spec(args, SandboxSpec(gpu=None), repo_root=Path(tmp))
+            managed_proxy = build_meta_learning_managed_proxy_spec(
+                args,
+                repo_root=Path(tmp),
+                sandbox_spec=spec,
+            )
+
+        self.assertEqual(spec.env_aliases, ())
+        self.assertFalse(spec.add_host_gateway)
+        self.assertFalse(managed_proxy.enabled)
+
+    def test_meta_learning_managed_proxy_fails_fast_when_bridge_ip_missing_with_config(self):
+        parser = self._meta_parser()
+        args = parser.parse_args([])
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / ".env.xray.json").write_text(
+                json.dumps({"inbounds": [], "outbounds": [{"protocol": "freedom"}]}),
+                encoding="utf-8",
+            )
+            spec = SandboxSpec(gpu=None, network="bridge", env_aliases=(("AT_PROXY_HTTP", "HTTP_PROXY"),))
+            with self.assertRaisesRegex(RuntimeError, "Docker bridge host IP"):
+                build_meta_learning_managed_proxy_spec(args, repo_root=repo_root, sandbox_spec=spec)
 
     def test_non_quarter_period_requires_explicit_generic_periods(self):
         script = Path(__file__).resolve().parents[2] / "scripts" / "experiments" / "run_experiment.py"

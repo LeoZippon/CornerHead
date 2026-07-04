@@ -68,10 +68,13 @@ class SandboxSpec:
     env_passthrough: tuple[str, ...] = ()
     env_aliases: tuple[tuple[str, str], ...] = ()
     add_host_gateway: bool = False
+    host_gateway_ip: str | None = None
 
     def __post_init__(self) -> None:
         if self.gpu_count <= 0:
             raise ValueError(f"gpu_count must be positive: {self.gpu_count}")
+        if self.host_gateway_ip is not None and not self.host_gateway_ip.strip():
+            raise ValueError("host_gateway_ip must be non-empty when set")
 
     @classmethod
     def from_host_fraction(cls, fraction: float = DEFAULT_HOST_FRACTION, **overrides) -> "SandboxSpec":
@@ -97,11 +100,16 @@ class SandboxSpec:
             "gpu_count": self.gpu_count,
             "gpu_name_filter": self.gpu_name_filter,
             "env_passthrough": list(self.env_passthrough),
+            "requested_env_aliases": [
+                {"container_env": container_env, "host_env": host_env}
+                for container_env, host_env in self.env_aliases
+            ],
             "env_aliases": [
                 {"container_env": container_env, "host_env": host_env}
                 for container_env, host_env in self.env_aliases
             ],
             "add_host_gateway": self.add_host_gateway,
+            "host_gateway_ip": self.host_gateway_ip,
         }
 
 
@@ -438,9 +446,11 @@ def _docker_env_args(
     aliases: Sequence[tuple[str, str]] = (),
     *,
     rewrite_localhost: bool = False,
-) -> tuple[list[str], dict[str, str]]:
+) -> tuple[list[str], dict[str, str], list[str], list[dict[str, str]]]:
     args: list[str] = []
     env: dict[str, str] = {}
+    active_names: list[str] = []
+    active_aliases: list[dict[str, str]] = []
     seen: set[str] = set()
     for raw_name in names:
         name = str(raw_name).strip()
@@ -449,6 +459,7 @@ def _docker_env_args(
         seen.add(name)
         if os.environ.get(name) is None:
             continue
+        active_names.append(name)
         args.extend(["--env", name])
     for raw_container_env, raw_host_env in aliases:
         container_env = str(raw_container_env).strip()
@@ -460,8 +471,9 @@ def _docker_env_args(
         if value is None:
             continue
         env[container_env] = _rewrite_localhost_proxy(value) if rewrite_localhost else value
+        active_aliases.append({"container_env": container_env, "host_env": host_env})
         args.extend(["--env", container_env])
-    return args, env
+    return args, env, active_names, active_aliases
 
 
 def _rewrite_localhost_proxy(value: str) -> str:
@@ -473,6 +485,13 @@ def _rewrite_localhost_proxy(value: str) -> str:
     if rewritten.startswith("localhost:"):
         rewritten = "host.docker.internal:" + rewritten.split(":", 1)[1]
     return rewritten
+
+
+def _host_gateway_args(spec: SandboxSpec) -> list[str]:
+    if not spec.add_host_gateway:
+        return []
+    target = spec.host_gateway_ip or "host-gateway"
+    return ["--add-host", f"host.docker.internal:{target}"]
 
 
 def link_copytree(source: str | Path, dest: str | Path) -> Path:
@@ -531,6 +550,8 @@ class DockerSandbox:
         self.spec = spec
         self.container = new_id("mqsbx")
         self.gpu_indices: list[int] = []
+        self.active_env_passthrough: list[str] = []
+        self.active_env_aliases: list[dict[str, str]] = []
 
     def start(self) -> str:
         paths = self.local.paths
@@ -551,11 +572,13 @@ class DockerSandbox:
                     self.gpu_indices = []  # CPU-only host: run without a GPU
                 else:
                     raise
-        env_args, command_env = _docker_env_args(
+        env_args, command_env, active_names, active_aliases = _docker_env_args(
             self.spec.env_passthrough,
             self.spec.env_aliases,
             rewrite_localhost=self.spec.add_host_gateway,
         )
+        self.active_env_passthrough = active_names
+        self.active_env_aliases = active_aliases
         command = [
             "docker",
             "run",
@@ -576,11 +599,7 @@ class DockerSandbox:
             # collector cannot read.
             "--ulimit",
             "core=0:0",
-            *(
-                ["--add-host", "host.docker.internal:host-gateway"]
-                if self.spec.add_host_gateway
-                else []
-            ),
+            *_host_gateway_args(self.spec),
             *_CACHE_REDIRECT_ENV_ARGS,
             *env_args,
             "-v",
@@ -629,6 +648,13 @@ class DockerSandbox:
             "gpu_name_filter": self.spec.gpu_name_filter,
             "allocated_gpu_indices": list(self.gpu_indices),
             "env_passthrough": list(self.spec.env_passthrough),
+            "requested_env_passthrough": list(self.spec.env_passthrough),
+            "active_env_passthrough": list(self.active_env_passthrough),
+            "requested_env_aliases": [
+                {"container_env": container_env, "host_env": host_env}
+                for container_env, host_env in self.spec.env_aliases
+            ],
+            "active_env_aliases": list(self.active_env_aliases),
             "env_aliases": [
                 {"container_env": container_env, "host_env": host_env}
                 for container_env, host_env in self.spec.env_aliases

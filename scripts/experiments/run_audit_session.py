@@ -34,6 +34,7 @@ from _cli import (
     add_snapshot_window_arguments,
     add_web_search_arguments,
     build_meta_learning_sandbox_spec,
+    build_meta_learning_managed_proxy_spec,
     build_pipeline,
     build_proxies,
     build_session_builders,
@@ -194,6 +195,11 @@ def _build_config(repo_root: Path, args: argparse.Namespace, meta_learning_direc
         repo_root=repo_root,
         extra_dotenv_keys=(args.tavily_api_key_env, args.semantic_scholar_api_key_env),
     )
+    meta_learning_managed_proxy = build_meta_learning_managed_proxy_spec(
+        args,
+        repo_root=repo_root,
+        sandbox_spec=meta_learning_sandbox_spec,
+    )
     return ExperimentConfig(
         experiment_id=args.experiment_id,
         experiments_root=args.experiments_root.resolve(),
@@ -220,6 +226,7 @@ def _build_config(repo_root: Path, args: argparse.Namespace, meta_learning_direc
         ),
         sandbox_spec=sandbox_spec,
         meta_learning_sandbox_spec=meta_learning_sandbox_spec,
+        meta_learning_managed_proxy=meta_learning_managed_proxy,
         meta_sandbox_rebuild_enabled=not args.disable_meta_sandbox_rebuild,
         use_docker=not args.local_dev,
     )

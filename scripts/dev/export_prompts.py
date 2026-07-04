@@ -177,10 +177,31 @@ SAMPLE_META_MANIFEST = {
     "taste_output": "/mnt/agent/workspace/taste.md",
     "web_search_engines": ["tavily", "semantic_scholar"],
     "meta_learning_directive": "",
+    "sandbox_runtime": {
+        "active_env_passthrough": ["GITHUB_TOKEN", "HF_TOKEN"],
+        "active_env_aliases": [
+            {"container_env": "AT_PROXY_HTTP", "host_env": "HTTP_PROXY"},
+            {"container_env": "AT_PROXY_HTTPS", "host_env": "HTTPS_PROXY"},
+            {"container_env": "AT_PROXY_ALL", "host_env": "ALL_PROXY"},
+            {"container_env": "AT_PROXY_NO_PROXY", "host_env": "NO_PROXY"},
+        ]
+    },
 }
 SAMPLE_META_FACTS = build_experiment_facts(
     manifest=SAMPLE_META_MANIFEST,
-    runtime_env={**SAMPLE_RUNTIME_ENV, "network": "bridge", "sandbox_spec": {"network": "bridge", "env_aliases": [{"container_env": "AT_PROXY_HTTP", "host_env": "HTTP_PROXY"}]}},
+    runtime_env={
+        **SAMPLE_RUNTIME_ENV,
+        "network": "bridge",
+        "sandbox_spec": {
+            "network": "bridge",
+            "env_aliases": [
+                {"container_env": "AT_PROXY_HTTP", "host_env": "HTTP_PROXY"},
+                {"container_env": "AT_PROXY_HTTPS", "host_env": "HTTPS_PROXY"},
+                {"container_env": "AT_PROXY_ALL", "host_env": "ALL_PROXY"},
+                {"container_env": "AT_PROXY_NO_PROXY", "host_env": "NO_PROXY"},
+            ],
+        },
+    },
     data_summary=SAMPLE_DATA_SUMMARY,
     max_llm_calls=80,
     context_compaction={"enabled": True, "token_threshold": 200000, "max_calls": 8},

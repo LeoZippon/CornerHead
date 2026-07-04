@@ -13,6 +13,7 @@ from typing import Callable, Protocol
 
 from autotrade.environment.artifacts import ModificationConstraints
 from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.managed_proxy import ManagedProxySpec
 from autotrade.environment.sandbox import SandboxSpec, link_copytree
 from autotrade.environment.snapshot import SnapshotBuilder, SnapshotConfig
 from autotrade.environment.tools import ToolContext
@@ -252,6 +253,9 @@ class ExperimentConfig:
     # Fold and held-out runs keep ``sandbox_spec`` so production backtests stay
     # offline unless explicitly configured otherwise.
     meta_learning_sandbox_spec: SandboxSpec | None = None
+    # Host-side XRay lifecycle for meta-learning only. The spec records only
+    # env-var names and process policy; raw proxy configs stay in the host env.
+    meta_learning_managed_proxy: ManagedProxySpec = field(default_factory=ManagedProxySpec)
     # If meta-learning writes workspace/sandbox_environment.json, Pipeline can
     # build a derived Docker image and use it for later ordinary Fold runs.
     meta_sandbox_rebuild_enabled: bool = True

@@ -73,6 +73,10 @@ class LocalExecutor:
         # detached container process tree to clean up.
         return None
 
+    def cleanup_user_processes(self, *, user: str = "agent") -> None:
+        # Local execution is not the formal container isolation boundary.
+        return None
+
     def _base_env(self, env: dict[str, str] | None) -> dict[str, str]:
         """The agent sandbox env for a host subprocess (shared by run/popen): user-base
         PATH/HOME/pip/npm, the inherited PYTHONPATH, then the caller's overrides."""
@@ -245,6 +249,17 @@ class DockerExecutor:
                 )
             except (OSError, subprocess.SubprocessError):
                 pass
+
+    def cleanup_user_processes(self, *, user: str = "agent") -> None:
+        """Best-effort sweep of unprivileged Agent processes at submission boundary."""
+        try:
+            subprocess.run(
+                ["docker", "exec", "--user", user, self.container, "pkill", "-KILL", "-u", user],
+                capture_output=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
 
     def popen(
         self,
