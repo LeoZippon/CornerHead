@@ -117,14 +117,14 @@
 
 ## 4. Broker profile（账户、成本与信用）
 
-定义：`src/autotrade/environment/broker.py`（`BrokerProfile`，默认 `gjzq_credit_v1`）与 `broker_core.py` 常量；权威文档 `environment_design.md` §3.3。全部字段经 `to_record()` 写入 run manifest 并回读重建。
+定义：`src/autotrade/environment/broker.py`（`BrokerProfile`，默认 `gjzq_dual_v1`；每次实验固定运行普通 + 信用双账户）与 `broker_core.py` 常量；权威文档 `environment_design.md` §3.3。全部字段经 `to_record()` 写入 run manifest 并回读重建。
 
 **账户与成本**
 
 | 参数 | 默认 | 作用 |
 |---|---:|---|
-| `account_type` | `credit` | 单账户类型：`credit` 信用账户 / `stock` 普通账户 |
-| `initial_cash` | 1,000,000 | 初始本金（元） |
+| `stock_initial_cash` | 500,000 | 普通账户（long-only 现金）初始资金（元） |
+| `credit_initial_cash` | 500,000 | 信用账户（担保品买卖 + 融资融券）初始资金（元）；组合权益 = 两者之和，运行中可经 `transfer` 划转 |
 | `commission_bps` | 1.0 | 佣金（万一），受最低佣金约束 |
 | `min_commission_cny` | 5.0 | 最低佣金（元/笔） |
 | `stamp_duty_sell_bps_before_cutover` | 10.0 | 印花税（卖出侧，切换日前，万十） |
@@ -148,8 +148,9 @@
 | `slo_rate_annual` | 0.085 | 融券费率（年化，研究假设） |
 | `assure_ratio` | 0.70 | 平坦担保品折算率近似（交易所上限：指数成份 ≤70%、其他 ≤65%） |
 | `fin_max_quota` / `slo_max_quota` | None | 融资/融券授信额度（None = 不设额度上限） |
-| `maintenance_closeout_ratio` | 1.30 | 维持担保比例平仓线（唯一被引擎强制的线） |
-| `maintenance_warning_ratio` / `maintenance_withdraw_ratio` | 1.40 / 3.00 | 警戒/提取参考线，仅审计记录 |
+| `maintenance_closeout_ratio` | 1.30 | 维持担保比例平仓线（触发时只强平信用账户；普通账户不作担保） |
+| `maintenance_warning_ratio` | 1.40 | 警戒参考线，仅审计记录 |
+| `maintenance_withdraw_ratio` | 3.00 | 提取线：信用账户有负债时，现金划出（`transfer`）后维保比例不得低于该线 |
 | `short_corporate_actions` | `disabled` | 空头分红/配股暂不建模 |
 
 ## 5. Agent 会话与上下文管理

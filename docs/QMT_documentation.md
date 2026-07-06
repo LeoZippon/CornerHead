@@ -86,7 +86,7 @@
 
 ### 2.1 统一逐 tick 实盘环路
 
-- 本地 executor 在 Asia/Shanghai 真实时钟上按与回测相同的 24h tick 网格逐时间片推进，每个 tick 调用同一个 `main(ctx)`，并通过同一套 `ctx.broker.*` 原语（`buy`/`sell`/`fin_buy`/`short`/`cover`/`sell_repay`/`direct_repay`/`close`/`cancel`，按账户类型可用）下单和撤销未成交委托。
+- 本地 executor 在 Asia/Shanghai 真实时钟上按与回测相同的 24h tick 网格逐时间片推进，每个 tick 调用同一个 `main(ctx)`，并通过同一套 `ctx.broker.*` 原语下单和撤销未成交委托：普通账户 `buy`/`sell`，信用账户 `credit_buy`/`credit_sell`/`fin_buy`/`short`/`cover`/`sell_repay`/`direct_repay`，加 `close`/`cancel`/`transfer`。实盘同样持有普通 + 信用两个账户，opType 决定订单归属账户。
 - 回测的 `SimBroker` 已实现 `TraderProtocol`，其接口与官方全功能 QMT 客户端内 Python 策略 API 对齐：`passorder`（按官方 opType 码：普通 23/24；信用 27/28/29/31/32/33/34）、`cancel`、`get_trade_detail_data`（ACCOUNT/POSITION/ORDER/DEAL）与信用查询（`get_debt_contract`/`get_assure_contract`/`get_enable_short_contract`）。字段级映射表见 `environment_design.md` §3.2。实盘只需一个满足同一 protocol 的 `QMTBroker` 适配器，即可 drop-in 替换回测 broker，策略代码无需改动：`passorder` 以唯一 `user_order_id`（投资备注 `m_strRemark`）提交并立即按官方 `get_last_order_id` 语义返回委托号；`ctx.broker.pending()` 对应当日可撤委托查询，返回的 `order_id` 可传给 `ctx.broker.cancel(order_id)`（适配器按备注解析委托号）。
 - `QMTBroker` 的实现形态是**文件桥**（xtquant 不采用）：`main(ctx)` 与决策环路运行在我们自己的 Python 环境（策略依赖现代 pandas/torch，不能跑在客户端内置 Python 3.6.8 里），`QMTBroker.passorder/cancel` 把委托/撤单写成 inbox 订单文件，`get_trade_detail_data` 读客户端内执行器回写的 ack/fill/state 快照；QMT 客户端内的常驻策略脚本（§2.2）用**内置 API 同名函数**逐条落地。协议两端函数名与语义一一对应，桥只做文件搬运。
 - 盘前集合竞价（09:15 info tick / 09:25 撮合开盘）与 14:57 收盘集合竞价从回测原样沿用，实盘 tick 网格在这些节点上的决策与下单语义与回测一致。
@@ -108,7 +108,7 @@
 **客户端内执行器要点**
 
 - 部署形态：策略加入模型交易、实盘模式，勾选"终端启动后自动执行"+账户自动登录。`init()` 里 `set_account(<账户>)` 并注册 `run_time("poll_inbox", "3nSecond", <过去时刻>, "SH")`；`handlebar` 置空。禁用阻塞循环、`watchdog` 和线程——官方运行时所有策略共享一个线程，任何阻塞会冻结全部策略；轮询定时器是唯一正确形态。
-- `poll_inbox`：校验 payload（账户、schema、`payload_id` 去重、预算/涨跌停/停牌/T+1/手数、当日 margin_secs 重校验 §4.2）→ 逐单构造 `client_order_id = <payload_id>#<code>#<side>#<seq>` 作为 `userOrderId`（→`m_strRemark`，幂等键；提交前先扫 ORDER/DEAL 里同备注则跳过；同代码有待报单则暂缓防超单）→ `passorder(opType, 1101, acc, code, prType, price, volume, strategyName, quickTrade=2, client_order_id, ContextInfo)`（`quickTrade=2` 使定时器回调内即刻下单）→ payload 归档。撤单指令文件同路径处理，映射到 `cancel(委托号, acc, accountType, ContextInfo)`（按备注解析委托号）。
+- `poll_inbox`：校验 payload（账户、schema、`payload_id` 去重、预算/涨跌停/停牌/T+1/手数、当日 margin_secs 重校验 §4.2）→ 逐单构造 `client_order_id = <payload_id>#<code>#<side>#<seq>` 作为 `userOrderId`（→`m_strRemark`，幂等键；提交前先扫 ORDER/DEAL 里同备注则跳过；同代码有待报单则暂缓防超单）→ `passorder(opType, 1101, acc, code, prType, price, volume, strategyName, quickTrade=2, client_order_id, ContextInfo)`（`quickTrade=2` 使定时器回调内即刻下单；`acc` 由订单 `op_type` 选择——23/24 用 `CQ_STOCK_ACCOUNT_ID`，27–34 用 `CQ_CREDIT_ACCOUNT_ID`）→ payload 归档。撤单指令文件同路径处理，映射到 `cancel(委托号, acc, accountType, ContextInfo)`（按备注解析委托号）。账户间现金划转（回测的 `transfer`）不在策略 API 内，payload 中的 transfer 指令只生成人工银证转账工单，不自动执行。
 - 回写与对账：`order_callback` 写 `*.ack.json`（状态、委托号、拒因）；`deal_callback` 追加 `*.fills.jsonl` 并按 `(委托号, 备注, 成交序号)` 去重（断线重连会整日重推）；慢定时器周期性把 `get_trade_detail_data` ACCOUNT/ORDER/DEAL/POSITION 快照进 `state/` 作为权威对账源（本地 `QMTBroker.get_trade_detail_data` 即读这些快照）。交易接口为异步、查询读本地缓存（无推送柜台 1–6s 刷新）——提交后等一个缓存周期再对账，永不把提交当成交（§8.2）。
 - 崩溃恢复：`init()` 先读 `state/` 重建，再用当日 ORDER/DEAL/POSITION 权威覆盖；客户端自启+自动登录+自动执行重挂定时器。时钟：Windows 本地时钟必须 Asia/Shanghai + NTP，回调内用 `get_tick_timetag()` 门控下单窗口。dry-run：运行(模拟)模式天然不发真实委托 + payload `execute:false` 标志双闸。
 - 已否决备选：xtquant/miniQMT 外接（用户决策弃用）；原生文件单模块（零售版不存在）；客户端内 HTTP（单线程运行时+白名单摩擦，换取我们分钟级节奏用不到的时延）。
@@ -244,8 +244,11 @@ C:\xquant\Python38\python.exe -m pip install --upgrade pip
 ```powershell
 setx CQ_QMT_DATA_PATH "C:\国金证券QMT交易端\userdata_mini"
 setx CQ_XQUANT_ROOT "C:\xquant"
-setx CQ_EXPECTED_ACCOUNT_ID "<account_id>"
+setx CQ_STOCK_ACCOUNT_ID "<普通账户 id>"
+setx CQ_CREDIT_ACCOUNT_ID "<信用账户 id>"
 ```
+
+执行器按订单 `op_type` 在两个账户 id 间路由（23/24 → 普通，27–34 → 信用）；两者都必须显式配置，缺失即拒绝启动。
 
 ### 6.4 本金口径
 
@@ -324,7 +327,7 @@ scp order.json Administrator@<server_ip>:C:/xquant/inbox/order.json
 ### 9.1 常见故障
 
 - 执行器未运行：检查 QMT 已登录、策略在模型交易列表且"终端启动后自动执行"勾选、`run_time` 定时器在实盘模式下已挂起。
-- 多账户：设置 `CQ_EXPECTED_ACCOUNT_ID`，禁止自动选择。
+- 多账户：普通/信用账户 id 分别用 `CQ_STOCK_ACCOUNT_ID` / `CQ_CREDIT_ACCOUNT_ID` 显式配置，禁止自动选择。
 - 重复 payload：默认拒绝；确需重跑时，先核对 state、委托、成交，再用显式 repeat 开关。
 - pending 未清：运行 `reconcile`，确认当日成交和委托状态。
 - inbox 有旧文件：移动到 `C:\xquant\archive\...`，不要直接手工执行。
