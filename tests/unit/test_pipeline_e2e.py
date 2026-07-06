@@ -202,7 +202,7 @@ class ExperimentCliTest(unittest.TestCase):
                 json.dumps({"inbounds": [], "outbounds": [{"protocol": "freedom"}]}),
                 encoding="utf-8",
             )
-            with patch("scripts.experiments._cli.subprocess.run", return_value=Completed()):
+            with patch("autotrade.pipelines.assembly.subprocess.run", return_value=Completed()):
                 spec = build_meta_learning_sandbox_spec(args, SandboxSpec(gpu=None), repo_root=repo_root)
                 managed_proxy = build_meta_learning_managed_proxy_spec(
                     args,
