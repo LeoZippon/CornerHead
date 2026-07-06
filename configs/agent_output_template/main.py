@@ -12,7 +12,7 @@ Key ``ctx`` surface (advanced helpers in ``candidate.py`` / ``trading.py`` + ``R
   ``ctx.price(code)`` / ``ctx.bar(code)``              this tick's price/bar (None pre-auction)
   ``ctx.broker.buy/sell(...)``                         stock account (long-only cash)
   ``ctx.broker.credit_buy/credit_sell/fin_buy/short/cover/sell_repay/direct_repay``  credit account (两融)
-  ``ctx.broker.transfer(amount, from_account, to_account)``  cash move between the two accounts
+  ``ctx.broker.transfer(amount, from_account, to_account)``  pre-09:14 account transfer request
   ``ctx.broker.close(code, account=...)``              market exit; account= required if both hold the code
   ``ctx.broker.pending(code=None)`` / ``ctx.broker.cancel(order_id)``      query/cancel working orders
   ``ctx.asof_dir`` / ``ctx.asof_version``              rolling point-in-time data view + its version
@@ -68,5 +68,8 @@ def main(ctx) -> None:
         for code in _screen(ctx):
             # Skip a code with a price unavailable this tick or an order still in flight
             # (the fill lands a later bar, so re-submitting before then would double-buy).
-            if ctx.price(code) is not None and not ctx.broker.pending(code):
-                ctx.broker.buy(code, weight=1.0 / TOP_N, reason="equal_weight_basket")
+            price = ctx.price(code)
+            if price is not None and not ctx.broker.pending(code):
+                amount = int((float(ctx.broker.stock["available_cash"]) / TOP_N) / float(price) // 100 * 100)
+                if amount > 0:
+                    ctx.broker.buy(code, amount=amount, reason="equal_amount_basket")

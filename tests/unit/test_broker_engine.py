@@ -88,7 +88,7 @@ class FakeMainPolicy:
 
 
 class BrokerPrimitiveTest(unittest.TestCase):
-    def make_broker(self, *, shortable=("000002.SZ",), mode="proxy_margin_secs", daily=REPLAY, **profile_kw):
+    def make_broker(self, *, shortable=("000001.SZ", "000002.SZ"), mode="proxy_margin_secs", daily=REPLAY, **profile_kw):
         profile = BrokerProfile(short_inventory_mode=mode, **profile_kw)
         return SimBroker(profile, MarketData(daily), shortable_codes=frozenset(shortable))
 
@@ -103,6 +103,37 @@ class BrokerPrimitiveTest(unittest.TestCase):
         broker.close_all("20220106")
         self.assertEqual(broker.stock.positions, {})
         self.assertGreater(broker.equity(), broker.initial_equity)
+
+    def test_order_amount_must_be_exact_lot(self):
+        broker = self.make_broker()
+        odd_lot = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=350)
+        self.assertEqual(odd_lot.reject_reason, "amount_not_lot_aligned")
+        fractional = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=100.5)
+        self.assertEqual(fractional.reject_reason, "invalid_amount")
+
+    def test_working_orders_reserve_cash_and_sellable_shares(self):
+        broker = self.make_broker()
+        broker.roll_to_date("20220104")
+        cash_before = _asset(broker, "stock")["available_cash"]
+        broker.passorder(
+            optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 10.0, 1000,
+            user_order_id="reserve_buy", valid_bars=5,
+        )
+        self.assertLess(_asset(broker, "stock")["available_cash"], cash_before - 10_000)
+        broker.cancel("reserve_buy")
+        self.assertAlmostEqual(_asset(broker, "stock")["available_cash"], cash_before)
+
+        buy = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        self.assertEqual(buy.status, "filled")
+        broker.roll_to_date("20220105")
+        self.assertEqual(_positions(broker, "stock")[0]["sellable_quantity"], 1000)
+        broker.passorder(
+            optype.STOCK_SELL, 1101, "", "000001.SZ", prtype.FIX, 12.0, 600,
+            user_order_id="reserve_sell", valid_bars=5,
+        )
+        self.assertEqual(_positions(broker, "stock")[0]["sellable_quantity"], 400)
+        broker.cancel("reserve_sell")
+        self.assertEqual(_positions(broker, "stock")[0]["sellable_quantity"], 1000)
 
     def test_accounts_have_separate_cash_pools(self):
         # The two accounts never back each other's orders: a stock buy leaves the
@@ -178,14 +209,17 @@ class BrokerPrimitiveTest(unittest.TestCase):
         held = next(p for p in _positions(broker, "stock") if p["ts_code"] == "000001.SZ")
         self.assertEqual(held["sellable_quantity"], 1000)
 
-    def test_short_can_cover_same_day(self):
-        # R5: a 融券 short has no T+1 sell lock, so same-day cover (买券还券) fills.
+    def test_short_cover_is_t_plus_one(self):
+        # 融券卖出后，买券还券同样按 T+1 处理：开空当日不可还券。
         broker = self.make_broker()  # 000002.SZ shortable
         opened = broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=500)
         self.assertEqual(opened.status, "filled")
         self.assertEqual(opened.account, "credit")
         covered = broker.execute("000002.SZ", "cover", trade_date="20220104", raw_price=19.5, amount=500)
-        self.assertEqual(covered.status, "filled")
+        self.assertEqual(covered.status, "rejected")
+        self.assertEqual(covered.reject_reason, "t_plus_one_no_sellable")
+        next_day = broker.execute("000002.SZ", "cover", trade_date="20220105", raw_price=19.4, amount=500)
+        self.assertEqual(next_day.status, "filled")
         self.assertEqual(broker.position_quantity("000002.SZ"), 0)
         # Covering everything closes the slo contract (its shares/sell_amount zero out).
         self.assertEqual(broker.get_debt_contract(), [])
@@ -198,11 +232,9 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual(sell.status, "rejected")
         self.assertEqual(sell.reject_reason, "t_plus_one_no_sellable")
 
-    def test_short_leaves_locked_today_untouched_while_long_t_plus_one_holds(self):
-        # Fix B: T+1 lock bookkeeping is long-only. A short never populates
-        # locked_today/locked_date — its sellable_quantity ignores them and 融券
-        # permits same-day cover — while the long T+1 lock is still recorded and lifts
-        # on the date roll exactly as before. The legs live in separate accounts.
+    def test_short_t_plus_one_lock_matches_long_lock(self):
+        # Long sells and 融券 covers both use locked_today/locked_date to block
+        # same-day reduction, while the legs live in separate accounts.
         broker = self.make_broker()  # 000001.SZ long (stock), 000002.SZ short (credit)
         broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
         long_pos = broker.stock.positions["000001.SZ"]
@@ -212,39 +244,42 @@ class BrokerPrimitiveTest(unittest.TestCase):
 
         broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=500)
         short_pos = broker.credit.positions["000002.SZ"]
-        self.assertEqual(short_pos.locked_today, 0)  # short leaves the lock state untouched
-        self.assertEqual(short_pos.locked_date, "")
-        self.assertEqual(short_pos.sellable_quantity, 500)  # fully coverable same day
+        self.assertEqual(short_pos.locked_today, 500)
+        self.assertEqual(short_pos.locked_date, "20220104")
+        self.assertEqual(short_pos.sellable_quantity, 0)
         self.assertEqual(long_pos.sellable_quantity, 0)  # long still locked on D
 
-        # Adding to the short after the date roll still never touches its lock state,
-        # while the long's T+1 lock lifts on the new day exactly as before.
+        # Adding to the short after the date roll locks only that day's new short
+        # shares; the previous day's short and long are now sellable.
         broker.execute("000002.SZ", "short", trade_date="20220105", raw_price=19.4, amount=500)
         short_pos = broker.credit.positions["000002.SZ"]
-        self.assertEqual(short_pos.locked_today, 0)
-        self.assertEqual(short_pos.locked_date, "")
-        self.assertEqual(short_pos.sellable_quantity, 1000)
+        self.assertEqual(short_pos.locked_today, 500)
+        self.assertEqual(short_pos.locked_date, "20220105")
+        self.assertEqual(short_pos.sellable_quantity, 500)
         self.assertEqual(long_pos.locked_today, 0)  # long unlocked on the D+1 roll
         self.assertEqual(long_pos.sellable_quantity, 1000)
 
-        # A partial cover keeps the short lock state at its defaults.
+        # A partial cover can only consume the previous day's sellable short.
         broker.execute("000002.SZ", "cover", trade_date="20220105", raw_price=19.0, amount=500)
         short_pos = broker.credit.positions["000002.SZ"]
-        self.assertEqual(short_pos.locked_today, 0)
-        self.assertEqual(short_pos.locked_date, "")
+        self.assertEqual(short_pos.locked_today, 500)
+        self.assertEqual(short_pos.locked_date, "20220105")
 
-    def test_partial_sell_clamps_to_sellable_balance(self):
+    def test_partial_sell_rejects_amount_above_sellable_balance(self):
         broker = self.make_broker()
         broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
         broker.execute("000001.SZ", "buy", trade_date="20220105", raw_price=10.6, amount=500)
         self.assertEqual(broker.position_quantity("000001.SZ"), 1500)
         order = broker.execute("000001.SZ", "sell", trade_date="20220105", raw_price=11.0, amount=1500)
         # Only the 1000 shares bought on 0104 are sellable on 0105 (T+1).
-        self.assertEqual(order.filled_quantity, 1000)
+        self.assertEqual(order.reject_reason, "amount_exceeds_sellable")
+        self.assertEqual(broker.position_quantity("000001.SZ"), 1500)
+        allowed = broker.execute("000001.SZ", "sell", trade_date="20220105", raw_price=11.0, amount=1000)
+        self.assertEqual(allowed.status, "filled")
         self.assertEqual(broker.position_quantity("000001.SZ"), 500)
 
     def test_short_requires_margin_secs_membership(self):
-        broker = self.make_broker(shortable=())
+        broker = self.make_broker(shortable=("000001.SZ",))
         order = broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=500)
         self.assertEqual(order.status, "rejected")
         self.assertEqual(order.reject_reason, "margin_secs_not_shortable")
@@ -315,7 +350,8 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual(broker.position_quantity("000001.SZ", account="credit"), 1000)
         contract = broker.get_debt_contract()[0]
         price = broker.profile.slipped_price(10.0, is_buy=True)
-        principal = 1000 * price + broker.profile.commission(1000 * price)
+        notional = 1000 * price
+        principal = notional + broker.profile.cost_model.trade_fee(notional)
         self.assertEqual(contract["compact_type"], "fin")
         self.assertAlmostEqual(contract["real_compact_balance"], principal)
         self.assertEqual(contract["real_compact_vol"], 1000)
@@ -329,21 +365,37 @@ class BrokerPrimitiveTest(unittest.TestCase):
         order = broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=1000)
         self.assertEqual(order.reject_reason, "margin_secs_not_finable")
 
-    def test_fin_interest_accrues_and_direct_repay_clamps(self):
+    def test_credit_buy_requires_margin_secs_membership(self):
+        broker = self.make_broker(shortable=())
+        order = broker.execute("000001.SZ", "credit_buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        self.assertEqual(order.reject_reason, "margin_secs_not_collateral")
+
+    def test_fin_interest_accrues_and_direct_repay_requires_valid_amount(self):
         broker = self.make_broker(shortable=("000001.SZ",))
         broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=1000)
         broker.mark_to_market("20220104")
         principal = broker._fin_amount_outstanding()
         interest = broker._interest_outstanding()
-        self.assertAlmostEqual(interest, principal * broker.profile.fin_rate_annual / 365.0)
+        self.assertAlmostEqual(interest, principal * broker.profile.fin_rate_annual / 360.0)
         # Partial repayment pays interest first, then principal, from credit cash.
         cash_before = broker.credit.cash
         broker.passorder(optype.DIRECT_REPAY, 1102, "", "", prtype.PEER, 0, 5000)
         self.assertAlmostEqual(cash_before - broker.credit.cash, 5000.0)
         self.assertAlmostEqual(broker.interest_paid_total, interest)
         self.assertAlmostEqual(broker._fin_amount_outstanding(), principal - (5000.0 - interest))
-        # Overshooting clamps to the outstanding debt; the contract closes.
+        # Overshooting live broker constraints is rejected, not clamped.
         broker.passorder(optype.DIRECT_REPAY, 1102, "", "", prtype.PEER, 0, 10_000_000)
+        self.assertEqual(broker.orders[-1].reject_reason, "insufficient_cash")
+        broker.passorder(
+            optype.DIRECT_REPAY, 1102, "", "", prtype.PEER, 0,
+            broker._fin_amount_outstanding() + broker._interest_outstanding() + 1.0,
+        )
+        self.assertEqual(broker.orders[-1].reject_reason, "amount_exceeds_fin_debt")
+        # An exact remaining debt repayment closes the contract.
+        broker.passorder(
+            optype.DIRECT_REPAY, 1102, "", "", prtype.PEER, 0,
+            broker._fin_amount_outstanding() + broker._interest_outstanding(),
+        )
         self.assertAlmostEqual(broker._fin_amount_outstanding(), 0.0)
         self.assertEqual(broker.get_debt_contract(), [])
         # With no debt left, another repay is rejected (fail-fast, not a no-op).
@@ -360,7 +412,11 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual(order.status, "filled")
         price = broker.profile.slipped_price(11.0, is_buy=False)
         notional = 1000 * price
-        net = notional - broker.profile.commission(notional) - broker.profile.stamp_duty_on_sale(notional, "20220105")
+        net = (
+            notional
+            - broker.profile.cost_model.trade_fee(notional)
+            - broker.profile.stamp_duty_on_sale(notional, "20220105")
+        )
         # The whole debt is repaid; the surplus stays as credit cash.
         self.assertAlmostEqual(broker.credit.cash, cash_before + net - owed)
         self.assertAlmostEqual(broker._fin_amount_outstanding(), 0.0)
@@ -372,6 +428,27 @@ class BrokerPrimitiveTest(unittest.TestCase):
         broker.execute("000001.SZ", "credit_buy", trade_date="20220104", raw_price=10.0, amount=1000)
         order = broker.execute("000001.SZ", "sell_repay", trade_date="20220105", raw_price=11.0, amount=1000)
         self.assertEqual(order.reject_reason, "no_fin_debt")
+
+    def test_financed_shares_must_use_sell_repay(self):
+        broker = self.make_broker(shortable=("000001.SZ",))
+        broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        plain_sell = broker.execute("000001.SZ", "credit_sell", trade_date="20220105", raw_price=11.0, amount=1000)
+        self.assertEqual(plain_sell.reject_reason, "financed_shares_require_sell_repay")
+        repay_sell = broker.execute("000001.SZ", "sell_repay", trade_date="20220105", raw_price=11.0, amount=1000)
+        self.assertEqual(repay_sell.status, "filled")
+
+    def test_star_market_minimum_then_one_share_increment(self):
+        daily = make_daily(
+            [
+                ("20220104", "688001.SH", 50.0, 50.0, 60.0, 40.0, False),
+            ]
+        )
+        broker = self.make_broker(daily=daily)
+        below_min = broker.execute("688001.SH", "buy", trade_date="20220104", raw_price=50.0, amount=100)
+        self.assertEqual(below_min.reject_reason, "amount_below_lot_size")
+        valid_odd = broker.execute("688001.SH", "buy", trade_date="20220104", raw_price=50.0, amount=201)
+        self.assertEqual(valid_odd.status, "filled")
+        self.assertEqual(broker.position_quantity("688001.SH", account="stock"), 201)
 
     def test_bail_balance_gates_fin_buy_and_short(self):
         broker = self.make_broker(shortable=("000001.SZ", "000002.SZ"))
@@ -414,6 +491,30 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual(broker.credit.positions, {})
         self.assertIn("000001.SZ", broker.stock.positions)  # stock account untouched
 
+    def test_maintenance_warning_records_without_forced_close(self):
+        daily = make_daily(
+            [
+                ("20220104", "000002.SZ", 100.0, 100.0, 2500.0, 1.0, False),
+                ("20220105", "000002.SZ", 170.0, 170.0, 2500.0, 1.0, False),
+            ]
+        )
+        broker = self.make_broker(daily=daily)
+        broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=100.0, amount=4000)
+        broker.mark_to_market("20220105")
+        self.assertTrue(any(e["event_type"] == "maintenance_warning" for e in broker.events))
+        self.assertFalse(any(e["event_type"] == "forced_close_triggered" for e in broker.events))
+        self.assertIn("000002.SZ", broker.credit.positions)
+
+    def test_debt_contract_term_auto_extension_records_event(self):
+        broker = self.make_broker(shortable=("000001.SZ",), debt_contract_term_days=1)
+        broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.mark_to_market("20220104")
+        broker.mark_to_market("20220105")
+        self.assertTrue(any(e["event_type"] == "debt_contract_extended" for e in broker.events))
+        contract = broker.get_debt_contract()[0]
+        self.assertEqual(contract["last_extension_date"], "20220105")
+        self.assertEqual(contract["extension_count"], 1)
+
     def test_credit_account_accounting_and_forced_close(self):
         # RA1 (dual-account form): with a credit-account collateral long plus a
         # short, equity/maintenance/available follow the 细则 formulas over the
@@ -452,7 +553,7 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual(order.reject_reason, "broker_inventory_unavailable")
 
     def test_passorder_lifecycle_matches_qmt_verbs(self):
-        broker = self.make_broker(shortable=())
+        broker = self.make_broker(shortable=("000001.SZ",))
         group = pd.DataFrame([{"ts_code": "000001.SZ", "open": 10.0, "high": 10.1, "low": 9.8, "close": 9.9}])
         # 指定价 limit below the bar -> rests, then auto-cancels (valid_bars=1).
         miss = broker.passorder(optype.CREDIT_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.5, 1000)
@@ -524,7 +625,7 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual([d["ts_code"] for d in stock_deals], ["000001.SZ"])
 
     def test_max_total_holdings_counts_codes_across_accounts(self):
-        broker = self.make_broker(shortable=(), max_total_holdings=1)
+        broker = self.make_broker(shortable=("000001.SZ",), max_total_holdings=1)
         broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=100)
         # A new code in the OTHER account still breaches the combined breadth cap...
         order = broker.execute("000002.SZ", "credit_buy", trade_date="20220104", raw_price=20.0, amount=100)
@@ -533,20 +634,21 @@ class BrokerPrimitiveTest(unittest.TestCase):
         same_code = broker.execute("000001.SZ", "credit_buy", trade_date="20220104", raw_price=10.0, amount=100)
         self.assertEqual(same_code.status, "filled")
 
-    def test_single_name_weight_cap_clamps_shares(self):
-        # Cap notional = weight x combined initial equity (0.2 x 1,000,000).
+    def test_single_name_weight_cap_rejects_oversized_order(self):
+        # Cap notional = max_single_name_weight x combined initial equity
+        # (0.2 x 1,000,000).
         broker = self.make_broker(max_single_name_weight=0.2)
-        order = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, weight=0.5)
-        self.assertEqual(order.status, "filled")
-        self.assertEqual(order.filled_quantity, 20000)  # 200,000 / 10 = 20,000 shares
+        order = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=50_000)
+        self.assertEqual(order.reject_reason, "single_name_weight_cap")
+        allowed = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=20_000)
+        self.assertEqual(allowed.status, "filled")
 
     def test_default_profile_does_not_force_holdings_or_single_name_caps(self):
         broker = self.make_broker(shortable=())
-        first = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, weight=0.5)
+        first = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
         second = broker.execute("000002.SZ", "buy", trade_date="20220104", raw_price=20.0, amount=100)
         self.assertEqual(first.status, "filled")
-        # weight is a fraction of the STOCK account's initial equity (500,000).
-        self.assertEqual(first.filled_quantity, 25000)
+        self.assertEqual(first.filled_quantity, 1000)
         self.assertEqual(second.status, "filled")
 
     def test_limit_up_blocks_buy_and_suspension_blocks_fill(self):
@@ -627,23 +729,29 @@ class BrokerPrimitiveTest(unittest.TestCase):
             stock_initial_cash=300_000.0,
             credit_initial_cash=700_000.0,
             commission_bps=2.5,
+            transfer_fee_bps=0.2,
             min_commission_cny=1.25,
             stamp_duty_sell_bps_before_cutover=12.0,
             stamp_duty_sell_bps_from_cutover=6.0,
             slippage_bps=7.0,
             slo_rate_annual=0.03,
             fin_rate_annual=0.06,
+            debt_contract_term_days=90,
+            debt_contract_auto_extend=False,
             assure_ratio=0.65,
             maintenance_source="broker-doc",
         )
         restored = BrokerProfile(**_profile_kwargs(profile.to_record()))
         self.assertEqual(restored.stock_initial_cash, 300_000.0)
         self.assertEqual(restored.credit_initial_cash, 700_000.0)
+        self.assertEqual(restored.transfer_fee_bps, 0.2)
         self.assertEqual(restored.min_commission_cny, 1.25)
         self.assertEqual(restored.stamp_duty_sell_bps_before_cutover, 12.0)
         self.assertEqual(restored.slippage_bps, 7.0)
         self.assertEqual(restored.slo_rate_annual, 0.03)
         self.assertEqual(restored.fin_rate_annual, 0.06)
+        self.assertEqual(restored.debt_contract_term_days, 90)
+        self.assertFalse(restored.debt_contract_auto_extend)
         self.assertEqual(restored.assure_ratio, 0.65)
         self.assertEqual(restored.maintenance_source, "broker-doc")
         private_restored = BrokerProfile(**_profile_kwargs(BrokerProfile(is_private_fund=True).to_record()))
@@ -657,7 +765,7 @@ class ReplayIntegrationTest(unittest.TestCase):
         def buy_hold(state):
             if state["cur_time"] != "09:25" or _held(state, "000001.SZ"):
                 return []
-            return [{"action": "buy", "ts_code": "000001.SZ", "weight": 0.1}]
+            return [{"action": "buy", "ts_code": "000001.SZ", "amount": 1000}]
 
         replay = run_main_ctx_replay(
             REPLAY,
@@ -680,7 +788,7 @@ class ReplayIntegrationTest(unittest.TestCase):
         # open under next-bar execution — proving minute bars drive the fill.
         def entry(state):
             if state["cur_time"] == "09:31" and not _held(state, "000001.SZ"):
-                return [{"action": "buy", "ts_code": "000001.SZ", "weight": 0.1}]
+                return [{"action": "buy", "ts_code": "000001.SZ", "amount": 1000}]
             return []
 
         replay = run_main_ctx_replay(
@@ -728,7 +836,7 @@ class ReplayIntegrationTest(unittest.TestCase):
         def go_short(state):
             if state["cur_time"] != "09:25" or _held(state, "000002.SZ"):
                 return []
-            return [{"action": "short", "ts_code": "000002.SZ", "weight": 0.1, "limit": 20.0}]
+            return [{"action": "short", "ts_code": "000002.SZ", "amount": 1000, "limit": 20.0}]
 
         replay = run_main_ctx_replay(
             REPLAY,
@@ -744,7 +852,7 @@ class ReplayIntegrationTest(unittest.TestCase):
         def go_short(state):
             if state["cur_time"] != "09:25" or _held(state, "000002.SZ"):
                 return []
-            return [{"action": "short", "ts_code": "000002.SZ", "weight": 0.1, "limit": 20.0}]
+            return [{"action": "short", "ts_code": "000002.SZ", "amount": 1000, "limit": 20.0}]
 
         # Frozen set empty, but the fill day's per-day set allows the short.
         allowed = run_main_ctx_replay(
@@ -774,7 +882,12 @@ class ReplayIntegrationTest(unittest.TestCase):
             if not _held(state, "000001.SZ"):
                 return [{"action": "fin_buy", "ts_code": "000001.SZ", "amount": 1000}]
             if state["debt_contracts"]:
-                return [{"action": "direct_repay", "amount": 1_000_000}]
+                owed = sum(
+                    float(c.get("real_compact_balance") or 0.0) + float(c.get("compact_interest") or 0.0)
+                    for c in state["debt_contracts"]
+                    if c.get("compact_type") == "fin"
+                )
+                return [{"action": "direct_repay", "amount": owed}]
             return []
 
         replay = run_main_ctx_replay(
@@ -792,18 +905,19 @@ class ReplayIntegrationTest(unittest.TestCase):
         self.assertGreater(stats["credit_interest_paid"], 0.0)
 
     def test_dual_account_state_transfer_and_close_resolution(self):
-        # The engine state exposes both account views; a transfer action moves
-        # cash between them mid-replay, and a bare close resolves to the unique
-        # holding account (the stock account here).
+        # The engine state exposes both account views; a pre-09:14 transfer request
+        # is confirmed by the pre-open batch, and a bare close resolves to the
+        # unique holding account (the stock account here).
         def dual(state):
-            if state["cur_time"] != "09:25":
-                return []
             assert state["account"]["stock"]["account_type"] == "STOCK"
             assert state["account"]["credit"]["account_type"] == "CREDIT"
+            if state["cur_date"] == "20220104" and state["cur_time"] == "09:00":
+                return [{"action": "transfer", "amount": 100_000, "from_account": "credit", "to_account": "stock"}]
+            if state["cur_time"] != "09:25":
+                return []
             if state["cur_date"] == "20220104" and not _held(state, "000001.SZ"):
                 return [
                     {"action": "buy", "ts_code": "000001.SZ", "amount": 1000},
-                    {"action": "transfer", "amount": 100_000, "from_account": "credit", "to_account": "stock"},
                 ]
             if state["cur_date"] == "20220105" and _held(state, "000001.SZ"):
                 return [{"action": "close", "ts_code": "000001.SZ"}]
@@ -822,6 +936,26 @@ class ReplayIntegrationTest(unittest.TestCase):
         closes = [e for e in broker.events if e["event_type"] == "position_closed"]
         self.assertTrue(any(e["account"] == "stock" and e["trade_date"] == "20220105" for e in closes))
         self.assertEqual(broker.position_quantity("000001.SZ"), 0)
+
+    def test_transfer_after_preopen_cutoff_is_ignored(self):
+        def late_transfer(state):
+            if state["cur_date"] == "20220104" and state["cur_time"] == "09:15":
+                return [{"action": "transfer", "amount": 100_000, "from_account": "credit", "to_account": "stock"}]
+            return []
+
+        replay = run_main_ctx_replay(
+            REPLAY,
+            BrokerProfile(),
+            shortable_codes=frozenset(),
+            main_policy=FakeMainPolicy(late_transfer),
+        )
+        broker = replay.broker
+        self.assertFalse(any(o.action == "transfer" and o.status == "filled" for o in broker.orders))
+        self.assertAlmostEqual(broker.stock.cash, 500_000.0)
+        self.assertTrue(
+            any(e.get("reason") == "transfer_after_preopen_cutoff" for e in broker.events),
+            broker.events,
+        )
 
 
 class CandidateIsolationTest(unittest.TestCase):
@@ -899,7 +1033,7 @@ class BrokerCoreTest(unittest.TestCase):
         fill = self.core.project_open(self.cost, side="long", raw_price=10.0, shares=1000, trade_date="20220104")
         price = self.cost.slipped_price(10.0, is_buy=True)
         notional = 1000 * price
-        fee = self.cost.commission(notional)
+        fee = self.cost.trade_fee(notional)
         self.assertAlmostEqual(fill.price, price)
         self.assertAlmostEqual(fill.required_cash, notional + fee)
         self.assertAlmostEqual(fill.cash_delta, -(notional + fee))
@@ -912,13 +1046,13 @@ class BrokerCoreTest(unittest.TestCase):
         notional = 1000 * self.cost.slipped_price(10.0, is_buy=True)
         self.assertEqual(fill.cash_delta, 0.0)
         self.assertEqual(fill.required_cash, 0.0)
-        self.assertAlmostEqual(fill.cost_basis, notional + self.cost.commission(notional))
+        self.assertAlmostEqual(fill.cost_basis, notional + self.cost.trade_fee(notional))
 
     def test_project_open_short_locks_margin_and_banks_net_proceeds(self):
         fill = self.core.project_open(self.cost, side="short", raw_price=10.0, shares=1000, trade_date="20220104")
         price = self.cost.slipped_price(10.0, is_buy=False)
         notional = 1000 * price
-        fee = self.cost.commission(notional)
+        fee = self.cost.trade_fee(notional)
         duty = self.cost.stamp_duty_on_sale(notional, "20220104")
         self.assertAlmostEqual(fill.margin, notional * self.cost.slo_margin_ratio)
         self.assertAlmostEqual(fill.required_cash, fill.margin + fee + duty)
@@ -934,9 +1068,9 @@ class BrokerCoreTest(unittest.TestCase):
     def test_lot_floor_and_resolve_shares(self):
         self.assertEqual(self.core.lot_floor(1099), 1000)
         self.assertEqual(self.core.lot_floor("abc"), 0)
-        self.assertEqual(self.core.resolve_shares(350, None, 10.0, 1_000_000.0), 300)
-        # weight 0.01 of 1,000,000 at price 10 -> 1000 shares.
-        self.assertEqual(self.core.resolve_shares(None, 0.01, 10.0, 1_000_000.0), 1000)
+        self.assertEqual(self.core.resolve_shares(350), 300)
+        self.assertEqual(self.core.resolve_shares(1099), 1000)
+        self.assertEqual(self.core.resolve_shares(None), 0)
 
     def _contract(self, kind, **kw):
         defaults = dict(
@@ -950,8 +1084,8 @@ class BrokerCoreTest(unittest.TestCase):
         fin = self._contract("fin", principal=10000.0)
         slo = self._contract("slo", compact_id="D2", shares=500, sell_amount=5000.0, year_rate=0.085)
         first = self.core.accrue_debt_interest([fin, slo], "20220107")  # first mark: 1 day
-        self.assertAlmostEqual(fin.interest_accrued, 10000.0 * 0.0835 / 365.0)
-        self.assertAlmostEqual(slo.interest_accrued, 500 * 10.0 * 0.085 / 365.0)
+        self.assertAlmostEqual(fin.interest_accrued, 10000.0 * 0.0835 / 360.0)
+        self.assertAlmostEqual(slo.interest_accrued, 500 * 10.0 * 0.085 / 360.0)
         again = self.core.accrue_debt_interest([fin, slo], "20220107")  # same day: idempotent
         self.assertEqual(again, 0.0)
         weekend = self.core.accrue_debt_interest([fin, slo], "20220110")  # Fri -> Mon: 3 days

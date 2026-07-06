@@ -38,7 +38,9 @@ from dataclasses import dataclass
 from datetime import datetime
 
 LOT_SIZE = 100
+STAR_MIN_LOT_SIZE = 200
 STAMP_DUTY_CUTOVER = "20230828"  # sell-side stamp duty halved to 0.05% from this date
+INTEREST_DAY_COUNT = 360.0
 
 
 @dataclass(frozen=True)
@@ -51,11 +53,18 @@ class CostModel:
     min_commission_cny: float = 5.0
     stamp_duty_sell_bps_before_cutover: float = 10.0
     stamp_duty_sell_bps_from_cutover: float = 5.0
+    transfer_fee_bps: float = 0.1  # 过户费 0.01‰ = 0.1 bps, both buy and sell side.
     slippage_bps: float = 5.0
     slo_margin_ratio: float = 1.0
 
     def commission(self, notional: float) -> float:
         return max(notional * self.commission_bps / 10_000.0, self.min_commission_cny)
+
+    def transfer_fee(self, notional: float) -> float:
+        return notional * self.transfer_fee_bps / 10_000.0
+
+    def trade_fee(self, notional: float) -> float:
+        return self.commission(notional) + self.transfer_fee(notional)
 
     def stamp_duty_on_sale(self, notional: float, trade_date: str) -> float:
         bps = (
@@ -79,13 +88,10 @@ def lot_floor(amount: object) -> int:
     return (shares // LOT_SIZE) * LOT_SIZE
 
 
-def resolve_shares(amount: object, weight: object, raw_price: object, initial_equity: float) -> int:
-    """Share count from an explicit ``amount`` or, failing that, a ``weight`` fraction
-    of ``initial_equity`` at ``raw_price`` — lot-aligned. 0 when neither is usable."""
+def resolve_shares(amount: object) -> int:
+    """Share count from an explicit ``amount`` — lot-aligned. 0 when unusable."""
     if amount is not None and str(amount).strip() != "":
         return lot_floor(amount)
-    if weight is not None and str(weight).strip() != "" and raw_price not in (None, "") and float(raw_price) > 0:
-        return lot_floor(abs(float(weight)) * initial_equity / float(raw_price))
     return 0
 
 
@@ -131,7 +137,7 @@ def project_open(
     is_buy = side == "long"
     price = cost.slipped_price(raw_price, is_buy=is_buy) if apply_slippage else float(raw_price)
     notional = shares * price
-    fee = cost.commission(notional)
+    fee = cost.trade_fee(notional)
     if side == "long":
         return OpenFill(
             side="long", price=price, shares=shares, fee=fee, duty=0.0, margin=0.0,
@@ -180,7 +186,7 @@ def project_reduce(
     is_buy = side == "short"  # covering a short is a buy
     price = cost.slipped_price(raw_price, is_buy=is_buy) if apply_slippage else float(raw_price)
     notional = shares * price
-    fee = cost.commission(notional)
+    fee = cost.trade_fee(notional)
     if side == "long":
         duty = cost.stamp_duty_on_sale(notional, trade_date)
         cash_delta = notional - fee - duty
@@ -222,6 +228,8 @@ class DebtContract:
     sell_amount: float = 0.0
     interest_accrued: float = 0.0
     last_accrual_date: str = ""
+    last_extension_date: str = ""
+    extension_count: int = 0
     business_balance: float = 0.0  # original principal (fin) / sell amount (slo)
     business_vol: int = 0  # original shares
 
@@ -241,6 +249,8 @@ class DebtContract:
             "real_compact_vol": self.shares,
             "sell_amount": self.sell_amount,
             "compact_interest": self.interest_accrued,
+            "last_extension_date": self.last_extension_date,
+            "extension_count": self.extension_count,
             "business_balance": self.business_balance,
             "business_vol": self.business_vol,
             "compact_status": (
@@ -278,7 +288,7 @@ def accrue_debt_interest(contracts: list[DebtContract], trade_date: str) -> floa
         if gap <= 0:
             continue
         base = contract.principal if contract.kind == "fin" else contract.shares * contract.open_price
-        fee = base * contract.year_rate / 365.0 * gap
+        fee = base * contract.year_rate / INTEREST_DAY_COUNT * gap
         contract.interest_accrued += fee
         total += fee
     return total

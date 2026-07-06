@@ -29,7 +29,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_date == "20220105" and ctx.cur_time == "09:25" and ctx.broker.position(code) == 0:
-            ctx.broker.buy(code, weight=0.3, reason="mid_replay_entry")
+            ctx.broker.buy(code, amount=1000, reason="mid_replay_entry")
 '''
 
 # Raises if the synthetic 09:30 open bar leaks end-of-day high/low/vol/amount.
@@ -46,7 +46,7 @@ def main(ctx):
         if bar.get("vol") is not None or bar.get("amount") is not None:
             raise RuntimeError("open bar leaks day volume/amount")
         if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-            ctx.broker.buy(code, weight=0.1, reason="clean_open")
+            ctx.broker.buy(code, amount=1000, reason="clean_open")
 '''
 
 # Enters at the 09:25 call-auction tick and fills at the first continuous bar.
@@ -55,7 +55,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:25" and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-            ctx.broker.buy(code, weight=0.2, reason="auction_entry")
+            ctx.broker.buy(code, amount=1000, reason="auction_entry")
 '''
 
 # Places a fixed-price (FIX_PRICE) limit buy; the engine rests it until a bar's
@@ -65,7 +65,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
-            ctx.broker.buy(code, weight=0.2, limit=9.80, valid_bars=5, reason="limit_entry")
+            ctx.broker.buy(code, amount=1000, limit=9.80, valid_bars=5, reason="limit_entry")
 '''
 
 # Limit price the market never reaches inside its validity window -> auto-cancelled.
@@ -74,7 +74,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
-            ctx.broker.buy(code, weight=0.2, limit=9.50, valid_bars=2, reason="limit_miss")
+            ctx.broker.buy(code, amount=1000, limit=9.50, valid_bars=2, reason="limit_miss")
 '''
 
 # Two buys in one tick; records the agent-visible cash/buying-power before and after
@@ -91,7 +91,7 @@ def main(ctx):
         if p1 is None or p2 is None or ctx.broker.position(c1) != 0:
             return
         obs = {"cash0": ctx.broker.stock["cash"], "avail0": ctx.broker.stock["available_cash"], "p1": p1, "p2": p2}
-        ctx.broker.buy(c1, weight=0.6, reason="buy1")
+        ctx.broker.buy(c1, amount=1000, reason="buy1")
         obs["cash1"] = ctx.broker.stock["cash"]
         obs["avail1"] = ctx.broker.stock["available_cash"]
         obs["pos1"] = ctx.broker.position(c1)
@@ -101,6 +101,26 @@ def main(ctx):
         os.makedirs(sd, exist_ok=True)
         with open(os.path.join(sd, "obs.json"), "w") as handle:
             json.dump(obs, handle)
+'''
+
+PENDING_RESERVES_CASH_MAIN = '''
+import json, os
+def main(ctx):
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        code = "000001.SZ"
+        sd = ctx.state_dir
+        if ctx.cur_time == "09:30" and not ctx.broker.pending(code):
+            ctx.broker.buy(code, amount=10000, reason="reserve_cash")
+        if ctx.cur_time == "09:31" and not os.path.exists(os.path.join(sd, "reserve.json")):
+            obs = {
+                "cash": ctx.broker.stock["cash"],
+                "available_cash": ctx.broker.stock["available_cash"],
+                "pending": len(ctx.broker.pending(code)),
+                "position": ctx.broker.position(code),
+            }
+            os.makedirs(sd, exist_ok=True)
+            with open(os.path.join(sd, "reserve.json"), "w") as handle:
+                json.dump(obs, handle)
 '''
 
 # Opens a short and records buying power before/after so the test can confirm the
@@ -119,7 +139,7 @@ def main(ctx):
         obs = {"avail0": ctx.broker.credit["available_cash"], "cash0": ctx.broker.credit["cash"], "p": p}
         # 融券卖出 must be a limit order; 19.8 == the activation bar's reference
         # price in this fixture, so the uptick rule passes and the order fills.
-        ctx.broker.short(c, weight=0.2, limit=19.8, reason="short1")
+        ctx.broker.short(c, amount=1000, limit=19.8, reason="short1")
         obs["avail1"] = ctx.broker.credit["available_cash"]
         obs["cash1"] = ctx.broker.credit["cash"]
         obs["pos1"] = ctx.broker.position(c)
@@ -140,7 +160,7 @@ def main(ctx):
             return
         if ctx.price(c) is None or ctx.broker.position(c) != 0:
             return
-        ctx.broker.short(c, weight=0.2, limit=19.8, reason="short")
+        ctx.broker.short(c, amount=1000, limit=19.8, reason="short")
         pos_after_short = ctx.broker.position(c)
         avail_after_short = ctx.broker.credit["available_cash"]
         ctx.broker.credit_sell(c, amount=1000, reason="wrong_sell_on_short")  # side mismatch
@@ -159,7 +179,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
-            ctx.broker.buy(code, weight=0.2, limit=7.00, valid_bars=99, reason="limit_day_end_miss")
+            ctx.broker.buy(code, amount=1000, limit=7.00, valid_bars=99, reason="limit_day_end_miss")
 '''
 
 # Re-evaluates every continuous tick but skips codes with a working order, so the
@@ -171,7 +191,7 @@ def main(ctx):
         if ctx.cur_time < "09:30" or ctx.price(code) is None:
             return  # continuous session only
         if ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
-            ctx.broker.buy(code, weight=0.2, reason="dedup_entry")
+            ctx.broker.buy(code, amount=1000, reason="dedup_entry")
 '''
 
 # Cancels every pending order older than one minute. With execution_lag_bars=3 the
@@ -181,7 +201,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:30" and ctx.price(code) is not None and not ctx.broker.pending(code):
-            ctx.broker.buy(code, weight=0.2, reason="queued_cancel_target")
+            ctx.broker.buy(code, amount=1000, reason="queued_cancel_target")
         for order in ctx.broker.pending():
             if float(order.get("age_minutes") or 0.0) > 1.0:
                 ctx.broker.cancel(order["order_id"], reason="stale_gt_1m")
@@ -193,7 +213,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:30" and ctx.price(code) is not None and not ctx.broker.pending(code):
-            ctx.broker.buy(code, weight=0.2, limit=9.50, valid_bars=5, reason="working_cancel_target")
+            ctx.broker.buy(code, amount=1000, limit=9.50, valid_bars=5, reason="working_cancel_target")
         for order in ctx.broker.pending():
             if order.get("status") == "working":
                 ctx.broker.cancel(order["order_id"], reason="working_cancel")
@@ -205,14 +225,32 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:30" and ctx.price(code) is not None and not ctx.broker.pending(code):
-            oid = ctx.broker.buy(code, weight=0.2, reason="same_tick_pending_fields")
+            oid = ctx.broker.buy(code, amount=1000, reason="same_tick_pending_fields")
             pending = ctx.broker.pending()
             assert len(pending) == 1, pending
             order = pending[0]
             assert order["order_id"] == oid, order
             assert order["status"] == "pending", order
             assert order["age_minutes"] == 0.0, order
+            assert order["account"] == "stock", order
+            assert order["op_type"] == 23, order
             assert "_substep" not in order, order
+'''
+
+INVALID_AMOUNT_MAIN = '''
+def main(ctx):
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        code = "000001.SZ"
+        if ctx.cur_time == "09:25" and ctx.broker.position(code) == 0:
+            ctx.broker.buy(code, amount=100.5, reason="fractional_amount")
+'''
+
+NON_POSITIVE_LIMIT_MAIN = '''
+def main(ctx):
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        code = "000001.SZ"
+        if ctx.cur_time == "09:25" and ctx.broker.position(code) == 0:
+            ctx.broker.buy(code, amount=1000, limit=0, reason="bad_limit")
 '''
 
 # Submits and immediately cancels; no net main_actions order should remain for audit.
@@ -221,7 +259,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:30" and ctx.price(code) is not None and not ctx.broker.pending(code):
-            oid = ctx.broker.buy(code, weight=0.2, reason="cancel_same_tick")
+            oid = ctx.broker.buy(code, amount=1000, reason="cancel_same_tick")
             ctx.broker.cancel(oid, reason="cancel_same_tick")
 '''
 
@@ -232,7 +270,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:30" and ctx.price(code) is not None and not ctx.broker.pending(code):
-            ctx.broker.buy(code, weight=0.2, limit=7.00, valid_bars=99, reason="postclose_target")
+            ctx.broker.buy(code, amount=1000, limit=7.00, valid_bars=99, reason="postclose_target")
         if ctx.cur_time > "09:34":
             for order in ctx.broker.pending():
                 if order.get("order_id"):
@@ -245,7 +283,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:15" and ctx.broker.position(code) == 0 and ctx.price(code) is None:
-            ctx.broker.buy(code, weight=0.2, reason="preopen_blind")
+            ctx.broker.buy(code, amount=1000, reason="preopen_blind")
 '''
 
 # Asserts the per-tick Timeview daily view at 20220105 09:15 holds the frozen
@@ -270,7 +308,7 @@ def main(ctx):
         assert "20220331" not in dates, "future leaked"
         assert ctx.asof_version, "asof_version not exposed"
         if ctx.broker.position(code) == 0:
-            ctx.broker.buy(code, weight=0.1, reason="asof_ok")
+            ctx.broker.buy(code, amount=1000, reason="asof_ok")
 '''
 
 # Declares a screening sub-step (budget_minutes=3): broker actions inside the block
@@ -280,7 +318,7 @@ def main(ctx):
     code = "000001.SZ"
     if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
         with ctx.substep("screen", budget_minutes=3):
-            ctx.broker.buy(code, weight=0.2, reason="slow_entry")
+            ctx.broker.buy(code, amount=1000, reason="slow_entry")
 '''
 
 # A sub-step that declares a small positive budget (0.001 min = 0.06s) but really
@@ -294,7 +332,7 @@ def main(ctx):
     if ctx.cur_time == "09:30":
         with ctx.substep("slow", budget_minutes=0.001):
             time.sleep(0.3)
-            ctx.broker.buy(code, weight=0.2, reason="overrun")
+            ctx.broker.buy(code, amount=1000, reason="overrun")
 '''
 
 # Wrapping a block with budget_minutes=0 is identical to not wrapping (no delay,
@@ -305,14 +343,14 @@ def main(ctx):
     code = "000001.SZ"
     if ctx.cur_time == "09:30":
         with ctx.substep("light", budget_minutes=0):
-            ctx.broker.buy(code, weight=0.2, reason="zero_budget")
+            ctx.broker.buy(code, amount=1000, reason="zero_budget")
 '''
 
 BROKER_OUTSIDE_SUBSTEP_MAIN = '''
 def main(ctx):
     code = "000001.SZ"
     if ctx.cur_time == "09:30" and ctx.price(code) is not None:
-        ctx.broker.buy(code, weight=0.2, reason="outside_substep")
+        ctx.broker.buy(code, amount=1000, reason="outside_substep")
 '''
 
 STATE_OUTSIDE_SUBSTEP_MAIN = '''
@@ -353,7 +391,7 @@ def main(ctx):
     code = "000001.SZ"
     if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
         with ctx.substep("light", budget_minutes=1):
-            ctx.broker.buy(code, weight=0.2, reason="light_entry")
+            ctx.broker.buy(code, amount=1000, reason="light_entry")
 '''
 
 SUBSTEP_HALF_BUDGET_MAIN = '''
@@ -361,7 +399,7 @@ def main(ctx):
     code = "000001.SZ"
     if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
         with ctx.substep("light", budget_minutes=0.5):
-            ctx.broker.buy(code, weight=0.2, reason="half_minute_entry")
+            ctx.broker.buy(code, amount=1000, reason="half_minute_entry")
 '''
 
 NOOP_MAIN = '''
@@ -376,7 +414,7 @@ def main(ctx):
     code = "000001.SZ"
     if ctx.cur_time == "09:25" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
         with ctx.substep("screen", budget_minutes=1):
-            ctx.broker.buy(code, weight=0.2, reason="auction_small_budget")
+            ctx.broker.buy(code, amount=1000, reason="auction_small_budget")
 '''
 
 SUBSTEP_AUCTION_LARGE_MAIN = '''
@@ -384,7 +422,7 @@ def main(ctx):
     code = "000001.SZ"
     if ctx.cur_time == "09:25" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
         with ctx.substep("screen", budget_minutes=4):
-            ctx.broker.buy(code, weight=0.2, reason="auction_large_budget")
+            ctx.broker.buy(code, amount=1000, reason="auction_large_budget")
 '''
 
 SUBSTEP_PENDING_DELAY_MAIN = '''
@@ -392,12 +430,10 @@ def main(ctx):
     code = "000001.SZ"
     if ctx.cur_time == "09:30" and not ctx.broker.pending(code):
         with ctx.substep("screen", budget_minutes=3):
-            ctx.broker.buy(code, weight=0.2, reason="delayed_pending")
+            ctx.broker.buy(code, amount=1000, reason="delayed_pending")
     if ctx.cur_time == "09:31":
         pending = ctx.broker.pending(code)
-        assert len(pending) == 1, pending
-        assert pending[0].get("pending_stage") == "substep_delay", pending
-        assert pending[0].get("ready_at", "").endswith("09:33:00+08:00"), pending
+        assert pending == [], pending
 '''
 
 SUBSTEP_SAME_TICK_PENDING_MAIN = '''
@@ -407,19 +443,13 @@ def main(ctx):
         cash_before = ctx.broker.stock["cash"]
         pos_before = ctx.broker.position(code)
         with ctx.substep("screen", budget_minutes=3):
-            oid = ctx.broker.buy(code, weight=0.2, reason="same_tick_delayed_pending")
+            oid = ctx.broker.buy(code, amount=1000, reason="same_tick_delayed_pending")
             pending = ctx.broker.pending(code)
-            assert len(pending) == 1, pending
-            assert pending[0].get("order_id") == oid, pending
-            assert pending[0].get("pending_stage") == "substep_delay", pending
-            assert pending[0].get("ready_at", "").endswith("09:33:00+08:00"), pending
-            assert float(pending[0].get("age_minutes") or 0.0) == 0.0, pending
+            assert pending == [], (oid, pending)
             assert ctx.broker.stock["cash"] == cash_before, (ctx.broker.stock["cash"], cash_before)
             assert ctx.broker.position(code) == pos_before, (ctx.broker.position(code), pos_before)
         pending = ctx.broker.pending(code)
-        assert len(pending) == 1 and pending[0].get("pending_stage") == "substep_delay", pending
-        if not ctx.broker.pending(code):
-            ctx.broker.buy(code, weight=0.2, reason="duplicate_due_to_missing_pending")
+        assert pending == [], pending
 '''
 
 SUBSTEP_CANCEL_DELAYED_MAIN = '''
@@ -427,13 +457,10 @@ def main(ctx):
     code = "000001.SZ"
     if ctx.cur_time == "09:30" and not ctx.broker.pending(code):
         with ctx.substep("screen", budget_minutes=3):
-            ctx.broker.buy(code, weight=0.2, reason="cancel_delayed_target")
+            ctx.broker.buy(code, amount=1000, reason="cancel_delayed_target")
     if ctx.cur_time == "09:31":
         pending = ctx.broker.pending(code)
-        assert len(pending) == 1, pending
-        assert pending[0].get("pending_stage") == "substep_delay", pending
-        with ctx.substep("cancel", budget_minutes=0.5):
-            ctx.broker.cancel(pending[0]["order_id"], reason="cancel_before_ready")
+        assert pending == [], pending
 '''
 
 SUBSTEP_LATE_NO_FILL_MAIN = '''
@@ -441,7 +468,7 @@ def main(ctx):
     code = "000001.SZ"
     if ctx.cur_time == "14:59" and not ctx.broker.pending(code):
         with ctx.substep("late", budget_minutes=1):
-            ctx.broker.buy(code, weight=0.2, reason="late_delayed_no_fill")
+            ctx.broker.buy(code, amount=1000, reason="late_delayed_no_fill")
 '''
 
 SUBSTEP_DUPLICATE_NAME_MAIN = '''
@@ -449,9 +476,9 @@ def main(ctx):
     code = "000001.SZ"
     if ctx.cur_time == "09:30":
         with ctx.substep("screen", budget_minutes=1):
-            ctx.broker.buy(code, weight=0.1, reason="first")
+            ctx.broker.buy(code, amount=1000, reason="first")
         with ctx.substep("screen", budget_minutes=3):
-            ctx.broker.buy(code, weight=0.1, reason="second")
+            ctx.broker.buy(code, amount=1000, reason="second")
 '''
 
 REPLAY_ROWS = [
@@ -663,6 +690,19 @@ class MainCtxReplayTest(unittest.TestCase):
         }
         self.assertEqual(filled, {"000001.SZ", "000002.SZ"})
 
+    def test_submitted_pending_order_reserves_available_cash_on_next_tick(self) -> None:
+        import json
+
+        (self.sandbox.paths.agent_output / "main.py").write_text(PENDING_RESERVES_CASH_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _dense_minutes(), execution_lag_bars=2)
+        obs = json.loads((self.sandbox.paths.workspace / ".state" / "reserve.json").read_text(encoding="utf-8"))
+        self.assertEqual(obs["cash"], 500_000.0)
+        self.assertLess(obs["available_cash"], 400_000.0)
+        self.assertEqual(obs["pending"], 1)
+        self.assertEqual(obs["position"], 0)
+        filled = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(filled), 1)
+
     def test_substep_short_open_does_not_project_available_cash(self) -> None:
         # Substep short opens are delayed-submit plans; no cash, available_cash, or
         # position projection is visible inside the substep.
@@ -724,7 +764,7 @@ class MainCtxReplayTest(unittest.TestCase):
         self.assertEqual(obs["pos_after_sell"], 0)
         self.assertAlmostEqual(obs["avail_after_sell"], obs["avail_after_short"])
 
-    def _run_with(self, replay: pd.DataFrame, minutes: pd.DataFrame | None = None) -> object:
+    def _run_with(self, replay: pd.DataFrame, minutes: pd.DataFrame | None = None, **replay_kwargs) -> object:
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
             decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
@@ -734,6 +774,7 @@ class MainCtxReplayTest(unittest.TestCase):
                 replay, BrokerProfile(),
                 shortable_codes=frozenset(), main_policy=policy,
                 replay_intraday_1min=minutes,
+                **replay_kwargs,
             )
 
     def test_auction_entry_fills_at_first_continuous_bar(self) -> None:
@@ -770,7 +811,7 @@ def main(ctx):
         visible = Path(str(ctx.state_dir)) / "plan.txt"
         if visible.exists() and "buy" not in _SEEN:
             _SEEN["buy"] = ctx.cur_datetime
-            ctx.broker.buy(code, weight=0.1, reason="plan_visible")
+            ctx.broker.buy(code, amount=1000, reason="plan_visible")
 '''
         (self.sandbox.paths.agent_output / "main.py").write_text(stage_main, encoding="utf-8")
         replay = pd.DataFrame(
@@ -803,9 +844,9 @@ def main(ctx):
 
     def test_substep_read_sees_old_visible_state(self) -> None:
         # R10: inside a sub-step, reading ctx.state_dir must return the OLD visible
-        # value, not the empty staging dir. The strategy writes "v1" to the visible
+        # value, not the empty staging dir. The strategy writes "seed" to the visible
         # state dir at 09:15 (outside a sub-step), then at 09:25 reads it from inside
-        # a sub-step (must be "v1") and stages "v2" (must NOT leak to visible this
+        # a sub-step (must be "seed") and stages "update" (must NOT leak to visible this
         # tick). It buys only when both hold; without the fix the in-substep read
         # raises FileNotFoundError and the replay aborts.
         stage_main = '''
@@ -815,15 +856,15 @@ from pathlib import Path
 def main(ctx):
     if ctx.cur_date == "20220104" and ctx.cur_time == "09:15":
         with ctx.substep("seed", budget_minutes=0.5):
-            Path(str(ctx.state_dir), "state.txt").write_text("v1")
+            Path(str(ctx.state_dir), "state.txt").write_text("seed")
     if ctx.cur_date == "20220104" and ctx.cur_time == "09:25":
         with ctx.substep("read_old", budget_minutes=2):
             staged = Path(str(ctx.state_dir)) / "state.txt"   # staging dir, seeded from visible
             old = staged.read_text()
-            staged.write_text("v2")   # staged, delayed
-        if old == "v1":
+            staged.write_text("update")   # staged, delayed
+        if old == "seed":
             with ctx.substep("trade", budget_minutes=0.5):
-                ctx.broker.buy("000001.SZ", weight=0.1, reason="read_old_ok")
+                ctx.broker.buy("000001.SZ", amount=1000, reason="read_old_ok")
 '''
         (self.sandbox.paths.agent_output / "main.py").write_text(stage_main, encoding="utf-8")
         replay = pd.DataFrame(
@@ -848,7 +889,7 @@ def main(ctx):
         buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         staged = [a for a in (result.state_staging_audit or []) if a["substep"] == "read_old"]
-        self.assertEqual(len(staged), 1)   # only the changed "v2", not the seeded copy
+        self.assertEqual(len(staged), 1)   # only the changed "update", not the seeded copy
         self.assertTrue(staged[0]["merged"])
 
     def test_rolling_asof_view_excludes_today_and_future(self) -> None:
@@ -901,6 +942,20 @@ def main(ctx):
             if e["event_type"] == "order_cancelled" and e.get("reason") == "expired_unfilled"
         ]
         self.assertTrue(cancels)
+
+    def test_fractional_amount_rejects_without_closing_position(self) -> None:
+        (self.sandbox.paths.agent_output / "main.py").write_text(INVALID_AMOUNT_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _limit_minutes())
+        rejects = [o for o in _all_orders(result.broker) if o["reject_reason"] == "invalid_amount"]
+        self.assertEqual(len(rejects), 1)
+        self.assertEqual(result.broker.position_quantity("000001.SZ"), 0)
+
+    def test_non_positive_limit_rejects_instead_of_market_order(self) -> None:
+        (self.sandbox.paths.agent_output / "main.py").write_text(NON_POSITIVE_LIMIT_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _limit_minutes())
+        rejects = [o for o in _all_orders(result.broker) if o["reject_reason"] == "invalid_limit_price"]
+        self.assertEqual(len(rejects), 1)
+        self.assertEqual(result.broker.position_quantity("000001.SZ"), 0)
 
     def test_day_end_limit_cancel_records_current_trade_date(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(LIMIT_DAY_END_CANCEL_MAIN, encoding="utf-8")
@@ -1109,18 +1164,17 @@ def main(ctx):
         events = [e for e in result.broker.events if e.get("event_type") == "main_actions" and e.get("delayed_from_substep")]
         self.assertTrue(str(events[0]["actions"][0].get("submitted_at") or "").endswith("09:30:00+08:00"))
 
-    def test_substep_delayed_action_is_visible_as_pending_until_release(self) -> None:
-        # While waiting for ready_at, a substep broker action is visible through
-        # pending() with pending_stage=substep_delay so strategy code can de-dup or
-        # cancel it before actual submission.
+    def test_substep_delayed_action_is_hidden_from_pending_until_release(self) -> None:
+        # While waiting for ready_at, a cross-minute substep broker action is not a
+        # broker order yet and does not appear in pending(); it is submitted at ready.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_PENDING_DELAY_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _substep_delay_minutes())
         buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
 
-    def test_substep_pending_is_visible_within_same_tick(self) -> None:
-        # The same main(ctx) invocation sees a substep-delayed action through pending(),
-        # so generic de-dup/cancel hygiene can be shared with normal submit-lag orders.
+    def test_cross_minute_substep_pending_is_hidden_within_same_tick(self) -> None:
+        # The same main(ctx) invocation does not see cross-minute delayed actions
+        # through pending(); they are future plans until their declared ready_at.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_SAME_TICK_PENDING_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _substep_delay_minutes())
         buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
@@ -1129,18 +1183,12 @@ def main(ctx):
             any(o.get("reason") == "duplicate_due_to_missing_pending" for o in _all_orders(result.broker))
         )
 
-    def test_cancel_removes_substep_delayed_action_before_release(self) -> None:
+    def test_cancel_does_not_see_unready_substep_action(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_CANCEL_DELAYED_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _substep_delay_minutes())
         buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
-        self.assertEqual(buys, [])
-        cancels = [
-            e for e in result.broker.events
-            if e["event_type"] == "order_cancelled"
-            and e.get("reason") == "cancel_before_ready"
-            and e.get("pending_stage") == "substep_delay"
-        ]
-        self.assertEqual(len(cancels), 1)
+        self.assertEqual(len(buys), 1)
+        self.assertFalse(any(e.get("pending_stage") == "substep_delay" for e in result.broker.events))
 
     def test_substep_ready_on_real_tick_without_fill_bar_records_unfilled(self) -> None:
         # A ready delayed action should submit on the first real/orderable tick. If
@@ -1285,7 +1333,7 @@ def main(ctx):
             "def main(ctx):\n"
             "    if ctx.cur_time == '09:30':\n"
             "        with ctx.substep('screen', budget_minutes=50):\n"
-            "            ctx.broker.buy('000001.SZ', weight=0.1)\n"
+            "            ctx.broker.buy('000001.SZ', amount=1000)\n"
         )
         (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
         with MainPolicyRunner(
@@ -1308,7 +1356,7 @@ def main(ctx):
             "def main(ctx):\n"
             "    if ctx.cur_time == '21:00' and ctx.broker.position('000001.SZ') == 0:\n"
             "        with ctx.substep('main_tick', budget_minutes=0.5):\n"
-            "            ctx.broker.buy('000001.SZ', weight=0.1, reason='offsession')\n"
+            "            ctx.broker.buy('000001.SZ', amount=1000, reason='offsession')\n"
         )
         (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
         with MainPolicyRunner(
@@ -1335,7 +1383,7 @@ def main(ctx):
             "def main(ctx):\n"
             "    if ctx.cur_time == '06:00' and ctx.broker.position('000001.SZ') == 0:\n"
             "        with ctx.substep('main_tick', budget_minutes=0.5):\n"
-            "            ctx.broker.buy('000001.SZ', weight=0.1, reason='preopen_offsession')\n"
+            "            ctx.broker.buy('000001.SZ', amount=1000, reason='preopen_offsession')\n"
         )
         (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
         with MainPolicyRunner(
@@ -1370,7 +1418,7 @@ def main(ctx):
             "    if ctx.cur_time == '14:57' and ctx.broker.position('000001.SZ') == 0 "
             "and not ctx.broker.pending('000001.SZ'):\n"
             "        with ctx.substep('main_tick', budget_minutes=0.5):\n"
-            "            ctx.broker.buy('000001.SZ', weight=0.2, reason='close_auction')\n"
+            "            ctx.broker.buy('000001.SZ', amount=1000, reason='close_auction')\n"
         )
         (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
         minutes = pd.DataFrame(
@@ -1404,7 +1452,7 @@ def main(ctx):
             "        assert ctx.cur_datetime == '2022-01-04T09:25:00+08:00', ctx.cur_datetime\n"
             "        if ctx.broker.position('000001.SZ') == 0 and ctx.price('000001.SZ') is not None:\n"
             "            with ctx.substep('main_tick', budget_minutes=0.5):\n"
-            "                ctx.broker.buy('000001.SZ', weight=0.1)\n"
+            "                ctx.broker.buy('000001.SZ', amount=1000)\n"
         )
         (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _auction_minutes())

@@ -39,10 +39,9 @@ and fills without slippage: at a favorable open if the bar opens through P,
 otherwise at P after an intrabar touch. It auto-cancels after `valid_bars` bars.
 Query `ctx.broker.pending(code)` to skip codes with an order still in flight, or
 `ctx.broker.pending()` to scan all pending orders and `ctx.broker.cancel(order_id)`
-to cancel stale unfilled orders. Orders generated inside `ctx.substep` appear in
-`pending()` immediately with `pending_stage="substep_delay"` until their `ready_at`,
-then submit on the first orderable tick and enter the normal submit-lag /
-working-order flow.
+to cancel stale unfilled orders. Cross-minute `ctx.substep` actions are not broker
+orders until `ready_at`, so they do not appear in `pending()` before submission.
+After submission they enter the normal submit-lag / working-order flow.
 
 The Environment calls `main(ctx)` across the WHOLE day on a 24h tick grid (intraday
 bars at 1-minute granularity plus a configurable off-session grid for research/state
@@ -63,8 +62,11 @@ def main(ctx):
         daily = pd.read_parquet(Path(str(ctx.asof_dir)) / "daily")  # a domain is a directory
         codes = sorted(daily["ts_code"].astype(str).unique())[:10]  # placeholder signal
         for code in codes:
-            if ctx.price(code) is not None and not ctx.broker.pending(code):
-                ctx.broker.buy(code, weight=0.1)
+            price = ctx.price(code)
+            if price is not None and not ctx.broker.pending(code):
+                amount = int((ctx.broker.stock["available_cash"] / 10) / price // 100 * 100)
+                if amount > 0:
+                    ctx.broker.buy(code, amount=amount)
 ```
 
 For finer control, the **optional** recommended cadence (in `candidate.py` /
@@ -94,6 +96,35 @@ sample `research()` gates on `ctx.cur_time` to run its screen once per day in a
 pre-open window (e.g. `08:00`), then submits at `09:15`/`09:25`, manages intraday on a
 fixed cadence, and wraps up by `14:57` — rather than screening on every tick.
 
+## `ctx.broker` quick reference
+
+Use these only inside `ctx.substep(name, budget_minutes=B)`. `amount` is shares:
+ordinary A-shares use positive 100-share lots, STAR Market uses 200 shares minimum
+then 1-share increments, and size is never inferred from `weight`.
+
+| Interface | Use |
+|---|---|
+| `buy(ts_code, amount, limit=None, valid_bars=1, reason=None)` | Stock account cash buy |
+| `sell(ts_code, amount, limit=None, valid_bars=1, reason=None)` | Stock account sell of T+1 sellable long shares |
+| `credit_buy(ts_code, amount, limit=None, valid_bars=1, reason=None)` | Credit account collateral buy |
+| `credit_sell(ts_code, amount, limit=None, valid_bars=1, reason=None)` | Credit account collateral sell; financed shares must use `sell_repay` |
+| `fin_buy(ts_code, amount, limit=None, valid_bars=1, reason=None)` | Margin buy; creates /360 daily interest-accruing financing debt |
+| `short(ts_code, amount, limit, valid_bars=1, reason=None)` | Short sale; `limit` is required and must satisfy the uptick rule |
+| `cover(ts_code, amount, limit=None, valid_bars=1, reason=None)` | Buy to cover short debt, oldest contract first; same-day short cover is T+1-blocked |
+| `sell_repay(ts_code, amount, limit=None, valid_bars=1, reason=None)` | Sell credit-account shares and repay financing debt interest-first |
+| `direct_repay(amount, reason=None)` | Repay financing debt from credit-account cash; strict reject if cash/debt is insufficient |
+| `transfer(amount, from_account, to_account, reason=None)` | Pre-09:14 cash transfer request between `stock` and `credit` accounts |
+| `close(ts_code, account=None, reason=None)` | Market exit; pass `account=` if both accounts hold the code |
+| `cancel(order_id, reason=None)` | Cancel an order returned by `pending()` |
+| `pending(ts_code=None)` | Submitted, unfilled, cancellable orders; no argument returns all |
+| `position(ts_code, account=None)` | Filled position only; default nets across accounts |
+| `stock` / `credit` / `account` / `positions` | Account and position snapshots; `cash`/`quantity` are filled truth, while available cash/bail/sellable shares reserve submitted pending orders |
+| `debt_contracts(ts_code=None)` | Open financing/short debt contracts and accrued interest |
+
+Common mistakes: broker actions outside `ctx.substep` are rejected; `short`
+without `limit=` is rejected; cross-minute substep actions are not orders until
+`ready_at` and therefore do not appear in `pending()` before submission.
+
 `ctx` exposes (rebuilt each tick):
 
 - `ctx.cur_date` (`"YYYYMMDD"`), `ctx.cur_time` (`"HH:MM"`).
@@ -104,23 +135,11 @@ fixed cadence, and wraps up by `14:57` — rather than screening on every tick.
 - `ctx.price(ts_code)`, `ctx.bar(ts_code)`, `ctx.bars` — the current tick only
   (`None` at the 09:15 info tick and off-session ticks; future bars never visible).
 - `ctx.broker`: every run holds TWO separate accounts (own cash/positions/T+1;
-  they never back each other). Stock account (long-only cash): `.buy/sell(...)`.
-  Credit account: `.credit_buy/credit_sell(...)` (担保品买卖), `.fin_buy(...)`
-  (融资买入 — no cash moves; principal+fee become an interest-accruing debt
-  contract), `.short/cover(...)` (融券), `.sell_repay(...)` (卖券还款 — sale
-  proceeds repay 融资 debt interest-first), `.direct_repay(amount)` (直接还款).
-  All order verbs accept `(ts_code, amount=None, weight=None, limit=None,
-  valid_bars=1, reason=None)` and return `order_id`; `weight` is a fraction of
-  the TARGET account's initial cash. `.transfer(amount, from_account,
-  to_account)` moves cash between the accounts (locked 融券 proceeds never
-  transfer; outbound credit transfers require 维保比例 ≥ the withdraw line while
-  debt is outstanding). `.close(ts_code, account=None)` market-exits a position
-  — pass `account=` when both accounts hold the code. `.cancel(order_id)`,
-  `.position(ts_code, account=None)` (default nets across accounts),
-  `.pending(ts_code=None)` (records carry `account`), `.stock` / `.credit`
-  account views, `.debt_contracts(ts_code=None)`. `limit=P` makes it a limit
-  order; `short` must be a LIMIT order priced at/above the reference price
-  (融券 uptick rule) — quote `limit=ctx.price(code)` or higher.
+  they never back each other). See the quick reference above for method names.
+  Calculate share counts explicitly from visible cash/price and round to the
+  exchange lot rule before calling order verbs. `limit=P` makes a limit order;
+  `short` must be a limit order priced at/above the reference price (融券 uptick
+  rule) — quote `limit=ctx.price(code)` or higher.
 - `ctx.nl(ts_code?, prompt="...")` — point-in-time NL Sub Agent for single-stock
   or event/theme/sector/macro text analysis (its text corpus also rolls on the
   refresh nodes; frozen research corpus always visible).
@@ -135,9 +154,9 @@ fixed cadence, and wraps up by `14:57` — rather than screening on every tick.
   parameters), `ctx.state_dir` (managed cross-tick state, only available inside
   `ctx.substep`), `ctx.params`.
 
-`amount` is a share count (lot-aligned to 100); `weight` is a notional fraction
-of initial equity. The Broker enforces cash and 保证金可用余额, T+1 sellable
-balance, lot size, price limits, suspension, margin-target eligibility and credit
+`amount` is a share count (lot-aligned to 100). The Broker enforces cash and
+保证金可用余额, T+1 sellable balance, lot size, price limits, suspension,
+margin-target eligibility and credit
 quotas, per-calendar-day debt interest, the maintenance-ratio forced close, and
 reserves the final replay date for mandatory liquidation. The Broker is the source
 of truth for positions and reflects **filled** positions only;

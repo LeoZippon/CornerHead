@@ -97,7 +97,7 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
         "test_sharpe": _num(test.get("sharpe")),
         "test_drawdown": _num(test.get("max_drawdown")),
         "orders": test.get("order_count"),
-        "short_rejects": test.get("margin_secs_reject_count"),
+        "margin_secs_rejects": test.get("margin_secs_reject_count"),
         "selected_step": record.get("selected_step_id"),
         "finish_reason": record.get("finish_reason"),
         "period_start": _period_part(record.get("test_period"), "start"),
@@ -123,7 +123,7 @@ def _heldout_row(record: dict[str, object]) -> dict[str, object]:
         "test_sharpe": _num(test.get("sharpe")),
         "test_drawdown": _num(test.get("max_drawdown")),
         "orders": test.get("order_count"),
-        "short_rejects": test.get("margin_secs_reject_count"),
+        "margin_secs_rejects": test.get("margin_secs_reject_count"),
         "selected_step": None,
         "finish_reason": "heldout",
         "period_start": _period_part(record.get("period"), "start"),
@@ -611,7 +611,7 @@ def _plot_single_epoch(rows: list[dict[str, object]], epoch_id: str, path: Path)
         "Sharpe",
         "Max loss",
         "Orders",
-        "Short rejects",
+        "Margin secs rejects",
         "Step",
     ]
     cells = [
@@ -626,7 +626,7 @@ def _plot_single_epoch(rows: list[dict[str, object]], epoch_id: str, path: Path)
             _fmt(row["test_sharpe"]),
             _fmt_pct(row["test_drawdown"]),
             _fmt_int(row["orders"]),
-            _fmt_int(row["short_rejects"]),
+            _fmt_int(row["margin_secs_rejects"]),
             str(row["selected_step"] or "-"),
         ]
         for row in rows

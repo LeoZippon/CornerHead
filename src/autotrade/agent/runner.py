@@ -339,16 +339,6 @@ class AgentSessionRunner:
             self.web_search.spec if self.web_search is not None else build_web_search_spec(self.web_search_engines),
             self.web_fetch.spec,
             ActionSpec(
-                action="note",
-                tool_name="runner_note",
-                description="Record a short reasoning note without executing tools.",
-                fields=(ActionField("text", "string", default="", description="Short note to keep in the trace."),),
-                read_only=True,
-                destructive=False,
-                concurrency_safe=True,
-                allowed_modes=("fold", "meta_learning"),
-            ),
-            ActionSpec(
                 action="explore",
                 tool_name="explore_subagent",
                 description=(
@@ -413,7 +403,6 @@ class AgentSessionRunner:
             "finish_fold": self._do_finish_fold,
             "web_search": self._do_web_search,
             "web_fetch": self._do_web_fetch,
-            "note": self._do_note,
             "explore": self._do_explore,
             "done": self._do_done,
         }
@@ -497,9 +486,6 @@ class AgentSessionRunner:
             deadline_at=self._effective_deadline_at(),
         )
         return {"observation": "explore", **engine.run(task=str(args["task"]), max_rounds=int(args.get("max_rounds") or 0))}
-
-    def _do_note(self, args: dict[str, object]) -> dict[str, object]:
-        return {"observation": "note_recorded", "text": str(args.get("text", ""))}
 
     def _do_done(self, args: dict[str, object]) -> dict[str, object]:
         if self.web_search is not None:
@@ -677,7 +663,7 @@ class AgentSessionRunner:
     ) -> list[tuple[str, str, dict[str, object]]]:
         """Run every tool_call in one assistant turn; one result per call.
 
-        A turn whose calls are all concurrency-safe (grep/glob/note/web_search/web_fetch)
+        A turn whose calls are all concurrency-safe (grep/glob/web_search/web_fetch)
         runs in parallel; any stateful tool (shell/backtest/finish_fold/...)
         forces deterministic sequential execution.
         """
@@ -751,7 +737,7 @@ class AgentSessionRunner:
         # No preemptive kill of in-flight work: per-call timeouts bound every
         # provider/tool call, and no NEW work is dispatched once the deadline
         # has passed, so the worst overrun is one bounded call.
-        if self._remaining_seconds() <= 0 and action not in {"note", "done"}:
+        if self._remaining_seconds() <= 0 and action != "done":
             cancellation = {
                 "observation": "cancelled",
                 "action": action,

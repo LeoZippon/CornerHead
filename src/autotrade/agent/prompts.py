@@ -45,7 +45,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 |---|---|---|---|
 | `/mnt/agent/workspace/` | 可读写 | 临时探索、草稿脚本、中间分析 | 不冻结、不回放、不继承 |
 | `/mnt/agent/output/` | 可读写 | 正式策略产物目录；根目录必须有 `main.py`，可用 helper 文件或子包组织复杂逻辑 | 会被 modification_check、backtest、freeze 使用 |
-| `/mnt/agent/output/README.md` | 只读 | 模板说明 | 不要修改 |
+| `/mnt/agent/output/README.md` | 只读 | 模板说明与 `ctx`/`ctx.broker` 速查 | 不确定策略接口时先读；不要修改 |
 | `/mnt/agent/models/` | 可读写 | 可继承模型产物目录；支持常见参数/权重格式 | 与 `output/` 分开校验和冻结 |
 | `/mnt/snapshot/` | 只读 | 当前正式决策输入视图 | `main.py`、`candidate.py` 和 helper 可读取 |
 | `/mnt/snapshots/train/` | 只读 | 训练/历史窗口快照 | 仅用于 Agent 探查；正式策略代码不得硬编码引用 |
@@ -91,7 +91,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - 竞价：`09:15` 信息 tick 无价格，盲下单成交于 09:30 开盘竞价；`09:25` 暴露撮合开盘价，下单成交于首根连续 bar（09:31，按 taker 滑点）；`14:57` 下单成交于 15:00 收盘价。真正开/收盘集合竞价成交不计滑点。
 - 订单类型：市价单按进入 bar 的 open + 滑点成交，单 bar 有效；限价单（FIX_PRICE）挂单，若 open 已优于限价则按 open 成交，否则 `[low, high]` 触及限价时成交，`valid_bars` 内未触及自动撤单。策略也可主动撤销 `pending()` 返回的未成交委托。
 - Broker 约束：策略只表达意图。每次实验同时运行普通+信用两个独立账户（现金、持仓、T+1 各自独立、互不担保），Broker 强制各账户现金与保证金可用余额、T+1 可卖余额、手数、涨跌停、停牌、融资融券标的与授信额度、融券限价规则、维保比例强平（只清信用账户）、账户间划转提取线和回放末日强制清仓。最大持仓数、单票权重和集中度默认由你控制。
-- 子步骤预算：所有会访问 `ctx.state_dir`、调用 `ctx.broker`、调用 `ctx.nl()`、读写策略状态或做实质筛选/推理的策略步骤，都必须放进 `ctx.substep(name, budget_minutes=B)`；`B>0`、tick 内 name 唯一、低报会 fail-fast。`ctx.broker` 原语和 `ctx.state_dir` 在子步骤外会被拒绝；宿主还会用 `main(ctx)` 总耗时减去 substep 耗时，拒绝实质未包裹计算。`B<1` 的轻量块在回测中视为本决策分钟内完成（仍统计/限时并带 `ready_at` 元数据）；`B>=1` 的块内 `ctx.state_dir` 写入和 `ctx.broker` 动作延迟到 `ready_at = tick + B` 后才可见/提交。延迟中的 broker 动作会立刻出现在 `pending()`，`pending_stage="substep_delay"`，用于同 tick/跨 tick 去重或撤销。
+- 子步骤预算：所有会访问 `ctx.state_dir`、调用 `ctx.broker`、调用 `ctx.nl()`、读写策略状态或做实质筛选/推理的策略步骤，都必须放进 `ctx.substep(name, budget_minutes=B)`；`B>0`、tick 内 name 唯一、低报会 fail-fast。`ctx.broker` 原语和 `ctx.state_dir` 在子步骤外会被拒绝；宿主还会用 `main(ctx)` 总耗时减去 substep 耗时，拒绝实质未包裹计算。`B<1` 的轻量块在回测中视为本决策分钟内完成（仍统计/限时并带 `ready_at` 元数据）；`B>=1` 的块内 `ctx.state_dir` 写入和 `ctx.broker` 动作延迟到 `ready_at = tick + B` 后才可见/提交。未 ready 的跨分钟 broker 动作还不是委托，不会出现在 `pending()`；`pending()` 只展示已提交但未成交/可撤的在途单。
 - 回测成本：`backtest` 独立计时，不计入 Fold 推理 deadline，但单 Fold 次数受 `max_backtests_per_fold` 限制；单 tick 与单交易日真实墙钟硬上限由 run manifest 给出。先用小 `replay_window` 试探，再外推完整耗时。
 - 跨 tick 状态：`ctx.state_dir` 只存你的规则、计划和轻量状态，不是持仓/委托账本；Broker 才是真相源。`ctx.state_dir` 只能在 `ctx.substep` 内访问，块内读到进入该块前的可见状态，写入按 `ready_at` 延迟合并；每次回测重置，需继承的参数在回测前写入 `models/`。
 - NL 与做空：`ctx.nl(ts_code, prompt=...)` 用于单股文本分析，`ctx.nl(prompt=...)` 用于事件/主题/行业/宏观文本检索；文本按数据节点 PIT 滚动且受配额限制，证据必须降权使用。默认做空券源由成交当日 `margin_secs` 校验，缺失当日集合时回退决策日冻结集合，不可融券会拒单。
@@ -104,7 +104,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 | 日线核心（daily/daily_basic/复权/涨跌停/停牌）、资金流、大宗、股东/回购/解禁/龙虎榜、宏观全域、分钟历史、批量文本 | `cn_evening_full` 23:35 启动、约次日 02:05 完成 | 交易日内横截面只到 **D-1**；当日日线要等次日约 02:05 才可见，当日实时行情用 `ctx.bars`/`ctx.price` |
 | 基本面 PIT 事件 | `cn_nightly_pit_event_build` 约 03:50 | 次日凌晨可查 |
 | 当日融券标的 `margin_secs` | 盘前 `cn_preopen_margin_secs_*` 约 09:05/09:15 | **当日**盘前可见 |
-| 上一交易日两融 `margin`/`margin_detail` | 盘前 `cn_preopen_margin_*` 约 09:05/09:15 | 次日盘前可见 |
+| 上一交易日两融 `margin`/`margin_detail` | 盘前 `cn_preopen_margin_*` 约 09:07/09:17 | 次日盘前可见 |
 | 短讯/新闻联播（cctv_news/news） | 盘前 `cn_preopen_text_backfill` 约 09:00 | 当日盘前可见 |
 
 `ctx.asof_dir` 只包含 parquet parts 目录，用 `pd.read_parquet(ctx.asof_dir / "daily")` 读取（域名 `daily`/`events`/`macro`/`fundamentals`/`intraday_1min`）。盘中无刷新节点跨越，视图冻结、`ctx.asof_version` 不变——按它缓存读取、变化时再重算。`ctx.nl()` 文本语料不在 `ctx.asof_dir` 下，通过宿主检索服务按上表节点滚动（冻结研究语料始终可见）。`ctx.snapshot_dir` 是 Fold 决策时点（区间前一交易日收盘）冻结的研究基准快照。
@@ -128,7 +128,6 @@ FOLD_ACTION_SECTION = """\
 | `modification_check` | （无） | 主动检查正式产物改动是否在约束内；`backtest` 执行前也会自动复核 |
 | `backtest` | replay_window? | 验证回测；Environment 逐 tick 回放当前 `output/main.py` 的 `main(ctx)`；可选 `replay_window` 只回放前 N 个交易日做快速调试（标记非完整验证、不可冻结、不满足 `finish_fold`），默认整段回放 |
 | `finish_fold` | （无） | 结束本 Fold；调用前先按“提交合同”自检；成功后 `output/` 和 `models/` 只读锁定，Sandbox 内 Agent 后台进程会被清理 |
-| `note` | text? | 记录推理，不执行任何操作 |
 
 一轮可以发起多个工具调用：相互独立的只读检索（如多个 grep/glob）应在同一轮并行发起以省时；`write_file`/`edit_file`/`explore`/`modification_check`/`backtest`/`finish_fold` 等有状态工具按因果顺序单独调用。每个工具调用都会单独返回一条结果。
 工具失败时优先读取结果中的 `error_type`、`reason`、`retry_hint`、`blocked_target`；Shell 结果若 `exit_code != 0`，先读 `stderr`，输出被截断时再读 `stdout_path` / `stderr_path`；修正命令或参数后继续，不要反复提交同一个失败调用。
@@ -138,24 +137,24 @@ FOLD_ACTION_SECTION = """\
 
 | 接口 | 主要参数 | 用途 |
 |---|---|---|
-| `ctx.broker.buy` / `sell` | ts_code, amount?/weight?, limit?, valid_bars?, reason? | **普通账户**现金买入/卖出（long-only）；返回可用于撤单的 `order_id` |
-| `ctx.broker.credit_buy` / `credit_sell` | ts_code, amount?/weight?, limit?, valid_bars?, reason? | **信用账户**担保品买入/卖出（现金口径，构成信用账户担保资产） |
-| `ctx.broker.fin_buy` | ts_code, amount?/weight?, limit?, valid_bars?, reason? | 融资买入（信用账户）：不动用现金，本金+佣金计入融资负债合约、按日计息；受保证金可用余额、融资标的池与授信额度约束 |
-| `ctx.broker.short` / `cover` | ts_code, amount?/weight?, limit?, valid_bars?, reason? | 融券卖出/买券还券（信用账户）；**融券卖出必须给 `limit=`，且申报价不得低于参考最新价（uptick 规则），市价 short 会被拒** |
+| `ctx.broker.buy` / `sell` | ts_code, amount, limit?, valid_bars?, reason? | **普通账户**现金买入/卖出（long-only）；`valid_bars` 为限价单最多挂单 bar 数（默认 1）；返回可用于撤单的 `order_id` |
+| `ctx.broker.credit_buy` / `credit_sell` | ts_code, amount, limit?, valid_bars?, reason? | **信用账户**担保品买入/卖出（现金口径，构成信用账户担保资产）；当前由 `margin_secs` 近似标的池门控 |
+| `ctx.broker.fin_buy` | ts_code, amount, limit?, valid_bars?, reason? | 融资买入（信用账户）：不动用现金，本金+费用计入融资负债合约、按自然日 /360 计息；受保证金可用余额、`margin_secs` 近似标的池与授信额度约束 |
+| `ctx.broker.short` / `cover` | ts_code, amount, limit?, valid_bars?, reason? | 融券卖出/买券还券（信用账户）；**融券卖出必须给 `limit=`，且申报价不得低于参考最新价（uptick 规则），市价 short 会被拒；开空当日不可还券** |
 | `ctx.broker.sell_repay` | ts_code, amount?, limit?, valid_bars?, reason? | 卖券还款（信用账户）：卖出净所得先还息后还本（最老合约优先），余额留作信用账户现金；无融资负债时拒单 |
-| `ctx.broker.direct_repay` | amount(元), reason? | 直接还款（信用账户）：从信用账户现金偿还融资负债（先息后本），金额自动截断到可用现金与负债余额；在提交 tick 即时结算 |
-| `ctx.broker.transfer` | amount(元), from_account, to_account, reason? | 两账户间现金划转（银证转账式，提交 tick 即时结算）；融券冻结所得不可划出，信用账户有负债时划出须保持维保比例 ≥ 提取线（见 facts `maintenance_withdraw_ratio`） |
+| `ctx.broker.direct_repay` | amount(元), reason? | 直接还款（信用账户）：从信用账户现金偿还融资负债（先息后本）；金额必须不超过信用账户可用现金和待还融资负债，否则拒单；在提交 tick 即时结算 |
+| `ctx.broker.transfer` | amount(元), from_account, to_account, reason? | 两账户间现金划转申请；仅接受每日 09:14 前提交的当日盘前申请，09:14 统一确认；融券冻结所得不可划出，信用账户有负债时划出须保持维保比例 ≥ 提取线（见 facts `maintenance_withdraw_ratio`） |
 | `ctx.broker.close` | ts_code, account?, reason? | 市价平掉该票全部持仓（按持仓账户与方向自动转换）；两个账户同时持有该票时必须显式给 `account=`，否则抛错 |
-| `ctx.broker.cancel` | order_id, reason? | 撤销 `pending()` 返回的未成交委托（substep 延迟队列、提交延迟队列或 Broker 当日订单簿；order_id 跨账户唯一） |
-| `ctx.broker.pending` | ts_code? | 有参返回该票在途单；无参返回全部在途单。记录含 `order_id`、`account`、`submitted_at`、`age_minutes`、`status`，可能含 `pending_stage`；`substep_delay` 的 age 从生成 tick 起算，ready 后进入 `submit_lag` 则从实际提交 tick 起算 |
+| `ctx.broker.cancel` | order_id, reason? | 撤销 `pending()` 返回的未成交委托（提交延迟队列或 Broker 当日订单簿；order_id 跨账户唯一） |
+| `ctx.broker.pending` | ts_code? | 有参返回该票已提交但未成交/可撤的在途单；无参返回全部在途单。记录含 `order_id`、`account`、`op_type`、`submitted_at`、`age_minutes`、`status`，可能含 `pending_stage` |
 | `ctx.broker.position` | ts_code, account? | 已成交持仓（不含在途），是持仓真相源；缺省跨账户净额（多空对冲净 0），给 `account=` 看单账户 |
-| `ctx.broker.stock` | （无） | 普通账户视图 dict（`cash`/`available_cash`/`total_assets`/`market_value`），每 tick 反映已成交结果；substep 内未成交计划不改变它 |
-| `ctx.broker.credit` | （无） | 信用账户视图 dict（`cash`/`available_cash` 扣融券冻结所得、维保比例、保证金可用余额、融资/融券负债、已计未付利息、额度、利率） |
+| `ctx.broker.stock` | （无） | 普通账户视图 dict（`cash`/`available_cash`/`total_assets`/`market_value`）；`cash` 是已成交真相，`available_cash` 扣已提交未成交买单冻结 |
+| `ctx.broker.credit` | （无） | 信用账户视图 dict（`cash`/`available_cash`、维保比例、保证金可用余额、融资/融券负债、已计未付利息、额度、利率）；可用现金/保证金扣融券冻结所得和已提交未成交订单占用 |
 | `ctx.broker.debt_contracts` | ts_code? | 未了结融资/融券负债合约明细（未还金额/量、开仓日、年利率、已计利息） |
 
-每次实验同时运行两个独立账户（普通 + 信用），现金、持仓与 T+1 各自独立、互不担保：普通账户 long-only；融资/融券只在信用账户。同一票允许普通账户做多 + 信用账户融券做空（对冲）。`amount` 是股数（按 100 股向下对齐），`weight` 是**下单目标账户**初始资金的名义比例；二者择一。`limit=P` 为限价单，缺省为市价单。只在显式可报单/交易分钟 tick 提交新订单；off-session tick 写计划。`ctx.broker` 下单/撤单/划转原语必须在 `ctx.substep` 内调用：`0 < B < 1` 的轻量块按当前决策分钟提交并统计耗时，`B>=1` 的动作等到 `ready_at` 后第一个可报单 tick 才提交，再按常规成交延迟撮合。
+每次实验同时运行两个独立账户（普通 + 信用），现金、持仓与 T+1 各自独立、互不担保：普通账户 long-only；融资/融券只在信用账户。同一票允许普通账户做多 + 信用账户融券做空（对冲）。`amount` 是股数，必须是正整数；普通 A 股 100 股整数倍，科创板 200 股起、之后 1 股递增。Broker 不做向下取整、超可卖量截断或单票 cap 自动压量，超约束直接拒单。仓位 sizing 由策略显式读取现金/价格/可卖量后自行计算，Broker 不接受 `weight` 下单参数。`limit=P` 为限价单，缺省为市价单；非正 `limit` 拒单。只在显式可报单/交易分钟 tick 提交新订单；普通 off-session tick 不提交交易所订单，`transfer` 只用于每日 09:14 前的盘前资金划转申请。`ctx.broker` 下单/撤单/划转原语必须在 `ctx.substep` 内调用：`0 < B < 1` 的轻量块按当前决策分钟提交并统计耗时，`B>=1` 的动作等到 `ready_at` 后第一个可报单 tick 才提交，再按常规成交延迟撮合。
 
-信用账户经济学（与交易所实施细则一致）：融资/融券利息按自然日计入合约、还款/还券时以现金支付（先息后本、最老合约优先）；维保比例 = (信用账户现金+证券市值)/(融资负债+融券市值+利息)——**只计信用账户资产，普通账户不作担保**——低于平仓线（见 facts `maintenance_closeout_ratio`）强制平掉信用账户持仓（普通账户不受影响）；融券卖出所得现金被冻结、只能用于买券还券、不可划转；新的融资/融券操作受保证金可用余额（信用现金+担保品市值×折算率−占用−浮亏）约束。两账户初始资金见 facts `stock_initial_cash` / `credit_initial_cash`，可用 `transfer` 重新配置（信用划出受提取线约束）。
+信用账户经济学（与交易所实施细则一致）：融资/融券利息按自然日 /360 计入合约、还款/还券时以现金支付（先息后本、最老合约优先）；融资买入股份卖出时必须用 `sell_repay` 先还融资负债；维保比例 = (信用账户现金+证券市值)/(融资负债+融券市值+利息)——**只计信用账户资产，普通账户不作担保**——低于平仓线（见 facts `maintenance_closeout_ratio`）强制平掉信用账户持仓（普通账户不受影响）；融券卖出所得现金被冻结、只能用于买券还券、不可划转；新的融资/融券操作受保证金可用余额（信用现金+担保品市值×折算率−占用−浮亏）约束。两账户初始资金见 facts `stock_initial_cash` / `credit_initial_cash`，可用盘前 `transfer` 重新配置（信用划出受提取线约束）。
 
 `ctx` 其他字段：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`、`ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`、`ctx.substep(name, budget_minutes=B)`、`ctx.asof_dir`、`ctx.asof_version`、`ctx.snapshot_dir`、`ctx.model_dir`、`ctx.state_dir`、`ctx.params`、`ctx.nl(ts_code?, prompt=...)`。
 
@@ -333,7 +332,6 @@ META_LEARNING_INSTRUCTION = """\
 | `web_search` | engine, perspective, query, max_results? | 配置允许时用于元学习联网检索；`engine` 和 `perspective` 按工具 schema 与 run manifest 选择 |
 | `web_fetch` | url, max_chars?, use_proxy? | 元学习专用；宿主侧只读抓取公开 http/https 页面，默认直连；`use_proxy=true` 才允许使用 active 代理；GET-only，无登录、认证、POST、浏览器渲染或 JS 执行 |
 | `modification_check` | （无） | 检查正则化改动是否在约束内 |
-| `note` | text? | 记录推理，不执行任何操作 |
 | `done` | （无） | 写好 Taste、必要修改通过 modification_check 后结束会话 |
 
 一轮可以发起多个工具调用：相互独立的只读检索（grep/glob/web_search/web_fetch）可在同一轮并行发起；有状态修改按因果顺序单独调用。每个工具调用都会单独返回一条结果。
@@ -731,7 +729,7 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             "nl_max_calls_per_decision_day": manifest.get("nl_max_calls_per_decision_day"),
             "nl_max_calls_per_backtest": manifest.get("nl_max_calls_per_backtest"),
             "short_inventory_mode": profile.get("short_inventory_mode") or manifest.get("short_inventory_mode"),
-            "credit_target_source": "events.parquet dataset=margin_secs (gates both 融资 and 融券)",
+            "credit_target_source": "events.parquet dataset=margin_secs (temporary shared gate for 担保品买入, 融资 and 融券)",
             "fin_margin_ratio": profile.get("fin_margin_ratio"),
             "slo_margin_ratio": profile.get("slo_margin_ratio"),
             "fin_rate_annual": profile.get("fin_rate_annual"),

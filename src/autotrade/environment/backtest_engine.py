@@ -302,7 +302,7 @@ def _daily_high(bar: pd.Series) -> float:
 
 
 def compute_return_stats(result: ReplayResult) -> dict[str, object]:
-    """The minimum return statistics from docs/environment_design.md §3.4."""
+    """The minimum return statistics from docs/environment_design.md §3.5."""
     broker = result.broker
     curve = result.equity_curve
     initial = broker.initial_equity
@@ -340,6 +340,11 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
     status_counts: dict[str, int] = {}
     for order in orders:
         status_counts[str(order["status"])] = status_counts.get(str(order["status"]), 0) + 1
+    margin_secs_reject_count = sum(
+        broker.reject_counts.get(reason, 0)
+        for reason in ("margin_secs_not_collateral", "margin_secs_not_finable", "margin_secs_not_shortable")
+    )
+
     return {
         "initial_cash": initial,
         "final_equity": float(curve.iloc[-1]) if len(curve) else initial,
@@ -356,7 +361,7 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "order_count": len(orders),
         "order_status_counts": status_counts,
         "reject_counts": dict(broker.reject_counts),
-        "margin_secs_reject_count": broker.reject_counts.get("margin_secs_not_shortable", 0),
+        "margin_secs_reject_count": margin_secs_reject_count,
         "broker_inventory_reject_count": broker.reject_counts.get("broker_inventory_unavailable", 0),
         "max_holdings_reject_count": broker.reject_counts.get("max_holdings_reached", 0),
         "fees_paid": float(broker.fees_paid),

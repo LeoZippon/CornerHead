@@ -16334,3 +16334,78 @@ Verification:
 - PROMPTS.md re-exported (idempotent); `git diff --check` clean.
 - Sandbox image rebuilt (driver baked in) and `DockerizedFoldE2ETest` re-run against it via the full-suite run.
 - Resources: CPU-only; RAM ample; no GPU used.
+
+## 2026-07-06 Fourth full audit: docs + code + real-world brokerage fidelity (feat/qmt-credit-broker)
+
+Task: comprehensive audit per user request — (1) living-doc logic/duplication/readability with environment_design §1–§2 excluded as pre-audited, (2) doc↔code alignment plus style/correctness/conciseness/fail-fast review, (3) real-world brokerage and margin-account (两融) fidelity check, (4) removal of version labels such as "v1".
+
+Method: six parallel read-only sub-agent audits (docs cross-audit; broker/replay engine; agent runtime & sandbox tools; data layer; pipeline; margin/industry realism verified against the SZSE 融资融券交易实施细则 2023 text, CSRC notices, and the bundled official QMT in-client API doc `external_references/gjzq-da-qmt`). Every High and key Medium finding was re-verified by hand in source before acceptance. Working tree audited as-is (uncommitted doc/code alignment changes from the prior session included).
+
+Code changes landed this session (version-label sweep only; all audit remediation deferred):
+- `src/autotrade/environment/llm/proxy.py`: ScriptedLLM model `"scripted-v0"` → `"scripted"` (2 sites).
+- `tests/unit/test_tools_flow.py`: fixture model `"compact-v0"` → `"compact-model"` (4 sites).
+- `tests/unit/test_pipeline_e2e.py`: dropped the stale `V1:` audit-finding tag from a comment.
+- `tests/unit/test_main_ctx_replay.py`: staging-test payload strings `"v1"`/`"v2"` → `"seed"`/`"update"`.
+- Living docs and src were already clean (`profile_id` is already `gjzq_dual`); LOGBOOK/DETAILED_LOGBOOK deliberately untouched — their `V1`/`V2` strings are historical audit-finding IDs, not version labels.
+- Verification: 174 tests across the three touched files OK (`python -m unittest`, quant env); embedded-suffix sweep (`_v[0-9]`) also clean.
+
+Key verified findings (hand-checked in source):
+- High / real-world: same-day 融券 cover permitted (`broker.py` `Position.sellable_quantity` gives shorts no T+1 lock) — 细则 2.13 mandates T+1 还券 since 2015-08; environment_design §3.2 states the correct rule, so code contradicts both regulation and its own doc. Tests bake the wrong behavior in (`test_short_can_cover_same_day`).
+- High / real-world: no long-side corporate actions — raw-price replay books ex-date drops as pure loss; grep across broker.py/broker_core.py/main_ctx_engine.py/backtest_engine.py finds zero dividend/adj_factor consumption. Short side is documented as disabled; long side is silent.
+- High / engine: `main_ctx_engine._int_or_none` silently floors fractional amounts (`int(float(v))`) and maps NaN/garbage to `None`, which reduce verbs interpret as "close entire sellable position" — violating the documented reject-don't-clamp contract on the primary strategy path.
+- High / pipeline: `run_fold` catches ALL `_frozen_test_eval` exceptions including the artifact-tamper `RuntimeError`, records them only as `finalize_error`, hardcodes `"state_changed_during_test": False`, and never re-raises; the held-out path fail-fasts correctly, so the two paths are inconsistent with each other and with pipeline_design §4.2.
+- Margin/microstructure Medium: 细则 2.14 forced repayment when selling financed shares not modeled; no 6-month debt-contract term; forced-close proceeds do not repay fin debt (debt keeps accruing against idle cash); margin-ratio floors static across the 2023-09→2026-01 regime window (correct for current live, conservative for history); interest day-count /365 vs broker convention /360; STAR-market 200-share+1-increment lots unmodeled; all-or-nothing fills with no volume/liquidity cap; 1.40 warning line documented as "audit record" but no recording code exists; uptick-rejected short Order lacks `account="credit"` (drops out of CREDIT ORDER queries/stats); submit-lag `pending()` records missing documented account/op_type fields.
+- Agent-runtime Medium: `output/README.md` readonly guard bypassable via `"./README.md"`; deterministic trim can rewrite the summary every turn without dropping messages (prefix-cache thrash); `chars/3` token estimator ~3× underestimates CJK vs the 200k compact trigger; production-dead prompt fallback would render unredacted fold_info/test_period if ever hit.
+- Data-layer Medium: same-day stk_limit/suspend_d rows structurally cannot enter daily.parquet though the manifest's `visible_trade_dates_by_dataset` claims day-D visibility; `shibor_quote` absent from both nightly default sets (silently stale, audit green); host absolute paths leak into agent-visible events.parquet via `share_float` `source_file`; `_daily_join` lacks a duplicate-key assertion for adj_factor; `_names_as_of`/`_industry_membership` silently return empty on missing files against the fail-fast policy.
+- Docs: parameters_reference defaults verified against code exhaustively — all match; no stale references or version labels anywhere. Main debts: agent_design §3.2 duplicates env §3.2–3.4 broker/substep semantics nearly verbatim (should shrink to signatures + pointers); three cross-doc contradictions (off-session no-order rule vs transfer's before-09:14 contract; acceptance checklists' `available_at <= decision_time` wording predating the per-tick Timeview cutoff; QMT §2.2 executor sketch hardcoding orderType 1101 while op-32 direct repay uses 1102 amount-CNY); prompts.py still advertises the removed "day" fold period; PROMPTS.md margin visibility row shows node start (~09:05/09:15) instead of ready (~09:07/09:17) times.
+- Verified-correct margin core (for the record): 维持担保比例 formula per 细则 4.10; 300% withdraw line incl. cash+securities numerator subtlety; 130/140 lines correctly framed as broker-contract convention; 保证金可用余额 with 100% 浮亏 folding; 融券 limit-only + uptick rule; locked short proceeds; 卖券还款 interest-first FIFO; calendar-day interest; stamp-duty 0.05% sell-side with the 2023-08-28 cutover; every opType/prType/orderType code and m_* field matches the official QMT doc verbatim.
+
+Conclusion: QMT interface layer and the credit-account math core are highly faithful; defects concentrate in four Highs (融券 T+1, long corporate actions, engine input coercion, frozen-test tamper detection) plus small-fix Mediums. Remediation not implemented this session — to be scheduled as separate work items. Full findings delivered in-session.
+Resources: CPU-only audit (sub-agents read-only + one 174-test run); no training/inference started.
+
+## 2026-07-06 Broker realism remediation batch (feat/qmt-credit-broker)
+
+Task: implement the user-approved remediation subset from the audit while leaving long-side corporate actions and partial fills for later.
+
+Code changes:
+- `broker.py` / `broker_core.py`: 融券 shorts now use the same T+1 lock machinery as long buys, so same-day 买券还券 rejects and D+1 cover works. Trade fees now include 0.01‰ transfer fee, debt interest uses natural days /360, STAR Market share validation is 200 shares minimum then 1-share increments, and debt contracts carry `last_extension_date`/`extension_count` with 180-day auto-extension audit events.
+- Credit-account rules: `credit_sell` rejects financed shares with `financed_shares_require_sell_repay`; `sell_repay` remains the required path for selling financed shares and applying proceeds interest-first/FIFO to financing debt. `mark_to_market` records `maintenance_warning` when the credit ratio is between closeout and warning lines.
+- Engine/driver hardening: `_submit_order` validates amount before `passorder` instead of relying on `_int_or_none`; fractional/NaN/garbage amount no longer becomes `None`/full close. Non-positive `limit` rejects as `invalid_limit_price`. `close()` on a financed credit long resolves to `sell_repay`; same-tick and submit-lag pending records include `account` and `op_type`; uptick-rejected shorts carry `account="credit"`.
+
+Docs and prompts:
+- `environment_design.md`, `agent_design.md`, `QMT_documentation.md`, `data_documentation.md`, `pipeline_design.md`, `parameters_reference.md`, `src/autotrade/agent/prompts.py`, and the template README now reflect: ordinary off-session ticks do not submit exchange orders while `transfer` is a pre-09:14 cash-transfer request; acceptance checks use Timeview row `available_at` plus refresh-node cutoff rather than a single `decision_time`; QMT op32 direct repayment uses `orderType=1102`; Agent docs keep only interface quick-reference and pointers for full broker/substep semantics.
+- `configs/prompts/PROMPTS.md` regenerated with `scripts/dev/export_prompts.py`.
+
+Validation:
+- `~/miniconda3/envs/quant/bin/python -m py_compile src/autotrade/environment/broker_core.py src/autotrade/environment/broker.py src/autotrade/environment/main_ctx_engine.py src/autotrade/environment/main_ctx_driver.py src/autotrade/agent/prompts.py` OK.
+- Targeted tests: `~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine tests.unit.test_main_ctx_replay tests.unit.test_tools_flow tests.unit.test_pipeline_e2e` -> 240 OK.
+- Full suite: `~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests` -> 483 OK.
+- `git diff --check` clean.
+- CPU-only code/doc/test work; no training or GPU workload started.
+
+## 2026-07-06 Real Docker broker interface smoke (feat/qmt-credit-broker)
+
+Task: after the user's review of environment_design §3.1/§3.2, launch a real Docker Sandbox with real sample data and verify the full `ctx.broker` interface surface.
+
+Setup:
+- Docker Sandbox: `autotrade-sandbox:latest`, `network=none`, CPU-only, no GPU.
+- Real data loaded from `/Data/lzp/MacroQuant/data/raw`: daily rows for 2024-01-02..2024-01-05 and `margin_secs` rows for the same dates. Smoke universe: `000001.SZ`, `000002.SZ`, `600000.SH`, `688001.SH`; minute bars were synthesized from those real daily OHLC rows for deterministic interface coverage.
+- The cached Docker image rebuild timed out in this session. To test current working-tree driver changes without waiting for a full image rebuild, the smoke mounted the current `src/autotrade/environment/main_ctx_driver.py` into the Agent workspace and used a `DockerExecutor` subclass whose runtime path points to that file. Matching, accounting, constraints and replay still ran through the real host `SimBroker` and real Docker container boundary.
+
+Coverage:
+- Query surfaces on every tick: `ctx.broker.stock`, `ctx.broker.credit`, `ctx.account`, `ctx.positions`, `ctx.broker.pending()`, `ctx.broker.debt_contracts()`.
+- Filled action coverage: `buy`, `sell`, `credit_buy`, `credit_sell`, `fin_buy`, `short`, `cover`, `sell_repay`, `direct_repay`, `transfer`.
+- Negative and lifecycle coverage: same-tick `pending()` shape, submit-lag `pending()`, `cancel()`, invalid fractional amount rejection, non-positive limit rejection, STAR 200-share+odd-lot buy, short T+1 cover on D+1, financing debt repayment and final close.
+
+Buglets fixed during smoke:
+- `main_ctx_driver.py`: `close()` now annotates same-tick pending records with the resolved QMT-style `op_type` (stock sell 24, cover 29, sell_repay 31, credit_sell 34).
+- `main_ctx_engine.py`: submit-lag pending view now preserves action-provided `account` / `op_type` before falling back to `broker.account_op_for_action`, which is necessary for `close()` and other resolved actions.
+- `main_ctx_driver.py`: `direct_repay()` now exposes `account="credit"` and `op_type=32` in same-tick pending records.
+
+Result:
+- Docker smoke passed: 15 orders, 28 broker events, final equity 999,498.65; filled actions covered all intended broker primitives; reject reasons included `invalid_amount` and `invalid_limit_price`; broker events included `cash_transferred`, `debt_repaid`, `main_actions`, `order_cancelled`, `order_filled`, `order_rejected`, `position_closed`, `position_reduced`, and `transfer_requested`.
+- No Docker containers were left running after the smoke.
+
+Validation:
+- `~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_main_ctx_replay tests.unit.test_broker_engine` -> 115 OK.
+- `git diff --check` clean.

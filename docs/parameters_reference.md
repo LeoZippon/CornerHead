@@ -86,7 +86,7 @@
 
 ## 3. 回放执行与预算
 
-定义：`src/autotrade/pipelines/config.py`（逐项写入 run manifest）；权威文档 `environment_design.md` §3.2「执行与资源预算一览」。
+定义：`src/autotrade/pipelines/config.py`（逐项写入 run manifest）；回放限时语义见 `environment_design.md` §3.5。
 
 | 参数 | 默认 | 约束对象 |
 |---|---:|---|
@@ -113,11 +113,11 @@
 | `nl_failure_policy` | `return_error_with_audit` | NL 失败时对策略的返回策略 |
 | NL 单次调用超时（派生） | `0.8 ×` 单决策上限 | 为决策 tick 的其余计算留余量（`tools/backtest.py`） |
 
-有意不设固定回测总上限：总耗时上界 = 交易日数 × 单日上限（`environment_design.md` §3.2）。
+有意不设固定回测总上限：总耗时上界 = 交易日数 × 单日上限（`environment_design.md` §3.5）。
 
 ## 4. Broker profile（账户、成本与信用）
 
-定义：`src/autotrade/environment/broker.py`（`BrokerProfile`，默认 `gjzq_dual_v1`；每次实验固定运行普通 + 信用双账户）与 `broker_core.py` 常量；权威文档 `environment_design.md` §3.3。全部字段经 `to_record()` 写入 run manifest 并回读重建。
+定义：`src/autotrade/environment/broker.py`（`BrokerProfile`，默认 `gjzq_dual`；每次实验固定运行普通 + 信用双账户）与 `broker_core.py` 常量；权威文档 `environment_design.md` §3.2。全部字段经 `to_record()` 写入 run manifest 并回读重建。
 
 **账户与成本**
 
@@ -126,12 +126,13 @@
 | `stock_initial_cash` | 500,000 | 普通账户（long-only 现金）初始资金（元） |
 | `credit_initial_cash` | 500,000 | 信用账户（担保品买卖 + 融资融券）初始资金（元）；组合权益 = 两者之和，运行中可经 `transfer` 划转 |
 | `commission_bps` | 1.0 | 佣金（万一），受最低佣金约束 |
+| `transfer_fee_bps` | 0.1 | 过户费（0.01‰，买卖双边） |
 | `min_commission_cny` | 5.0 | 最低佣金（元/笔） |
 | `stamp_duty_sell_bps_before_cutover` | 10.0 | 印花税（卖出侧，切换日前，万十） |
 | `stamp_duty_sell_bps_from_cutover` | 5.0 | 印花税（切换日起，万五） |
 | `broker_core.STAMP_DUTY_CUTOVER`（常量） | `20230828` | 印花税减半切换日 |
 | `slippage_bps` | 5.0 | 市价 taker 滑点（限价/竞价成交不计滑点） |
-| `broker_core.LOT_SIZE`（常量） | 100 | A 股一手股数（下单向下对齐） |
+| `broker_core.LOT_SIZE`（常量） | 100 | 普通 A 股一手股数；科创板为 200 股起、之后 1 股递增 |
 | `max_total_holdings` | None | 最大持仓数（默认交给 Agent 自控） |
 | `max_single_name_weight` | None | 单票权重上限（默认交给 Agent 自控） |
 
@@ -139,13 +140,15 @@
 
 | 参数 | 默认 | 作用 |
 |---|---:|---|
-| `short_inventory_mode` | `proxy_margin_secs` | 标的池模式：`proxy_margin_secs` / `broker_inventory` / `theoretical_short`（同一集合门控融券与融资） |
+| `short_inventory_mode` | `proxy_margin_secs` | 信用账户标的池模式：`proxy_margin_secs` / `broker_inventory` / `theoretical_short`（当前同一集合近似门控担保品买入、融资买入与融券卖出） |
 | `fin_margin_ratio` | 1.0 | 融资保证金比例（交易所下限 100%） |
 | `slo_margin_ratio` | 1.0 | 融券保证金比例 |
 | `slo_margin_ratio_private_fund` | 1.2 | 私募适用的融券保证金比例（`is_private_fund=True` 时生效） |
 | `is_private_fund` | False | 选择融券保证金档位 |
-| `fin_rate_annual` | 0.0835 | 融资利率（年化，研究假设，按自然日计入合约） |
-| `slo_rate_annual` | 0.085 | 融券费率（年化，研究假设） |
+| `fin_rate_annual` | 0.0835 | 融资利率（年化，研究假设，按自然日 /360 计入合约） |
+| `slo_rate_annual` | 0.085 | 融券费率（年化，研究假设，按自然日 /360 计入合约） |
+| `debt_contract_term_days` | 180 | 融资/融券负债合约期限（自然日） |
+| `debt_contract_auto_extend` | True | 合约到期时自动展期并记录审计事件 |
 | `assure_ratio` | 0.70 | 平坦担保品折算率近似（交易所上限：指数成份 ≤70%、其他 ≤65%） |
 | `fin_max_quota` / `slo_max_quota` | None | 融资/融券授信额度（None = 不设额度上限） |
 | `maintenance_closeout_ratio` | 1.30 | 维持担保比例平仓线（触发时只强平信用账户；普通账户不作担保） |

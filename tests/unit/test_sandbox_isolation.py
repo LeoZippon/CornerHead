@@ -531,7 +531,7 @@ class MetaLearningSessionTest(unittest.TestCase):
                         max_results=1,
                     )
                 ),
-                tool_call_response(tool_call("note", text="continue after failure")),
+                tool_call_response(tool_call("glob", pattern="**/*", root="workspace")),
             ]
             runner = AgentSessionRunner(
                 ctx,

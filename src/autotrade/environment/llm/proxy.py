@@ -192,7 +192,7 @@ class ScriptedLLM(LLMProxy):
     """Deterministic in-memory proxy for tests and dry runs."""
 
     provider = "scripted"
-    model = "scripted-v0"
+    model = "scripted"
 
     def __init__(self, responses: list[ProviderResponse | str | Exception]) -> None:
         self._responses = list(responses)
@@ -268,7 +268,7 @@ def tool_call_response(*calls: dict[str, object], content: str = "", reasoning: 
     return ProviderResponse(
         content=content,
         provider="scripted",
-        model="scripted-v0",
+        model="scripted",
         reasoning_content=reasoning,
         tool_calls=tuple(calls),
     )

@@ -1,3 +1,14 @@
+2026-07-06 第四轮全面审计：文档 + 代码 + 实盘保真（feat/qmt-credit-broker）
+
+- 六个并行只读子代理审计（文档交叉逻辑/去重/可读性、broker/引擎、Agent 运行时与工具、数据层、pipeline、两融/行业保真——细则与官方 QMT 文档原文核验）；High 与关键 Medium 项全部人工在源码复核后采信。env_design §1–§2 按用户指示视为已审计跳过。
+- 实盘保真 High×2：①代码允许融券**当日**还券（`sellable_quantity` 对空头不设 T+1 锁），细则 2.13 自 2015-08 起为 T+1，且 env_design §3.2 写的是正确规则——码与文档相反；②多头公司行为完全缺失：raw 价回放下除权日跌幅记为纯亏损，broker/engine 四个模块 grep 无任何 dividend/adj_factor 消费（空头侧已文档化 disabled，多头侧无声）。
+- 代码 High×2：①引擎 `_int_or_none` 静默 floor 小数股数、NaN/垃圾→None→reduce 动词按"全仓卖出"执行，违反 §3.2"拒单不取整"契约；②`run_fold` 吞掉 `_frozen_test_eval` 全部异常（含 artifact 篡改 RuntimeError），`state_changed_during_test` 硬编码 False，与 held-out 路径的 fail-fast 不一致。
+- 两融 Medium：细则 2.14（卖出融资标的所得应先偿融资欠款）未建模；负债合约无 6 个月期限；强平所得不偿融资、负债继续计息；保证金比例下限静态（对 2026-07 实盘正确，2023-09~2026-01 历史回放偏紧，属保守）；利息 /365 vs 券商惯例 /360；科创板 200 股+1 股递增未建模（现按 100 整数倍误拒/误受）；无部分成交与流动性约束。核对为**正确**的：维保比例公式、300% 提取线（含现金+证券分子口径）、130/140 券商约定线定位、保证金可用余额（浮亏 100% 折算）、融券限价+uptick、冻结所得、卖券还款先息后本 FIFO、自然日计息、印花税 2023-08-28 切换、opType/prType/1101/1102/m_* 字段逐一与官方文档一致。
+- 其余 Medium 簇：uptick 拒单 Order 缺 `account="credit"`（信用 ORDER 查询/统计漏计）；`pending()` submit-lag 记录缺 account/op_type 字段（与文档映射表不符）；警戒线 1.40 文档称"仅审计记录"但无任何记录代码；token 估算 chars/3 对中文低估约 3×（compact 可能晚触发）；确定性 trim token 触发时可能一字不删却每轮重写 summary（打散前缀缓存）；`"./README.md"` 绕过 output/README 只读守卫；数据层：stk_limit/suspend_d 当日行结构上进不了 daily.parquet 但 manifest 声称可见、shibor_quote 掉出夜间刷新且 audit 测不出年内陈旧、share_float `source_file` 宿主绝对路径泄入 agent 可见 events.parquet、`_daily_join` 对 adj_factor 缺重复键断言、`_names_as_of`/`_industry_membership` 缺文件静默返回空（违反 fail-fast）。
+- 文档面：parameters_reference **全部默认值与代码核验一致**，所有文件/CLI/函数引用有效；主要债务为 agent_design §3.2 近拷贝 env §3.2–3.4 语义（应缩为签名+指针）、三处跨文档矛盾（盘外禁报单规则未给 transfer 留 09:14 前豁免；验收清单 `available_at <= decision_time` 措辞早于 Timeview 逐 tick 模型；QMT §2.2 执行器草图 1101-only 未提 op32 用 1102 金额口径）、prompts.py 残留已删除的"日 Fold"周期、PROMPTS.md margin 可见时间写节点启动时刻（应为就绪 ~09:07/09:17）。
+- 版本标签清除（本次唯一代码改动）：`scripted-v0`→`scripted`（llm/proxy.py）、`compact-v0`→`compact-model`（test_tools_flow）、删测试注释"V1:"标签（test_pipeline_e2e）、暂存测试载荷 "v1"/"v2"→"seed"/"update"（test_main_ctx_replay）；living docs 与 src 本已干净（profile_id 已是 gjzq_dual）；logbook 历史条目中的 V1/V2 为审计发现编号，有意不改。三个被改测试文件 174 测试全过。
+- 结论：QMT 接口层与两融数学核心保真度高；缺陷集中在融券 T+1、多头公司行为、引擎输入强转、frozen-test 篡改检测四个 High 及上述可小步修复的 Medium。修复未实施，待排期为独立工作项。
+
 2026-07-06 双账户拆分：普通现金账户 + 信用两融账户（feat/qmt-credit-broker）
 
 - 按用户要求把 SimBroker 与 QMT 实盘环境从"单账户（account_type 选型）"改为**固定双账户**：`stock` 普通账户（long-only 现金，opType 23/24）+ `credit` 信用账户（担保品买卖 33/34 + 融资 27 + 融券 28/29/31/32），如同真实投资者在同一券商的两户。现金、持仓、T+1 各自独立、互不担保；opType 自身决定账户归属，`passorder` 无需账户选择器；`get_trade_detail_data` 的 `account_type` 变为必填（STOCK/CREDIT）。
@@ -1022,3 +1033,15 @@
 - 将策略 `ctx.nl()` 与宿主 NL 服务之间的临时 JSONL RPC 从 Agent `workspace` 移到宿主预创建并锁定的 `/mnt/agent/.runtime/nl_rpc/`；request 仅供 Agent 追加，response 由宿主写入、Agent 只读，回测结束删除本次临时文件，目录空时删除 `nl_rpc/`。
 - Sandbox 初始化现在预创建只读 `.runtime`，避免 backtest 阶段打开 `/mnt/agent` 父目录写权限；环境文档同步说明临时 RPC 与正式 `results/.../nl_tool/` 审计产物的区别。
 - Validation: `tests.unit.test_tools_flow` + `tests.unit.test_nl_scoring` 共 104 OK；真实 Docker 完整 valid smoke 调用 DeepSeek NL provider 成功（`nl_calls=1`、provider call log 2 条、`scope=general`、`nl_rpc` 已清理）；`py_compile` 与 `git diff --check` OK；临时容器和 smoke 目录已清理。
+
+2026-07-06 Broker realism remediation batch
+
+- 修复审计中列出的两融/撮合真实性问题：融券买券还券 T+1、非法 amount 严格拒单、融资股卖出必须走卖券还款、submit-lag/same-tick pending 补 `account/op_type`、uptick 拒单归入信用账户、非正 limit 拒单、维保警戒事件、180 日合约展期、利息 /360、科创板 200 股起 1 股递增、过户费 0.01‰。
+- 同步 living docs、QMT 文档、Prompt 和模板 README：off-session 与 transfer 关系、Timeview 可见性验收口径、op32 direct_repay 使用 orderType=1102、Agent 文档去重。
+- Validation: targeted 240 tests OK；full `~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests` -> 483 OK；`git diff --check` clean；PROMPTS.md 已由 `scripts/dev/export_prompts.py` 重新导出。
+
+2026-07-06 Real Docker broker interface smoke
+
+- 启动真实 `autotrade-sandbox:latest` Docker Sandbox（`network=none`），加载 2024-01-02..05 的真实 daily / margin_secs 样本，并用真实宿主 `SimBroker` 跑通普通账户、信用账户、融资、融券、买券还券、卖券还款、直接还款、盘前 transfer、cancel、非法 amount/limit 拒单和 pending 查询。
+- Smoke 暴露并修复 pending 字段细节：`close()` 同 tick pending 补 `op_type`，submit-lag pending 优先保留 action 自带 `account/op_type`，`direct_repay()` 同 tick pending 补 `account="credit"` / `op_type=32`。
+- Validation: Docker smoke OK（15 orders / 28 broker events，filled actions 覆盖 `buy/sell/credit_buy/credit_sell/fin_buy/short/cover/sell_repay/direct_repay/transfer`，rejects 覆盖 `invalid_amount` / `invalid_limit_price`）；`tests.unit.test_main_ctx_replay` + `tests.unit.test_broker_engine` -> 115 OK；`git diff --check` clean。当前镜像 build 曾超时，smoke 通过 workspace overlay 使用最新 `main_ctx_driver.py`。

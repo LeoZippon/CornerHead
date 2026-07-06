@@ -89,6 +89,16 @@ class _DelayedAction:
     generated_at: str
 
 
+@dataclass(frozen=True)
+class _PendingTransfer:
+    seq: int
+    action: dict[str, object]
+    requested_at: str
+
+
+_PREOPEN_TRANSFER_TIME = "09:14"
+
+
 class MainPolicyRunner:
     """Persistent sandbox process serving per-minute ``main(ctx)`` calls."""
 
@@ -403,6 +413,7 @@ def run_main_ctx_replay(
     last_progress_time = replay_start
 
     for day_idx, trade_date in enumerate(market.trade_dates):
+        preopen_transfers: list[_PendingTransfer] = []
         # Roll the sim-date before the day's first tick so overnight holds report
         # their full sellable_quantity (T+1 unlocked) from the first off-session tick,
         # not only after the day's first fill. execute()/mark_to_market() keep their
@@ -461,10 +472,12 @@ def run_main_ctx_replay(
                         _merge_t0 = time.monotonic()
                         stager.merge_ready(when)  # surface staged writes whose ready_at has arrived
                         phase_wall["state_merge"] += time.monotonic() - _merge_t0
+                    _confirm_preopen_transfers(preopen_transfers, broker=broker, trade_date=trade_date, when=when)
                     released_actions = _release_delayed_actions(
                         delayed_actions,
                         broker=broker,
                         incoming=incoming,
+                        preopen_transfers=preopen_transfers,
                         tick=tick,
                         trade_date=trade_date,
                         when=when,
@@ -486,7 +499,8 @@ def run_main_ctx_replay(
                         minute_group=tick.group,
                         asof_dir=asof_dir,
                         asof_version=asof_version,
-                        pending=_pending_view(broker, incoming, delayed_actions=delayed_actions, now=when),
+                        pending=_pending_view(broker, incoming, now=when),
+                        pending_orders=_incoming_reservation_records(broker, incoming),
                         cur_datetime=when.isoformat(),
                     )
                     # A single decision (one main(ctx) tick) over the per-decision real
@@ -588,9 +602,10 @@ def run_main_ctx_replay(
                         immediate_actions,
                         broker=broker,
                         incoming=incoming,
-                        delayed_actions=delayed_actions,
+                        preopen_transfers=preopen_transfers,
                         tick=tick,
                         trade_date=trade_date,
+                        when=when,
                         n_real=n_real,
                     )
                     if placed_actions:
@@ -599,6 +614,8 @@ def run_main_ctx_replay(
                             action_count=len(placed_actions), actions=_jsonable(placed_actions),
                         )
                 _cancel_day_end_orders(broker, trade_date=trade_date)
+
+        _reject_unconfirmed_transfers(preopen_transfers, broker=broker, trade_date=trade_date)
 
         equity = broker.mark_to_market(trade_date)
         if trade_date == exit_date and any(state.positions for state in broker.accounts.values()):
@@ -764,6 +781,7 @@ def _release_delayed_actions(
     *,
     broker: SimBroker,
     incoming: dict[int, list[tuple[dict[str, object], bool, bool]]],
+    preopen_transfers: list[_PendingTransfer],
     tick: "_Tick",
     trade_date: str,
     when: datetime,
@@ -803,9 +821,10 @@ def _release_delayed_actions(
         actions,
         broker=broker,
         incoming=incoming,
-        delayed_actions=delayed_actions,
+        preopen_transfers=preopen_transfers,
         tick=tick,
         trade_date=trade_date,
+        when=when,
         n_real=n_real,
     )
 
@@ -819,9 +838,10 @@ def _place_actions_at_tick(
     *,
     broker: SimBroker,
     incoming: dict[int, list[tuple[dict[str, object], bool, bool]]],
-    delayed_actions: list[_DelayedAction],
+    preopen_transfers: list[_PendingTransfer],
     tick: "_Tick",
     trade_date: str,
+    when: datetime,
     n_real: int,
 ) -> list[dict[str, object]]:
     """Route broker actions submitted at this tick into cancel/order queues."""
@@ -839,7 +859,6 @@ def _place_actions_at_tick(
                 trade_date=trade_date,
                 minute_key=tick.minute_key,
                 reason=str(action.get("reason") or "agent_cancel"),
-                delayed_actions=delayed_actions,
             ):
                 placed_actions = [
                     placed for placed in placed_actions
@@ -854,6 +873,17 @@ def _place_actions_at_tick(
                 reason="cancel_order_not_found" if order_id else "cancel_missing_order_id",
             )
             continue
+        if name == "transfer":
+            if _queue_preopen_transfer(
+                action,
+                preopen_transfers,
+                broker=broker,
+                trade_date=trade_date,
+                minute_key=tick.minute_key,
+                when=when,
+            ):
+                placed_actions.append(dict(action))
+            continue
         fill_index = tick.activate_index
         if fill_index is None or fill_index >= n_real:
             broker.record_event(
@@ -861,9 +891,116 @@ def _place_actions_at_tick(
                 action=_jsonable(action), reason="no_fill_bar_ahead",
             )
             continue
+        if action.get("limit") in (None, ""):
+            reserve_price = _tick_price_for_code(tick.group, str(action.get("ts_code") or ""))
+            if reserve_price is not None:
+                action["_reserve_price"] = reserve_price
         incoming.setdefault(fill_index, []).append((action, tick.is_auction, tick.is_close_auction))
         placed_actions.append(dict(action))
     return placed_actions
+
+
+def _queue_preopen_transfer(
+    action: dict[str, object],
+    pending: list[_PendingTransfer],
+    *,
+    broker: SimBroker,
+    trade_date: str,
+    minute_key: str,
+    when: datetime,
+) -> bool:
+    """Store a same-day account transfer request for the user's 09:14 batch."""
+    cutoff = sim_datetime(trade_date, _PREOPEN_TRANSFER_TIME)
+    if when >= cutoff:
+        broker.record_event(
+            "main_action_ignored",
+            trade_date=trade_date,
+            minute_key=minute_key,
+            action=_jsonable(action),
+            reason="transfer_after_preopen_cutoff",
+            transfer_cutoff=_PREOPEN_TRANSFER_TIME,
+        )
+        return False
+    amount = _float_or_none(action.get("amount"))
+    if amount is None or amount <= 0:
+        broker.record_event(
+            "main_action_ignored",
+            trade_date=trade_date,
+            minute_key=minute_key,
+            action=_jsonable(action),
+            reason="transfer_amount_not_positive",
+            transfer_cutoff=_PREOPEN_TRANSFER_TIME,
+        )
+        return False
+    pending.append(_PendingTransfer(seq=len(pending), action=dict(action), requested_at=when.isoformat()))
+    broker.record_event(
+        "transfer_requested",
+        trade_date=trade_date,
+        minute_key=minute_key,
+        action=_jsonable(action),
+        requested_at=when.isoformat(),
+        confirm_time=_PREOPEN_TRANSFER_TIME,
+    )
+    return True
+
+
+def _confirm_preopen_transfers(
+    pending: list[_PendingTransfer],
+    *,
+    broker: SimBroker,
+    trade_date: str,
+    when: datetime,
+) -> None:
+    """Confirm queued same-day transfers once the simulated clock reaches 09:14."""
+    if not pending or when < sim_datetime(trade_date, _PREOPEN_TRANSFER_TIME):
+        return
+    ready = sorted(pending, key=lambda item: item.seq)
+    pending.clear()
+    for item in ready:
+        action = dict(item.action)
+        amount = _float_or_none(action.get("amount"))
+        if amount is None or amount <= 0:
+            continue
+        try:
+            broker.transfer(
+                amount,
+                str(action.get("from_account", "")),
+                str(action.get("to_account", "")),
+                reason=str(action.get("reason") or "preopen_transfer"),
+                order_id=str(action.get("order_id") or "") or None,
+                submitted_at=sim_datetime(trade_date, _PREOPEN_TRANSFER_TIME).isoformat(),
+            )
+        except ValueError as exc:
+            broker.record_event(
+                "transfer_rejected",
+                trade_date=trade_date,
+                minute_key=_PREOPEN_TRANSFER_TIME,
+                action=_jsonable(action),
+                reason=str(exc),
+                requested_at=item.requested_at,
+            )
+
+
+def _reject_unconfirmed_transfers(
+    pending: list[_PendingTransfer],
+    *,
+    broker: SimBroker,
+    trade_date: str,
+) -> None:
+    if not pending:
+        return
+    ready = sorted(pending, key=lambda item: item.seq)
+    pending.clear()
+    for item in ready:
+        broker.record_event(
+            "transfer_rejected",
+            trade_date=trade_date,
+            minute_key="",
+            action=_jsonable(item.action),
+            reason="preopen_transfer_not_confirmed",
+            requested_at=item.requested_at,
+            confirm_time=_PREOPEN_TRANSFER_TIME,
+        )
 
 
 def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool, is_close_auction: bool = False) -> bool:
@@ -875,9 +1012,10 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
     (the activation tick is also the match tick, so there is no drift window) —
     an explicit ``account`` wins, else the unique holder; ambiguous closes are
     ignored (the driver already rejects them at call time). ``direct_repay``
-    follows the official 1102 (amount in CNY) convention and ``transfer`` moves
-    cash between the accounts; neither needs a bar. ``is_close_auction`` marks a
-    15:00 close-auction order so it fills at the activation bar's close.
+    follows the official 1102 (amount in CNY) convention and needs no bar.
+    ``transfer`` is handled by the pre-open batch path before this order-submission
+    translator. ``is_close_auction`` marks a 15:00 close-auction order so it fills
+    at the activation bar's close.
     Returns False if unsupported."""
     name = _action_name(action)
     order_kwargs = {
@@ -891,25 +1029,20 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
             return False
         broker.passorder(optype.DIRECT_REPAY, 1102, "", "", prtype.PEER, 0, amount, **order_kwargs)
         return True
-    if name == "transfer":
-        amount = _float_or_none(action.get("amount"))
-        if amount is None or amount <= 0:
-            return False
-        broker.transfer(
-            amount,
-            str(action.get("from_account", "")),
-            str(action.get("to_account", "")),
-            reason=order_kwargs["reason"],
-            order_id=order_kwargs["user_order_id"] or None,
-            submitted_at=order_kwargs["submitted_at"],
-        )
-        return True
     ts_code = str(action.get("ts_code", "")).strip()
     if name not in _ORDER_ACTIONS or not ts_code:
         return False
     limit = _float_or_none(action.get("limit")) if name != "close" else None
     if limit is not None and limit <= 0:
-        limit = None
+        broker.reject_submission(
+            ts_code=ts_code,
+            action=name,
+            reason="invalid_limit_price",
+            amount=action.get("amount"),
+            submitted_at=str(action.get("submitted_at") or ""),
+            order_id=str(action.get("order_id") or ""),
+        )
+        return True
     if name == "close":
         account = str(action.get("account") or "").strip().lower()
         if not account:
@@ -923,11 +1056,30 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
         if account == "stock":
             name = "sell"
         else:
-            name = "cover" if broker.position_quantity(ts_code, account="credit") < 0 else "credit_sell"
+            credit_qty = broker.position_quantity(ts_code, account="credit")
+            if credit_qty < 0:
+                name = "cover"
+            elif broker.financed_shares_outstanding(ts_code) > 0:
+                name = "sell_repay"
+            else:
+                name = "credit_sell"
+        action = dict(action)
+        action["amount"] = broker.sellable_quantity(account, ts_code)
     try:
         _, op_type = broker.account_op_for_action(name)
     except ValueError:
         return False
+    shares, amount_reject = broker.validate_share_amount(action.get("amount"), ts_code)
+    if amount_reject is not None:
+        broker.reject_submission(
+            ts_code=ts_code,
+            action=name,
+            reason=amount_reject,
+            amount=action.get("amount"),
+            submitted_at=str(action.get("submitted_at") or ""),
+            order_id=str(action.get("order_id") or ""),
+        )
+        return True
     broker.passorder(
         op_type,
         1101,
@@ -935,8 +1087,7 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
         ts_code,
         prtype.FIX if limit is not None else prtype.PEER,
         limit or 0,
-        _int_or_none(action.get("amount")),
-        weight=_float_or_none(action.get("weight")),
+        shares,
         valid_bars=max(1, _int_or_none(action.get("valid_bars")) or 1) if limit is not None else 1,
         is_auction=is_auction,
         auction_close=is_close_auction,
@@ -969,9 +1120,8 @@ def _cancel_pending_order(
     trade_date: str,
     minute_key: str,
     reason: str,
-    delayed_actions: list[_DelayedAction] | None = None,
 ) -> bool:
-    """Cancel a live working order, submit-lag order, or unreleased substep action."""
+    """Cancel a live working order or submit-lag order."""
     if broker.cancel(order_id, reason=reason, trade_date=trade_date, minute_key=minute_key):
         return True
     for index, items in list(incoming.items()):
@@ -999,30 +1149,6 @@ def _cancel_pending_order(
                     pending_stage="submit_lag",
                 )
             return True
-    if delayed_actions is not None:
-        kept_delayed: list[_DelayedAction] = []
-        removed_delayed: list[_DelayedAction] = []
-        for item in delayed_actions:
-            if str(item.action.get("order_id") or "") == order_id:
-                removed_delayed.append(item)
-            else:
-                kept_delayed.append(item)
-        if removed_delayed:
-            delayed_actions[:] = kept_delayed
-            for item in removed_delayed:
-                broker.record_event(
-                    "order_cancelled",
-                    trade_date=trade_date,
-                    minute_key=minute_key,
-                    ts_code=str(item.action.get("ts_code") or ""),
-                    order_id=order_id,
-                    reason=reason,
-                    pending_stage="substep_delay",
-                    substep=item.substep,
-                    generated_at=item.generated_at,
-                    ready_at=item.ready_at.isoformat(),
-                )
-            return True
     return False
 
 
@@ -1030,45 +1156,32 @@ def _pending_view(
     broker: SimBroker,
     incoming: dict[int, list[tuple[dict[str, object], bool, bool]]],
     *,
-    delayed_actions: list[_DelayedAction] | None = None,
     now: datetime | None = None,
 ) -> dict[str, list[dict[str, object]]]:
     """Working orders the Agent can see via ``ctx.broker.pending(ts_code)``: the
-    Broker's cancelable book plus decisions still inside the submit lag or delayed
-    by a substep, so de-dup holds across the whole decision-to-fill window."""
+    Broker's cancelable book plus decisions already submitted into the regular
+    submit lag. Broker actions whose substep compute is not ready are not orders
+    yet and are intentionally hidden."""
     records = [_pending_record(record, now=now) for record in broker.working_orders()]
-    for item in delayed_actions or []:
-        action = item.action
-        records.append(
-            _pending_record(
-                {
-                    "order_id": action.get("order_id"),
-                    # direct_repay carries no ts_code; it still shows as pending ("").
-                    "ts_code": str(action.get("ts_code", "")),
-                    "action": str(action.get("action", "")),
-                    "order_volume": action.get("amount"),
-                    "weight": action.get("weight"),
-                    "price": action.get("limit"),
-                    "status": "pending",
-                    "submitted_at": action.get("submitted_at"),
-                    "reason": action.get("reason"),
-                    "pending_stage": "substep_delay",
-                    "substep": item.substep,
-                    "ready_at": item.ready_at.isoformat(),
-                },
-                now=now,
-            )
-        )
     for items in incoming.values():
         for action, _is_auction, _is_close_auction in items:
+            account = str(action.get("account") or "")
+            op_type = action.get("op_type")
+            action_name = _action_name(action)
+            if account not in {"stock", "credit"} or op_type is None:
+                try:
+                    account, op_type = broker.account_op_for_action(action_name)
+                except ValueError:
+                    pass
             records.append(
                 _pending_record(
                     {
                         "order_id": action.get("order_id"),
                         "ts_code": str(action.get("ts_code", "")),
-                        "action": str(action.get("action", "")),
+                        "action": action_name,
+                        "account": account,
+                        "op_type": op_type,
                         "order_volume": action.get("amount"),
-                        "weight": action.get("weight"),
                         "price": action.get("limit"),
                         "status": "pending",
                         "submitted_at": action.get("submitted_at"),
@@ -1082,6 +1195,28 @@ def _pending_view(
     for record in records:
         grouped.setdefault(str(record.get("ts_code", "")), []).append(record)
     return grouped
+
+
+def _incoming_reservation_records(
+    broker: SimBroker,
+    incoming: dict[int, list[tuple[dict[str, object], bool, bool]]]
+) -> list[dict[str, object]]:
+    """Submit-lag actions already accepted by the host but not yet in Broker._book."""
+    records: list[dict[str, object]] = []
+    for items in incoming.values():
+        for action, _is_auction, _is_close_auction in items:
+            record = dict(action)
+            record.setdefault("status", "pending")
+            record.setdefault("pending_stage", "submit_lag")
+            action_name = _action_name(record)
+            try:
+                account, op_type = broker.account_op_for_action(action_name)
+                record.setdefault("account", account)
+                record.setdefault("op_type", op_type)
+            except ValueError:
+                pass
+            records.append(record)
+    return records
 
 
 def _pending_record(record: dict[str, object], *, now: datetime | None) -> dict[str, object]:
@@ -1098,6 +1233,20 @@ def _pending_record(record: dict[str, object], *, now: datetime | None) -> dict[
     out.setdefault("age_minutes", 0.0)
     out.setdefault("status", "pending")
     return out
+
+
+def _tick_price_for_code(minute_group: pd.DataFrame, ts_code: str) -> float | None:
+    if minute_group.empty or not ts_code:
+        return None
+    rows = minute_group[minute_group["ts_code"].astype(str) == str(ts_code)]
+    if rows.empty:
+        return None
+    row = rows.iloc[-1]
+    for field in ("close", "open"):
+        value = row.get(field)
+        if value is not None and pd.notna(value):
+            return float(value)
+    return None
 
 
 def _timeview_replay_frames(
@@ -1128,6 +1277,7 @@ def _market_state(
     asof_dir: str | None = None,
     asof_version: str | None = None,
     pending: dict[str, list[dict[str, object]]] | None = None,
+    pending_orders: list[dict[str, object]] | None = None,
     cur_datetime: str = "",
 ) -> dict[str, object]:
     bars = [
@@ -1147,8 +1297,8 @@ def _market_state(
         "cur_time": str(minute_key or ""),
         "cur_datetime": str(cur_datetime or ""),
         "account": {
-            "stock": _jsonable(broker.get_trade_detail_data(account_type="STOCK", data_type="ACCOUNT")[0]),
-            "credit": _jsonable(broker.get_trade_detail_data(account_type="CREDIT", data_type="ACCOUNT")[0]),
+            "stock": _jsonable(broker.account_record("stock", pending_orders=pending_orders or ())),
+            "credit": _jsonable(broker.account_record("credit", pending_orders=pending_orders or ())),
             "total_assets": float(broker.equity()),
             "risk_limits": {
                 "max_total_holdings": broker.profile.max_total_holdings,
@@ -1158,8 +1308,8 @@ def _market_state(
             },
         },
         "positions": _jsonable(
-            broker.get_trade_detail_data(account_type="STOCK", data_type="POSITION")
-            + broker.get_trade_detail_data(account_type="CREDIT", data_type="POSITION")
+            broker.position_records("stock", pending_orders=pending_orders or ())
+            + broker.position_records("credit", pending_orders=pending_orders or ())
         ),
         "debt_contracts": _jsonable(broker.get_debt_contract()),
         "bars": bars,

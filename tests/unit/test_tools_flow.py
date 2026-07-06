@@ -63,7 +63,7 @@ def main(ctx):
         daily = pd.read_parquet(snapshot_dir / "daily.parquet")
         code = sorted(daily["ts_code"].astype(str).unique())[0]
         if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-            ctx.broker.buy(code, weight=0.1, reason="direct_long")
+            ctx.broker.buy(code, amount=1000, reason="direct_long")
 '''
 
 MINUTE_STRATEGY_MAIN = '''
@@ -79,7 +79,7 @@ def main(ctx):
         daily = pd.read_parquet(snapshot_dir / "daily.parquet")
         code = sorted(daily["ts_code"].astype(str).unique())[0]
         if ctx.cur_time == "09:31" and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-            ctx.broker.buy(code, weight=0.1, reason="minute_close_buy")
+            ctx.broker.buy(code, amount=1000, reason="minute_close_buy")
 '''
 
 MODEL_READ_STRATEGY_MAIN = '''
@@ -97,7 +97,7 @@ def main(ctx):
         daily = pd.read_parquet(snapshot_dir / "daily.parquet")
         code = sorted(daily["ts_code"].astype(str).unique())[0]
         if params.get("threshold") == 0.42 and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-            ctx.broker.buy(code, weight=0.1, reason="model_artifact_buy")
+            ctx.broker.buy(code, amount=1000, reason="model_artifact_buy")
 '''
 
 MODEL_WRITE_STRATEGY_MAIN = '''
@@ -147,7 +147,7 @@ def buy_if_dip(ctx):
         bar = ctx.bar(code) or {}
         low = bar.get("low")
         if low is not None and float(low) <= 9.95 and ctx.broker.position(code) == 0:
-            ctx.broker.buy(code, weight=0.1, reason="minute_dip")
+            ctx.broker.buy(code, amount=1000, reason="minute_dip")
 '''
 
 INTRA_MINUTE_MAIN = '''
@@ -157,9 +157,9 @@ def main(ctx):
         if ctx.cur_time != "09:25":  # optimistic dedup needs a priced tick
             return
         if ctx.broker.position(code) == 0:
-            ctx.broker.buy(code, weight=0.1, reason="first_weight_buy")
+            ctx.broker.buy(code, amount=1000, reason="first_amount_buy")
         if ctx.broker.position(code) == 0:
-            ctx.broker.buy(code, weight=0.1, reason="duplicate_weight_buy")
+            ctx.broker.buy(code, amount=1000, reason="duplicate_amount_buy")
 '''
 
 NOISY_POLICY_MAIN = '''
@@ -173,7 +173,7 @@ def main(ctx):
         if ctx.cur_time != "09:25":  # noise prints every tick; order once
             return
         if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-            ctx.broker.buy(code, weight=0.1, reason="noisy_buy")
+            ctx.broker.buy(code, amount=1000, reason="noisy_buy")
 '''
 
 BROKEN_STRATEGY_MAIN = '''
@@ -247,9 +247,9 @@ def main(ctx):
         result = nl("000001.SZ", prompt="score this fixture")
         content = result.get("content", "")
         code = "000001.SZ"
-        weight = 0.1 if "positive" in content else 0.0
-        if weight and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-            ctx.broker.buy(code, weight=weight, reason="nl_buy")
+        should_buy = "positive" in content
+        if should_buy and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+            ctx.broker.buy(code, amount=1000, reason="nl_buy")
 '''
 
 GENERAL_NL_CALL_MAIN = '''
@@ -286,7 +286,7 @@ def main(ctx):
         daily = pd.read_parquet(snapshot_dir / "daily.parquet")
         code = sorted(daily["ts_code"].astype(str).unique())[0]
         if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-            ctx.broker.buy(code, weight=0.1, reason="template_candidate")
+            ctx.broker.buy(code, amount=1000, reason="template_candidate")
 '''
 
 
@@ -736,10 +736,10 @@ class ToolFlowTest(unittest.TestCase):
             self.assertEqual(len(actions[0]["actions"]), 2)
             action = actions[0]["actions"][0]
             self.assertEqual(
-                {key: action.get(key) for key in ("action", "ts_code", "weight", "reason")},
-                {"action": "buy", "ts_code": "000001.SZ", "weight": 0.1, "reason": "first_weight_buy"},
+                {key: action.get(key) for key in ("action", "ts_code", "amount", "reason")},
+                {"action": "buy", "ts_code": "000001.SZ", "amount": 1000, "reason": "first_amount_buy"},
             )
-            self.assertEqual(actions[0]["actions"][1].get("reason"), "duplicate_weight_buy")
+            self.assertEqual(actions[0]["actions"][1].get("reason"), "duplicate_amount_buy")
             self.assertTrue(str(action.get("order_id") or "").startswith("C"))
             self.assertEqual(action.get("submitted_time"), "09:25")
             self.assertEqual(summary["order_count"], 2)
@@ -1267,7 +1267,7 @@ class AgentSessionRunnerTest(unittest.TestCase):
                 ProviderResponse(
                     content=json.dumps(compact_payload),
                     provider="scripted",
-                    model="compact-v0",
+                    model="compact-model",
                 )
             ]
         )
@@ -1319,7 +1319,7 @@ class AgentSessionRunnerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
             nl_proxy_responses = [
-                tool_call_response(tool_call("note", text="inspect data")),
+                tool_call_response(tool_call("glob", pattern="**/*.py", root="output")),
                 tool_call_response(tool_call("modification_check")),
                 tool_call_response(tool_call("backtest")),
                 tool_call_response(tool_call("finish_fold")),
@@ -1361,9 +1361,9 @@ def main(ctx):
         _DONE = True
         result = nl("000001.SZ", prompt="fixture")
         code = "000001.SZ"
-        weight = 0.1 if "positive" in result.get("content", "") else 0.0
-        if weight and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-            ctx.broker.buy(code, weight=weight, reason="nl_buy")
+        should_buy = "positive" in result.get("content", "")
+        if should_buy and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+            ctx.broker.buy(code, amount=1000, reason="nl_buy")
 ''',
                 encoding="utf-8",
             )
@@ -1761,10 +1761,10 @@ def main(ctx):
             _, ctx = build_sandbox(Path(tmp))
             proxy = ScriptedLLM(
                 [
-                    tool_call_response(tool_call("note", text="one")),
-                    tool_call_response(tool_call("note", text="two")),
-                    tool_call_response(tool_call("note", text="three")),
-                    tool_call_response(tool_call("note", text="four")),
+                    tool_call_response(tool_call("glob", pattern="one*", root="workspace")),
+                    tool_call_response(tool_call("glob", pattern="two*", root="workspace")),
+                    tool_call_response(tool_call("glob", pattern="three*", root="workspace")),
+                    tool_call_response(tool_call("glob", pattern="four*", root="workspace")),
                 ]
             )
             runner = AgentSessionRunner(
@@ -1837,7 +1837,7 @@ def main(ctx):
             {
                 "role": "assistant",
                 "content": "",
-                "tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "note", "arguments": "{}"}}],
+                "tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "glob", "arguments": "{}"}}],
                 "_seq": 2,
             },
             {"role": "tool", "tool_call_id": "call_x", "content": "ok", "_seq": 3},
@@ -1907,13 +1907,13 @@ def main(ctx):
             _, ctx = build_sandbox(Path(tmp))
             proxy = ScriptedLLM(
                 [
-                    tool_call_response(tool_call("note", text="x" * 3000)),
-                    tool_call_response(tool_call("note", text="after compact")),
+                    tool_call_response(tool_call("glob", pattern="x" * 3000, root="workspace")),
+                    tool_call_response(tool_call("glob", pattern="after_compact*", root="workspace")),
                 ]
             )
             compact_payload = {
                 "primary_request": "continue the fold",
-                "current_state": "large note was observed",
+                "current_state": "large glob request was observed",
                 "user_constraints": ["preserve current strategy state"],
                 "files_and_artifacts": ["/mnt/agent/output/main.py"],
                 "decisions": ["use compact before the next main call"],
@@ -1927,7 +1927,7 @@ def main(ctx):
                     ProviderResponse(
                         content=json.dumps(compact_payload),
                         provider="scripted",
-                        model="compact-v0",
+                        model="compact-model",
                         usage={"input_tokens": 100, "output_tokens": 60},
                         response_id="compact-response-1",
                     )
@@ -1966,7 +1966,7 @@ def main(ctx):
             events = [event for event in ctx.trace.read_events() if event["event_type"] == "context_compaction"]
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["status"], "ok")
-            self.assertEqual(events[0]["model"], "compact-v0")
+            self.assertEqual(events[0]["model"], "compact-model")
             self.assertEqual(events[0]["usage"]["output_tokens"], 60)
 
     def test_runner_recomputes_deadline_after_compaction_before_main_call(self):
@@ -1974,8 +1974,8 @@ def main(ctx):
             _, ctx = build_sandbox(Path(tmp))
             proxy = ScriptedLLM(
                 [
-                    tool_call_response(tool_call("note", text="x" * 3000)),
-                    tool_call_response(tool_call("note", text="should not run")),
+                    tool_call_response(tool_call("glob", pattern="x" * 3000, root="workspace")),
+                    tool_call_response(tool_call("glob", pattern="should_not_run*", root="workspace")),
                 ]
             )
             compact_proxy = ScriptedLLM(
@@ -1983,7 +1983,7 @@ def main(ctx):
                     ProviderResponse(
                         content=json.dumps({"primary_request": "continue", "current_state": "state"}),
                         provider="scripted",
-                        model="compact-v0",
+                        model="compact-model",
                     )
                 ]
             )
@@ -2019,9 +2019,9 @@ def main(ctx):
             _, ctx = build_sandbox(Path(tmp))
             proxy = ScriptedLLM(
                 [
-                    tool_call_response(tool_call("note", text="x" * 3000)),
-                    tool_call_response(tool_call("note", text="after failure")),
-                    tool_call_response(tool_call("note", text="circuit should skip")),
+                    tool_call_response(tool_call("glob", pattern="x" * 3000, root="workspace")),
+                    tool_call_response(tool_call("glob", pattern="after_failure*", root="workspace")),
+                    tool_call_response(tool_call("glob", pattern="circuit_should_skip*", root="workspace")),
                 ]
             )
             compact_proxy = ScriptedLLM([LLMProxyError("temporary failure Bearer secret-token-abc")])

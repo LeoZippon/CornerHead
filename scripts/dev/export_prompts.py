@@ -64,7 +64,7 @@ SAMPLE_MANIFEST = {
     "modification_constraints": {"max_changed_lines": 500, "max_model_artifact_bytes": 104857600},
     "acceptance_rules": SAMPLE_ACCEPTANCE,
     "broker_profile": {
-        "profile_id": "gjzq_dual_v1",
+        "profile_id": "gjzq_dual",
         "stock_initial_cash": 500000.0,
         "credit_initial_cash": 500000.0,
         "commission_bps": 1.0,

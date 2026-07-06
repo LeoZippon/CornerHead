@@ -34,7 +34,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = _code()
         if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
-            ctx.broker.buy(code, weight=0.1, reason="fixture_top")
+            ctx.broker.buy(code, amount=1000, reason="fixture_top")
 '''
 
 # (trade_date, open, close) for the single fixture stock across all periods.

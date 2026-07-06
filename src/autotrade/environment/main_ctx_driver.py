@@ -18,6 +18,18 @@ from pathlib import Path
 
 _PROTOCOL_STDOUT = sys.stdout
 
+_ACTION_ACCOUNT_OP = {
+    "buy": ("stock", 23),
+    "sell": ("stock", 24),
+    "fin_buy": ("credit", 27),
+    "short": ("credit", 28),
+    "cover": ("credit", 29),
+    "sell_repay": ("credit", 31),
+    "direct_repay": ("credit", 32),
+    "credit_buy": ("credit", 33),
+    "credit_sell": ("credit", 34),
+}
+
 def _normalize_path(value):
     try:
         raw = os.fspath(value)
@@ -424,9 +436,10 @@ class _Broker:
 
     Calls are recorded as deferred actions applied by the trusted host Broker with full
     market constraints. Formal strategy actions must be issued inside ``ctx.substep``;
-    inside a substep they are submission plans, so cash, buying power, and position keep
-    reflecting filled state. The in-flight plans are exposed through ``pending()`` for
-    de-duplication and cancellation."""
+    inside a substep they are submission plans. Filled cash/position stay literal;
+    available cash, credit buying power, and sellable shares may already reflect
+    host-side reservations from orders submitted on earlier ticks. The in-flight
+    plans are exposed through ``pending()`` for de-duplication and cancellation."""
 
     def __init__(self, state):
         account = state.get("account") or {}
@@ -437,11 +450,10 @@ class _Broker:
         self._cur_datetime = str(state.get("cur_datetime", "") or "")
         self._tick_key = _safe_name(self._cur_datetime or self._cur_time or "tick")
         self._client_seq = 0
-        # Account views and positions reflect the FILLED broker state at the start
-        # of this tick. Broker actions issued inside ctx.substep are delayed-submit
-        # plans (surfaced via pending()) that the host settles — they are NOT
-        # projected here — so these views stay at their entering-tick values for
-        # the whole tick.
+        # Filled cash/quantity reflect the broker truth at tick entry. Available
+        # cash, credit buying power, and sellable shares can include host-side
+        # reservations for orders submitted on earlier ticks; actions recorded in
+        # this same substep are not projected back into these views.
         self._working = state.get("pending") or {}
         self._pos = {}
         for item in self.positions:
@@ -459,10 +471,9 @@ class _Broker:
 
     @property
     def stock(self):
-        """普通账户 view (cash, available_cash, total_assets, market_value) in the
-        FILLED broker state at the start of this tick. Substep broker actions are
-        delayed-submit plans that do NOT change this view within the tick, so size
-        a same-tick sequence of orders conservatively and let the host settle."""
+        """普通账户 view. ``cash`` is filled truth; ``available_cash`` may already
+        reserve orders submitted on earlier ticks. Same-substep plans are not
+        projected back into this dict."""
         return self.account.get("stock") or {}
 
     def position(self, ts_code, account=None):
@@ -494,16 +505,21 @@ class _Broker:
             item for item in working
             if str(item.get("order_id", "")) not in self._cancelled_this_tick
         ]
-        working.extend(
-            self._pending_action_record(action)
-            for action in self._actions
-            if action.get("action") != "cancel"
-            and str(action.get("order_id", "")) not in self._cancelled_this_tick
-            and (code is None or str(action.get("ts_code")) == code)
-        )
+        for action in self._actions:
+            if action.get("action") == "cancel":
+                continue
+            if str(action.get("order_id", "")) in self._cancelled_this_tick:
+                continue
+            if code is not None and str(action.get("ts_code")) != code:
+                continue
+            record = self._pending_action_record(action)
+            if record is not None:
+                working.append(record)
         return working
 
     def _pending_action_record(self, action):
+        if action.get("action") == "transfer":
+            return None
         record = {
             key: value
             for key, value in dict(action).items()
@@ -513,7 +529,9 @@ class _Broker:
         if substep is not None:
             step_name = str(substep)
             budget = self._substep_budgets.get(step_name)
-            record["pending_stage"] = "substep_delay"
+            if budget is not None and float(budget) >= 1.0:
+                return None
+            record["pending_stage"] = "submit_lag"
             record["substep"] = step_name
             if budget is not None:
                 record["ready_at"] = self._ready_at_iso(float(budget))
@@ -531,7 +549,8 @@ class _Broker:
     @property
     def credit(self):
         """信用账户 view (cash, available_cash, 维保比例, 保证金可用余额, 负债,
-        利息, 额度, 利率), reflecting the FILLED state at the start of this tick."""
+        利息, 额度, 利率). Deployable fields may reserve submitted pending orders;
+        filled cash/debt remain broker truth."""
         return self.account.get("credit") or {}
 
     def debt_contracts(self, ts_code=None):
@@ -543,57 +562,55 @@ class _Broker:
             if code is None or str(record.get("ts_code")) == code
         ]
 
-    def buy(self, ts_code, amount=None, weight=None, limit=None, valid_bars=None, reason=None, **kwargs):
-        """普通账户买入 (现金, long-only); ``weight`` is a fraction of the STOCK
-        account's initial equity."""
+    def buy(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
+        """普通账户买入 (现金, long-only). ``amount`` is a share count."""
         self._require_substep("buy")
-        return self._order("buy", ts_code, amount, weight, limit, valid_bars, reason)
+        return self._order("buy", ts_code, amount, limit, valid_bars, reason)
 
-    def sell(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None, **kwargs):
+    def sell(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
         """普通账户卖出 (T+1 可卖份额)."""
         self._require_substep("sell")
-        return self._order("sell", ts_code, amount, None, limit, valid_bars, reason)
+        return self._order("sell", ts_code, amount, limit, valid_bars, reason)
 
-    def credit_buy(self, ts_code, amount=None, weight=None, limit=None, valid_bars=None, reason=None, **kwargs):
-        """信用账户担保品买入; ``weight`` is a fraction of the CREDIT account's
-        initial equity."""
+    def credit_buy(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
+        """信用账户担保品买入."""
         self._require_substep("credit_buy")
-        return self._order("credit_buy", ts_code, amount, weight, limit, valid_bars, reason)
+        return self._order("credit_buy", ts_code, amount, limit, valid_bars, reason)
 
-    def credit_sell(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None, **kwargs):
+    def credit_sell(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
         """信用账户担保品卖出 (T+1 可卖份额; proceeds stay in the credit account)."""
         self._require_substep("credit_sell")
-        return self._order("credit_sell", ts_code, amount, None, limit, valid_bars, reason)
+        return self._order("credit_sell", ts_code, amount, limit, valid_bars, reason)
 
-    def fin_buy(self, ts_code, amount=None, weight=None, limit=None, valid_bars=None, reason=None, **kwargs):
+    def fin_buy(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
         """融资买入 (信用账户): opens a fin debt contract (notional+fee financed,
         daily interest); gated by 保证金可用余额, the margin_secs target set, and
         the fin quota."""
         self._require_substep("fin_buy")
-        return self._order("fin_buy", ts_code, amount, weight, limit, valid_bars, reason)
+        return self._order("fin_buy", ts_code, amount, limit, valid_bars, reason)
 
-    def short(self, ts_code, amount=None, weight=None, limit=None, valid_bars=None, reason=None, **kwargs):
+    def short(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
         """融券卖出 (信用账户); must be a limit order at/above the reference price."""
         self._require_substep("short")
-        return self._order("short", ts_code, amount, weight, limit, valid_bars, reason)
+        return self._order("short", ts_code, amount, limit, valid_bars, reason)
 
-    def cover(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None, **kwargs):
+    def cover(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
         """买券还券 (信用账户): reduces the short and repays 融券 contracts FIFO."""
         self._require_substep("cover")
-        return self._order("cover", ts_code, amount, None, limit, valid_bars, reason)
+        return self._order("cover", ts_code, amount, limit, valid_bars, reason)
 
-    def sell_repay(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None, **kwargs):
+    def sell_repay(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
         """卖券还款 (信用账户): sells held shares and applies the net proceeds to
         融资 debt (interest first, oldest contract first); any surplus stays as
         credit-account cash."""
         self._require_substep("sell_repay")
-        return self._order("sell_repay", ts_code, amount, None, limit, valid_bars, reason)
+        return self._order("sell_repay", ts_code, amount, limit, valid_bars, reason)
 
     def direct_repay(self, amount, reason=None, **kwargs):
         """直接还款 (信用账户): repays 融资 debt from credit-account cash (interest
-        first, oldest contract first). ``amount`` is CNY, clamped to deployable
-        cash and the outstanding debt; settles at its submission tick without bar
-        matching."""
+        first, oldest contract first). ``amount`` is CNY and must not exceed
+        deployable cash or outstanding financing debt; settles at its submission
+        tick without bar matching."""
         self._require_substep("direct_repay")
         value = float(amount)
         if value <= 0:
@@ -601,16 +618,16 @@ class _Broker:
         order_id = self._new_order_id()
         self._actions.append({
             "action": "direct_repay", "amount": value, "order_id": order_id,
+            "account": "credit", "op_type": 32,
             "reason": reason, "submitted_at": self._cur_datetime,
             "submitted_time": self._cur_time, "_substep": self._cur_substep,
         })
         return order_id
 
     def transfer(self, amount, from_account, to_account, reason=None, **kwargs):
-        """银证转账-style cash move between the stock and credit accounts. Locked
-        融券 proceeds never transfer, and outbound credit transfers require the
-        post-transfer 维持担保比例 to stay at or above the withdraw line while
-        credit debt is outstanding; settles at its submission tick."""
+        """Request a same-day stock/credit cash transfer. Requests are accepted only
+        before the 09:14 pre-open batch; the host confirms them at 09:14 using the
+        same cash and withdraw-line checks as the Broker."""
         self._require_substep("transfer")
         src = self._account_name(from_account)
         dst = self._account_name(to_account)
@@ -649,18 +666,36 @@ class _Broker:
                 )
             if holders:
                 record["account"] = holders[0]
+        if record.get("account"):
+            record["op_type"] = self._close_op_type(code, str(record["account"]))
         order_id = self._new_order_id()
         record["order_id"] = order_id
         self._actions.append(record)
         return order_id
 
+    def _close_op_type(self, code, account):
+        if account == "stock":
+            return 24
+        qty = self._pos.get(("credit", str(code)), 0)
+        if qty < 0:
+            return 29
+        for contract in self._debt_contracts:
+            if (
+                str(contract.get("compact_type") or "") == "fin"
+                and str(contract.get("ts_code") or "") == str(code)
+                and float(contract.get("real_compact_balance") or 0.0) > 0.0
+            ):
+                return 31
+        return 34
+
     def cancel(self, order_id, reason=None, **kwargs):
         """Cancel a still-pending order returned by ``ctx.broker.pending()``.
 
         Mirrors the live ``cancel(order_id, ...)`` at the strategy layer. The host
-        removes the order across the substep-delay / submit-lag / working-order queues;
-        the cancelled id is also dropped from this tick's ``pending()`` view so a
-        same-tick re-scan does not re-see it.
+        removes the order across the submit-lag / working-order queues; the
+        cancelled id is also dropped from this tick's ``pending()`` view so a
+        same-tick re-scan does not re-see it. Cross-minute substep actions are not
+        broker orders until ready and therefore are not cancelable through pending().
         """
         oid = str(order_id or "").strip()
         if not oid:
@@ -689,7 +724,7 @@ class _Broker:
         self._client_seq += 1
         return "C%s_%03d" % (self._tick_key, self._client_seq)
 
-    def _order(self, action, ts_code, amount, weight, limit, valid_bars, reason):
+    def _order(self, action, ts_code, amount, limit, valid_bars, reason):
         code = str(ts_code)
         order_id = self._new_order_id()
         record = {
@@ -699,10 +734,12 @@ class _Broker:
             "submitted_at": self._cur_datetime,
             "submitted_time": self._cur_time,
         }
+        account_op = _ACTION_ACCOUNT_OP.get(action)
+        if account_op is not None:
+            record["account"] = account_op[0]
+            record["op_type"] = account_op[1]
         if amount is not None:
             record["amount"] = amount
-        if weight is not None:
-            record["weight"] = weight
         if limit is not None:
             record["limit"] = limit
         if valid_bars is not None:

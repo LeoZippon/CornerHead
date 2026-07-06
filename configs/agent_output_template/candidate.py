@@ -53,9 +53,9 @@ def research(ctx, *, budget_minutes: float = 5.0, screen_time: str = "08:00") ->
     Anchored to a FIXED daily pre-open time (a real trader's routine): the
     ``ctx.cur_time`` gate runs the heavy screen once per day in the pre-open window,
     not every tick. The template selects nothing; a strategy ranks ``ctx.asof_dir`` and
-    writes a ``{ts_code: {"status": "pending", "weight": w}}`` map. The write is staged
-    and surfaces in ``ctx.state_dir`` only after ``budget_minutes`` elapse, so a later
-    orderable tick (09:15 / 09:25) executes it."""
+    writes a ``{ts_code: {"status": "pending", "cash_fraction": f}}`` map. The write
+    is staged and surfaces in ``ctx.state_dir`` only after ``budget_minutes`` elapse,
+    so a later orderable tick (09:15 / 09:25) executes it."""
     if ctx.cur_time < screen_time or ctx.cur_time >= "09:15":
         return  # only screen in the fixed pre-open window [screen_time, 09:15)
     with ctx.substep("research", budget_minutes=budget_minutes):
@@ -63,7 +63,7 @@ def research(ctx, *, budget_minutes: float = 5.0, screen_time: str = "08:00") ->
             return
         daily = pd.read_parquet(Path(str(ctx.asof_dir)) / "daily")
         codes = sorted(daily["ts_code"].astype(str).unique())[:TOP_N]
-        plan = {code: {"status": "pending", "weight": 1.0 / TOP_N} for code in codes}
+        plan = {code: {"status": "pending", "cash_fraction": 1.0 / TOP_N} for code in codes}
         # Inside the sub-step ctx.state_dir is the staging dir, so this write is held
         # back until ready_at; a later tick's manage() sees it once it has merged.
         _plan_path(ctx).write_text(json.dumps(plan), encoding="utf-8")
@@ -88,6 +88,10 @@ def manage(ctx) -> None:
             continue
         if ctx.broker.pending(code) or ctx.price(code) is None:
             continue  # an order is already in flight, or no price to size/submit yet
-        ctx.broker.buy(code, weight=float(entry["weight"]), reason="plan_entry")
+        cash_fraction = float(entry.get("cash_fraction") or 0.0)
+        amount = int((float(ctx.broker.stock["available_cash"]) * cash_fraction) / float(ctx.price(code)) // 100 * 100)
+        if amount <= 0:
+            continue
+        ctx.broker.buy(code, amount=amount, reason="plan_entry")
     if changed:
         path.write_text(json.dumps(plan), encoding="utf-8")

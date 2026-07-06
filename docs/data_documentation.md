@@ -148,7 +148,7 @@ flowchart LR
 | 主营业务构成 | `fina_mainbz_vip` | 按股票代码 | 业务结构 |
 | 披露计划 | `disclosure_date` | 按报告期 | 披露计划和实际披露日 |
 
-财务原始层保留多版本、重复业务键和稀疏分区。环境层会把它们构造成 `fundamental_events` 后再按 `available_at <= decision_time` 选择可见版本。
+财务原始层保留多版本、重复业务键和稀疏分区。环境层会把它们构造成 `fundamental_events` 后，再按当前视图的 Timeview cutoff 选择可见版本。
 
 ### 1.4 宏观与全球上下文
 
@@ -191,7 +191,7 @@ flowchart LR
 |---|---|---|---|
 | 两融汇总 | `margin` | 按交易日 | 市场杠杆 |
 | 两融明细 | `margin_detail` | 按交易日 | 个股融资融券压力 |
-| 融资融券标的 | `margin_secs` | 按交易日 | 交易所标的资格；原始表不区分融资/融券标的，当前研究以同一集合门控融券券源与融资买入资格 |
+| 融资融券标的 | `margin_secs` | 按交易日 | 交易所标的资格；原始表不区分担保品/融资/融券标的，当前研究以同一集合近似门控信用账户担保品买入、融资买入和融券卖出 |
 | 个股资金流 | `moneyflow` | 按交易日 | 资金行为 |
 | 股东人数 | `stk_holdernumber` | 按公告月 | 筹码集中度 |
 | 股东增减持 | `stk_holdertrade` | 按公告月 | 治理和事件 |
@@ -201,7 +201,7 @@ flowchart LR
 
 `share_float_complete` 是解禁最终保留边界。普通 `share_float` 过程文件可归档，但 union 不得静默缩水。触顶分区使用 candidate 级补充；如果最细粒度仍正好 6000 行，只能标记 `source_cap_risk`。
 
-做空券源模式（默认 `proxy_margin_secs`：成交日 `margin_secs` 表内股票全部视为可融券/可融资标的）的执行语义由 `docs/environment_design.md` §3.3（信用账户模型）定义；数据层只负责 `margin_secs` 表本身的可见性与口径。券商真实券源、逐票折算率/保证金比例、利率费率和信用风控数据当前不可获得，相关数据合同待真实 broker 数据到位后再补充。
+信用账户标的池模式（默认 `proxy_margin_secs`：成交日 `margin_secs` 表内股票临时视为可担保品买入、可融资、可融券标的）的执行语义由 `docs/environment_design.md` §3.2（信用账户模型）定义；数据层只负责 `margin_secs` 表本身的可见性与口径。券商真实担保品清单、券源、逐票折算率/保证金比例、利率费率和信用风控数据当前不可获得，相关数据合同待真实 broker 数据到位后再补充。
 
 **打板专题数据**
 
@@ -490,7 +490,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 | `cn_nightly_pit_event_build` | 03:35 → 约 03:50（约 15 分钟） | 财务 PIT 事件（`fundamental_events`）变为可查询 |
 | `cn_preopen_board_backfill_0850` | 08:50 → 约 08:55 | 前一日打板关键榜单（`kpl_list` 等） |
 | `cn_preopen_text_backfill_0855` | 08:55 → 约 09:00 | 短新闻 `cctv_news` / `news` 盘前回补 |
-| `cn_preopen_margin_secs_backfill_0903` / `_retry_0913` | 09:03 / 09:13 → 约 09:05 / 09:15 | 当日融资融券标的 `margin_secs`（同一集合门控融券券源与融资买入资格） |
+| `cn_preopen_margin_secs_backfill_0903` / `_retry_0913` | 09:03 / 09:13 → 约 09:05 / 09:15 | 当日 `margin_secs` 近似标的池（同一集合临时门控担保品买入、融资买入和融券卖出） |
 | `cn_preopen_margin_backfill_0905` / `_retry_0915` | 09:05 / 09:15 → 约 09:07 / 09:17 | 前一交易日 `margin` / `margin_detail` |
 
 关键后果：因 `cn_evening_full` 约次日 02:05 才写完，交易日内横截面日频视图只到上一交易日（D-1），当日 `daily` 等次日约 02:05 才落库可见；分钟历史同样在晚间节点滚动落库，当日实时分钟 bar 不走持久化视图、由引擎单独提供（`ctx.bars`）。
@@ -520,7 +520,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 | TuShare 可能回写历史数据 | 近期和部分历史分区 | 定时任务强刷滚动窗口并写修正账本；旧非空、新空默认不覆盖 |
 | `limit_list_d.limit_amount` 历史不稳定 | 打板和涨停强度字段 | raw 保留，默认不进入冻结交易输入；sentinel 发现源端会把历史数值回写为空 |
 | 结构性重复业务键 | `block_trade`、`top_list` 等 | raw 保留，审计 warning；进入 snapshot 前必须扩展键、聚合或去重 |
-| `proxy_margin_secs` 只是券源近似 | 融券做空可执行性与成本 | 当前研究把 `margin_secs` 表内股票全部视为可融，费率用 profile 假设值；真实券源/费率/风控数据到位后再切换 `broker_inventory` 模式 |
+| `proxy_margin_secs` 只是信用账户标的池近似 | 信用账户担保品/融资/融券可执行性与成本 | 当前研究把 `margin_secs` 表内股票全部临时视为可担保品买入、可融资、可融券，费率用 profile 假设值；真实担保品池、券源、费率和风控数据到位后再拆分 |
 | 财务多版本和公告日缺失 | 财务按时点可见 | 原始数据保留多版本；环境层构造 `fundamental_events` 后选择可见版本 |
 | 宏观发布时间不精确 | 月度/季度数据 | 原始数据使用保守可见时间，环境层优先使用发布日程修正 |
 | 文本重复推送和转载 | 大模型证据 | 原始数据保留，证据层按 hash 和时间过滤 |

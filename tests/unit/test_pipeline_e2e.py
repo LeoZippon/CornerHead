@@ -597,7 +597,7 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual(captured["auction_decision_time"], config.auction_decision_time)
 
     def test_agent_visible_data_summary_and_trace_opaque_fold_id(self):
-        # V1: data_summary.json and agent_trace.jsonl are both agent-readable, so the
+        # data_summary.json and agent_trace.jsonl are both agent-readable, so the
         # calendar period must not leak through them; host correlation stays on
         # run_id + the host-only manifest.
         with tempfile.TemporaryDirectory() as tmp:
