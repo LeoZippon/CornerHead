@@ -106,7 +106,7 @@ SAMPLE_RUNTIME_ENV = {
 SAMPLE_DATA_SUMMARY = {
     "kind": "fold",
     "large_table_guidance": [
-        "events.parquet、text_index.parquet、intraday_1min.parquet 优先用 DuckDB count/limit、metadata 或按列读取。"
+        "events.parquet、text_index.parquet、intraday_1min.parquet 先查 metadata；需要抽样或聚合时再用 DuckDB count/limit 或按列读取。"
     ],
     "views": {
         "snapshot": {
@@ -270,7 +270,7 @@ def render() -> str:
         "- `src/autotrade/agent/prompts.py`",
         "- `src/autotrade/environment/nl/engine.py`",
         "",
-        "阅读说明：每个 Prompt 块都按模型实际接收的文本原样放入 `text` 代码块；为减少页面噪声，除第一节外默认折叠。NL Sub Agent 的用户消息为 JSON object：`{request: {ts_code, prompt, kwargs}, company_context}`；最终回答不限定格式，只有 `text_retrieve` 工具调用需要使用约定 JSON。",
+        "阅读说明：每个 Prompt 块都按模型实际接收的文本原样放入 `text` 代码块；为减少页面噪声，除第一节外默认折叠。NL Sub Agent 的用户消息为 JSON object：`{request: {ts_code?, prompt, kwargs}, company_context}`；最终回答不限定格式，只有 `text_retrieve` 工具调用使用内部工具 schema。",
         "",
         "## 导航",
         "",

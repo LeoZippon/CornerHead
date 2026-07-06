@@ -18,6 +18,7 @@ from autotrade.environment.nl import (
     TextRetriever,
     extract_json_object,
 )
+from autotrade.environment.nl.engine import TEXT_RETRIEVE_SCHEMA, TEXT_RETRIEVE_SPEC
 
 
 def tool_call(pattern: str = "公告", *, max_results: int = 3):
@@ -99,6 +100,14 @@ class NLSubAgentEngineTest(unittest.TestCase):
             self.assertEqual(result.tool_calls, [])
             self.assertIn("tools", proxy.calls[0])
 
+    def test_text_retrieve_schema_is_generated_from_standard_spec(self):
+        schema = TEXT_RETRIEVE_SCHEMA["function"]["parameters"]
+        self.assertEqual(TEXT_RETRIEVE_SCHEMA, TEXT_RETRIEVE_SPEC.to_tool_schema())
+        self.assertEqual(TEXT_RETRIEVE_SPEC.schema_version, 1)
+        self.assertEqual(TEXT_RETRIEVE_SPEC.result_policy, "bounded_structured_evidence")
+        self.assertEqual(schema["required"], ["pattern"])
+        self.assertIn("ts_code", schema["properties"])
+
     def test_tool_call_then_freeform_answer(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, _ = self.make_engine([tool_call("平安银行|公告"), "公告正文未见重大负面事项。"], Path(tmp))
@@ -108,6 +117,21 @@ class NLSubAgentEngineTest(unittest.TestCase):
             self.assertEqual(result.tool_calls[0]["arguments"]["pattern"], "平安银行|公告")
             self.assertEqual(result.evidence[0]["text_id"], "t1")
             self.assertIn("重大负面", result.content)
+
+    def test_general_nl_request_has_no_single_stock_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, _ = self.make_engine([tool_call("公告"), "全局文本检索完成。"], Path(tmp))
+            result = engine.run(
+                ts_code="",
+                prompt="检索当前可见文本里的市场事件",
+                request_kwargs={},
+                config=NLSubAgentConfig(per_call_timeout_seconds=30),
+            )
+            self.assertEqual(result.state, "completed")
+            self.assertEqual(result.to_record()["scope"], "general")
+            self.assertEqual(result.company_context["scope"], "general")
+            self.assertEqual(result.tool_calls[0]["arguments"]["ts_code"], "")
+            self.assertEqual(result.evidence[0]["relevance"], "background")
 
     def test_content_alongside_tool_call_is_executed(self):
         with tempfile.TemporaryDirectory() as tmp:

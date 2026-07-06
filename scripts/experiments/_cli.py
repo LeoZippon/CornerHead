@@ -258,7 +258,6 @@ def add_meta_sandbox_arguments(
         help=_opt_help(
             "Host environment variable name to pass into the meta-learning Docker container. "
             "Repeat for custom non-proxy variables; GITHUB_TOKEN and HF_TOKEN are included by default. "
-            "Proxy aliases are exposed by default as AT_PROXY_* unless --disable-meta-learning-host-proxy is set. "
             "Only names are recorded; values are never written to manifests.",
             verbose_help,
         ),
@@ -267,7 +266,7 @@ def add_meta_sandbox_arguments(
         "--meta-learning-add-host-gateway",
         action="store_true",
         help=_opt_help(
-            "Add host.docker.internal -> host-gateway for bridge-mode access to host proxy ports.",
+            "Add host.docker.internal -> host-gateway for bridge-mode access to managed XRay ports.",
             verbose_help,
         ),
     )
@@ -275,8 +274,7 @@ def add_meta_sandbox_arguments(
         "--meta-learning-host-proxy",
         action="store_true",
         help=_opt_help(
-            "Compatibility flag; host proxy aliases are enabled by default for meta-learning. "
-            "The aliases are non-standard AT_PROXY_* variables, so direct internet remains the default behavior.",
+            "Compatibility flag retained for old scripts; proxy aliases now require managed XRay config.",
             verbose_help,
         ),
     )
@@ -284,7 +282,7 @@ def add_meta_sandbox_arguments(
         "--disable-meta-learning-host-proxy",
         action="store_true",
         help=_opt_help(
-            "Do not expose host proxy values as AT_PROXY_* aliases in the meta-learning Docker container.",
+            "Do not expose managed proxy values as AT_PROXY_* aliases in the meta-learning Docker container.",
             verbose_help,
         ),
     )
@@ -442,31 +440,28 @@ def build_meta_learning_sandbox_spec(
     ``extra_dotenv_keys``; ``run_experiment`` passes none.
     """
     meta_network = str(args.meta_learning_network)
-    host_proxy_enabled = (
+    proxy_allowed = (
         not bool(getattr(args, "disable_meta_learning_host_proxy", False))
         and meta_network != "none"
     )
+    managed_proxy_allowed = proxy_allowed and not bool(getattr(args, "disable_meta_learning_managed_proxy", False))
     requested_envs = [name.strip() for name in args.meta_learning_env if name.strip()]
     dotenv_keys = tuple(
         dict.fromkeys(
             [
                 *DEFAULT_META_CREDENTIAL_ENVS,
-                *(host_env for _container_env, host_env in DEFAULT_META_PROXY_ALIASES if host_proxy_enabled),
-                *(
-                    DEFAULT_XRAY_CONFIG_ENVS
-                    if host_proxy_enabled and not getattr(args, "disable_meta_learning_managed_proxy", False)
-                    else ()
-                ),
+                *(DEFAULT_XRAY_CONFIG_ENVS if managed_proxy_allowed else ()),
                 *requested_envs,
                 *extra_dotenv_keys,
             ]
         )
     )
     _load_dotenv_into_environ(repo_root / ".env", keys=dotenv_keys)
+    managed_proxy_configured = managed_proxy_allowed and _managed_xray_config_present(repo_root)
     meta_learning_env = tuple(dict.fromkeys([*DEFAULT_META_CREDENTIAL_ENVS, *requested_envs]))
-    meta_learning_env_aliases = DEFAULT_META_PROXY_ALIASES if host_proxy_enabled else ()
+    meta_learning_env_aliases = DEFAULT_META_PROXY_ALIASES if managed_proxy_configured else ()
     add_host_gateway = bool(args.meta_learning_add_host_gateway) or (
-        host_proxy_enabled and meta_network == "bridge"
+        managed_proxy_configured and meta_network == "bridge"
     )
     host_gateway_ip = _detect_docker0_ipv4() if add_host_gateway and meta_network == "bridge" else None
     return replace(
@@ -487,17 +482,19 @@ def build_meta_learning_managed_proxy_spec(
 ) -> ManagedProxySpec:
     """Return the redacted managed-proxy policy after loading .env config names."""
     meta_network = str(sandbox_spec.network if sandbox_spec is not None else getattr(args, "meta_learning_network", "bridge"))
-    host_proxy_enabled = (
+    proxy_allowed = (
         not bool(getattr(args, "disable_meta_learning_host_proxy", False))
         and meta_network != "none"
     )
     if meta_network == "none":
         return ManagedProxySpec(enabled=False, disabled_status="disabled_by_network_none")
-    enabled = host_proxy_enabled and not bool(getattr(args, "disable_meta_learning_managed_proxy", False))
+    managed_proxy_allowed = proxy_allowed and not bool(getattr(args, "disable_meta_learning_managed_proxy", False))
+    if managed_proxy_allowed:
+        _load_dotenv_into_environ(repo_root / ".env", keys=DEFAULT_XRAY_CONFIG_ENVS)
+    configured = managed_proxy_allowed and _managed_xray_config_present(repo_root)
+    enabled = configured
     listen_host = "127.0.0.1"
     container_host: str | None = None
-    if enabled:
-        _load_dotenv_into_environ(repo_root / ".env", keys=DEFAULT_XRAY_CONFIG_ENVS)
     if enabled and meta_network == "bridge":
         bridge_host = sandbox_spec.host_gateway_ip if sandbox_spec is not None else _detect_docker0_ipv4()
         if bridge_host:
@@ -508,8 +505,11 @@ def build_meta_learning_managed_proxy_spec(
                 "managed XRay config is present, but Docker bridge host IP could not be detected; "
                 "use --meta-learning-network host, fix docker0 visibility, or disable managed proxy"
             )
-        else:
-            enabled = False
+    disabled_status = "not_configured"
+    if not proxy_allowed:
+        disabled_status = "disabled"
+    elif not managed_proxy_allowed:
+        disabled_status = "disabled"
     xray_bin = (
         str(args.meta_learning_xray_bin).strip()
         if getattr(args, "meta_learning_xray_bin", None)
@@ -522,6 +522,7 @@ def build_meta_learning_managed_proxy_spec(
         startup_timeout_seconds=float(getattr(args, "meta_learning_xray_startup_timeout", 15.0)),
         listen_host=listen_host,
         container_host=container_host,
+        disabled_status=disabled_status,
     )
 
 

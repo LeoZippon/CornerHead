@@ -135,6 +135,7 @@ class LocalSandbox:
             self.paths.workspace,
             self.paths.agent_output,
             self.paths.model_artifacts,
+            self.paths.agent / ".runtime",
         ):
             path.mkdir(parents=True, exist_ok=True)
         # Rootless Docker maps the container agent user to a subuid; the
@@ -142,6 +143,7 @@ class LocalSandbox:
         # Keep the Agent mount root itself clean; only the documented child
         # directories below are writable by sandbox commands.
         self.paths.agent.chmod(0o555)
+        (self.paths.agent / ".runtime").chmod(0o555)
         self.paths.workspace.chmod(0o777)
         self.paths.model_artifacts.chmod(0o777)
         self.paths.snapshot_views.chmod(0o700)
@@ -419,7 +421,10 @@ def _runtime_policy() -> dict[str, object]:
             "allowed only when experiment config enables network; persistent dependencies belong in the sandbox image"
         ),
         "ordinary_fold_network": "disabled",
-        "meta_learning_network": "web_search_tool_only unless a meta-learning sandbox spec explicitly enables Docker network access",
+        "meta_learning_network": (
+            "web_search/web_fetch host-side tools only unless a meta-learning sandbox spec explicitly enables "
+            "Docker network access"
+        ),
         "formal_strategy_read_roots": ["/mnt/snapshot", "/mnt/agent/output", "/mnt/agent/models"],
     }
 

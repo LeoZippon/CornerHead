@@ -21,9 +21,9 @@ OUTPUT_LIMIT_CHARS = 20_000
 OUTPUT_CAPTURE_LIMIT_CHARS = 200_000
 DEFAULT_TIMEOUT_SECONDS = 120.0
 # Hard upper bound the Agent may request for a single command. The default stays
-# 120s for quick probes, but a legitimate heavy probe (e.g. a long DuckDB scan)
+# 120s for quick probes, but a legitimate heavy probe (e.g. model training)
 # may opt up to this cap — granting more exploration freedom without unbounding it.
-MAX_TIMEOUT_SECONDS = 600.0
+MAX_TIMEOUT_SECONDS = 1800.0
 # Advisory (not enforced): nudge the Agent away from hiding stderr, which breaks audit.
 STDERR_SUPPRESSION_RE = re.compile(r"2\s*>\s*/dev/null|&>\s*/dev/null|/dev/null\s+2\s*>\s*&\s*1")
 STDERR_SUPPRESSION_REMINDER = (

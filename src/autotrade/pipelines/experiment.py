@@ -615,6 +615,8 @@ class ExperimentPipeline:
                 executor=self._executor_for(docker, sandbox),
             )
             ctx.extra["allow_backtest"] = False
+            if managed_proxy.env:
+                ctx.extra["web_fetch_proxy_env"] = dict(managed_proxy.env)
 
             session_summary = self.meta_learner(ctx)
             if session_summary is None:

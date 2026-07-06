@@ -252,6 +252,25 @@ def main(ctx):
             ctx.broker.buy(code, weight=weight, reason="nl_buy")
 '''
 
+GENERAL_NL_CALL_MAIN = '''
+from at_tools import nl
+from pathlib import Path
+
+_DONE = False
+
+
+def main(ctx):
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        global _DONE
+        if _DONE:
+            return
+        _DONE = True
+        result = nl(prompt="检索当前可见文本里的市场级事件")
+        state_dir = Path(ctx.state_dir)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "nl_scope.txt").write_text(str(result.get("scope", "")), encoding="utf-8")
+'''
+
 TEMPLATE_CANDIDATE_WITH_ROW = '''
 import os
 from pathlib import Path
@@ -818,6 +837,19 @@ class ToolFlowTest(unittest.TestCase):
             self.assertEqual(summary["status"], "ok")
             nl_calls = ctx.paths.results / "valid_000" / "nl_tool" / "nl_llm_calls.jsonl"
             self.assertTrue(nl_calls.exists())
+
+    def test_general_nl_call_uses_runtime_rpc_and_cleans_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(GENERAL_NL_CALL_MAIN, encoding="utf-8")
+            ctx.proxy = ScriptedLLM(["general market event summary"])
+            summary = BacktestTool(ctx).run(mode="valid")
+            self.assertEqual(summary["status"], "ok")
+            nl_requests = ctx.paths.results / "valid_000" / "nl_tool" / "nl_requests.jsonl"
+            records = [json.loads(line) for line in nl_requests.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(records[0]["result"]["scope"], "general")
+            self.assertEqual(records[0]["request"]["ts_code"], "")
+            self.assertFalse((ctx.paths.agent / ".runtime" / "nl_rpc").exists())
 
     def test_contract_check_runs_without_results_or_nl(self):
         with tempfile.TemporaryDirectory() as tmp:

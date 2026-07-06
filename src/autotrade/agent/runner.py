@@ -23,6 +23,7 @@ from autotrade.environment.explore import ExploreSubAgentEngine
 from autotrade.environment.llm.proxy import LLMProxy, LLMProxyError, ProviderResponse
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.tools import (
+    AgentWebFetchTool,
     AgentWebSearchTool,
     BacktestTool,
     FinishFoldTool,
@@ -35,6 +36,7 @@ from autotrade.environment.tools import (
 from autotrade.environment.tools.artifact_io import ArtifactIOTool
 from autotrade.environment.tools.base import ActionField, ActionSpec, ToolSchemaError
 from autotrade.environment.tools.web_search import META_SEARCH_PERSPECTIVES, build_web_search_spec
+from autotrade.environment.web_fetch import WebFetchError
 from autotrade.environment.web_search import WebSearchError, WebSearchProvider
 
 from .compact import (
@@ -152,6 +154,7 @@ class AgentSessionRunner:
             self.system_prompt = build_system_prompt(**prompt_kwargs)
         self.shell = SandboxShellTool(ctx)
         self.artifact_io = ArtifactIOTool(ctx)
+        self.web_fetch = AgentWebFetchTool(ctx)
         self.modification_check = ModificationCheckTool(ctx)
         self.backtest = BacktestTool(ctx)
         self.finish_fold = FinishFoldTool(ctx)
@@ -334,6 +337,7 @@ class AgentSessionRunner:
             self.backtest.spec,
             self.finish_fold.spec,
             self.web_search.spec if self.web_search is not None else build_web_search_spec(self.web_search_engines),
+            self.web_fetch.spec,
             ActionSpec(
                 action="note",
                 tool_name="runner_note",
@@ -408,6 +412,7 @@ class AgentSessionRunner:
             "backtest": self._do_backtest,
             "finish_fold": self._do_finish_fold,
             "web_search": self._do_web_search,
+            "web_fetch": self._do_web_fetch,
             "note": self._do_note,
             "explore": self._do_explore,
             "done": self._do_done,
@@ -473,6 +478,14 @@ class AgentSessionRunner:
             self._meta_search_perspectives.add(str(args["perspective"]))
         return {"observation": "web_search", **result}
 
+    def _do_web_fetch(self, args: dict[str, object]) -> dict[str, object]:
+        result = self.web_fetch.run(
+            url=str(args["url"]),
+            max_chars=int(args["max_chars"]),
+            use_proxy=bool(args["use_proxy"]),
+        )
+        return {"observation": "web_fetch", **result}
+
     def _do_explore(self, args: dict[str, object]) -> dict[str, object]:
         engine = ExploreSubAgentEngine(
             self.explore_proxy,
@@ -510,7 +523,7 @@ class AgentSessionRunner:
             return (
                 "开始元学习。先读取 development_history、meta_learning_memory、run_manifest、runtime_env 和 data_summary；"
                 "用 shell/Python 只读检查并分析可见 snapshot 的文件清单、字段、行数、日期覆盖、关键空值和单位；"
-                "需要时反复使用 shell、grep/glob 和 web_search；配置联网检索时完成三类 perspective 的非空成功检索；"
+                "需要时反复使用 shell、grep/glob、web_search 和 web_fetch；配置联网检索时完成三类 perspective 的非空成功检索；"
                 "把简洁可执行的中文 Taste 写入 /mnt/agent/workspace/taste.md；"
                 "如需正则化，可在约束内简化 output/models；最后调用 done。"
             )
@@ -664,7 +677,7 @@ class AgentSessionRunner:
     ) -> list[tuple[str, str, dict[str, object]]]:
         """Run every tool_call in one assistant turn; one result per call.
 
-        A turn whose calls are all concurrency-safe (grep/glob/note/web_search)
+        A turn whose calls are all concurrency-safe (grep/glob/note/web_search/web_fetch)
         runs in parallel; any stateful tool (shell/backtest/finish_fold/...)
         forces deterministic sequential execution.
         """
@@ -755,7 +768,7 @@ class AgentSessionRunner:
             return handler(args)
         except ToolError as exc:
             return _tool_error_observation(action, exc)
-        except WebSearchError as exc:
+        except (WebSearchError, WebFetchError) as exc:
             return {"observation": "error", "action": action, "error": safe_error_summary(exc)}
         except Exception as exc:  # noqa: BLE001 - an agent action must never kill the fold
             error = safe_error_summary(exc)

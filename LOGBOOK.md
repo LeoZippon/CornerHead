@@ -991,3 +991,9 @@
 - 普通 Fold 只完成非验收 replay：3-day `valid_001` return 0.49%、Sharpe -1.20、回放 229s；10-day `valid_002` return 3.01%、Sharpe 5.58、max drawdown 0.70%、replay_wall_seconds 979s、108 orders / 11 trades / 93 rejects（主要 `insufficient_cash`）。`valid_002` 的 substep 预算未超时，`gnn_research` 9 次、最大约 19.43s，预算 15 分钟。
 - 正式实验最终失败且未生成 `experiments/torchgeo_formal_fold_20260701`：Agent 在 deadline 前 `finish_fold`，但没有完整 2021Q4 valid 回测；pipeline 按 `require_complete_validation=true` 拒绝初始 baseline，报 `RuntimeError: initial fold produced no acceptable baseline artifact: ['no successful complete validation backtest in this fold']`。结论与上一轮一致：Agent IO、依赖传递、substep 轨迹正常；阻塞仍是完整季度回放耗时约远超 60 分钟探索窗口/当前流程未保证完成验收回测。
 - 资源复查：无运行中 Docker 容器；内存约 392 GiB available；GPU 6 回到约 7.8 GiB / 0%（其余 GPU 为既有任务占用）。本轮保留 runtime sandbox `.runtime/sandboxes/run_caf370907b69` 供审计。
+
+2026-07-05 NL RPC runtime hardening
+
+- 将策略 `ctx.nl()` 与宿主 NL 服务之间的临时 JSONL RPC 从 Agent `workspace` 移到宿主预创建并锁定的 `/mnt/agent/.runtime/nl_rpc/`；request 仅供 Agent 追加，response 由宿主写入、Agent 只读，回测结束删除本次临时文件，目录空时删除 `nl_rpc/`。
+- Sandbox 初始化现在预创建只读 `.runtime`，避免 backtest 阶段打开 `/mnt/agent` 父目录写权限；环境文档同步说明临时 RPC 与正式 `results/.../nl_tool/` 审计产物的区别。
+- Validation: `tests.unit.test_tools_flow` + `tests.unit.test_nl_scoring` 共 104 OK；真实 Docker 完整 valid smoke 调用 DeepSeek NL provider 成功（`nl_calls=1`、provider call log 2 条、`scope=general`、`nl_rpc` 已清理）；`py_compile` 与 `git diff --check` OK；临时容器和 smoke 目录已清理。

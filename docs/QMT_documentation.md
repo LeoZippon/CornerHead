@@ -2,7 +2,7 @@
 
 本文档记录 AutoTrade 项目接入阿里云 Windows + MiniQMT 的部署状态、当前日常流程和未来实盘上线门槛。当前阶段模型尚未训练完成，仓库也没有活动的 live 下单脚本，因此 QMT 侧只能作为已部署的执行环境保持 standby、只读检查和 dry-run 准备；不得启动自动实盘交易。
 
-相关边界：
+**相关边界**
 
 - 数据下载、单位和 raw 审计见 `docs/data_documentation.md`。
 - Agent 工作合同和策略产物格式见 `docs/agent_design.md`。
@@ -65,7 +65,7 @@
 
 ### 2.1 统一逐 tick 实盘环路
 
-实盘执行沿用回测的统一逐 tick 模型，不另起一套下单逻辑：
+**统一逐 tick 模型**
 
 - 本地 executor 在 Asia/Shanghai 真实时钟上按与回测相同的 24h tick 网格逐时间片推进，每个 tick 调用同一个 `main(ctx)`，并通过同一套 `ctx.broker.*` 原语（`buy`/`sell`/`short`/`cover`/`close`/`cancel`）下单和撤销未成交委托。
 - 回测的 `SimBroker` 已实现 `TraderProtocol`，其 `order_stock` / `cancel_order_stock` / `query_stock_*` 接口与 miniQMT `xt_trader` 1:1 对齐；因此实盘只需一个包装 `xt_trader` 的 `QMTBroker`，即可在同一 protocol 下 drop-in 替换回测 broker，策略代码无需改动。`ctx.broker.pending()` 对应可撤委托查询，返回的 `order_id` 可传给 `ctx.broker.cancel(order_id)`。
@@ -77,7 +77,7 @@
 
 ## 3. 当前日常流程
 
-在模型未训练完成之前，日常流程只做准备和健康检查：
+**当前日常范围**
 
 ### 3.1 准备和健康检查
 
@@ -95,7 +95,7 @@
 
 ### 3.2 只读检查命令
 
-只读检查命令：
+**只读检查命令**
 
 ```bash
 ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_executor.py status"
@@ -106,7 +106,7 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
 
 ## 4. 未来实盘流程
 
-未来上线后，日常流程应按“先冻结、再生成、再 dry-run、最后人工确认”的顺序执行：
+**上线后日常顺序**
 
 ### 4.1 上线后日常顺序
 
@@ -127,7 +127,7 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
 
 ### 4.2 实盘下单前重校验
 
-实盘 executor 在发出每一笔订单前，必须就当日最新状态重新校验：
+**下单前重校验**
 
 - 当日 `margin_secs`（融资/融券）资格，即该标的当日是否可融券做空 / 可融资。
 - 全部交易约束：可用现金、T+1 可卖余额、涨跌停价限、停牌、最小交易单位（手）。
@@ -145,7 +145,7 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
 
 ## 5. 上线门槛
 
-真实交易前至少满足：
+**真实交易门槛**
 
 - 已有冻结的 strategy config、model ID、prompt/model provider 版本和数据合同。
 - held-out 或 quasi-forward 评估结果已审计，并明确允许进入 paper/live 阶段。
@@ -160,7 +160,7 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
 
 ### 6.1 固定目录
 
-远端建议固定目录：
+**远端固定目录**
 
 ```text
 C:\xquant\
@@ -177,14 +177,16 @@ C:\xquant\
 
 ### 6.2 QMT 路径和官方参考
 
-QMT 常见路径：
+**QMT 常见路径**
 
 ```text
 C:\国金证券QMT交易端
 C:\国金证券QMT交易端\userdata_mini
 ```
 
-Windows 上应能看到 `XtMiniQmt.exe` 和 `miniquote.exe`。官方参考：
+Windows 上应能看到 `XtMiniQmt.exe` 和 `miniquote.exe`。
+
+**官方参考**
 
 - XtQuant 快速开始: http://dict.thinktrader.net/nativeApi/start_now.html
 - XtTrader 交易接口: http://dict.thinktrader.net/nativeApi/xttrader.html
@@ -192,7 +194,9 @@ Windows 上应能看到 `XtMiniQmt.exe` 和 `miniquote.exe`。官方参考：
 
 ### 6.3 远端 Python 与环境变量
 
-远端 Python 建议使用独立 Python 3.8，不改系统 PATH：
+**远端 Python**
+
+远端 Python 建议使用独立 Python 3.8，不改系统 PATH。
 
 ```powershell
 C:\xquant\Python38\python.exe -m pip install --upgrade pip
@@ -200,7 +204,7 @@ C:\xquant\Python38\python.exe -m pip install xtquant pandas numpy requests tqdm
 C:\xquant\Python38\python.exe -c "import xtquant; print('xtquant ok')"
 ```
 
-环境变量：
+**环境变量**
 
 ```powershell
 setx CQ_QMT_DATA_PATH "C:\国金证券QMT交易端\userdata_mini"
@@ -210,7 +214,7 @@ setx CQ_EXPECTED_ACCOUNT_ID "<account_id>"
 
 ### 6.4 本金口径
 
-如需限制策略总规模：
+**本金限制**
 
 ```powershell
 setx CQ_MAX_PRINCIPAL "100000"
@@ -255,7 +259,7 @@ setx CQ_MAX_PRINCIPAL "100000"
 
 ### 7.2 执行语义
 
-当前执行语义建议：
+**当前执行语义建议**
 
 - 无 `principal` 时，远端读取账户 `total_asset`。
 - 每日买入预算可设为 `min(account_cash, total_asset * daily_buy_limit_ratio)`。
@@ -267,19 +271,19 @@ setx CQ_MAX_PRINCIPAL "100000"
 
 ### 8.1 上传和执行命令
 
-上传 payload：
+**上传 payload**
 
 ```bash
 scp order.json Administrator@<server_ip>:C:/xquant/inbox/order.json
 ```
 
-Dry-run：
+**Dry-run**
 
 ```bash
 ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_executor.py execute C:\\xquant\\inbox\\order.json --dry-run"
 ```
 
-真实下单必须双确认：
+**真实下单双确认**
 
 ```bash
 ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_executor.py execute C:\\xquant\\inbox\\order.json --execute --confirm LIVE"

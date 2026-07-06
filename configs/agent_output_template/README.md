@@ -107,8 +107,9 @@ fixed cadence, and wraps up by `14:57` — rather than screening on every tick.
   `.pending(ts_code=None)` (working orders; no argument returns all). `limit=P`
   makes it a limit order; the optional `reason=` is an audit annotation the driver
   records without affecting matching.
-- `ctx.nl(ts_code, prompt="...")` — point-in-time NL Sub Agent (its text corpus
-  also rolls on the refresh nodes; frozen research corpus always visible).
+- `ctx.nl(ts_code?, prompt="...")` — point-in-time NL Sub Agent for single-stock
+  or event/theme/sector/macro text analysis (its text corpus also rolls on the
+  refresh nodes; frozen research corpus always visible).
 - `ctx.asof_dir` — per-tick rolling point-in-time view; one directory per data
   domain (`daily`, `events`, `macro`, `fundamentals`, `intraday_1min`), read with
   `pd.read_parquet(ctx.asof_dir / "daily")`. A row appears only once its real
@@ -153,11 +154,14 @@ pre-open or near close), never every tick, or API cost and wall-clock blow up.
 Load or cache model parameters from `ctx.model_dir` once; do not write or
 retrain into `ctx.model_dir` during replay.
 
-`ctx.nl(ts_code, prompt="...")` (equivalently `from at_tools import nl`) starts a
-host-side NL Sub Agent with a point-in-time `text_retrieve` tool and returns a
-result dict. The final `content` is unconstrained; parse whatever score, label,
-or decision you need in `main`/`candidate`/helpers. Request, retrieval, evidence,
-result, and provider-call logs are written under the backtest result directory.
+`ctx.nl(ts_code?, prompt="...")` (equivalently `from at_tools import nl`) starts a
+host-side NL Sub Agent. Passing `ts_code` requests single-stock PIT text analysis;
+`ctx.nl(prompt="...")`
+uses the same service for event, theme, sector, macro, or market-wide PIT text
+retrieval. `ts_code` is a context/ranking hint, not a hard filter. The final
+`content` is unconstrained; parse whatever score, label, or decision you need in
+`main`/`candidate`/helpers. Request, retrieval, evidence, result, and
+provider-call logs are written under the backtest result directory.
 NL carries publish/ingest-time, recall, model-prior, free-text-parsing, and
 look-ahead risks: down-weight or drop low-evidence conclusions, and never let NL
 override cash, tradability, cost, or replay constraints.

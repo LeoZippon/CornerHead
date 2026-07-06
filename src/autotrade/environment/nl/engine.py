@@ -22,36 +22,45 @@ from autotrade.environment.data.contracts import text_dataset_visible_cutoff
 from autotrade.environment.llm.proxy import LLMProxy, LLMProxyError, ProviderResponse, assistant_tool_turn
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.snapshot import to_cn_timestamps
+from autotrade.environment.tools.base import ActionField, ActionSpec, ToolSchemaError
 
 MAX_TOOL_ROUNDS = 3
 TEXT_RETRIEVE_TOOL = "text_retrieve"
 
-TEXT_RETRIEVE_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": TEXT_RETRIEVE_TOOL,
-        "description": (
-            "Retrieve point-in-time text evidence by case-insensitive grep/regex over titles, "
-            "codes, and optional full text bodies."
+TEXT_RETRIEVE_SPEC = ActionSpec(
+    action=TEXT_RETRIEVE_TOOL,
+    tool_name="nl_text_retrieve_tool",
+    description=(
+        "Retrieve point-in-time text evidence by case-insensitive grep/regex over titles, "
+        "codes, and optional full text bodies."
+    ),
+    fields=(
+        ActionField("pattern", "string", required=True, description="Case-insensitive grep/regex pattern."),
+        ActionField(
+            "ts_code",
+            "string",
+            default="",
+            description=(
+                "Optional stock code used only as retrieval context/ranking hint; leave empty for "
+                "event, sector, macro, or market-wide searches."
+            ),
         ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string", "description": "case-insensitive grep/regex pattern"},
-                "ts_code": {"type": "string"},
-                "max_results": {"type": "integer", "minimum": 1, "maximum": 20},
-                "search_bodies": {"type": "boolean"},
-            },
-            "required": ["pattern"],
-            "additionalProperties": False,
-        },
-    },
-}
+        ActionField("max_results", "integer", default=5, min_value=1, max_value=20),
+        ActionField("search_bodies", "boolean", default=True),
+    ),
+    read_only=True,
+    destructive=False,
+    concurrency_safe=False,
+    result_policy="bounded_structured_evidence",
+    allowed_modes=("nl_subagent",),
+)
+TEXT_RETRIEVE_SCHEMA = TEXT_RETRIEVE_SPEC.to_tool_schema()
 
 SUB_AGENT_SYSTEM_PROMPT = """\
 # Role
 You are an A-share point-in-time natural-language research Sub Agent. You help
-strategy code answer the user's prompt for one stock or decision context.
+strategy code answer the user's prompt for one stock, event, sector, macro, or
+decision context.
 
 # Data Boundary
 Use only the context and text evidence returned by tools in this task. Do not
@@ -66,8 +75,9 @@ fact.
 Call the ``text_retrieve`` function tool (native function calling) to fetch text
 evidence. ``pattern`` uses case-insensitive grep/regex semantics over titles,
 codes, and optional full text bodies; prefer company/code/business-context
-patterns before broad market patterns. Optional arguments: ``ts_code``,
-``max_results`` (1-20), ``search_bodies``.
+patterns for single-stock requests, and broad event/sector/macro patterns for
+general requests. Optional arguments: ``ts_code``, ``max_results`` (1-20),
+``search_bodies``. ``ts_code`` is a context/ranking hint, not a hard filter.
 
 # Final Answer
 When you have enough information, answer in any format that is useful to the
@@ -119,6 +129,7 @@ class NLSubAgentResult:
         return {
             "task_id": self.task_id,
             "ts_code": self.ts_code,
+            "scope": "stock" if self.ts_code else "general",
             "status": "ok" if self.ok else "error",
             "state": self.state,
             "content": self.content,
@@ -198,7 +209,7 @@ class TextRetriever:
         self,
         pattern: str,
         *,
-        ts_code: str,
+        ts_code: str = "",
         max_results: int = 5,
         search_bodies: bool = True,
         company_terms: list[str] | None = None,
@@ -259,10 +270,18 @@ class TextRetriever:
     def _candidate_mask(
         self, frame: pd.DataFrame, *, ts_code: str, company_terms: list[str] | None = None
     ) -> pd.Series:
+        terms = _candidate_terms(ts_code, company_terms)
+        if not terms:
+            return pd.Series(False, index=frame.index)
         codes = frame.get("ts_codes", pd.Series("", index=frame.index)).astype(str)
         titles = frame.get("title", pd.Series("", index=frame.index)).astype(str)
-        mask = codes.str.contains(str(ts_code), case=False, regex=False, na=False)
-        for term in _candidate_terms(ts_code, company_terms):
+        code = str(ts_code or "").strip()
+        mask = (
+            codes.str.contains(code, case=False, regex=False, na=False)
+            if code
+            else pd.Series(False, index=frame.index)
+        )
+        for term in terms:
             escaped = re.escape(term)
             mask = mask | titles.str.contains(escaped, case=False, regex=True, na=False)
         return mask
@@ -274,7 +293,8 @@ class TextRetriever:
         if not body:
             return False
         lowered = body.lower()
-        return any(term.lower() in lowered for term in _candidate_terms(ts_code, company_terms))
+        terms = _candidate_terms(ts_code, company_terms)
+        return bool(terms) and any(term.lower() in lowered for term in terms)
 
     def _grep_bodies(self, index: pd.DataFrame, regex: str, *, exclude: set[str], limit: int) -> set[str]:
         found: set[str] = set()
@@ -330,10 +350,21 @@ class TextRetrieveTool:
         company_terms: list[str],
     ) -> tuple[dict[str, object], list[dict[str, object]]]:
         pattern = _request_pattern(arguments)
-        ts_code = str(arguments.get("ts_code") or default_ts_code)
-        max_results = _bounded_int(arguments.get("max_results"), default=5, lower=1, upper=20)
-        search_bodies = bool(arguments.get("search_bodies", True))
         argument_error = _text_retrieve_argument_error(arguments, pattern)
+        if argument_error:
+            validated = {}
+        else:
+            normalized = dict(arguments)
+            normalized["pattern"] = pattern
+            normalized.pop("keywords", None)  # legacy compatibility; not advertised in the schema.
+            try:
+                validated = TEXT_RETRIEVE_SPEC.validate(normalized, mode="nl_subagent")
+            except ToolSchemaError as exc:
+                validated = {}
+                argument_error = str(exc)
+        ts_code = str(validated.get("ts_code") or default_ts_code or "").strip()
+        max_results = int(validated.get("max_results", 5) or 5)
+        search_bodies = bool(validated.get("search_bodies", True))
         if argument_error:
             return (
                 {
@@ -393,8 +424,12 @@ class NLSubAgentEngine:
         request_kwargs: dict[str, object] | None = None,
         config: NLSubAgentConfig,
     ) -> NLSubAgentResult:
+        ts_code = str(ts_code or "").strip()
         task = NLSubAgentResult(ts_code=ts_code, task_id=new_id("nlsub"), state="failed")
-        task.company_context = self.company_contexts.get(ts_code, {"ts_code": ts_code, "context": "unknown"})
+        if ts_code:
+            task.company_context = self.company_contexts.get(ts_code, {"ts_code": ts_code, "context": "unknown"})
+        else:
+            task.company_context = {"scope": "general", "context": "no_single_stock"}
         messages = self._initial_messages(task, prompt=prompt, request_kwargs=request_kwargs or {})
         company_terms = _company_terms(task.company_context, ts_code)
         evidence_seen: set[str] = set()
@@ -604,9 +639,10 @@ def _safe_regex(pattern: str) -> str:
 
 
 def _candidate_terms(ts_code: str, company_terms: list[str] | None = None) -> list[str]:
-    terms = [str(ts_code)]
-    if "." in str(ts_code):
-        terms.append(str(ts_code).split(".", 1)[0])
+    code = str(ts_code or "").strip()
+    terms = [code] if code else []
+    if "." in code:
+        terms.append(code.split(".", 1)[0])
     terms.extend(str(term).strip() for term in (company_terms or []) if str(term).strip())
     seen: set[str] = set()
     ordered: list[str] = []
@@ -618,17 +654,10 @@ def _candidate_terms(ts_code: str, company_terms: list[str] | None = None) -> li
 
 
 def _company_terms(context: dict[str, object], ts_code: str) -> list[str]:
-    terms: list[str] = [ts_code]
+    code = str(ts_code or "").strip()
+    terms: list[str] = [code] if code else []
     for key in ("name", "name_asof", "fullname", "company_name", "short_name"):
         value = context.get(key)
         if isinstance(value, str) and value.strip():
             terms.append(value.strip())
     return terms
-
-
-def _bounded_int(value: object, *, default: int, lower: int, upper: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return max(lower, min(upper, parsed))

@@ -189,7 +189,7 @@ class ExperimentCliTest(unittest.TestCase):
         self.assertIn("--disable-meta-learning-host-proxy", result.stdout)
         self.assertIn("--disable-meta-learning-managed-proxy", result.stdout)
 
-    def test_meta_learning_sandbox_exposes_proxy_aliases_by_default(self):
+    def test_meta_learning_sandbox_exposes_proxy_aliases_when_managed_xray_config_exists(self):
         parser = self._meta_parser()
         args = parser.parse_args([])
         class Completed:
@@ -197,11 +197,16 @@ class ExperimentCliTest(unittest.TestCase):
             stdout = "45: docker0    inet 10.10.0.1/24 brd 10.10.0.255 scope global docker0\\n"
             stderr = ""
         with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / ".env.xray.json").write_text(
+                json.dumps({"inbounds": [], "outbounds": [{"protocol": "freedom"}]}),
+                encoding="utf-8",
+            )
             with patch("scripts.experiments._cli.subprocess.run", return_value=Completed()):
-                spec = build_meta_learning_sandbox_spec(args, SandboxSpec(gpu=None), repo_root=Path(tmp))
+                spec = build_meta_learning_sandbox_spec(args, SandboxSpec(gpu=None), repo_root=repo_root)
                 managed_proxy = build_meta_learning_managed_proxy_spec(
                     args,
-                    repo_root=Path(tmp),
+                    repo_root=repo_root,
                     sandbox_spec=spec,
                 )
 
@@ -215,6 +220,24 @@ class ExperimentCliTest(unittest.TestCase):
         self.assertIn("AT_PROXY_HTTP", aliases)
         self.assertIn("AT_PROXY_HTTPS", aliases)
         self.assertIn("AT_PROXY_ALL", aliases)
+
+    def test_meta_learning_sandbox_does_not_map_ambient_host_proxy_without_managed_config(self):
+        parser = self._meta_parser()
+        args = parser.parse_args([])
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            spec = build_meta_learning_sandbox_spec(args, SandboxSpec(gpu=None), repo_root=repo_root)
+            managed_proxy = build_meta_learning_managed_proxy_spec(
+                args,
+                repo_root=repo_root,
+                sandbox_spec=spec,
+            )
+
+        self.assertEqual(spec.network, "bridge")
+        self.assertEqual(spec.env_aliases, ())
+        self.assertFalse(spec.add_host_gateway)
+        self.assertFalse(managed_proxy.enabled)
+        self.assertEqual(managed_proxy.disabled_status, "not_configured")
 
     def test_meta_learning_network_none_disables_proxy_aliases_and_managed_proxy(self):
         parser = self._meta_parser()

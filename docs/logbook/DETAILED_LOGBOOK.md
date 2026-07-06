@@ -12434,7 +12434,7 @@ Validation:
   - `free -h`: 273 GiB available RAM.
   - GPU usage remained external to this run.
 
-## 2026-06-24 - Meta Learning direct network and optional host proxy
+## 2026-06-24 - Meta Learning direct network and optional managed proxy
 
 Task: make the Meta Learning Docker sandbox use normal direct networking by
 default, keep proxy usage optional, and pass the proxy option into the Meta
@@ -12448,10 +12448,8 @@ Implementation:
 - Added default meta-learning credential env passthrough names:
   `GITHUB_TOKEN` and `HF_TOKEN`. Docker still receives env values only if
   those variables are already present in the host process environment.
-- Added `--meta-learning-host-proxy`. When enabled, the meta-learning sandbox
-  passthrough list includes standard proxy env names, and host gateway mapping
-  is enabled so Docker bridge containers can reach host proxy ports via
-  `host.docker.internal`.
+- Added optional proxy guidance for meta-learning sandbox runs. This earlier
+  implementation was later superseded by the managed XRay-only alias contract.
 - Added a dynamic non-secret Meta Learning system prompt section:
   `# 本次联网与代理选项`. It records network mode, credential/proxy env variable
   names, default direct-network behavior, and secret-handling rules.
@@ -12461,8 +12459,7 @@ Implementation:
 - Updated prompt export to include a short network/proxy appendix example
   rather than another full Meta Learning prompt.
 - Updated Agent, Environment, and Pipeline docs to state that Meta Learning
-  defaults to direct Docker bridge networking; proxy is opt-in and should be
-  configured on the host through Docker-reachable proxy env vars.
+  defaults to direct Docker bridge networking; proxy usage is explicit.
 
 Security notes:
 - The raw GitHub token provided in chat was not used in a command, written to
@@ -12725,8 +12722,7 @@ Configuration:
   remains `none`.
 - Environment variables: `DEEPSEEK_API_KEY`, `TAVILY_API_KEY`,
   `SEMANTIC_SCHOLAR_API_KEY`, and `GITHUB_TOKEN` were present via `.env`;
-  `HF_TOKEN` and standard host proxy variables were not present. Values were
-  not printed or written.
+  `HF_TOKEN` was not present. Values were not printed or written.
 
 Pre-run checks:
 - Real path: `/Data/lzp/MacroQuant`.
@@ -13090,8 +13086,8 @@ Implementation:
 - Docker startup now supports alias env vars by placing values in the
   `subprocess.run(env=...)` environment and passing only `--env CONTAINER_NAME`
   to `docker run`. This avoids embedding proxy values in the command line.
-- `--meta-learning-host-proxy` now maps host standard proxy variables into
-  non-standard container aliases:
+- Managed proxy support maps configured proxy endpoints into non-standard
+  container aliases:
   `MQ_PROXY_HTTP`, `MQ_PROXY_HTTPS`, `MQ_PROXY_ALL`, `MQ_PROXY_NO_PROXY`.
   It does not inject standard `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or
   `NO_PROXY`, so Agent shell commands use direct internet by default.
@@ -13099,9 +13095,9 @@ Implementation:
   names from the repository `.env` into the process environment before
   rendering the Meta Learning sandbox spec. Values are not printed or
   recorded, and existing process env values are not overwritten.
-- For Docker bridge mode with host gateway enabled, localhost proxy URLs are
-  rewritten to `host.docker.internal` before being placed into the container
-  alias env vars.
+- For Docker bridge mode with managed proxy enabled, proxy URLs use a
+  Docker-reachable host alias before being placed into the container alias env
+  vars.
 - Meta Learning system prompt guidance now tells Agent to try direct access
   first and only map alias vars to standard proxy vars for a specific command
   if GitHub/HuggingFace/PyPI/npm is slow or blocked.
@@ -16247,3 +16243,34 @@ Ordinary Fold:
 - Genuine omissions restored: pipeline meta-learning visible-data bullet (explicit `/mnt/snapshot` + `/mnt/snapshots/{train,valid}` mounts and the test/held-out exclusion); env §1.3 compact "PIT 支撑机制" block — fundamentals row-level `available_at` = announcement date 18:00 (verified `fundamental_events.py:361`), `build_pit_events.py` entrypoint, `fundamental_events_status.json` fail-fast gate (pointer to data §3.1), configured-dataset missing `available_at` column must raise (verified `snapshot.py:533`), manifest `build_profile`/`data_profile`; env §1.4 units.py implementation pointer; agent submission checklist dead-code item (doc↔prompt parity); data sentinel prose `revision_monitor.sentinel_*` single-source note.
 
 **Validation.** Reference + anchor checkers 0 problems; full suite 422 OK; PROMPTS.md re-export byte-idempotent against GPT's version; `git diff --check` clean.
+
+## 2026-07-05 NL RPC runtime hardening and real Docker provider smoke
+
+**Task.** Move `ctx.nl()` JSONL RPC out of Agent `workspace`, delete empty `/mnt/agent/.runtime/nl_rpc/` after use, and verify with a real Docker sandbox hitting the LLM provider.
+
+**Changes.**
+
+- `LocalSandbox.prepare_layout()` now pre-creates `/mnt/agent/.runtime` and locks it read-only, preserving the contract that `/mnt/agent` itself is not Agent-writable.
+- `BacktestTool` creates per-backtest NL RPC files under `/mnt/agent/.runtime/nl_rpc/`: request file mode `0622` for Agent append, response file mode `0644` for host-write/Agent-read, with parent directories locked after creation.
+- Backtest cleanup deletes the current request/response files and removes `nl_rpc/` when it is empty; if other files remain, the directory is kept locked read-only.
+- `environment_design.md` now documents the temporary RPC path separately from durable `results/.../nl_tool/` audit logs, and updates the company context component name to `CompanyContextStore`.
+- Added a unit regression for `ctx.nl(prompt=...)` through the main driver/backtest path, including `scope=general` and `nl_rpc` cleanup.
+
+**Validation commands.**
+
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ToolFlowTest.test_main_nl_call_records_audit_files tests.unit.test_tools_flow.ToolFlowTest.test_general_nl_call_uses_runtime_rpc_and_cleans_it tests.unit.test_nl_scoring.NLSubAgentEngineTest.test_general_nl_request_has_no_single_stock_context -v` -> OK.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow tests.unit.test_nl_scoring -v` -> 104 OK.
+- `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m py_compile src/autotrade/environment/tools/backtest.py src/autotrade/environment/sandbox.py tests/unit/test_tools_flow.py` -> OK.
+- `git diff --check -- src/autotrade/environment/tools/backtest.py src/autotrade/environment/sandbox.py tests/unit/test_tools_flow.py docs/environment_design.md` -> OK.
+
+**Real Docker/provider smoke.**
+
+- Created a temporary `.runtime/nl_provider_docker_smoke` sandbox with fixture decision/replay data, started `autotrade-sandbox:latest` with `network=none`, set `ctx.executor = DockerExecutor(...)`, and configured `ctx.nl_proxy = DeepSeekProxy.from_env(model="deepseek-v4-flash", thinking_enabled=False)`.
+- Ran a complete valid `BacktestTool(ctx).run(mode="valid")` without `replay_window`; strategy called `ctx.nl(prompt=...)` once inside a substep.
+- Result: `status=ok`, `complete_validation=true`, `nl_calls=1`, `provider_calls_logged=2`, `request_ts_code=""`, `result_scope="general"`, `nl_rpc_exists_after_backtest=false`.
+- Container was removed; temporary smoke directory was chmod-restored and deleted. Follow-up checks found no `nl_provider_docker_smoke*` or `nl_rpc` directories and no `mqsbx*` containers.
+
+**Resources.**
+
+- Before smoke: system memory about 380 GiB available; no GPU requested for the Docker smoke.
+- After smoke: system memory about 381 GiB available; existing GPU jobs unchanged except normal cluster activity.

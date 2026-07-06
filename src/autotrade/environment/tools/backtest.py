@@ -215,10 +215,7 @@ class BacktestTool:
             decision_cap = float(manifest.get("backtest_final_eval_max_seconds_per_decision", 900))
             per_day_cap = _optional_float(manifest.get("backtest_final_eval_max_seconds_per_trading_day", 3000))
         tmp_nl_dir = self.ctx.paths.workspace / f".{new_id('nl_tool')}"
-        requests_host = self.ctx.paths.workspace / f".{new_id('nl_requests')}.jsonl"
-        responses_host = self.ctx.paths.workspace / f".{new_id('nl_responses')}.jsonl"
-        requests_host.write_text("", encoding="utf-8")
-        responses_host.write_text("", encoding="utf-8")
+        requests_host, responses_host = _prepare_nl_rpc_files(self.ctx.paths.agent)
 
         timeview_enabled = bool(manifest.get("timeview_enabled", manifest.get("rolling_asof_enabled", True)))
         nl_service = _StrategyNLService(
@@ -293,8 +290,7 @@ class BacktestTool:
         finally:
             if tmp_nl_dir.exists():
                 shutil.rmtree(tmp_nl_dir, ignore_errors=True)
-            requests_host.unlink(missing_ok=True)
-            responses_host.unlink(missing_ok=True)
+            _cleanup_nl_rpc_files(requests_host, responses_host)
 
         orders_path = self._write_orders(result_dir, replay.broker.query_stock_orders())
         (result_dir / "detailed_return.json").write_text(
@@ -527,6 +523,8 @@ class _StrategyNLService:
         kwargs: dict[str, object],
         request: dict[str, object],
     ) -> dict[str, object]:
+        ts_code = str(ts_code or "").strip()
+        scope = "stock" if ts_code else "general"
         self.calls += 1
         # Bind the retriever to the requesting tick's sim clock so announcements/news
         # become visible to ctx.nl() only once their refresh node has completed.
@@ -548,7 +546,7 @@ class _StrategyNLService:
         engine = NLSubAgentEngine(
             self.proxy,
             self.retriever,
-            company_contexts={ts_code: self.company_context_store.context(ts_code)},
+            company_contexts={ts_code: self.company_context_store.context(ts_code)} if ts_code else {},
         )
         config = NLSubAgentConfig(
             per_call_timeout_seconds=self.per_call_timeout_seconds,
@@ -559,8 +557,14 @@ class _StrategyNLService:
         self.nl_wall_seconds += time.monotonic() - _nl_t0
         record = result.to_record()
         self._write_result(request, record)
-        _append_jsonl(self.log_dir / "search_requests.jsonl", [{"ts_code": ts_code, **r} for r in result.tool_calls])
-        _append_jsonl(self.log_dir / "evidence.jsonl", [{"ts_code": ts_code, **e} for e in result.evidence])
+        _append_jsonl(
+            self.log_dir / "search_requests.jsonl",
+            [{"ts_code": ts_code, "scope": scope, **r} for r in result.tool_calls],
+        )
+        _append_jsonl(
+            self.log_dir / "evidence.jsonl",
+            [{"ts_code": ts_code, "scope": scope, **e} for e in result.evidence],
+        )
         _append_jsonl(self.log_dir / "nl_llm_calls.jsonl", result.llm_calls)
         if result.state in {"failed", "timeout"} and self.failure_policy == "fail":
             raise BacktestError(f"nl() failed for {ts_code}: {result.error}")
@@ -585,10 +589,51 @@ def _append_jsonl(path: Path, records: object) -> None:
             handle.write(json.dumps(sanitize_for_log(record), ensure_ascii=False, default=str) + "\n")
 
 
+def _prepare_nl_rpc_files(agent_root: Path) -> tuple[Path, Path]:
+    runtime_dir = agent_root / ".runtime"
+    rpc_dir = runtime_dir / "nl_rpc"
+    if not runtime_dir.exists():
+        raise BacktestError("agent runtime directory is missing; prepare the sandbox layout before backtest")
+    runtime_dir.chmod(0o755)
+    rpc_dir.mkdir(parents=True, exist_ok=True)
+    rpc_dir.chmod(0o755)
+    requests_host = rpc_dir / f"{new_id('nl_requests')}.jsonl"
+    responses_host = rpc_dir / f"{new_id('nl_responses')}.jsonl"
+    requests_host.write_text("", encoding="utf-8")
+    responses_host.write_text("", encoding="utf-8")
+    # The sandbox agent may append requests, but only the host may write
+    # responses. Locked parent dirs prevent delete/replace attacks.
+    requests_host.chmod(0o622)
+    responses_host.chmod(0o644)
+    rpc_dir.chmod(0o555)
+    runtime_dir.chmod(0o555)
+    return requests_host, responses_host
+
+
+def _cleanup_nl_rpc_files(requests_host: Path, responses_host: Path) -> None:
+    rpc_dir = requests_host.parent
+    runtime_dir = rpc_dir.parent
+    if runtime_dir.exists():
+        runtime_dir.chmod(0o755)
+    if rpc_dir.exists():
+        rpc_dir.chmod(0o755)
+    requests_host.unlink(missing_ok=True)
+    responses_host.unlink(missing_ok=True)
+    if rpc_dir.exists():
+        try:
+            rpc_dir.rmdir()
+        except OSError:
+            rpc_dir.chmod(0o555)
+    if runtime_dir.exists():
+        runtime_dir.chmod(0o555)
+
+
 def _error_result(ts_code: str, *, state: str, error: str) -> dict[str, object]:
+    code = str(ts_code or "").strip()
     return {
         "task_id": "",
-        "ts_code": ts_code,
+        "ts_code": code,
+        "scope": "stock" if code else "general",
         "status": "error",
         "state": state,
         "content": "",

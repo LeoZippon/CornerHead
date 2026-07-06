@@ -64,8 +64,8 @@ KEY_COLUMN_NAMES = {
 LARGE_TABLE_GUIDANCE = (
     "本 data_summary.json 是轻量索引，只保留文件规模、行数、关键列和日期覆盖；可整文件 cat 读取。",
     "只有主决策视图 snapshot 给出关键列与空值；train/valid 仅给规模与日期覆盖（schema 与 snapshot 一致）。",
-    "需要完整 schema、行组、空值或更细字段时，用 snapshot manifest、Parquet metadata 或 DuckDB 按需查询。",
-    "events.parquet、text_index.parquet、intraday_1min.parquet 通常是大表；优先用 DuckDB count/limit、Parquet metadata、按列读取。",
+    "需要完整 schema、行组、空值或更细字段时，先查 snapshot manifest 或 Parquet metadata。",
+    "events.parquet、text_index.parquet、intraday_1min.parquet 通常是大表；需要抽样或聚合时，用 DuckDB count/limit、pyarrow 或 pandas 按列/日期过滤读取。",
     "不要对未知规模大表直接 pd.read_parquet() 全量读取；需要 pandas 时先限制列、过滤日期或抽样。",
 )
 PRIMARY_VIEW_NAME = "snapshot"
