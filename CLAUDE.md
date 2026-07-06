@@ -51,13 +51,14 @@
 ## Living Documentation
 
 - Treat the current design docs as the communication layer between audit, research decisions, and implementation.
-- Keep exactly five current living docs aligned by scope:
+- Keep five authoritative living docs aligned by scope:
   - `@docs/data_documentation.md`: data sources, downloads, audits, PIT availability rules, unit rules, and known data risks.
   - `@docs/agent_design.md`: Agent-visible inputs, writable strategy artifacts, prompt protocol, tool usage semantics, and forbidden behavior.
   - `@docs/environment_design.md`: PIT snapshots, Sandbox/runtime paths, trusted tools, Broker/backtest/NL scoring, LLM API boundary, and run logs.
   - `@docs/pipeline_design.md`: Fold/Epoch/Held-out orchestration, artifact handoff, freeze/fallback rules, ledgers, and reporting.
-  - `@docs/QMT_documentation.md`: QMT deployment and live-operation workflow.
-- When a change materially affects one of these areas, update the relevant document in the same work item. Do not rely on code or logs alone to communicate a changed design, data contract, or operating procedure.
+  - `@docs/QMT_documentation.md`: QMT in-client Python API, file-bridge architecture, deployment, and live-operation workflow.
+- Keep `@docs/parameters_reference.md` as a derived quick reference, not a sixth authoritative design doc. When defaults, CLI/config knobs, Broker profile fields, replay budgets, sandbox/tool limits, data-task limits, or QMT constants change, update the relevant authoritative doc and this parameter reference in the same work item. Code and run/snapshot manifests remain the source of truth for actually effective values.
+- When a change materially affects one of these areas, update the relevant document in the same work item. Do not rely on code or logs alone to communicate a changed design, data contract, operating procedure, or parameter default.
 - Keep these documents concise and current. They should describe the latest accepted state, not a chronology of earlier attempts, old names, or superseded workflows.
 - Detailed historical traces belong in `@LOGBOOK.md` and `@docs/logbook/DETAILED_LOGBOOK.md`; do not preserve obsolete version labels or migration notes in the living design docs unless they are still operationally relevant.
 - Add a new durable document under `docs/` when a new project area becomes important enough that the existing documents would become confusing or overloaded.
