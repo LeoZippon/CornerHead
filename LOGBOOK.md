@@ -1,3 +1,10 @@
+2026-07-05 文档格式标准化 + 新增参数速查文档
+
+- 以用户已审计的 environment_design §1–§2 为格式与信息密度基准，核对其余全部文档：env §3–§4、agent、pipeline、data 四份基本已合规（五轮收敛的结果），仅修掉信用重构遗留的过期表述（agent ctx 注释 `FIX_PRICE`→指定价+short 需 limit、"借券费"→信用利息；env §3.3 与 data 官方索引的中信来源→SSE 细则解读+国金页；data §3.3 margin_secs 节点描述补融资资格）。
+- QMT_documentation 结构对齐参考格式：`## 术语说明`/`## 导航` 降为与其他四份一致的加粗块；新增其余文档都有的 **职责边界** 块（本机/执行器分工表）；删除 8 处与小节标题重复的加粗标签；§2.2 分工改表格、开放问题改编号列表；术语表补"执行器/文件桥 QMTBroker"；§6.2 官方参考由 XtQuant/XtTrader 链接改为客户端内置 Python API 文档（仓库副本 + 迅投文档），清除 `qmt_executor.py`/XtMiniQmt 残留指向。
+- 新增 `docs/parameters_reference.md`（派生速查，非第六份 living 设计文档）：汇总五份文档引用的全部参数/超参数，默认值逐项对照代码核验——快照窗口、实验编排/验收/修改约束、回放执行与预算、Broker profile（含信用参数）、Agent 会话与上下文管理、Sandbox 资源与工具预算、数据层任务参数（限频/分页/哨兵/刷新节点）、报告与常量；五份文档"相关边界"各加一行指向。
+- 验证：`git diff --check` clean；纯 .md 改动，不涉代码与 prompt；PROMPTS.md 无变化。
+
 2026-07-05 QMT 官方 API 对齐重构：股票/信用账户分离（feat/qmt-credit-broker）
 
 - 依官方全功能 QMT 客户端内 Python 策略 API（`external_references/gjzq-da-qmt`，12k 行接口文档逐节提取）重构 Broker 边界：`TraderProtocol` 由 xtquant 6 方法改为 `passorder`（官方 opType 码）/`cancel`/`get_trade_detail_data`(ACCOUNT/POSITION/ORDER/DEAL)/信用查询（`get_debt_contract`/`get_assure_contract`/`get_enable_short_contract`）；旧 `order_stock`/`query_stock_*` 全部移除（无兼容 shim），m_* 字段映射表进 env docs §3.2。

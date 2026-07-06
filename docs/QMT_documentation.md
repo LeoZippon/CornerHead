@@ -8,8 +8,9 @@
 - Agent 工作合同和策略产物格式见 `docs/agent_design.md`。
 - PIT 窗口、Sandbox、Agent 工具和回测见 `docs/environment_design.md`。
 - 研究侧 Pipeline、冻结和 held-out 流程见 `docs/pipeline_design.md`。
+- 全部参数/超参数默认值速查见 `docs/parameters_reference.md`。
 
-## 术语说明
+**术语说明**
 
 | 术语 | 含义 |
 |---|---|
@@ -17,11 +18,30 @@
 | WFO | Walk-Forward 训练和测试流程；只有冻结后的结果可以进入实盘候选 |
 | LLM shadow | 大模型只做影子审计或建议，不直接改订单 |
 | ledger | 研究侧实验账本；不等于券商成交和持仓 |
-| payload | 本机生成并上传给远端执行器的订单 JSON |
+| payload | 本机生成并传输到远端 inbox 的订单 JSON |
+| 执行器 | QMT 客户端内常驻 Python 策略脚本：轮询 inbox、用内置 API 下单/撤单、回写 ack/fill/state |
+| 文件桥 `QMTBroker` | 本机侧 `TraderProtocol` 适配器：把 `passorder`/`cancel` 写成 inbox 订单文件，把回写快照读成查询结果 |
 | dry-run | 只检查解析、风控和预算，不向券商发真实委托 |
 | state | 远端记录的策略持仓、待处理委托和已处理订单状态 |
 
-## 导航
+**职责边界**
+
+**本机 Linux 负责**
+
+- 数据更新、审计、PIT snapshot、冻结策略推理和订单 payload 生成。
+- 运行与回测相同的 `main(ctx)` 环路，经文件桥 `QMTBroker` 表达交易意图。
+- 从回写的 `state/` 快照对账；本机实验 ledger 只是研究记录，不替代 broker 成交状态。
+
+**远端 QMT 客户端内执行器负责**
+
+| 事项 | 说明 |
+|---|---|
+| 订单执行 | 轮询 inbox，校验后用内置 `passorder`/`cancel` 落地 |
+| 查询与回写 | `get_trade_detail_data` 快照、`order_callback`/`deal_callback` ack/fill 回写 |
+| 状态持久化 | `pending_orders`、`strategy_positions`、`inbox`/`archive` |
+| 禁止 | 网络访问、阻塞循环、线程、研究语义判断（rebalance 拆单在本机完成） |
+
+**导航**
 
 - [1. 当前状态](#1-当前状态)
 - [2. 目标架构](#2-目标架构)
@@ -61,12 +81,10 @@
 
 - 本机 Linux：负责 TuShare/本地 raw 数据更新、审计、PIT snapshot 构造、模型推理、信号审计、订单 payload 生成。
 - 远端 Windows：运行国金全功能 QMT 客户端；客户端内置 Python 策略（§2.2 文件单执行器）负责账户/持仓/成交查询（`get_trade_detail_data`）、订单执行（`passorder`/`cancel`）、策略 state、pending 委托和 payload 归档。
-- 通信：本机通过 `scp` 上传 JSON payload，通过 `ssh` 调用远端 Python 执行器。
+- 通信：本机通过 `scp`/SMB 把 JSON payload 落入远端 inbox；执行由客户端内策略轮询接管，`ssh` 只用于文件搬运和状态快照读取等运维辅助。
 - 状态：远端策略 state 是实盘对账的权威来源；本机实验 ledger 只能作为研究和审计记录，不能替代 broker 成交状态。
 
 ### 2.1 统一逐 tick 实盘环路
-
-**统一逐 tick 模型**
 
 - 本地 executor 在 Asia/Shanghai 真实时钟上按与回测相同的 24h tick 网格逐时间片推进，每个 tick 调用同一个 `main(ctx)`，并通过同一套 `ctx.broker.*` 原语（`buy`/`sell`/`fin_buy`/`short`/`cover`/`sell_repay`/`direct_repay`/`close`/`cancel`，按账户类型可用）下单和撤销未成交委托。
 - 回测的 `SimBroker` 已实现 `TraderProtocol`，其接口与官方全功能 QMT 客户端内 Python 策略 API 对齐：`passorder`（按官方 opType 码：普通 23/24；信用 27/28/29/31/32/33/34）、`cancel`、`get_trade_detail_data`（ACCOUNT/POSITION/ORDER/DEAL）与信用查询（`get_debt_contract`/`get_assure_contract`/`get_enable_short_contract`）。字段级映射表见 `environment_design.md` §3.2。实盘只需一个满足同一 protocol 的 `QMTBroker` 适配器，即可 drop-in 替换回测 broker，策略代码无需改动：`passorder` 以唯一 `user_order_id`（投资备注 `m_strRemark`）提交并立即按官方 `get_last_order_id` 语义返回委托号；`ctx.broker.pending()` 对应当日可撤委托查询，返回的 `order_id` 可传给 `ctx.broker.cancel(order_id)`（适配器按备注解析委托号）。
@@ -82,22 +100,30 @@
 
 **分工**
 
-- 决策侧（本地 Linux / 我们自己的 Python 环境）：跑与回测同一 `main(ctx)` 环路与冻结策略（现代 pandas/torch 依赖，不能运行在客户端内置 Python 3.6.8），经文件桥 `QMTBroker`（§2.1）生成订单 payload（§7 schema，订单带 `op_type`），由 OS 通道（scp/SMB）落入远端 `C:\xquant\inbox\`。
-- 执行侧（QMT 客户端内常驻策略脚本，标准库-only）：轮询 inbox、校验并用**内置 API** 落地订单、回写 ack/fill/state。**全程零网络、只碰本地文件**——规避内置 Python 单线程阻塞与三方库白名单风险（这也是否决"客户端内 HTTP"方案的原因）。
+| 侧 | 运行环境 | 职责 |
+|---|---|---|
+| 决策侧 | 本地 Linux，自有 Python（现代 pandas/torch，不能跑在客户端内置 Python 3.6.8） | 跑与回测同一 `main(ctx)` 环路与冻结策略；经文件桥 `QMTBroker`（§2.1）生成订单 payload（§7 schema，订单带 `op_type`），由 OS 通道（scp/SMB）落入远端 `C:\xquant\inbox\` |
+| 执行侧 | QMT 客户端内常驻策略脚本，仅标准库 | 轮询 inbox、校验并用内置 API 落地订单、回写 ack/fill/state；全程零网络、只碰本地文件（规避内置 Python 单线程阻塞与三方库白名单风险，也是否决"客户端内 HTTP"方案的原因） |
 
 **客户端内执行器要点**
 
-- 部署形态：策略加入模型交易、实盘模式，勾选"终端启动后自动执行"+账户自动登录。`init()` 里 `set_account(<账户>)` 并注册 `run_time("poll_inbox", "3nSecond", <过去时刻>, "SH")`；`handlebar` 置空。**禁用阻塞循环/`watchdog`/线程**——官方运行时所有策略共享一个线程，任何阻塞会冻结全部策略；轮询定时器是唯一正确形态。
+- 部署形态：策略加入模型交易、实盘模式，勾选"终端启动后自动执行"+账户自动登录。`init()` 里 `set_account(<账户>)` 并注册 `run_time("poll_inbox", "3nSecond", <过去时刻>, "SH")`；`handlebar` 置空。禁用阻塞循环、`watchdog` 和线程——官方运行时所有策略共享一个线程，任何阻塞会冻结全部策略；轮询定时器是唯一正确形态。
 - `poll_inbox`：校验 payload（账户、schema、`payload_id` 去重、预算/涨跌停/停牌/T+1/手数、当日 margin_secs 重校验 §4.2）→ 逐单构造 `client_order_id = <payload_id>#<code>#<side>#<seq>` 作为 `userOrderId`（→`m_strRemark`，幂等键；提交前先扫 ORDER/DEAL 里同备注则跳过；同代码有待报单则暂缓防超单）→ `passorder(opType, 1101, acc, code, prType, price, volume, strategyName, quickTrade=2, client_order_id, ContextInfo)`（`quickTrade=2` 使定时器回调内即刻下单）→ payload 归档。撤单指令文件同路径处理，映射到 `cancel(委托号, acc, accountType, ContextInfo)`（按备注解析委托号）。
 - 回写与对账：`order_callback` 写 `*.ack.json`（状态、委托号、拒因）；`deal_callback` 追加 `*.fills.jsonl` 并按 `(委托号, 备注, 成交序号)` 去重（断线重连会整日重推）；慢定时器周期性把 `get_trade_detail_data` ACCOUNT/ORDER/DEAL/POSITION 快照进 `state/` 作为权威对账源（本地 `QMTBroker.get_trade_detail_data` 即读这些快照）。交易接口为异步、查询读本地缓存（无推送柜台 1–6s 刷新）——提交后等一个缓存周期再对账，永不把提交当成交（§8.2）。
 - 崩溃恢复：`init()` 先读 `state/` 重建，再用当日 ORDER/DEAL/POSITION 权威覆盖；客户端自启+自动登录+自动执行重挂定时器。时钟：Windows 本地时钟必须 Asia/Shanghai + NTP，回调内用 `get_tick_timetag()` 门控下单窗口。dry-run：运行(模拟)模式天然不发真实委托 + payload `execute:false` 标志双闸。
 - 已否决备选：xtquant/miniQMT 外接（用户决策弃用）；原生文件单模块（零售版不存在）；客户端内 HTTP（单线程运行时+白名单摩擦，换取我们分钟级节奏用不到的时延）。
 
-**需在真实国金客户端上验证的开放问题**：①客户端内策略对任意本地路径的**写**权限（读已有官方接口 `load_stk_list` 佐证）；②`run_time`/回调在实盘模式的稳定性与重连重推行为；③隔夜重启自动恢复链路；④我们各 op 在国金柜台的 opType/prType 实测映射（尤其信用 27–34）；⑤内置 Python 3.6.8 + 白名单约束（执行器目标：仅标准库）；⑥GBK 源文件下 UTF-8 JSON 读写；⑦程序化交易报备与申报速率阈值（分钟级节奏预计合规）。
+**需在真实国金客户端上验证的开放问题**
+
+1. 客户端内策略对任意本地路径的写权限（读权限已有官方接口 `load_stk_list` 佐证）。
+2. `run_time`/回调在实盘模式的稳定性与断线重连重推行为。
+3. 隔夜重启自动恢复链路（自启 + 自动登录 + 自动执行）。
+4. 各 op 在国金柜台的 opType/prType 实测映射（尤其信用 27–34）。
+5. 内置 Python 3.6.8 与三方库白名单约束（执行器目标：仅标准库）。
+6. GBK 源文件下 UTF-8 JSON 数据文件读写。
+7. 程序化交易报备与申报速率阈值（分钟级节奏预计合规）。
 
 ## 3. 当前日常流程
-
-**当前日常范围**
 
 ### 3.1 准备和健康检查
 
@@ -115,8 +141,6 @@
 
 ### 3.2 只读检查命令
 
-**只读检查命令**
-
 ```bash
 ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_executor.py status"
 ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_executor.py reconcile"
@@ -125,8 +149,6 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
 `reconcile` 不下单，只用 QMT 当日成交同步远端策略 state 和 pending 委托。这两条是 miniQMT 时期部署的遗留只读工具，仅用于 standby 期健康检查；客户端内执行器（§2.2）上线后，status/reconcile 改为直接读取其回写的 `state/` 快照文件。
 
 ## 4. 未来实盘流程
-
-**上线后日常顺序**
 
 ### 4.1 上线后日常顺序
 
@@ -147,8 +169,6 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
 
 ### 4.2 实盘下单前重校验
 
-**下单前重校验**
-
 - 当日 `margin_secs`（融资/融券）资格，即该标的当日是否可融券做空 / 可融资买入。
 - 信用账户约束：保证金可用余额、授信额度、融券卖出限价（申报价不低于最新成交价）。
 - 全部交易约束：可用现金、T+1 可卖余额、涨跌停价限、停牌、最小交易单位（手）。
@@ -166,8 +186,6 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
 
 ## 5. 上线门槛
 
-**真实交易门槛**
-
 - 已有冻结的 strategy config、model ID、prompt/model provider 版本和数据合同。
 - held-out 或 quasi-forward 评估结果已审计，并明确允许进入 paper/live 阶段。
 - `can_affect_trading=true` 的组件必须经过单独审计；当前 LLM shadow 默认不能影响交易。
@@ -180,8 +198,6 @@ ssh Administrator@<server_ip> "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_
 ## 6. 远端部署
 
 ### 6.1 固定目录
-
-**远端固定目录**
 
 ```text
 C:\xquant\
@@ -205,13 +221,11 @@ C:\国金证券QMT交易端
 C:\国金证券QMT交易端\userdata_mini
 ```
 
-Windows 上应能看到 `XtMiniQmt.exe` 和 `miniquote.exe`。
-
 **官方参考**
 
-- XtQuant 快速开始: http://dict.thinktrader.net/nativeApi/start_now.html
-- XtTrader 交易接口: http://dict.thinktrader.net/nativeApi/xttrader.html
-- 代码示例: http://dict.thinktrader.net/nativeApi/code_examples.html
+- 客户端内 Python 策略 API 文档（本仓库副本）：`external_references/gjzq-da-qmt/qmt_python_api_doc.html`
+- 迅投内置 Python 文档：http://docs.thinktrader.net/QMT/
+- 迅投常见问题（单线程运行时、异步交易接口、查询缓存刷新）：https://dict.thinktrader.net/innerApi/question_answer.html
 
 ### 6.3 远端 Python 与环境变量
 
@@ -235,8 +249,6 @@ setx CQ_EXPECTED_ACCOUNT_ID "<account_id>"
 
 ### 6.4 本金口径
 
-**本金限制**
-
 ```powershell
 setx CQ_MAX_PRINCIPAL "100000"
 ```
@@ -245,7 +257,7 @@ setx CQ_MAX_PRINCIPAL "100000"
 
 ## 7. Payload 草案
 
-当前 payload schema 尚未冻结；以下只作为 AutoTrade 后续实现参考。真实接入前必须与远端 `qmt_executor.py` 实际代码核对。
+当前 payload schema 尚未冻结；以下只作为 AutoTrade 后续实现参考。真实接入前必须与客户端内执行器的实际实现核对。
 
 ### 7.1 Payload Schema
 
@@ -282,8 +294,6 @@ setx CQ_MAX_PRINCIPAL "100000"
 `op_type` 取官方 passorder 操作码（普通 23/24；信用 27/28/29/31/32/33/34，与 `environment_design.md` §3.2 一致）；`side` 保留为人读冗余，执行器以 `op_type` 为准并校验两者一致。
 
 ### 7.2 执行语义
-
-**当前执行语义建议**
 
 - 无 `principal` 时，远端读取账户 `total_asset`。
 - 每日买入预算可设为 `min(account_cash, total_asset * daily_buy_limit_ratio)`。

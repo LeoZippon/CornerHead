@@ -8,6 +8,7 @@
 - Agent 的证据包和大模型输入见 `docs/agent_design.md`。
 - 完整实验编排见 `docs/pipeline_design.md`。
 - QMT 实盘流程见 `docs/QMT_documentation.md`。
+- 全部参数/超参数默认值速查见 `docs/parameters_reference.md`。
 
 **术语说明**
 
@@ -489,7 +490,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 | `cn_nightly_pit_event_build` | 03:35 → 约 03:50（约 15 分钟） | 财务 PIT 事件（`fundamental_events`）变为可查询 |
 | `cn_preopen_board_backfill_0850` | 08:50 → 约 08:55 | 前一日打板关键榜单（`kpl_list` 等） |
 | `cn_preopen_text_backfill_0855` | 08:55 → 约 09:00 | 短新闻 `cctv_news` / `news` 盘前回补 |
-| `cn_preopen_margin_secs_backfill_0903` / `_retry_0913` | 09:03 / 09:13 → 约 09:05 / 09:15 | 当日融资融券标的 `margin_secs`（做空券源池） |
+| `cn_preopen_margin_secs_backfill_0903` / `_retry_0913` | 09:03 / 09:13 → 约 09:05 / 09:15 | 当日融资融券标的 `margin_secs`（同一集合门控融券券源与融资买入资格） |
 | `cn_preopen_margin_backfill_0905` / `_retry_0915` | 09:05 / 09:15 → 约 09:07 / 09:17 | 前一交易日 `margin` / `margin_detail` |
 
 关键后果：因 `cn_evening_full` 约次日 02:05 才写完，交易日内横截面日频视图只到上一交易日（D-1），当日 `daily` 等次日约 02:05 才落库可见；分钟历史同样在晚间节点滚动落库，当日实时分钟 bar 不走持久化视图、由引擎单独提供（`ctx.bars`）。
@@ -562,9 +563,8 @@ Revision sentinel 监控 `daily`、`adj_factor`、`daily_basic`、`stk_limit`、
 - 上市公司公告：https://tushare.pro/document/2?doc_id=176
 - 中国经济数据发布日程：https://tushare.pro/document/2?doc_id=461
 - GDP：https://tushare.pro/document/2?doc_id=227
-- 中信证券融资融券保证金比例：https://pb.citics.com/trading/annon_new/202407/t20240718_1189870.html
-- 中信证券维持担保比例：https://pb.citics.com/trading/xxgs/wcdbbl/
-- 中信证券约定融券费率说明：https://pb.citics.com/trading/annon_new/202012/t20201210_1147502.html
+- 上交所融资融券交易实施细则解读（维保比例/保证金可用余额公式）：https://www.sse.com.cn/services/tradingservice/margin/edu/c/10074042/files/a1f1c4833302451fb9130dbb94116c56.pdf
+- 国金证券融资融券业务页（利率、担保证券、维保比例公示）：https://www.gjzq.com.cn/main/a/rzrq/index.html
 - CPI/PPI/PMI/货币供应/社融：https://tushare.pro/document/2?doc_id=228 / https://tushare.pro/document/2?doc_id=229 / https://tushare.pro/document/2?doc_id=325 / https://tushare.pro/document/2?doc_id=242 / https://tushare.pro/document/2?doc_id=310
 - 利率与全球事件：https://tushare.pro/document/2?doc_id=202 / https://tushare.pro/document/2?doc_id=204 / https://tushare.pro/document/2?doc_id=205 / https://tushare.pro/document/2?doc_id=206 / https://tushare.pro/document/2?doc_id=233
 - 全球指数/外汇/美国利率：https://tushare.pro/document/2?doc_id=211 / https://tushare.pro/document/2?doc_id=179 / https://tushare.pro/document/2?doc_id=218

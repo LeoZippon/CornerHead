@@ -8,6 +8,7 @@
 - PIT 窗口、Sandbox、Agent 工具和回测入口见 `docs/environment_design.md`。
 - raw 数据下载和审计见 `docs/data_documentation.md`。
 - QMT 实盘流程见 `docs/QMT_documentation.md`。
+- 全部参数/超参数默认值速查见 `docs/parameters_reference.md`。
 
 **术语说明**
 
