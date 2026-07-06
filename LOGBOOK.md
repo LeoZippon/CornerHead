@@ -1,3 +1,12 @@
+2026-07-06 双账户拆分：普通现金账户 + 信用两融账户（feat/qmt-credit-broker）
+
+- 按用户要求把 SimBroker 与 QMT 实盘环境从"单账户（account_type 选型）"改为**固定双账户**：`stock` 普通账户（long-only 现金，opType 23/24）+ `credit` 信用账户（担保品买卖 33/34 + 融资 27 + 融券 28/29/31/32），如同真实投资者在同一券商的两户。现金、持仓、T+1 各自独立、互不担保；opType 自身决定账户归属，`passorder` 无需账户选择器；`get_trade_detail_data` 的 `account_type` 变为必填（STOCK/CREDIT）。
+- SimBroker 内部重构为 `AccountState`（name/cash/initial_equity/positions/contracts）×2：维保比例/保证金可用余额/利息/强平**只计信用账户资产**（普通账户不作担保、强平只清信用户）；组合权益 = 两账户之和；`max_total_holdings` 按跨账户去重代码数、单票权重按跨账户合并名义执行；同一票允许普通做多 + 信用融券做空（账户内仍单票单侧，opType 30 维持不支持）。`weight` 改为按下单目标账户初始资金（`stock_initial_cash`/`credit_initial_cash` 各默认 500k，替代 `initial_cash`+`account_type`；profile_id → `gjzq_dual_v1`）。
+- 新增 `transfer(amount, from, to)` 账户间现金划转（银证转账式、提交 tick 即时结算、substep 延迟语义一致）：融券冻结所得不可划出；信用账户有负债时划出后维保比例必须 ≥ 提取线 3.00——`maintenance_withdraw_ratio` 从"仅审计记录"变为实际执行的约束。实盘侧 transfer 不在策略 API 内，payload 中的划转指令只生成人工银证转账工单。
+- Agent 面：`ctx.broker` 新增 `credit_buy`/`credit_sell`/`transfer`/`stock` 视图；`buy`/`sell` 语义改为普通账户；顶层 `cash`/`available_cash` 移除（改 `ctx.broker.stock["..."]`/`credit["..."]`，无兼容别名）；`close(code, account=None)` 双账户同持时 driver 端抛错要求显式 `account=`（引擎按提交 tick 唯一持有账户解析）；`position(code, account=None)` 缺省跨账户净额；`ctx.account` 变为 `{stock, credit, total_assets, risk_limits}`，持仓行带 `account`。修复顺带发现的 `_limit_fill_price` 动作集缺口（credit_buy/fin_buy 限价单曾走卖方分支）。
+- 实盘（QMT_documentation）：执行器按 op_type 在 `CQ_STOCK_ACCOUNT_ID`/`CQ_CREDIT_ACCOUNT_ID` 间路由（两者必填）；§2.1/§2.2/§6.3/§9 同步。五份 living docs + parameters_reference + 提示词动作表/facts（`stock_initial_cash`/`credit_initial_cash`/`maintenance_withdraw_ratio`）+ 模板同步，PROMPTS.md 重导出（幂等）。
+- 验证：full suite 472 OK（468→472：新增独立现金池/跨账户对冲/划转提取线/维保不计普通账户/双账户回放解析等测试，删单账户拒绝类测试）；`git diff --check` clean；沙箱镜像重建（driver 变更）+ Docker e2e 复验。
+
 2026-07-05 文档格式标准化 + 新增参数速查文档
 
 - 以用户已审计的 environment_design §1–§2 为格式与信息密度基准，核对其余全部文档：env §3–§4、agent、pipeline、data 四份基本已合规（五轮收敛的结果），仅修掉信用重构遗留的过期表述（agent ctx 注释 `FIX_PRICE`→指定价+short 需 limit、"借券费"→信用利息；env §3.3 与 data 官方索引的中信来源→SSE 细则解读+国金页；data §3.3 margin_secs 节点描述补融资资格）。
