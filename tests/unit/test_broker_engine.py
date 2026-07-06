@@ -20,16 +20,26 @@ def _held(state, code):
     return next((p for p in state["positions"] if str(p["ts_code"]) == code), None)
 
 
-def _positions(broker):
-    return broker.get_trade_detail_data(data_type="POSITION")
+def _positions(broker, account=None):
+    accounts = ("stock", "credit") if account is None else (account,)
+    return [
+        row
+        for name in accounts
+        for row in broker.get_trade_detail_data(account_type=name, data_type="POSITION")
+    ]
 
 
-def _asset(broker):
-    return broker.get_trade_detail_data(data_type="ACCOUNT")[0]
+def _asset(broker, account):
+    return broker.get_trade_detail_data(account_type=account, data_type="ACCOUNT")[0]
 
 
 def _deals(broker, code):
-    return [t for t in broker.get_trade_detail_data(data_type="DEAL") if t["ts_code"] == code]
+    return [
+        t
+        for name in ("stock", "credit")
+        for t in broker.get_trade_detail_data(account_type=name, data_type="DEAL")
+        if t["ts_code"] == code
+    ]
 
 
 DECISION = "2022-01-04T09:25:00+08:00"
@@ -86,18 +96,70 @@ class BrokerPrimitiveTest(unittest.TestCase):
         broker = self.make_broker()
         order = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
         self.assertEqual(order.status, "filled")
+        self.assertEqual(order.account, "stock")
         self.assertEqual(broker.position_quantity("000001.SZ"), 1000)
         broker.mark_to_market("20220105")
         broker.mark_to_market("20220106")
         broker.close_all("20220106")
-        self.assertEqual(broker.positions, {})
+        self.assertEqual(broker.stock.positions, {})
         self.assertGreater(broker.equity(), broker.initial_equity)
+
+    def test_accounts_have_separate_cash_pools(self):
+        # The two accounts never back each other's orders: a stock buy leaves the
+        # credit cash untouched and vice versa, and combined equity starts at the
+        # sum of the two initial cash amounts.
+        broker = self.make_broker()
+        self.assertEqual(broker.initial_equity, 1_000_000.0)
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        self.assertLess(broker.stock.cash, 500_000.0)
+        self.assertEqual(broker.credit.cash, 500_000.0)
+        stock_cash = broker.stock.cash
+        broker.execute("000002.SZ", "credit_buy", trade_date="20220104", raw_price=20.0, amount=500)
+        self.assertEqual(broker.stock.cash, stock_cash)
+        self.assertLess(broker.credit.cash, 500_000.0)
+        # A stock-account buy larger than the stock cash is rejected even though
+        # the credit account could fund it.
+        too_big = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=60_000)
+        self.assertEqual(too_big.reject_reason, "insufficient_cash")
+
+    def test_cross_account_hedge_nets_to_zero(self):
+        # Long in the stock account plus 融券 short in the credit account is a
+        # legitimate hedged book: each account keeps one side per code, and the
+        # default position view nets across accounts.
+        broker = self.make_broker()
+        broker.execute("000002.SZ", "buy", trade_date="20220104", raw_price=20.0, amount=1000)
+        short = broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=1000)
+        self.assertEqual(short.status, "filled")
+        self.assertEqual(broker.position_quantity("000002.SZ"), 0)
+        self.assertEqual(broker.position_quantity("000002.SZ", account="stock"), 1000)
+        self.assertEqual(broker.position_quantity("000002.SZ", account="credit"), -1000)
+
+    def test_transfer_between_accounts_and_withdraw_gate(self):
+        broker = self.make_broker()
+        moved = broker.transfer(200_000, "stock", "credit")
+        self.assertEqual(moved.status, "filled")
+        self.assertEqual(broker.stock.cash, 300_000.0)
+        self.assertEqual(broker.credit.cash, 700_000.0)
+        # Misuse is rejected, not clamped.
+        self.assertEqual(broker.transfer(0, "stock", "credit").reject_reason, "transfer_amount_not_positive")
+        self.assertEqual(broker.transfer(100, "stock", "stock").reject_reason, "transfer_same_account")
+        self.assertEqual(broker.transfer(10_000_000, "credit", "stock").reject_reason, "insufficient_cash")
+        # With no credit debt, cash moves out freely.
+        back = broker.transfer(200_000, "credit", "stock")
+        self.assertEqual(back.status, "filled")
+        # With debt outstanding, an outbound transfer must keep the maintenance
+        # ratio at or above the withdraw line (3.00): the 提取线 is enforced here.
+        broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=500)
+        ok = broker.transfer(200_000, "credit", "stock")
+        self.assertEqual(ok.status, "filled")  # post-ratio far above 3.0
+        blocked = broker.transfer(290_000, "credit", "stock")
+        self.assertEqual(blocked.reject_reason, "credit_withdraw_blocked_by_maintenance")
 
     def test_t1_blocks_same_day_close(self):
         broker = self.make_broker()
         broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
         broker.close_all("20220104")
-        self.assertIn("000001.SZ", broker.positions)
+        self.assertIn("000001.SZ", broker.stock.positions)
         self.assertTrue(any(e["event_type"] == "exit_blocked_t_plus_one" for e in broker.events))
 
     def test_date_roll_unlocks_t_plus_one_before_any_fill(self):
@@ -106,14 +168,14 @@ class BrokerPrimitiveTest(unittest.TestCase):
         # off-session tick (the host calls broker.roll_to_date at each new trade date).
         broker = self.make_broker()
         broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
-        held = next(p for p in _positions(broker) if p["ts_code"] == "000001.SZ")
+        held = next(p for p in _positions(broker, "stock") if p["ts_code"] == "000001.SZ")
         self.assertEqual(held["sellable_quantity"], 0)  # T+1 locked on D
         broker.roll_to_date("20220105")  # the host rolls the date before any D+1 tick
-        held = next(p for p in _positions(broker) if p["ts_code"] == "000001.SZ")
+        held = next(p for p in _positions(broker, "stock") if p["ts_code"] == "000001.SZ")
         self.assertEqual(held["sellable_quantity"], 1000)  # unlocked without a fill
         # roll_to_date is idempotent: re-rolling the same date does not relock or error.
         broker.roll_to_date("20220105")
-        held = next(p for p in _positions(broker) if p["ts_code"] == "000001.SZ")
+        held = next(p for p in _positions(broker, "stock") if p["ts_code"] == "000001.SZ")
         self.assertEqual(held["sellable_quantity"], 1000)
 
     def test_short_can_cover_same_day(self):
@@ -121,6 +183,7 @@ class BrokerPrimitiveTest(unittest.TestCase):
         broker = self.make_broker()  # 000002.SZ shortable
         opened = broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=500)
         self.assertEqual(opened.status, "filled")
+        self.assertEqual(opened.account, "credit")
         covered = broker.execute("000002.SZ", "cover", trade_date="20220104", raw_price=19.5, amount=500)
         self.assertEqual(covered.status, "filled")
         self.assertEqual(broker.position_quantity("000002.SZ"), 0)
@@ -139,16 +202,16 @@ class BrokerPrimitiveTest(unittest.TestCase):
         # Fix B: T+1 lock bookkeeping is long-only. A short never populates
         # locked_today/locked_date — its sellable_quantity ignores them and 融券
         # permits same-day cover — while the long T+1 lock is still recorded and lifts
-        # on the date roll exactly as before.
-        broker = self.make_broker()  # 000001.SZ (long), 000002.SZ shortable
+        # on the date roll exactly as before. The legs live in separate accounts.
+        broker = self.make_broker()  # 000001.SZ long (stock), 000002.SZ short (credit)
         broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
-        long_pos = broker.positions["000001.SZ"]
+        long_pos = broker.stock.positions["000001.SZ"]
         self.assertEqual(long_pos.locked_today, 1000)  # long records the T+1 lock
         self.assertEqual(long_pos.locked_date, "20220104")
         self.assertEqual(long_pos.sellable_quantity, 0)  # locked on entry day
 
         broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=500)
-        short_pos = broker.positions["000002.SZ"]
+        short_pos = broker.credit.positions["000002.SZ"]
         self.assertEqual(short_pos.locked_today, 0)  # short leaves the lock state untouched
         self.assertEqual(short_pos.locked_date, "")
         self.assertEqual(short_pos.sellable_quantity, 500)  # fully coverable same day
@@ -157,7 +220,7 @@ class BrokerPrimitiveTest(unittest.TestCase):
         # Adding to the short after the date roll still never touches its lock state,
         # while the long's T+1 lock lifts on the new day exactly as before.
         broker.execute("000002.SZ", "short", trade_date="20220105", raw_price=19.4, amount=500)
-        short_pos = broker.positions["000002.SZ"]
+        short_pos = broker.credit.positions["000002.SZ"]
         self.assertEqual(short_pos.locked_today, 0)
         self.assertEqual(short_pos.locked_date, "")
         self.assertEqual(short_pos.sellable_quantity, 1000)
@@ -166,7 +229,7 @@ class BrokerPrimitiveTest(unittest.TestCase):
 
         # A partial cover keeps the short lock state at its defaults.
         broker.execute("000002.SZ", "cover", trade_date="20220105", raw_price=19.0, amount=500)
-        short_pos = broker.positions["000002.SZ"]
+        short_pos = broker.credit.positions["000002.SZ"]
         self.assertEqual(short_pos.locked_today, 0)
         self.assertEqual(short_pos.locked_date, "")
 
@@ -198,6 +261,7 @@ class BrokerPrimitiveTest(unittest.TestCase):
         broker.close_all("20220106")
         closed = [event for event in broker.events if event["event_type"] == "position_closed"][0]
         self.assertEqual(closed["side"], "short")
+        self.assertEqual(closed["account"], "credit")
         self.assertGreater(broker.equity(), broker.initial_equity)
         self.assertGreater(broker.stamp_duty_paid, 0.0)
         self.assertAlmostEqual(broker.interest_paid_total, broker.interest_accrued_total)
@@ -223,17 +287,18 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertAlmostEqual(fee_monday - fee_friday, fee_friday * 3)
 
     def test_short_proceeds_are_locked_not_deployable(self):
-        # R8b: a short banks its proceeds into cash but locks them as collateral;
-        # available_cash never inflates with proceeds. Margin is not frozen cash —
-        # it constrains new credit ops through 保证金可用余额.
-        broker = self.make_broker()  # 000002.SZ shortable, 1,000,000 initial cash
+        # R8b: a short banks its proceeds into credit-account cash but locks them
+        # as collateral; the credit available_cash never inflates with proceeds.
+        # Margin is not frozen cash — it constrains new credit ops through
+        # 保证金可用余额.
+        broker = self.make_broker()  # 000002.SZ shortable, 500,000 credit cash
         bail_before = broker.enable_bail_balance()
         broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=500)
-        asset_after = _asset(broker)
-        pos = next(p for p in _positions(broker) if p["ts_code"] == "000002.SZ")
-        self.assertGreater(broker.cash, 1_000_000.0)  # proceeds banked into literal cash
+        asset_after = _asset(broker, "credit")
+        pos = next(p for p in _positions(broker, "credit") if p["ts_code"] == "000002.SZ")
+        self.assertGreater(broker.credit.cash, 500_000.0)  # proceeds banked into literal cash
         # Deployable cash excludes exactly the locked short proceeds (entry_cost).
-        self.assertAlmostEqual(asset_after["available_cash"], broker.cash - pos["entry_cost"])
+        self.assertAlmostEqual(asset_after["available_cash"], broker.credit.cash - pos["entry_cost"])
         # The bail balance drops by the posted margin plus open costs (fee + duty).
         contract = broker.get_debt_contract()[0]
         margin = contract["sell_amount"] * broker.profile.effective_slo_margin_ratio
@@ -244,16 +309,17 @@ class BrokerPrimitiveTest(unittest.TestCase):
         broker = self.make_broker(shortable=("000001.SZ",))  # fin gate shares margin_secs
         order = broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=1000)
         self.assertEqual(order.status, "filled")
+        self.assertEqual(order.account, "credit")
         self.assertEqual(order.op_type, optype.FIN_BUY)
-        self.assertEqual(broker.cash, 1_000_000.0)  # financed: no cash moves at open
-        self.assertEqual(broker.position_quantity("000001.SZ"), 1000)
+        self.assertEqual(broker.credit.cash, 500_000.0)  # financed: no cash moves at open
+        self.assertEqual(broker.position_quantity("000001.SZ", account="credit"), 1000)
         contract = broker.get_debt_contract()[0]
         price = broker.profile.slipped_price(10.0, is_buy=True)
         principal = 1000 * price + broker.profile.commission(1000 * price)
         self.assertEqual(contract["compact_type"], "fin")
         self.assertAlmostEqual(contract["real_compact_balance"], principal)
         self.assertEqual(contract["real_compact_vol"], 1000)
-        credit = _asset(broker)["credit"]
+        credit = _asset(broker, "credit")
         self.assertAlmostEqual(credit["fin_debt"], principal)
         # equity nets the debt: only the financed fee is lost at open.
         self.assertAlmostEqual(broker.equity(), 1_000_000.0 + 1000 * price - principal)
@@ -270,10 +336,10 @@ class BrokerPrimitiveTest(unittest.TestCase):
         principal = broker._fin_amount_outstanding()
         interest = broker._interest_outstanding()
         self.assertAlmostEqual(interest, principal * broker.profile.fin_rate_annual / 365.0)
-        # Partial repayment pays interest first, then principal, from cash.
-        cash_before = broker.cash
+        # Partial repayment pays interest first, then principal, from credit cash.
+        cash_before = broker.credit.cash
         broker.passorder(optype.DIRECT_REPAY, 1102, "", "", prtype.PEER, 0, 5000)
-        self.assertAlmostEqual(cash_before - broker.cash, 5000.0)
+        self.assertAlmostEqual(cash_before - broker.credit.cash, 5000.0)
         self.assertAlmostEqual(broker.interest_paid_total, interest)
         self.assertAlmostEqual(broker._fin_amount_outstanding(), principal - (5000.0 - interest))
         # Overshooting clamps to the outstanding debt; the contract closes.
@@ -289,34 +355,34 @@ class BrokerPrimitiveTest(unittest.TestCase):
         broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=1000)
         broker.mark_to_market("20220104")
         owed = broker._fin_amount_outstanding() + broker._interest_outstanding()
-        cash_before = broker.cash
+        cash_before = broker.credit.cash
         order = broker.execute("000001.SZ", "sell_repay", trade_date="20220105", raw_price=11.0, amount=1000)
         self.assertEqual(order.status, "filled")
         price = broker.profile.slipped_price(11.0, is_buy=False)
         notional = 1000 * price
         net = notional - broker.profile.commission(notional) - broker.profile.stamp_duty_on_sale(notional, "20220105")
-        # The whole debt is repaid; the surplus stays as cash.
-        self.assertAlmostEqual(broker.cash, cash_before + net - owed)
+        # The whole debt is repaid; the surplus stays as credit cash.
+        self.assertAlmostEqual(broker.credit.cash, cash_before + net - owed)
         self.assertAlmostEqual(broker._fin_amount_outstanding(), 0.0)
         self.assertEqual(broker.position_quantity("000001.SZ"), 0)
         self.assertEqual(broker.get_debt_contract(), [])
 
     def test_sell_repay_without_debt_is_rejected(self):
         broker = self.make_broker()
-        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.execute("000001.SZ", "credit_buy", trade_date="20220104", raw_price=10.0, amount=1000)
         order = broker.execute("000001.SZ", "sell_repay", trade_date="20220105", raw_price=11.0, amount=1000)
         self.assertEqual(order.reject_reason, "no_fin_debt")
 
     def test_bail_balance_gates_fin_buy_and_short(self):
         broker = self.make_broker(shortable=("000001.SZ", "000002.SZ"))
-        # Financing far beyond the bail balance (~1,000,000) is rejected.
+        # Financing far beyond the credit bail balance (~500,000) is rejected.
         too_big = broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=120_000)
         self.assertEqual(too_big.reject_reason, "insufficient_bail_balance")
         # A fin_buy within the balance passes, and its margin occupation reduces
         # what a subsequent short may post.
-        ok = broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=90_000)
+        ok = broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=40_000)
         self.assertEqual(ok.status, "filled")
-        short = broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=40_000)
+        short = broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=5_000)
         self.assertEqual(short.reject_reason, "insufficient_bail_balance")
 
     def test_credit_quota_gates(self):
@@ -326,66 +392,10 @@ class BrokerPrimitiveTest(unittest.TestCase):
         short = broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=500)
         self.assertEqual(short.reject_reason, "slo_quota_exceeded")
 
-    def test_stock_account_rejects_credit_ops(self):
-        broker = self.make_broker(shortable=("000002.SZ",), account_type="stock")
-        rejected = broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=500)
-        self.assertEqual(rejected.reject_reason, "account_type_forbids_action")
-        with self.assertRaisesRegex(ValueError, "stock account"):
-            broker.passorder(optype.FIN_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 1000)
-        with self.assertRaisesRegex(ValueError, "credit account"):
-            broker.get_debt_contract()
-        self.assertIsNone(broker.maintenance_ratio())
-        self.assertNotIn("credit", _asset(broker))
-        # The plain cash ops still work and available_cash == cash.
-        buy = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
-        self.assertEqual(buy.status, "filled")
-        self.assertEqual(buy.op_type, optype.STOCK_BUY)
-        self.assertAlmostEqual(_asset(broker)["available_cash"], broker.cash)
-
-    def test_slo_sell_requires_limit_and_uptick_rule(self):
-        broker = self.make_broker()
-        group = pd.DataFrame([{"ts_code": "000002.SZ", "open": 20.0, "high": 20.2, "low": 19.8, "close": 20.1}])
-        # A market-priced 融券卖出 is rejected at submission (must be a limit order).
-        broker.passorder(optype.SLO_SELL, 1101, "", "000002.SZ", prtype.PEER, 0, 500)
-        self.assertEqual(broker.orders[-1].reject_reason, "slo_sell_requires_limit_price")
-        # A limit below the activation bar's reference price violates the 申报 rule.
-        broker.passorder(optype.SLO_SELL, 1101, "", "000002.SZ", prtype.FIX, 19.0, 500)
-        broker.match_bar("20220104", "09:31", group)
-        self.assertEqual(broker.orders[-1].reject_reason, "slo_sell_uptick_rule")
-        # A limit at the reference price passes and fills at the limit (no slippage).
-        broker.passorder(optype.SLO_SELL, 1101, "", "000002.SZ", prtype.FIX, 20.0, 500)
-        broker.match_bar("20220104", "09:32", group)
-        self.assertEqual(broker.position_quantity("000002.SZ"), -500)
-        contract = broker.get_debt_contract()[0]
-        self.assertEqual(contract["compact_type"], "slo")
-        self.assertAlmostEqual(contract["sell_amount"], 500 * 20.0)
-
-    def test_maintenance_includes_fin_debt_and_forces_close(self):
-        daily = make_daily(
-            [
-                ("20220104", "000001.SZ", 10.0, 10.0, 12.0, 0.5, False),
-                ("20220105", "000001.SZ", 2.0, 1.9, 12.0, 0.5, False),  # crash day
-            ]
-        )
-        broker = self.make_broker(shortable=("000001.SZ",), daily=daily)
-        broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=90_000)
-        broker.mark_to_market("20220104")
-        self.assertGreater(broker.maintenance_ratio(), broker.profile.maintenance_closeout_ratio)
-        broker.roll_to_date("20220105")
-        broker.mark_to_market("20220105")  # ratio ~(1e6+171k)/(900k+i) < 1.30
-        self.assertTrue(any(e["event_type"] == "forced_close_triggered" for e in broker.events))
-        self.assertEqual(broker.positions, {})  # the financed long was liquidated
-        # The fin debt is NOT auto-settled by liquidation: it stays outstanding
-        # (accruing interest) until repaid, and equity nets it out.
-        self.assertGreater(broker._fin_amount_outstanding(), 0.0)
-        self.assertAlmostEqual(
-            broker.equity(), broker.cash - broker._fin_amount_outstanding() - broker._interest_outstanding()
-        )
-
-    def test_combined_long_short_accounting_and_forced_close(self):
-        # RA1: with a simultaneous long + short, equity()/maintenance_ratio() follow
-        # the 细则 formulas (literal cash in the numerator, debt + interest in the
-        # denominator); a short loss that breaches the 1.30 line forces a close.
+    def test_maintenance_ignores_stock_account_assets(self):
+        # 维保比例 counts CREDIT-account assets only: a large stock-account cash
+        # pile neither lifts the ratio nor prevents the credit forced close, and
+        # the liquidation never touches the stock account.
         daily = make_daily(
             [
                 ("20220104", "000001.SZ", 10.0, 10.0, 12.0, 8.0, False),
@@ -394,24 +404,46 @@ class BrokerPrimitiveTest(unittest.TestCase):
                 ("20220105", "000002.SZ", 250.0, 250.0, 2500.0, 1.0, False),  # short loss day
             ]
         )
-        broker = self.make_broker(daily=daily)  # 000002.SZ shortable, 1,000,000 initial
+        broker = self.make_broker(daily=daily, stock_initial_cash=10_000_000.0)
         broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
-        broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=100.0, amount=5000)
-        asset = _asset(broker)
-        positions = {p["ts_code"]: p for p in _positions(broker)}
+        broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=100.0, amount=4000)
+        # Day 2: the short jumps 100 -> 250; despite 10M of stock cash the credit
+        # account alone breaches the 1.30 line -> forced close of the credit book.
+        broker.mark_to_market("20220105")
+        self.assertTrue(any(e["event_type"] == "forced_close_triggered" for e in broker.events))
+        self.assertEqual(broker.credit.positions, {})
+        self.assertIn("000001.SZ", broker.stock.positions)  # stock account untouched
+
+    def test_credit_account_accounting_and_forced_close(self):
+        # RA1 (dual-account form): with a credit-account collateral long plus a
+        # short, equity/maintenance/available follow the 细则 formulas over the
+        # credit account; a short loss that breaches the 1.30 line forces a close.
+        daily = make_daily(
+            [
+                ("20220104", "000001.SZ", 10.0, 10.0, 12.0, 8.0, False),
+                ("20220105", "000001.SZ", 10.2, 10.2, 12.0, 8.0, False),
+                ("20220104", "000002.SZ", 100.0, 100.0, 2500.0, 1.0, False),
+                ("20220105", "000002.SZ", 250.0, 250.0, 2500.0, 1.0, False),  # short loss day
+            ]
+        )
+        broker = self.make_broker(daily=daily)  # 000002.SZ shortable, 500,000 credit cash
+        broker.execute("000001.SZ", "credit_buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=100.0, amount=4000)
+        asset = _asset(broker, "credit")
+        positions = {p["ts_code"]: p for p in _positions(broker, "credit")}
         long_mv = positions["000001.SZ"]["market_value"]
         short_mv = positions["000002.SZ"]["market_value"]
         proceeds_locked = positions["000002.SZ"]["entry_cost"]
-        # equity and maintenance ratio use literal cash (the banked short proceeds
-        # count as collateral); available_cash subtracts only the locked proceeds.
-        self.assertAlmostEqual(broker.equity(), broker.cash + long_mv - short_mv)
-        self.assertAlmostEqual(broker.maintenance_ratio(), (broker.cash + long_mv) / short_mv)
-        self.assertAlmostEqual(asset["available_cash"], broker.cash - proceeds_locked)
-        self.assertLess(asset["available_cash"], broker.cash)  # locked collateral not deployable
+        # equity and maintenance ratio use literal credit cash (the banked short
+        # proceeds count as collateral); available_cash subtracts the locked proceeds.
+        self.assertAlmostEqual(broker.account_equity("credit"), broker.credit.cash + long_mv - short_mv)
+        self.assertAlmostEqual(broker.maintenance_ratio(), (broker.credit.cash + long_mv) / short_mv)
+        self.assertAlmostEqual(asset["available_cash"], broker.credit.cash - proceeds_locked)
+        self.assertLess(asset["available_cash"], broker.credit.cash)  # locked collateral not deployable
         # Day 2: the short jumps 100 -> 250, breaching the maintenance line -> forced close.
         broker.mark_to_market("20220105")
         self.assertTrue(any(e["event_type"] == "forced_close_triggered" for e in broker.events))
-        self.assertEqual(broker.positions, {})  # both legs liquidated at the close
+        self.assertEqual(broker.credit.positions, {})  # both credit legs liquidated
         self.assertGreater(broker.interest_paid_total, 0.0)  # slo interest paid at the cover
 
     def test_broker_inventory_mode_rejects_without_files(self):
@@ -427,6 +459,7 @@ class BrokerPrimitiveTest(unittest.TestCase):
         working = broker.working_orders()
         self.assertEqual([o["order_id"] for o in working], [miss])
         self.assertEqual(working[0]["op_type"], optype.CREDIT_BUY)
+        self.assertEqual(working[0]["account"], "credit")
         broker.match_bar("20220104", "09:31", group)
         self.assertEqual(broker.working_orders(), [])  # expired_unfilled
         self.assertEqual(_positions(broker), [])
@@ -440,28 +473,29 @@ class BrokerPrimitiveTest(unittest.TestCase):
         )
         self.assertEqual(tagged, "C_tick_001")
         self.assertTrue(broker.cancel("C_tick_001"))
-        # A reachable limit fills at exactly the limit (maker, no slippage).
+        # A reachable limit fills at exactly the limit (maker, no slippage) into
+        # the account the opType selects.
         broker.passorder(optype.CREDIT_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.85, 1000)
         broker.match_bar("20220104", "09:32", group)
-        self.assertEqual(broker.position_quantity("000001.SZ"), 1000)
+        self.assertEqual(broker.position_quantity("000001.SZ", account="credit"), 1000)
+        self.assertEqual(broker.position_quantity("000001.SZ", account="stock"), 0)
         self.assertEqual(_deals(broker, "000001.SZ")[-1]["price"], 9.85)
         # If the activation bar opens through a buy limit, the better open is used.
         better_open = self.make_broker(shortable=())
-        better_open.passorder(optype.CREDIT_BUY, 1101, "", "000001.SZ", prtype.FIX, 10.5, 1000)
+        better_open.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 10.5, 1000)
         better_open.match_bar("20220104", "09:31", group)
         self.assertEqual(_deals(better_open, "000001.SZ")[-1]["price"], 10.0)
+        self.assertEqual(better_open.position_quantity("000001.SZ", account="stock"), 1000)
         # Sell limits use the same better-open rule on the other side.
         better_sell = self.make_broker(shortable=())
         better_sell.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
-        better_sell.passorder(optype.CREDIT_SELL, 1101, "", "000001.SZ", prtype.FIX, 9.5, 1000)
+        better_sell.passorder(optype.STOCK_SELL, 1101, "", "000001.SZ", prtype.FIX, 9.5, 1000)
         better_sell.match_bar("20220105", "09:31", group)
         self.assertEqual(_deals(better_sell, "000001.SZ")[-1]["price"], 10.0)
         self.assertEqual(better_sell.position_quantity("000001.SZ"), 0)
 
     def test_passorder_validates_op_order_and_price_types(self):
         broker = self.make_broker()
-        with self.assertRaisesRegex(ValueError, "opType=23"):
-            broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 100)  # credit uses 33
         with self.assertRaisesRegex(ValueError, "opType=30"):
             broker.passorder(optype.DIRECT_SECU_REPAY, 1101, "", "000001.SZ", prtype.PEER, 0, 100)
         with self.assertRaisesRegex(ValueError, "orderType"):
@@ -472,19 +506,36 @@ class BrokerPrimitiveTest(unittest.TestCase):
             broker.passorder(optype.CREDIT_BUY, 1101, "", "000001.SZ", 12, 0, 100)
         with self.assertRaisesRegex(ValueError, "positive price"):
             broker.passorder(optype.CREDIT_BUY, 1101, "", "000001.SZ", prtype.FIX, 0, 100)
-        with self.assertRaisesRegex(ValueError, "does not match"):
-            broker.get_trade_detail_data(account_type="stock")
+        with self.assertRaisesRegex(ValueError, "account_type is required"):
+            broker.get_trade_detail_data(data_type="ORDER")
         with self.assertRaisesRegex(ValueError, "data_type"):
-            broker.get_trade_detail_data(data_type="TASK")
+            broker.get_trade_detail_data(account_type="STOCK", data_type="TASK")
 
-    def test_max_total_holdings_rejects_new_code(self):
+    def test_order_and_deal_records_are_account_filtered(self):
+        broker = self.make_broker()
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.execute("000002.SZ", "credit_buy", trade_date="20220104", raw_price=20.0, amount=500)
+        stock_orders = broker.get_trade_detail_data(account_type="STOCK", data_type="ORDER")
+        credit_orders = broker.get_trade_detail_data(account_type="CREDIT", data_type="ORDER")
+        self.assertEqual([o["ts_code"] for o in stock_orders], ["000001.SZ"])
+        self.assertEqual([o["ts_code"] for o in credit_orders], ["000002.SZ"])
+        self.assertTrue(all(o["account"] == "stock" for o in stock_orders))
+        stock_deals = broker.get_trade_detail_data(account_type="STOCK", data_type="DEAL")
+        self.assertEqual([d["ts_code"] for d in stock_deals], ["000001.SZ"])
+
+    def test_max_total_holdings_counts_codes_across_accounts(self):
         broker = self.make_broker(shortable=(), max_total_holdings=1)
         broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=100)
-        order = broker.execute("000002.SZ", "buy", trade_date="20220104", raw_price=20.0, amount=100)
+        # A new code in the OTHER account still breaches the combined breadth cap...
+        order = broker.execute("000002.SZ", "credit_buy", trade_date="20220104", raw_price=20.0, amount=100)
         self.assertEqual(order.reject_reason, "max_holdings_reached")
+        # ...while adding to an already-held code in another account does not.
+        same_code = broker.execute("000001.SZ", "credit_buy", trade_date="20220104", raw_price=10.0, amount=100)
+        self.assertEqual(same_code.status, "filled")
 
     def test_single_name_weight_cap_clamps_shares(self):
-        broker = self.make_broker(max_single_name_weight=0.2)  # 20% of 1,000,000 = 200,000
+        # Cap notional = weight x combined initial equity (0.2 x 1,000,000).
+        broker = self.make_broker(max_single_name_weight=0.2)
         order = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, weight=0.5)
         self.assertEqual(order.status, "filled")
         self.assertEqual(order.filled_quantity, 20000)  # 200,000 / 10 = 20,000 shares
@@ -494,7 +545,8 @@ class BrokerPrimitiveTest(unittest.TestCase):
         first = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, weight=0.5)
         second = broker.execute("000002.SZ", "buy", trade_date="20220104", raw_price=20.0, amount=100)
         self.assertEqual(first.status, "filled")
-        self.assertGreater(first.filled_quantity, 20000)
+        # weight is a fraction of the STOCK account's initial equity (500,000).
+        self.assertEqual(first.filled_quantity, 25000)
         self.assertEqual(second.status, "filled")
 
     def test_limit_up_blocks_buy_and_suspension_blocks_fill(self):
@@ -510,6 +562,47 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual(blocked.reject_reason, "limit_up_blocked_buy")
         self.assertEqual(suspended.reject_reason, "suspended")
 
+    def test_slo_sell_requires_limit_and_uptick_rule(self):
+        broker = self.make_broker()
+        group = pd.DataFrame([{"ts_code": "000002.SZ", "open": 20.0, "high": 20.2, "low": 19.8, "close": 20.1}])
+        # A market-priced 融券卖出 is rejected at submission (must be a limit order).
+        broker.passorder(optype.SLO_SELL, 1101, "", "000002.SZ", prtype.PEER, 0, 500)
+        self.assertEqual(broker.orders[-1].reject_reason, "slo_sell_requires_limit_price")
+        # A limit below the activation bar's reference price violates the 申报 rule.
+        broker.passorder(optype.SLO_SELL, 1101, "", "000002.SZ", prtype.FIX, 19.0, 500)
+        broker.match_bar("20220104", "09:31", group)
+        self.assertEqual(broker.orders[-1].reject_reason, "slo_sell_uptick_rule")
+        # A limit at the reference price passes and fills at the limit (no slippage).
+        broker.passorder(optype.SLO_SELL, 1101, "", "000002.SZ", prtype.FIX, 20.0, 500)
+        broker.match_bar("20220104", "09:32", group)
+        self.assertEqual(broker.position_quantity("000002.SZ", account="credit"), -500)
+        contract = broker.get_debt_contract()[0]
+        self.assertEqual(contract["compact_type"], "slo")
+        self.assertAlmostEqual(contract["sell_amount"], 500 * 20.0)
+
+    def test_maintenance_includes_fin_debt_and_forces_close(self):
+        daily = make_daily(
+            [
+                ("20220104", "000001.SZ", 10.0, 10.0, 12.0, 0.5, False),
+                ("20220105", "000001.SZ", 1.6, 1.5, 12.0, 0.5, False),  # crash day
+            ]
+        )
+        broker = self.make_broker(shortable=("000001.SZ",), daily=daily)
+        broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=45_000)
+        broker.mark_to_market("20220104")
+        self.assertGreater(broker.maintenance_ratio(), broker.profile.maintenance_closeout_ratio)
+        broker.roll_to_date("20220105")
+        broker.mark_to_market("20220105")  # ratio ~(500k+67.5k)/(450k+i) < 1.30 after the crash
+        self.assertTrue(any(e["event_type"] == "forced_close_triggered" for e in broker.events))
+        self.assertEqual(broker.credit.positions, {})  # the financed long was liquidated
+        # The fin debt is NOT auto-settled by liquidation: it stays outstanding
+        # (accruing interest) until repaid, and equity nets it out.
+        self.assertGreater(broker._fin_amount_outstanding(), 0.0)
+        self.assertAlmostEqual(
+            broker.account_equity("credit"),
+            broker.credit.cash - broker._fin_amount_outstanding() - broker._interest_outstanding(),
+        )
+
     def test_trades_for_records_open_and_reduce_history(self):
         broker = self.make_broker()
         broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
@@ -517,6 +610,7 @@ class BrokerPrimitiveTest(unittest.TestCase):
         broker.execute("000001.SZ", "sell", trade_date="20220105", raw_price=11.0, amount=500)
         trades = _deals(broker, "000001.SZ")
         self.assertEqual([t["kind"] for t in trades], ["open", "reduce"])
+        self.assertTrue(all(t["account"] == "stock" for t in trades))
         self.assertAlmostEqual(trades[0]["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
 
     def test_costs_use_slippage_min_commission_and_dated_stamp_duty(self):
@@ -530,6 +624,8 @@ class BrokerPrimitiveTest(unittest.TestCase):
 
     def test_profile_record_round_trips_all_constructor_fields(self):
         profile = BrokerProfile(
+            stock_initial_cash=300_000.0,
+            credit_initial_cash=700_000.0,
             commission_bps=2.5,
             min_commission_cny=1.25,
             stamp_duty_sell_bps_before_cutover=12.0,
@@ -541,7 +637,8 @@ class BrokerPrimitiveTest(unittest.TestCase):
             maintenance_source="broker-doc",
         )
         restored = BrokerProfile(**_profile_kwargs(profile.to_record()))
-        self.assertEqual(restored.account_type, "credit")
+        self.assertEqual(restored.stock_initial_cash, 300_000.0)
+        self.assertEqual(restored.credit_initial_cash, 700_000.0)
         self.assertEqual(restored.min_commission_cny, 1.25)
         self.assertEqual(restored.stamp_duty_sell_bps_before_cutover, 12.0)
         self.assertEqual(restored.slippage_bps, 7.0)
@@ -549,8 +646,6 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual(restored.fin_rate_annual, 0.06)
         self.assertEqual(restored.assure_ratio, 0.65)
         self.assertEqual(restored.maintenance_source, "broker-doc")
-        stock_restored = BrokerProfile(**_profile_kwargs(BrokerProfile(account_type="stock").to_record()))
-        self.assertEqual(stock_restored.account_type, "stock")
         private_restored = BrokerProfile(**_profile_kwargs(BrokerProfile(is_private_fund=True).to_record()))
         self.assertEqual(private_restored.effective_slo_margin_ratio, 1.2)
 
@@ -696,25 +791,37 @@ class ReplayIntegrationTest(unittest.TestCase):
         stats = compute_return_stats(replay)
         self.assertGreater(stats["credit_interest_paid"], 0.0)
 
-    def test_stock_account_replay_has_no_credit_state(self):
-        def buy_hold(state):
-            self_state = state["account"]
-            assert self_state["account_type"] == "STOCK"
-            assert "credit" not in self_state
-            assert state["debt_contracts"] == []
-            if state["cur_time"] != "09:25" or _held(state, "000001.SZ"):
+    def test_dual_account_state_transfer_and_close_resolution(self):
+        # The engine state exposes both account views; a transfer action moves
+        # cash between them mid-replay, and a bare close resolves to the unique
+        # holding account (the stock account here).
+        def dual(state):
+            if state["cur_time"] != "09:25":
                 return []
-            return [{"action": "buy", "ts_code": "000001.SZ", "weight": 0.1}]
+            assert state["account"]["stock"]["account_type"] == "STOCK"
+            assert state["account"]["credit"]["account_type"] == "CREDIT"
+            if state["cur_date"] == "20220104" and not _held(state, "000001.SZ"):
+                return [
+                    {"action": "buy", "ts_code": "000001.SZ", "amount": 1000},
+                    {"action": "transfer", "amount": 100_000, "from_account": "credit", "to_account": "stock"},
+                ]
+            if state["cur_date"] == "20220105" and _held(state, "000001.SZ"):
+                return [{"action": "close", "ts_code": "000001.SZ"}]
+            return []
 
         replay = run_main_ctx_replay(
             REPLAY,
-            BrokerProfile(account_type="stock"),
+            BrokerProfile(),
             shortable_codes=frozenset(),
-            main_policy=FakeMainPolicy(buy_hold),
+            main_policy=FakeMainPolicy(dual),
         )
-        stats = compute_return_stats(replay)
-        self.assertEqual(stats["order_status_counts"].get("filled"), 1)
-        self.assertEqual(stats["credit_interest_accrued"], 0.0)
+        broker = replay.broker
+        self.assertTrue(any(o.action == "transfer" and o.status == "filled" for o in broker.orders))
+        self.assertAlmostEqual(broker.credit.cash, 400_000.0)
+        # The bare close resolved to a stock-account sell on 0105 (T+1 unlocked).
+        closes = [e for e in broker.events if e["event_type"] == "position_closed"]
+        self.assertTrue(any(e["account"] == "stock" and e["trade_date"] == "20220105" for e in closes))
+        self.assertEqual(broker.position_quantity("000001.SZ"), 0)
 
 
 class CandidateIsolationTest(unittest.TestCase):

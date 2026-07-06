@@ -292,7 +292,11 @@ class BacktestTool:
                 shutil.rmtree(tmp_nl_dir, ignore_errors=True)
             _cleanup_nl_rpc_files(requests_host, responses_host)
 
-        orders_path = self._write_orders(result_dir, replay.broker.get_trade_detail_data(data_type="ORDER"))
+        orders_path = self._write_orders(
+            result_dir,
+            replay.broker.get_trade_detail_data(account_type="STOCK", data_type="ORDER")
+            + replay.broker.get_trade_detail_data(account_type="CREDIT", data_type="ORDER"),
+        )
         (result_dir / "detailed_return.json").write_text(
             json.dumps(sanitize_for_log(stats), ensure_ascii=False, indent=2, sort_keys=True, default=str),
             encoding="utf-8",

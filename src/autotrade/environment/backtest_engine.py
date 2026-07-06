@@ -320,7 +320,9 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
     long_pnl = sum(e["realized_pnl"] for e in realized if e["side"] == "long")
     short_pnl = sum(e["realized_pnl"] for e in realized if e["side"] == "short")
     wins = sum(1 for e in realized if e["realized_pnl"] > 0)
-    orders = broker.get_trade_detail_data(data_type="ORDER")
+    orders = broker.get_trade_detail_data(account_type="STOCK", data_type="ORDER") + broker.get_trade_detail_data(
+        account_type="CREDIT", data_type="ORDER"
+    )
     per_stock = [
         {
             "ts_code": event["ts_code"],

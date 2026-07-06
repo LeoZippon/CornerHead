@@ -56,7 +56,10 @@ _ACTION_ALIASES = {
     "margin_buy": "fin_buy",
     "cancel_order": "cancel",
 }
-_ORDER_ACTIONS = {"buy", "sell", "short", "cover", "close", "fin_buy", "sell_repay", "direct_repay"}
+_ORDER_ACTIONS = {
+    "buy", "sell", "credit_buy", "credit_sell", "short", "cover", "close",
+    "fin_buy", "sell_repay", "direct_repay", "transfer",
+}
 _SUPPORTED_ACTIONS = _ORDER_ACTIONS | {"cancel"}
 
 
@@ -598,7 +601,7 @@ def run_main_ctx_replay(
                 _cancel_day_end_orders(broker, trade_date=trade_date)
 
         equity = broker.mark_to_market(trade_date)
-        if trade_date == exit_date and broker.positions:
+        if trade_date == exit_date and any(state.positions for state in broker.accounts.values()):
             broker.close_all(trade_date)
             equity = broker.equity()
         equity_by_date[trade_date] = equity
@@ -868,11 +871,14 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
 
     ``limit`` (a fixed price) routes to a 指定价 order resting ``valid_bars`` bars
     (default 1); otherwise a 对手价 market order valid that bar. ``close`` has no
-    official op: it resolves to the held side's market exit at submission (the
-    activation tick is also the match tick, so there is no drift window).
-    ``direct_repay`` follows the official 1102 (amount in CNY) convention and needs
-    no bar. ``is_close_auction`` marks a 15:00 close-auction order so it fills at
-    the activation bar's close. Returns False if unsupported."""
+    official op: it resolves to the holding account's market exit at submission
+    (the activation tick is also the match tick, so there is no drift window) —
+    an explicit ``account`` wins, else the unique holder; ambiguous closes are
+    ignored (the driver already rejects them at call time). ``direct_repay``
+    follows the official 1102 (amount in CNY) convention and ``transfer`` moves
+    cash between the accounts; neither needs a bar. ``is_close_auction`` marks a
+    15:00 close-auction order so it fills at the activation bar's close.
+    Returns False if unsupported."""
     name = _action_name(action)
     order_kwargs = {
         "user_order_id": str(action.get("order_id") or ""),
@@ -881,9 +887,22 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
     }
     if name == "direct_repay":
         amount = _float_or_none(action.get("amount"))
-        if amount is None or amount <= 0 or not broker.is_credit:
+        if amount is None or amount <= 0:
             return False
         broker.passorder(optype.DIRECT_REPAY, 1102, "", "", prtype.PEER, 0, amount, **order_kwargs)
+        return True
+    if name == "transfer":
+        amount = _float_or_none(action.get("amount"))
+        if amount is None or amount <= 0:
+            return False
+        broker.transfer(
+            amount,
+            str(action.get("from_account", "")),
+            str(action.get("to_account", "")),
+            reason=order_kwargs["reason"],
+            order_id=order_kwargs["user_order_id"] or None,
+            submitted_at=order_kwargs["submitted_at"],
+        )
         return True
     ts_code = str(action.get("ts_code", "")).strip()
     if name not in _ORDER_ACTIONS or not ts_code:
@@ -892,9 +911,21 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
     if limit is not None and limit <= 0:
         limit = None
     if name == "close":
-        name = "cover" if broker.position_quantity(ts_code) < 0 else "sell"
+        account = str(action.get("account") or "").strip().lower()
+        if not account:
+            holders = [
+                acct for acct in ("stock", "credit")
+                if broker.position_quantity(ts_code, account=acct) != 0
+            ]
+            if len(holders) != 1:
+                return False  # no holder, or ambiguous (both accounts hold the code)
+            account = holders[0]
+        if account == "stock":
+            name = "sell"
+        else:
+            name = "cover" if broker.position_quantity(ts_code, account="credit") < 0 else "credit_sell"
     try:
-        op_type = broker.op_for_action(name)
+        _, op_type = broker.account_op_for_action(name)
     except ValueError:
         return False
     broker.passorder(
@@ -1115,10 +1146,22 @@ def _market_state(
         "cur_date": str(trade_date),
         "cur_time": str(minute_key or ""),
         "cur_datetime": str(cur_datetime or ""),
-        "account": _jsonable(broker.get_trade_detail_data(data_type="ACCOUNT")[0]),
-        "positions": _jsonable(broker.get_trade_detail_data(data_type="POSITION")),
-        "debt_contracts": _jsonable(broker.get_debt_contract()) if broker.is_credit else [],
-        "cash": float(broker.cash),
+        "account": {
+            "stock": _jsonable(broker.get_trade_detail_data(account_type="STOCK", data_type="ACCOUNT")[0]),
+            "credit": _jsonable(broker.get_trade_detail_data(account_type="CREDIT", data_type="ACCOUNT")[0]),
+            "total_assets": float(broker.equity()),
+            "risk_limits": {
+                "max_total_holdings": broker.profile.max_total_holdings,
+                "max_single_name_weight": broker.profile.max_single_name_weight,
+                "maintenance_closeout_ratio": broker.profile.maintenance_closeout_ratio,
+                "maintenance_withdraw_ratio": broker.profile.maintenance_withdraw_ratio,
+            },
+        },
+        "positions": _jsonable(
+            broker.get_trade_detail_data(account_type="STOCK", data_type="POSITION")
+            + broker.get_trade_detail_data(account_type="CREDIT", data_type="POSITION")
+        ),
+        "debt_contracts": _jsonable(broker.get_debt_contract()),
         "bars": bars,
         "asof_dir": asof_dir,
         "asof_version": asof_version,
