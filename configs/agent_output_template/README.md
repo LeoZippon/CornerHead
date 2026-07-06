@@ -107,6 +107,13 @@ fixed cadence, and wraps up by `14:57` — rather than screening on every tick.
   `.pending(ts_code=None)` (working orders; no argument returns all). `limit=P`
   makes it a limit order; the optional `reason=` is an audit annotation the driver
   records without affecting matching.
+- Credit-account (信用账户, the default) extras: `.fin_buy(...)` (融资买入 — no cash
+  moves; principal+fee become an interest-accruing debt contract), `.sell_repay(...)`
+  (卖券还款 — sale proceeds repay 融资 debt interest-first), `.direct_repay(amount)`
+  (直接还款 from cash), `.credit` (维保比例/保证金可用余额/负债 view),
+  `.debt_contracts(ts_code=None)`. `short` must be a LIMIT order priced at/above the
+  reference price (融券 uptick rule) — quote `limit=ctx.price(code)` or higher. On a
+  `stock` account (see facts `broker_replay.account_type`) the credit verbs raise.
 - `ctx.nl(ts_code?, prompt="...")` — point-in-time NL Sub Agent for single-stock
   or event/theme/sector/macro text analysis (its text corpus also rolls on the
   refresh nodes; frozen research corpus always visible).
@@ -122,12 +129,14 @@ fixed cadence, and wraps up by `14:57` — rather than screening on every tick.
   `ctx.substep`), `ctx.params`.
 
 `amount` is a share count (lot-aligned to 100); `weight` is a notional fraction
-of initial equity. The Broker enforces cash, short margin, T+1 sellable balance,
-lot size, price limits, suspension, and shortability, and reserves the final
-replay date for mandatory liquidation. The Broker is the source of truth for
-positions and reflects **filled** positions only; `ctx.broker.pending(code)`
-exposes orders still working between decision and fill, so gate re-entry/exit on
-both. For light order hygiene, run this every tick inside a small-budget sub-step:
+of initial equity. The Broker enforces cash and 保证金可用余额, T+1 sellable
+balance, lot size, price limits, suspension, margin-target eligibility and credit
+quotas, per-calendar-day debt interest, the maintenance-ratio forced close, and
+reserves the final replay date for mandatory liquidation. The Broker is the source
+of truth for positions and reflects **filled** positions only;
+`ctx.broker.pending(code)` exposes orders still working between decision and fill,
+so gate re-entry/exit on both. For light order hygiene, run this every tick inside
+a small-budget sub-step:
 
 ```python
 with ctx.substep("cancel_stale_pending", budget_minutes=0.5):

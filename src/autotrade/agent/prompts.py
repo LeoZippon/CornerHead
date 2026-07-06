@@ -90,7 +90,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - 成交延迟：在某根 bar 决策的单默认于其后第 `execution_lag_bars`（默认 2）根 bar 起进入撮合，杜绝 bar 内前视（如 09:35 决策、09:37 起成交）。临近收盘、其后无可成交 bar 的决策无法成交。
 - 竞价：`09:15` 信息 tick 无价格，盲下单成交于 09:30 开盘竞价；`09:25` 暴露撮合开盘价，下单成交于首根连续 bar（09:31，按 taker 滑点）；`14:57` 下单成交于 15:00 收盘价。真正开/收盘集合竞价成交不计滑点。
 - 订单类型：市价单按进入 bar 的 open + 滑点成交，单 bar 有效；限价单（FIX_PRICE）挂单，若 open 已优于限价则按 open 成交，否则 `[low, high]` 触及限价时成交，`valid_bars` 内未触及自动撤单。策略也可主动撤销 `pending()` 返回的未成交委托。
-- Broker 约束：策略只表达意图，Broker 强制现金、可部署买力、做空保证金、T+1 可卖余额、手数、涨跌停、停牌、可融券和回放末日强制清仓。最大持仓数、单票权重和集中度默认由你控制。
+- Broker 约束：策略只表达意图，Broker 按账户类型（信用/普通）强制现金与保证金可用余额、T+1 可卖余额、手数、涨跌停、停牌、融资融券标的与授信额度、融券限价规则、维保比例强平和回放末日强制清仓。最大持仓数、单票权重和集中度默认由你控制。
 - 子步骤预算：所有会访问 `ctx.state_dir`、调用 `ctx.broker`、调用 `ctx.nl()`、读写策略状态或做实质筛选/推理的策略步骤，都必须放进 `ctx.substep(name, budget_minutes=B)`；`B>0`、tick 内 name 唯一、低报会 fail-fast。`ctx.broker` 原语和 `ctx.state_dir` 在子步骤外会被拒绝；宿主还会用 `main(ctx)` 总耗时减去 substep 耗时，拒绝实质未包裹计算。`B<1` 的轻量块在回测中视为本决策分钟内完成（仍统计/限时并带 `ready_at` 元数据）；`B>=1` 的块内 `ctx.state_dir` 写入和 `ctx.broker` 动作延迟到 `ready_at = tick + B` 后才可见/提交。延迟中的 broker 动作会立刻出现在 `pending()`，`pending_stage="substep_delay"`，用于同 tick/跨 tick 去重或撤销。
 - 回测成本：`backtest` 独立计时，不计入 Fold 推理 deadline，但单 Fold 次数受 `max_backtests_per_fold` 限制；单 tick 与单交易日真实墙钟硬上限由 run manifest 给出。先用小 `replay_window` 试探，再外推完整耗时。
 - 跨 tick 状态：`ctx.state_dir` 只存你的规则、计划和轻量状态，不是持仓/委托账本；Broker 才是真相源。`ctx.state_dir` 只能在 `ctx.substep` 内访问，块内读到进入该块前的可见状态，写入按 `ready_at` 延迟合并；每次回测重置，需继承的参数在回测前写入 `models/`。
@@ -138,16 +138,23 @@ FOLD_ACTION_SECTION = """\
 
 | 接口 | 主要参数 | 用途 |
 |---|---|---|
-| `ctx.broker.buy` / `sell` | ts_code, amount?/weight?, limit?, valid_bars?, reason? | 多头开/减仓；返回可用于撤单的 `order_id` |
-| `ctx.broker.short` / `cover` | ts_code, amount?/weight?, limit?, valid_bars?, reason? | 融券做空/买入平空；返回 `order_id` |
-| `ctx.broker.close` | ts_code, reason? | 市价平掉该票全部持仓；返回 `order_id` |
+| `ctx.broker.buy` / `sell` | ts_code, amount?/weight?, limit?, valid_bars?, reason? | 买入/卖出（信用账户下即担保品买卖）；返回可用于撤单的 `order_id` |
+| `ctx.broker.fin_buy` | ts_code, amount?/weight?, limit?, valid_bars?, reason? | 融资买入（仅信用账户）：不动用现金，本金+佣金计入融资负债合约、按日计息；受保证金可用余额、融资标的池与授信额度约束 |
+| `ctx.broker.short` / `cover` | ts_code, amount?/weight?, limit?, valid_bars?, reason? | 融券卖出/买券还券（仅信用账户）；**融券卖出必须给 `limit=`，且申报价不得低于参考最新价（uptick 规则），市价 short 会被拒** |
+| `ctx.broker.sell_repay` | ts_code, amount?, limit?, valid_bars?, reason? | 卖券还款（仅信用账户）：卖出所得先还息后还本（最老合约优先），余额留作现金；无融资负债时拒单 |
+| `ctx.broker.direct_repay` | amount(元), reason? | 直接还款（仅信用账户）：从现金直接偿还融资负债（先息后本），金额自动截断到可用现金与负债余额；在提交 tick 即时结算 |
+| `ctx.broker.close` | ts_code, reason? | 市价平掉该票全部持仓（按持仓方向自动转为卖出/买券还券）；返回 `order_id` |
 | `ctx.broker.cancel` | order_id, reason? | 撤销 `pending()` 返回的未成交委托（substep 延迟队列、提交延迟队列或 Broker 当日订单簿） |
 | `ctx.broker.pending` | ts_code? | 有参返回该票在途单；无参返回全部在途单。记录含 `order_id`、`submitted_at`、`age_minutes`、`status`，可能含 `pending_stage`；`substep_delay` 的 age 从生成 tick 起算，ready 后进入 `submit_lag` 则从实际提交 tick 起算 |
 | `ctx.broker.position` | ts_code | 已成交持仓（不含在途），是持仓真相源 |
 | `ctx.broker.cash` | （无） | 现金视图，每 tick 反映已成交结果（含真实佣金/滑点）；substep 内未成交计划不改变它 |
-| `ctx.broker.available_cash` | （无） | 当前已成交状态下的可部署买力（现金扣融券保证金与冻结所得）；substep 内新发出的 broker action 是提交计划，不会立刻改变 cash/position/available_cash |
+| `ctx.broker.available_cash` | （无） | 可用于买入/担保品买入的现金（现金扣融券卖出冻结所得）；保证金占用不冻结现金，只通过保证金可用余额约束新的信用操作 |
+| `ctx.broker.credit` | （无） | 信用账户视图（维保比例、保证金可用余额、融资/融券负债、已计未付利息、额度、利率）；普通账户为 None |
+| `ctx.broker.debt_contracts` | ts_code? | 未了结融资/融券负债合约明细（未还金额/量、开仓日、年利率、已计利息） |
 
-`amount` 是股数（按 100 股向下对齐），`weight` 是初始权益的名义比例；二者择一。`limit=P` 为限价单，缺省为市价单。只在显式可报单/交易分钟 tick 提交新订单；off-session tick 写计划。`ctx.broker` 下单/撤单原语必须在 `ctx.substep` 内调用：`0 < B < 1` 的轻量块按当前决策分钟提交并统计耗时，`B>=1` 的动作等到 `ready_at` 后第一个可报单 tick 才提交，再按常规成交延迟撮合。
+本实验的账户类型见 experiment facts 的 `broker_replay.account_type`：`credit`（信用账户，默认）支持全部原语；`stock`（普通账户）只支持 buy/sell/close/cancel，调用信用原语会直接抛错。`amount` 是股数（按 100 股向下对齐），`weight` 是初始权益的名义比例；二者择一。`limit=P` 为限价单，缺省为市价单。只在显式可报单/交易分钟 tick 提交新订单；off-session tick 写计划。`ctx.broker` 下单/撤单原语必须在 `ctx.substep` 内调用：`0 < B < 1` 的轻量块按当前决策分钟提交并统计耗时，`B>=1` 的动作等到 `ready_at` 后第一个可报单 tick 才提交，再按常规成交延迟撮合。
+
+信用账户经济学（与交易所实施细则一致）：融资/融券利息按自然日计入合约、还款/还券时以现金支付（先息后本、最老合约优先）；维保比例 = (现金+证券市值)/(融资负债+融券市值+利息)，低于平仓线（见 facts `maintenance_closeout_ratio`）触发强制平仓；融券卖出所得现金被冻结、只能用于买券还券；新的融资/融券操作受保证金可用余额（现金+担保品市值×折算率−占用−浮亏）约束。
 
 `ctx` 其他字段：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`、`ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`、`ctx.substep(name, budget_minutes=B)`、`ctx.asof_dir`、`ctx.asof_version`、`ctx.snapshot_dir`、`ctx.model_dir`、`ctx.state_dir`、`ctx.params`、`ctx.nl(ts_code?, prompt=...)`。
 
@@ -721,11 +728,18 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             "backtest_max_seconds_per_trading_day": manifest.get("backtest_max_seconds_per_trading_day"),
             "nl_max_calls_per_decision_day": manifest.get("nl_max_calls_per_decision_day"),
             "nl_max_calls_per_backtest": manifest.get("nl_max_calls_per_backtest"),
+            "account_type": profile.get("account_type"),
             "short_inventory_mode": profile.get("short_inventory_mode") or manifest.get("short_inventory_mode"),
-            "shortable_source": "events.parquet dataset=margin_secs",
-            "short_margin_ratio": profile.get("short_margin_ratio"),
-            "short_borrow_fee_annual": profile.get("short_borrow_fee_annual"),
-            "short_borrow_fee_is_assumed": profile.get("short_borrow_fee_is_assumed"),
+            "credit_target_source": "events.parquet dataset=margin_secs (gates both 融资 and 融券)",
+            "fin_margin_ratio": profile.get("fin_margin_ratio"),
+            "slo_margin_ratio": profile.get("slo_margin_ratio"),
+            "fin_rate_annual": profile.get("fin_rate_annual"),
+            "slo_rate_annual": profile.get("slo_rate_annual"),
+            "credit_rates_are_assumed": profile.get("credit_rates_are_assumed"),
+            "assure_ratio": profile.get("assure_ratio"),
+            "fin_max_quota": profile.get("fin_max_quota"),
+            "slo_max_quota": profile.get("slo_max_quota"),
+            "maintenance_closeout_ratio": profile.get("maintenance_closeout_ratio"),
             "concentration_limits": concentration or None,
         }
     )
