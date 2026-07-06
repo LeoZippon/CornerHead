@@ -190,7 +190,7 @@ flowchart LR
 |---|---|---|---|
 | 两融汇总 | `margin` | 按交易日 | 市场杠杆 |
 | 两融明细 | `margin_detail` | 按交易日 | 个股融资融券压力 |
-| 融资融券标的 | `margin_secs` | 按交易日 | 交易所标的资格；当前研究将表内股票全部视为可融券源 |
+| 融资融券标的 | `margin_secs` | 按交易日 | 交易所标的资格；原始表不区分融资/融券标的，当前研究以同一集合门控融券券源与融资买入资格 |
 | 个股资金流 | `moneyflow` | 按交易日 | 资金行为 |
 | 股东人数 | `stk_holdernumber` | 按公告月 | 筹码集中度 |
 | 股东增减持 | `stk_holdertrade` | 按公告月 | 治理和事件 |
@@ -200,7 +200,7 @@ flowchart LR
 
 `share_float_complete` 是解禁最终保留边界。普通 `share_float` 过程文件可归档，但 union 不得静默缩水。触顶分区使用 candidate 级补充；如果最细粒度仍正好 6000 行，只能标记 `source_cap_risk`。
 
-做空券源模式（默认 `proxy_margin_secs`：决策日 `margin_secs` 表内股票全部视为可融）的执行语义由 `docs/environment_design.md` §3.3（做空模式）定义；数据层只负责 `margin_secs` 表本身的可见性与口径。中信真实券源、费率和信用风控数据当前不可获得，相关数据合同待真实 broker 数据到位后再补充。
+做空券源模式（默认 `proxy_margin_secs`：成交日 `margin_secs` 表内股票全部视为可融券/可融资标的）的执行语义由 `docs/environment_design.md` §3.3（信用账户模型）定义；数据层只负责 `margin_secs` 表本身的可见性与口径。券商真实券源、逐票折算率/保证金比例、利率费率和信用风控数据当前不可获得，相关数据合同待真实 broker 数据到位后再补充。
 
 **打板专题数据**
 

@@ -260,12 +260,18 @@ ctx.cur_datetime      # ISO 时间戳（含 +08:00 时区）；同一 main(ctx) 
 ctx.account                               # 只读账户级快照（可用现金见 ctx.broker.cash / available_cash）
 ctx.positions                             # 只读逐标的持仓快照列表
 ctx.price(ts_code), ctx.bar(ts_code), ctx.bars   # 仅当前 tick、PIT 可见的 bar（09:15 和 off-session 无价）
-ctx.broker.buy/short(ts_code, amount=None, weight=None, limit=None, valid_bars=1, reason=None)  # 开多/开空，可用 weight 名义比例；返回 order_id
-ctx.broker.sell/cover(ts_code, amount=None, limit=None, valid_bars=1, reason=None)              # 减多/平空，只接受 amount 股数（无 weight）
+ctx.broker.buy/fin_buy/short(ts_code, amount=None, weight=None, limit=None, valid_bars=1, reason=None)
+                                          # 买入(担保品)/融资买入/融券卖出；weight 为名义比例；返回 order_id
+                                          #   fin_buy 开融资负债合约（本金+佣金计息）；short 必须限价且申报价不低于参考最新价
+ctx.broker.sell/cover/sell_repay(ts_code, amount=None, limit=None, valid_bars=1, reason=None)
+                                          # 卖出/买券还券/卖券还款，只接受 amount 股数（无 weight）
+ctx.broker.direct_repay(amount, reason=None)   # 直接还款（金额元，先息后本、最老合约优先；提交 tick 即时结算）
 ctx.broker.close(ts_code, reason=None)                                             # 市价平掉可平持仓（恒市价，无 limit）
 ctx.broker.cancel(order_id, reason=None)                                           # reason= 为可选审计注记，driver 原样记录、不影响撮合
 ctx.broker.cash                           # 现金视图（每 tick 反映已成交结果，含真实成本；未成交计划不改变它）
-ctx.broker.available_cash                 # 可部署买力（现金扣融券保证金/冻结所得）
+ctx.broker.available_cash                 # 可用于买入的现金（扣融券冻结所得；保证金占用经保证金可用余额约束信用操作）
+ctx.broker.credit                         # 信用账户视图（维保比例/保证金可用余额/负债/利息/额度）；普通账户为 None
+ctx.broker.debt_contracts(ts_code=None)   # 未了结融资/融券负债合约明细
 ctx.broker.position(ts_code)
 ctx.broker.pending(ts_code=None)          # 在途/延迟提交单；无参返回全量，记录含 order_id/submitted_at/age_minutes/status，可能含 pending_stage
                                           #   substep_delay 的 age 从生成 tick 起算；submit_lag 从实际提交 tick 起算
@@ -287,7 +293,7 @@ ctx.model_dir, ctx.params
 
 Broker 原语和 `ctx` 完整语义由 `docs/environment_design.md` §3 定义。`ctx.bars` 只含当前 tick、bar close 时点已可见的行情，未来 bar 不可见（09:15 信息 tick 与 off-session tick 无价）；off-session tick 不报单，只写研究状态或 `ctx.state_dir` 计划。正式回放进程只读加载 `output/` 策略代码和 `models/` 模型产物，禁止写 `output/` / `models/`、创建软/硬链接，且按真实路径阻断经链接访问测试槽或 `/mnt/artifacts`。
 
-`amount` 是股数（按 100 股，即 1 手，向下对齐），`weight` 是初始权益名义比例。函数只表达意图；现金、做空保证金、T+1 可卖余额、手数、涨跌停、停牌和券源由 Broker 执行。最大持仓数、单票权重上限和仓位集中度默认由 Agent 自行控制；只有 run config 显式设置 Broker 附加风控时才由 Broker 额外拦截（正式代码不得有死循环、网络访问或不可控写入，见 §3.1）。
+`amount` 是股数（按 100 股，即 1 手，向下对齐），`weight` 是初始权益名义比例。函数只表达意图；现金、保证金可用余额、T+1 可卖余额、手数、涨跌停、停牌、融资融券标的池/额度/限价规则、负债利息和维保强平由 Broker 执行。账户类型（`credit` 信用账户默认 / `stock` 普通账户）见 experiment facts 的 `broker_replay.account_type`；普通账户下信用原语（`fin_buy`/`short`/`cover`/`sell_repay`/`direct_repay`）在 driver 层直接抛错。最大持仓数、单票权重上限和仓位集中度默认由 Agent 自行控制；只有 run config 显式设置 Broker 附加风控时才由 Broker 额外拦截（正式代码不得有死循环、网络访问或不可控写入，见 §3.1）。信用账户经济学（负债合约、利息、保证金公式、强平）见 `environment_design.md` §3.3。
 
 **正式代码边界**
 
