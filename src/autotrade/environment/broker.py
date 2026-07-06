@@ -1,17 +1,30 @@
-"""Simulated Broker and the default CITIC replay/Broker profile.
+"""Simulated Broker aligned with the official full-QMT in-client trading API.
 
-The Broker exposes only fundamental, strategy-agnostic primitives
-(``buy``/``sell``/``short``/``cover``/``close`` by share amount, plus account,
-position, and per-stock trade-history queries). It owns no trading-strategy
-logic; trading strategies live in the Agent's ``output`` and drive these
-primitives during minute-by-minute replay.
+The host boundary mirrors QMT's strategy API (docs/environment_design.md §3.2):
+``passorder`` submits by official ``opType`` code, ``cancel`` withdraws,
+``get_trade_detail_data`` returns ACCOUNT/POSITION/ORDER/DEAL records, and the
+credit queries (``get_debt_contract``/``get_assure_contract``/
+``get_enable_short_contract``) expose the 信用账户 surface — so a live
+``QMTBroker`` adapter maps mechanically. The Broker owns no trading-strategy
+logic; strategies live in the Agent's ``output`` and drive the ``ctx.broker``
+verbs, which the replay engine translates into ``passorder`` submissions.
+
+One run operates exactly ONE account, selected by ``BrokerProfile.account_type``:
+
+* ``"stock"`` — 普通账户: cash buys/sells only (opType 23/24).
+* ``"credit"`` — 信用账户 (default): 担保品买卖 (33/34), 融资买入 (27), 融券卖出
+  (28), 买券还券 (29), 卖券还款 (31), 直接还款 (32), with 负债合约 tracking,
+  per-calendar-day interest, 保证金可用余额 gating, 维持担保比例 and forced close.
+  直接还券 (30) is intentionally unsupported: the sim keeps one side per code
+  (``opposite_side_position_open``), which makes the op structurally unreachable;
+  买券还券 covers the economic need.
 
 The Broker still enforces every A-share market rule (docs/environment_design.md
-§3): cash, short margin, T+1 sellable balance, lot size, limit
-up/down, suspension, the configured short-inventory mode (default
-``proxy_margin_secs``), optional run-config concentration limits, commission,
-stamp duty, slippage, borrow fee, and forced close. Every order/reject is
-recorded.
+§3): cash/margin, T+1 sellable balance, lot size, limit up/down, suspension, the
+configured short-inventory mode (default ``proxy_margin_secs``), the 融券卖出
+limit-price rule (申报价不得低于最新成交价 — shorts must be limit orders), optional
+concentration limits, commission, stamp duty, slippage, and forced close. Every
+order/reject is recorded.
 """
 
 from __future__ import annotations
@@ -25,25 +38,37 @@ import pandas as pd
 from autotrade.environment.broker_core import (
     STAMP_DUTY_CUTOVER,
     CostModel,
+    DebtContract,
+    accrue_debt_interest,
+    credit_maintenance_ratio,
+    enable_bail_balance,
     lot_floor,
     project_open,
     project_reduce,
+    release_fin_shares,
+    repay_fin,
+    repay_slo,
     resolve_shares,
 )
 from autotrade.environment.runtime import new_id
 
 SHORT_INVENTORY_MODES = ("proxy_margin_secs", "broker_inventory", "theoretical_short")
+ACCOUNT_TYPES = ("stock", "credit")
 
 
 @dataclass(frozen=True)
 class BrokerProfile:
-    """Default CITIC replay/Broker profile (docs/environment_design.md §3.3).
+    """Default GJZQ-style credit-account replay profile (docs/environment_design.md §3.3).
 
-    Maintenance lines follow the published CITIC base case (T-day 16:00
-    维持担保比例 > 200%): closeout 130%, safety 140%, withdrawal 300%.
-    Concentration-dependent variants below 200% are not modeled.
+    The maintenance closeout line (130%) follows the pre-2019 exchange floor that
+    brokers still commonly contract; warning/withdraw lines are recorded for audit
+    only. ``assure_ratio`` is a flat 担保品折算率 approximation (exchange caps:
+    index constituents ≤70%, other stocks ≤65%); ``fin_rate_annual`` and
+    ``slo_rate_annual`` are flagged research assumptions until per-security broker
+    fee files are wired in.
     """
 
+    account_type: str = "credit"
     initial_cash: float = 1_000_000.0
     commission_bps: float = 1.0
     min_commission_cny: float = 5.0
@@ -52,35 +77,43 @@ class BrokerProfile:
     slippage_bps: float = 5.0
     max_total_holdings: int | None = None
     short_inventory_mode: str = "proxy_margin_secs"
-    short_margin_ratio: float = 1.0
-    short_margin_ratio_private_fund: float = 1.2
+    fin_margin_ratio: float = 1.0  # 融资保证金比例 (exchange floor 100%)
+    slo_margin_ratio: float = 1.0
+    slo_margin_ratio_private_fund: float = 1.2
     is_private_fund: bool = False
-    # Annualized assumed borrow fee; flagged as a research assumption in the
-    # profile record until per-security broker fee files are wired in.
-    short_borrow_fee_annual: float = 0.085
+    fin_rate_annual: float = 0.0835  # 融资利率 (assumed)
+    slo_rate_annual: float = 0.085  # 融券费率 (assumed)
+    assure_ratio: float = 0.70  # flat 担保品折算率 approximation
+    fin_max_quota: float | None = None  # 融资授信额度 (None = ungated)
+    slo_max_quota: float | None = None  # 融券授信额度 (None = ungated)
     # Dividends/rights against short positions are intentionally not modeled yet.
     short_corporate_actions: str = "disabled"
     maintenance_closeout_ratio: float = 1.30
-    # Disclosed CITIC reference lines, recorded for audit only; the engine enforces
-    # just maintenance_closeout_ratio (forced close), not these two.
+    # Reference lines recorded for audit only; the engine enforces just
+    # maintenance_closeout_ratio (forced close), not these two.
     maintenance_warning_ratio: float = 1.40
     maintenance_withdraw_ratio: float = 3.00
     max_single_name_weight: float | None = None
-    profile_id: str = "citic_default_v3"
+    profile_id: str = "gjzq_credit_v1"
     source: str = "docs/environment_design.md#33-回放-profile强制约束与做空模式"
-    maintenance_source: str = "https://pb.citics.com/trading/xxgs/wcdbbl/"
+    formula_source: str = "https://www.sse.com.cn/services/tradingservice/margin/edu/c/10074042/files/a1f1c4833302451fb9130dbb94116c56.pdf"
+    maintenance_source: str = "https://www.gjzq.com.cn/main/a/rzrq/index.html"
 
     def __post_init__(self) -> None:
+        if self.account_type not in ACCOUNT_TYPES:
+            raise ValueError(f"unsupported account_type={self.account_type}")
         if self.short_inventory_mode not in SHORT_INVENTORY_MODES:
             raise ValueError(f"unsupported short_inventory_mode={self.short_inventory_mode}")
         if self.max_total_holdings is not None and self.max_total_holdings <= 0:
             raise ValueError("max_total_holdings must be positive")
         if self.max_single_name_weight is not None and self.max_single_name_weight <= 0:
             raise ValueError("max_single_name_weight must be positive")
+        if not 0.0 < self.assure_ratio <= 1.0:
+            raise ValueError("assure_ratio must be in (0, 1]")
 
     @property
-    def effective_short_margin_ratio(self) -> float:
-        return self.short_margin_ratio_private_fund if self.is_private_fund else self.short_margin_ratio
+    def effective_slo_margin_ratio(self) -> float:
+        return self.slo_margin_ratio_private_fund if self.is_private_fund else self.slo_margin_ratio
 
     @property
     def cost_model(self) -> CostModel:
@@ -92,7 +125,7 @@ class BrokerProfile:
             stamp_duty_sell_bps_before_cutover=self.stamp_duty_sell_bps_before_cutover,
             stamp_duty_sell_bps_from_cutover=self.stamp_duty_sell_bps_from_cutover,
             slippage_bps=self.slippage_bps,
-            short_margin_ratio=self.effective_short_margin_ratio,
+            slo_margin_ratio=self.effective_slo_margin_ratio,
         )
 
     def commission(self, notional: float) -> float:
@@ -108,7 +141,9 @@ class BrokerProfile:
         return {
             "profile_id": self.profile_id,
             "source": self.source,
+            "formula_source": self.formula_source,
             "maintenance_source": self.maintenance_source,
+            "account_type": self.account_type,
             "initial_cash": self.initial_cash,
             "commission_bps": self.commission_bps,
             "min_commission_cny": self.min_commission_cny,
@@ -118,9 +153,14 @@ class BrokerProfile:
             "slippage_bps": self.slippage_bps,
             "max_total_holdings": self.max_total_holdings,
             "short_inventory_mode": self.short_inventory_mode,
-            "short_margin_ratio": self.effective_short_margin_ratio,
-            "short_borrow_fee_annual": self.short_borrow_fee_annual,
-            "short_borrow_fee_is_assumed": True,
+            "fin_margin_ratio": self.fin_margin_ratio,
+            "slo_margin_ratio": self.effective_slo_margin_ratio,
+            "fin_rate_annual": self.fin_rate_annual,
+            "slo_rate_annual": self.slo_rate_annual,
+            "credit_rates_are_assumed": True,
+            "assure_ratio": self.assure_ratio,
+            "fin_max_quota": self.fin_max_quota,
+            "slo_max_quota": self.slo_max_quota,
             "short_corporate_actions": self.short_corporate_actions,
             "maintenance_closeout_ratio": self.maintenance_closeout_ratio,
             "maintenance_warning_ratio": self.maintenance_warning_ratio,
@@ -175,7 +215,7 @@ class Order:
     """Audited record of a single broker primitive call (filled or rejected)."""
 
     ts_code: str
-    action: str  # "buy" | "sell" | "short" | "cover" | "close"
+    action: str  # buy | sell | short | cover | close | fin_buy | sell_repay | direct_repay
     side: str  # "long" | "short"
     requested_amount: int
     trade_date: str
@@ -187,11 +227,13 @@ class Order:
     reason: str = ""
     source_artifacts: list[str] = field(default_factory=list)
     price_label: str = "price"
+    op_type: int | None = None
     order_id: str = field(default_factory=lambda: new_id("ord"))
 
     def to_record(self) -> dict[str, object]:
         return {
             "order_id": self.order_id,
+            "op_type": self.op_type,
             "ts_code": self.ts_code,
             "action": self.action,
             "side": self.side,
@@ -225,8 +267,6 @@ class Position:
     last_price: float
     locked_today: int = 0
     locked_date: str = ""
-    # Last trade date this short accrued a borrow fee on (calendar-day accrual).
-    last_mark_date: str = ""
 
     @property
     def market_value(self) -> float:
@@ -249,48 +289,77 @@ class Position:
         return max(self.quantity - self.locked_today, 0)
 
 
-class xtconstant:
-    """The subset of live xtquant (miniQMT) order constants the Broker mirrors 1:1,
-    so a live adapter (``order_stock``) maps to the backtest mechanically."""
+class optype:
+    """Official QMT ``passorder`` 下单操作类型 codes (股票/信用 subset, API doc §3.2.4)."""
 
-    STOCK_BUY = "STOCK_BUY"
-    STOCK_SELL = "STOCK_SELL"
-    CREDIT_SLO_SELL = "CREDIT_SLO_SELL"  # 融券卖出 — open a short
-    CREDIT_BUY_SECU_REPAY = "CREDIT_BUY_SECU_REPAY"  # 买券还券 — cover a short
-    FIX_PRICE = "FIX_PRICE"  # resting limit order
-    MARKET_PEER_PRICE_FIRST = "MARKET_PEER_PRICE_FIRST"  # counterparty-best market order
+    STOCK_BUY = 23  # 股票买入
+    STOCK_SELL = 24  # 股票卖出
+    FIN_BUY = 27  # 融资买入
+    SLO_SELL = 28  # 融券卖出
+    BUY_SECU_REPAY = 29  # 买券还券
+    DIRECT_SECU_REPAY = 30  # 直接还券 — unsupported (module docstring)
+    SELL_REPAY = 31  # 卖券还款
+    DIRECT_REPAY = 32  # 直接还款
+    CREDIT_BUY = 33  # 信用账号股票买入 (担保品买入)
+    CREDIT_SELL = 34  # 信用账号股票卖出 (担保品卖出)
 
 
-# Internal action <-> xtquant order_type. CLOSE_POSITION is a backtest convenience
-# (a market exit of whichever side is held; no single xtquant order_type).
-_ORDER_TYPE_TO_ACTION = {
-    xtconstant.STOCK_BUY: "buy",
-    xtconstant.STOCK_SELL: "sell",
-    xtconstant.CREDIT_SLO_SELL: "short",
-    xtconstant.CREDIT_BUY_SECU_REPAY: "cover",
-    "CLOSE_POSITION": "close",
+class prtype:
+    """Official QMT ``passorder`` 价格类型 codes (the subset the sim matches)."""
+
+    LATEST = 5  # 最新价 — market, taker slippage in the sim
+    FIX = 11  # 指定价 — resting limit order, price used
+    PEER = 14  # 对手价 — market, taker slippage in the sim
+
+    MARKET = (LATEST, PEER)
+
+
+# Agent action verb <-> official opType, per account type. ``close`` is a driver
+# convenience with no official op: the engine resolves it to the held side's
+# sell/cover op at submission (same tick as matching, so no drift).
+_STOCK_ACTION_TO_OP = {"buy": optype.STOCK_BUY, "sell": optype.STOCK_SELL}
+_CREDIT_ACTION_TO_OP = {
+    "buy": optype.CREDIT_BUY,
+    "sell": optype.CREDIT_SELL,
+    "fin_buy": optype.FIN_BUY,
+    "short": optype.SLO_SELL,
+    "cover": optype.BUY_SECU_REPAY,
+    "sell_repay": optype.SELL_REPAY,
+    "direct_repay": optype.DIRECT_REPAY,
 }
-_ACTION_TO_ORDER_TYPE = {action: order_type for order_type, action in _ORDER_TYPE_TO_ACTION.items()}
+_OP_TO_ACTION = {
+    optype.STOCK_BUY: "buy",
+    optype.STOCK_SELL: "sell",
+    optype.CREDIT_BUY: "buy",
+    optype.CREDIT_SELL: "sell",
+    optype.FIN_BUY: "fin_buy",
+    optype.SLO_SELL: "short",
+    optype.BUY_SECU_REPAY: "cover",
+    optype.SELL_REPAY: "sell_repay",
+    optype.DIRECT_REPAY: "direct_repay",
+}
 
 
 @dataclass
 class WorkingOrder:
-    """A resting order in the day's book (xtquant ``order_stock`` semantics).
+    """A resting order in the day's book (``passorder`` semantics).
 
-    A ``FIX_PRICE`` order fills without slippage when a bar reaches it, using a
-    better open when the bar already crosses the limit; a
-    ``MARKET_PEER_PRICE_FIRST`` order fills at the bar open with taker slippage,
-    except an auction order (``is_auction``), which clears at the single auction
-    price with no slippage. ``remaining_bars`` is the time-in-force countdown; at
-    expiry the order auto-cancels.
+    A ``prtype.FIX`` (指定价) order fills without slippage when a bar reaches it,
+    using a better open when the bar already crosses the limit; a market order
+    (``prtype.LATEST``/``PEER``) fills at the bar open with taker slippage, except
+    an auction order (``is_auction``), which clears at the single auction price
+    with no slippage. ``remaining_bars`` is the time-in-force countdown; at expiry
+    the order auto-cancels. A 融券卖出 order is checked against the 申报价 rule at
+    its first match attempt (``uptick_checked``).
     """
 
     order_id: str
     action: str
+    op_type: int
     ts_code: str
     volume: int | None
     weight: float | None
-    price_type: str
+    price_type: int
     price: float | None
     remaining_bars: int
     is_auction: bool
@@ -299,15 +368,16 @@ class WorkingOrder:
     # A close (15:00) call-auction order fills at the activation bar's CLOSE; an
     # open (09:25) auction or a continuous order fills at its bar OPEN.
     auction_close: bool = False
+    uptick_checked: bool = False
 
     @property
     def is_limit(self) -> bool:
-        return self.price_type == xtconstant.FIX_PRICE
+        return self.price_type == prtype.FIX
 
     def to_record(self) -> dict[str, object]:
         return {
             "order_id": self.order_id,
-            "order_type": _ACTION_TO_ORDER_TYPE.get(self.action, self.action),
+            "op_type": self.op_type,
             "action": self.action,
             "ts_code": self.ts_code,
             "order_volume": self.volume,
@@ -324,9 +394,9 @@ class WorkingOrder:
 class SimBroker:
     """Order/fill/position accounting driven only by structured primitives.
 
-    The Agent strategy never writes fills, positions, or returns; it calls
-    ``buy``/``sell``/``short``/``cover``/``close`` (by share amount) and the
-    Broker applies every market constraint and records the outcome.
+    The Agent strategy never writes fills, positions, or returns; the replay
+    engine translates its verbs into ``passorder`` submissions and the Broker
+    applies every market constraint and records the outcome.
     """
 
     def __init__(
@@ -340,119 +410,240 @@ class SimBroker:
     ) -> None:
         self.profile = profile
         self.market = market
-        # Frozen decision-day shortable set (the agent's snapshot view), used as the
-        # fallback when a fill day is absent from the per-day map below.
+        # Frozen decision-day margin_secs set (the agent's snapshot view), used as the
+        # fallback when a fill day is absent from the per-day map below. margin_secs
+        # carries no 融资/融券 split, so the same set gates both fin_buy eligibility
+        # and short inventory (documented approximation).
         self.shortable_codes = shortable_codes
-        # Per-fill-day margin_secs sets from the replay slot. The short-inventory gate
+        # Per-fill-day margin_secs sets from the replay slot. The credit-target gate
         # consults the FILL day's real set (current_date advances to the fill day before
-        # the check), so the broker constraint reflects same-day inventory and stays
+        # the check), so the broker constraint reflects same-day eligibility and stays
         # independent of the agent's frozen, decision-day snapshot.
         self.shortable_by_date = dict(shortable_by_date or {})
         self.cash = float(initial_cash if initial_cash is not None else profile.initial_cash)
         self.initial_equity = self.cash
         self.positions: dict[str, Position] = {}
         self.orders: list[Order] = []
+        self.contracts: list[DebtContract] = []  # open 融资/融券 负债合约 (credit account)
         self._book: list[WorkingOrder] = []  # resting (working) orders for the day
         self._order_seq = 0
+        self._compact_seq = 0
         self.events: list[dict[str, object]] = []
         self.trade_ledger: dict[str, list[dict[str, object]]] = {}
         self.fees_paid = 0.0
         self.stamp_duty_paid = 0.0
-        self.borrow_fees = 0.0
+        self.interest_accrued_total = 0.0
+        self.interest_paid_total = 0.0
         self.traded_notional = 0.0
         self.reject_counts: dict[str, int] = {}
         self.current_date = ""
 
-    # ---- broker queries (docs/environment_design.md §3.2) ----
+    @property
+    def is_credit(self) -> bool:
+        return self.profile.account_type == "credit"
 
-    def query_stock_asset(self) -> dict[str, object]:
-        """Account snapshot (xtquant ``query_stock_asset``)."""
-        return {
+    def op_for_action(self, action: str) -> int:
+        """The official opType for an agent verb under this account type; raises
+        ValueError for verbs the account type does not support."""
+        table = _CREDIT_ACTION_TO_OP if self.is_credit else _STOCK_ACTION_TO_OP
+        op = table.get(str(action))
+        if op is None:
+            raise ValueError(f"{self.profile.account_type} account does not support action {action!r}")
+        return op
+
+    # ---- official-API queries (docs/environment_design.md §3.2) ----
+
+    def get_trade_detail_data(
+        self,
+        account_id: str = "",
+        account_type: str = "",
+        data_type: str = "ORDER",
+        strategy_name: str = "",
+    ) -> list[dict[str, object]]:
+        """ACCOUNT / POSITION / ORDER / DEAL records (QMT ``get_trade_detail_data``).
+
+        The sim runs a single account, so ``account_id`` is accepted and ignored;
+        ``account_type`` must match the profile's account type when given. ORDER
+        returns the day's working book plus the cumulative settled/rejected orders
+        for the whole replay (live QMT returns only the current day; the sim keeps
+        the history because report/stats consumers aggregate the whole backtest)."""
+        self._require_account_type(account_type)
+        if strategy_name:
+            raise ValueError("the sim does not tag orders by strategy_name; filter by remark/order_id instead")
+        kind = str(data_type or "").upper()
+        if kind == "ACCOUNT":
+            return [self._account_record()]
+        if kind == "POSITION":
+            return [
+                {
+                    "ts_code": pos.ts_code,
+                    "side": pos.side,
+                    "quantity": pos.quantity,
+                    "sellable_quantity": pos.sellable_quantity,
+                    "entry_price": pos.entry_price,
+                    "entry_date": pos.entry_date,
+                    # Cost basis (a short's locked net proceeds) so the sandbox view can
+                    # see the buying power released on a cover; maps to QMT m_dOpenCost.
+                    "entry_cost": pos.entry_cost,
+                    "last_price": pos.last_price,
+                    "market_value": pos.market_value,
+                }
+                for pos in self.positions.values()
+            ]
+        if kind == "ORDER":
+            return [order.to_record() for order in self._book] + [order.to_record() for order in self.orders]
+        if kind == "DEAL":
+            return [trade for trades in self.trade_ledger.values() for trade in trades]
+        raise ValueError(f"unsupported data_type={data_type!r} (ACCOUNT/POSITION/ORDER/DEAL)")
+
+    def get_debt_contract(self, account_id: str = "") -> list[dict[str, object]]:
+        """Open 负债合约 records (QMT ``get_debt_contract``; credit account only)."""
+        self._require_credit_query("get_debt_contract")
+        return [contract.to_record() for contract in self.contracts if not contract.closed]
+
+    def get_assure_contract(self, account_id: str = "") -> list[dict[str, object]]:
+        """担保标的 terms for held positions (QMT ``get_assure_contract``). The sim
+        applies flat profile ratios to every code, so this projects them."""
+        self._require_credit_query("get_assure_contract")
+        return [
+            {
+                "ts_code": pos.ts_code,
+                "assure_ratio": self.profile.assure_ratio,
+                "fin_ratio": self.profile.fin_margin_ratio,
+                "slo_ratio": self.profile.effective_slo_margin_ratio,
+                "fin_rate_annual": self.profile.fin_rate_annual,
+                "slo_rate_annual": self.profile.slo_rate_annual,
+            }
+            for pos in self.positions.values()
+        ]
+
+    def get_enable_short_contract(self, account_id: str = "") -> list[dict[str, object]]:
+        """当日可融券标的 (QMT ``get_enable_short_contract``): the fill-day margin_secs
+        set. Quantities are unknown in proxy mode, so records carry eligibility only."""
+        self._require_credit_query("get_enable_short_contract")
+        shortable = self.shortable_by_date.get(self.current_date, self.shortable_codes)
+        return [
+            {"ts_code": code, "slo_ratio": self.profile.effective_slo_margin_ratio, "slo_status": "normal"}
+            for code in sorted(shortable)
+        ]
+
+    def _require_account_type(self, account_type: str) -> None:
+        given = str(account_type or "").strip().lower()
+        if given and given != self.profile.account_type:
+            raise ValueError(
+                f"account_type={account_type!r} does not match this run's {self.profile.account_type} account"
+            )
+
+    def _require_credit_query(self, name: str) -> None:
+        if not self.is_credit:
+            raise ValueError(f"{name} requires a credit account; this run uses a stock account")
+
+    def _account_record(self) -> dict[str, object]:
+        record: dict[str, object] = {
+            "account_type": self.profile.account_type.upper(),
             "cash": self.cash,
-            "total_assets": self.equity(),
             "available_cash": self.available_cash(),
-            "short_margin_occupied": self._short_margin_occupied(),
-            "maintenance_ratio": self.maintenance_ratio(),
+            "total_assets": self.equity(),
+            "market_value": sum(pos.market_value for pos in self.positions.values() if pos.side == "long"),
             "risk_limits": {
                 "max_total_holdings": self.profile.max_total_holdings,
                 "max_single_name_weight": self.profile.max_single_name_weight,
                 "maintenance_closeout_ratio": self.profile.maintenance_closeout_ratio,
             },
         }
-
-    def query_stock_positions(self) -> list[dict[str, object]]:
-        """Holdings snapshot (xtquant ``query_stock_positions``)."""
-        return [
-            {
-                "ts_code": pos.ts_code,
-                "side": pos.side,
-                "quantity": pos.quantity,
-                "sellable_quantity": pos.sellable_quantity,
-                "entry_price": pos.entry_price,
-                "entry_date": pos.entry_date,
-                # Cost basis (a short's locked net proceeds) so the sandbox view can
-                # project the buying-power released on a cover; matches xtquant's cost field.
-                "entry_cost": pos.entry_cost,
-                "last_price": pos.last_price,
-                "market_value": pos.market_value,
+        if self.is_credit:
+            fin_amount = self._fin_amount_outstanding()
+            slo_amount = self._slo_sell_amount_outstanding()
+            record["credit"] = {
+                "maintenance_ratio": self.maintenance_ratio(),
+                "enable_bail_balance": self.enable_bail_balance(),
+                "fin_debt": fin_amount,
+                "slo_debt": self._slo_mv_outstanding(),
+                "interest_accrued": self._interest_outstanding(),
+                "fin_quota_used": fin_amount,
+                "fin_quota_max": self.profile.fin_max_quota,
+                "slo_quota_used": slo_amount,
+                "slo_quota_max": self.profile.slo_max_quota,
+                "fin_rate_annual": self.profile.fin_rate_annual,
+                "slo_rate_annual": self.profile.slo_rate_annual,
             }
-            for pos in self.positions.values()
-        ]
+        return record
 
-    def query_stock_orders(self, cancelable_only: bool = False) -> list[dict[str, object]]:
-        """Orders (xtquant ``query_stock_orders``): the day's working (cancelable) book
-        — drained at each day's close — plus, unless ``cancelable_only``, the cumulative
-        settled/rejected orders for the whole replay. (Live xtquant returns only the
-        current trading day's orders; the sim keeps the full settled history because the
-        report/stats consumers aggregate over the whole backtest.)"""
-        working = [order.to_record() for order in self._book]
-        if cancelable_only:
-            return working
-        return working + [order.to_record() for order in self.orders]
+    # ---- order book (passorder lifecycle) ----
 
-    def query_stock_trades(self, ts_code: str | None = None) -> list[dict[str, object]]:
-        """Executed trades (xtquant ``query_stock_trades``), optionally for one code."""
-        if ts_code is not None:
-            return list(self.trade_ledger.get(str(ts_code), []))
-        return [trade for trades in self.trade_ledger.values() for trade in trades]
-
-    # ---- order book (xtquant order_stock lifecycle) ----
-
-    def order_stock(
+    def passorder(
         self,
-        order_type: str,
-        stock_code: str,
-        order_volume: int | None,
-        price_type: str,
+        op_type: int,
+        order_type: int,
+        account_id: str,
+        order_code: str,
+        pr_type: int,
         price: float | None,
+        volume: int | float | None,
         *,
+        user_order_id: str = "",
         weight: float | None = None,
         valid_bars: int = 1,
         is_auction: bool = False,
         auction_close: bool = False,
         reason: str = "",
-        order_id: str | None = None,
         submitted_at: str = "",
     ) -> str:
-        """Submit an order to the day's book and return its ``order_id``.
+        """Submit an order by official opType and return its order id.
 
-        Mirrors the live ``order_stock``; the order is matched against subsequent
-        bars by :meth:`match_bar`. ``weight`` is a backtest sizing convenience used
-        when ``order_volume`` is absent (a live adapter resolves it to a share count
-        before calling ``order_stock``)."""
-        action = _ORDER_TYPE_TO_ACTION.get(order_type, str(order_type))
+        Mirrors QMT ``passorder`` with sim conveniences: the returned id is what
+        the official flow recovers via ``get_last_order_id`` right after the call
+        (``user_order_id`` doubles as the id/投资备注 when given, so the agent's
+        client id is the correlation key, as live remarks are). ``weight``,
+        ``valid_bars``, the auction flags, ``reason`` and ``submitted_at`` are
+        backtest conveniences a live adapter resolves before its own passorder.
+        Only ``order_type`` 1101 (单股/股) is supported — except 直接还款, which
+        follows the official 1102 (金额元) convention and settles immediately."""
+        op_type = int(op_type)
+        action = _OP_TO_ACTION.get(op_type)
+        if action is None or op_type not in (
+            _CREDIT_ACTION_TO_OP if self.is_credit else _STOCK_ACTION_TO_OP
+        ).values():
+            raise ValueError(
+                f"opType={op_type} is not supported on a {self.profile.account_type} account"
+            )
         self._order_seq += 1
-        order_id = str(order_id or ("O%06d" % self._order_seq))
-        is_limit = str(price_type) == xtconstant.FIX_PRICE
+        order_id = str(user_order_id or ("O%06d" % self._order_seq))
+        if op_type == optype.DIRECT_REPAY:
+            if int(order_type) != 1102:
+                raise ValueError("直接还款 requires orderType=1102 (amount in CNY)")
+            return self._direct_repay(
+                float(volume or 0), order_id=order_id, reason=reason, submitted_at=submitted_at
+            )
+        if int(order_type) != 1101:
+            raise ValueError(f"unsupported orderType={order_type} (single stock by shares = 1101)")
+        pr_type = int(pr_type)
+        if pr_type not in (prtype.FIX, *prtype.MARKET):
+            raise ValueError(f"unsupported prType={pr_type} (11 指定价 / 5 最新价 / 14 对手价)")
+        is_limit = pr_type == prtype.FIX
+        if is_limit and not (price and float(price) > 0):
+            raise ValueError("prType=11 (指定价) requires a positive price")
+        if op_type == optype.SLO_SELL and not is_limit:
+            # 融券卖出申报价不得低于最新成交价 (实施细则), so it must be a limit order.
+            order = Order(
+                ts_code=str(order_code), action="short", side="short",
+                requested_amount=int(volume or 0), trade_date=self.current_date,
+                decision_time=str(submitted_at or ""), reason=str(reason or "short"),
+                op_type=op_type, order_id=order_id,
+            )
+            self.orders.append(order)
+            self._reject(order, "slo_sell_requires_limit_price")
+            return order_id
         self._book.append(
             WorkingOrder(
                 order_id=order_id,
                 action=action,
-                ts_code=str(stock_code),
-                volume=int(order_volume) if order_volume else None,
+                op_type=op_type,
+                ts_code=str(order_code),
+                volume=int(volume) if volume else None,
                 weight=weight,
-                price_type=str(price_type),
-                price=float(price) if (is_limit and price) else None,
+                price_type=pr_type,
+                price=float(price) if is_limit else None,
                 remaining_bars=max(1, int(valid_bars or 1)),
                 is_auction=bool(is_auction),
                 auction_close=bool(auction_close),
@@ -462,15 +653,25 @@ class SimBroker:
         )
         return order_id
 
-    def cancel_order_stock(
+    def working_orders(self) -> list[dict[str, object]]:
+        """The day's still-cancelable book — a sim convenience for the replay
+        engine's pending view and day-end auto-cancel (a live loop filters ORDER
+        records by status instead)."""
+        return [order.to_record() for order in self._book]
+
+    def cancel(
         self,
         order_id: str,
+        account_id: str = "",
+        account_type: str = "",
         *,
         reason: str = "cancelled",
         trade_date: str | None = None,
         minute_key: str | None = None,
     ) -> bool:
-        """Cancel a working order by id (xtquant ``cancel_order_stock``)."""
+        """Cancel a working order by id (QMT ``cancel``); the audit kwargs are sim
+        extensions used by the replay engine's cancel events."""
+        self._require_account_type(account_type)
         for index, order in enumerate(self._book):
             if order.order_id == order_id:
                 self._book.pop(index)
@@ -495,6 +696,22 @@ class SimBroker:
         survivors: list[WorkingOrder] = []
         for order in self._book:
             bar = _bar_for_code(minute_group, order.ts_code)
+            if order.action == "short" and not order.uptick_checked and bar is not None:
+                # 融券卖出申报价不得低于最新成交价: checked once, when the order first
+                # reaches the exchange (its activation bar). An aggressive limit below
+                # the reference price would have been rejected at 申报.
+                order.uptick_checked = True
+                ref_price = _close_price(bar) if order.auction_close else _open_price(bar)
+                if order.price is not None and ref_price is not None and order.price < ref_price:
+                    rejected = Order(
+                        ts_code=order.ts_code, action="short", side="short",
+                        requested_amount=int(order.volume or 0), trade_date=str(trade_date),
+                        decision_time=str(minute_key), reason=order.reason,
+                        op_type=order.op_type, order_id=order.order_id,
+                    )
+                    self.orders.append(rejected)
+                    self._reject(rejected, "slo_sell_uptick_rule")
+                    continue
             price = _limit_fill_price(order, bar, use_close=order.auction_close) if bar is not None else None
             if price is not None:
                 self.execute(
@@ -566,12 +783,14 @@ class SimBroker:
     ) -> Order:
         """Apply one strategy primitive at the current bar with full constraints.
 
-        ``action`` is ``buy``/``sell``/``short``/``cover``/``close``. ``amount``
-        is a share count (lot-aligned); ``weight`` is a notional-fraction
-        convenience used when ``amount`` is absent. ``apply_slippage`` is True for
-        marketable (taker) fills and False for limit fills, where ``raw_price`` is
-        the no-slippage limit-fill price (limit or better open).
-        ``order_id`` carries the originating working order's id onto the fill.
+        ``action`` is ``buy``/``sell``/``short``/``cover``/``close`` plus the
+        credit ops ``fin_buy``/``sell_repay`` (直接还款 settles via
+        :meth:`passorder` without a bar). ``amount`` is a share count
+        (lot-aligned); ``weight`` is a notional-fraction convenience used when
+        ``amount`` is absent. ``apply_slippage`` is True for marketable (taker)
+        fills and False for limit fills, where ``raw_price`` is the no-slippage
+        limit-fill price (limit or better open). ``order_id`` carries the
+        originating working order's id onto the fill.
         """
         self._advance_date(trade_date)
         action = str(action).lower().strip()
@@ -587,9 +806,12 @@ class SimBroker:
             **({"order_id": order_id} if order_id else {}),
             source_artifacts=list(source_artifacts or []),
             price_label=price_label,
+            op_type=(_CREDIT_ACTION_TO_OP if self.is_credit else _STOCK_ACTION_TO_OP).get(action),
         )
         self.orders.append(order)
 
+        if not self.is_credit and action in {"short", "cover", "fin_buy", "sell_repay"}:
+            return self._reject(order, "account_type_forbids_action")
         bar = self.market.bar(trade_date, ts_code)
         if MarketData.is_suspended(bar):
             return self._reject(order, "suspended")
@@ -597,9 +819,9 @@ class SimBroker:
             return self._reject(order, "missing_price")
         raw_price = float(raw_price)
 
-        if action in {"buy", "short"}:
+        if action in {"buy", "short", "fin_buy"}:
             return self._open(order, bar, raw_price, amount=amount, weight=weight, apply_slippage=apply_slippage)
-        if action in {"sell", "cover", "close"}:
+        if action in {"sell", "cover", "close", "sell_repay"}:
             return self._reduce(order, bar, raw_price, amount=amount, apply_slippage=apply_slippage)
         return self._reject(order, f"unsupported_action:{action}")
 
@@ -628,6 +850,10 @@ class SimBroker:
             return self._fill_short_open(order, raw_price, shares, apply_slippage)
         if MarketData.limit_up_blocked_at_price(bar, raw_price):
             return self._reject(order, "limit_up_blocked_buy")
+        if order.action == "fin_buy":
+            if self._credit_target_reject(order.ts_code):
+                return self._reject(order, "margin_secs_not_finable")
+            return self._fill_fin_open(order, raw_price, shares, apply_slippage)
         return self._fill_long_open(order, raw_price, shares, apply_slippage)
 
     def _fill_long_open(self, order: Order, raw_price: float, shares: int, apply_slippage: bool = True) -> Order:
@@ -635,8 +861,8 @@ class SimBroker:
             self.profile.cost_model, side="long", raw_price=raw_price, shares=shares,
             trade_date=order.trade_date, apply_slippage=apply_slippage,
         )
-        # A long buy may only deploy available cash: short-sale proceeds are locked
-        # collateral (not deployable), so available_cash() == cash when flat/long-only.
+        # A cash/担保品 buy may only deploy available cash: short-sale proceeds are
+        # locked collateral (not deployable), so available_cash() == cash long-only.
         if fill.required_cash > self.available_cash() + 1e-6:
             return self._reject(order, "insufficient_cash")
         self.cash += fill.cash_delta
@@ -644,29 +870,69 @@ class SimBroker:
         self._add_to_position(order.ts_code, "long", shares, fill.price, fill.cost_basis, order.trade_date)
         return self._fill(order, fill.price, shares, "open")
 
+    def _fill_fin_open(self, order: Order, raw_price: float, shares: int, apply_slippage: bool = True) -> Order:
+        """融资买入: no cash moves; notional+fee become a fin contract's principal,
+        gated on 保证金可用余额 and the 融资 quota."""
+        fill = project_open(
+            self.profile.cost_model, side="long", raw_price=raw_price, shares=shares,
+            trade_date=order.trade_date, apply_slippage=apply_slippage, financed=True,
+        )
+        # Opening the contract moves the bail balance by the financed fee (booked at
+        # 100% as an immediate 浮亏) plus the margin occupied by the new principal.
+        required_bail = fill.cost_basis * self.profile.fin_margin_ratio + fill.fee
+        if required_bail > self.enable_bail_balance() + 1e-6:
+            return self._reject(order, "insufficient_bail_balance")
+        if (
+            self.profile.fin_max_quota is not None
+            and self._fin_amount_outstanding() + fill.cost_basis > self.profile.fin_max_quota + 1e-6
+        ):
+            return self._reject(order, "fin_quota_exceeded")
+        self.fees_paid += fill.fee  # financed into the contract, counted as cost incurred
+        self._add_to_position(order.ts_code, "long", shares, fill.price, fill.cost_basis, order.trade_date)
+        self.contracts.append(
+            self._new_contract(
+                kind="fin", ts_code=order.ts_code, trade_date=order.trade_date,
+                open_price=fill.price, principal=fill.cost_basis, shares=shares,
+            )
+        )
+        return self._fill(order, fill.price, shares, "open")
+
     def _fill_short_open(self, order: Order, raw_price: float, shares: int, apply_slippage: bool = True) -> Order:
         fill = project_open(
             self.profile.cost_model, side="short", raw_price=raw_price, shares=shares,
             trade_date=order.trade_date, apply_slippage=apply_slippage,
         )
-        # The new short's margin must be backed by deployable cash, which already
-        # excludes the locked proceeds and margin of any existing shorts.
-        if fill.required_cash > self.available_cash() + 1e-6:
-            return self._reject(order, "insufficient_short_margin")
+        # 保证金可用余额 must back the new short's margin plus its open costs
+        # (the bail balance moves by -margin - fee - duty when the short opens).
+        if fill.required_cash > self.enable_bail_balance() + 1e-6:
+            return self._reject(order, "insufficient_bail_balance")
+        if (
+            self.profile.slo_max_quota is not None
+            and self._slo_sell_amount_outstanding() + fill.notional > self.profile.slo_max_quota + 1e-6
+        ):
+            return self._reject(order, "slo_quota_exceeded")
         self.cash += fill.cash_delta
         self.fees_paid += fill.fee
         self.stamp_duty_paid += fill.duty
         # entry_cost for a short is the net sale proceeds released proportionally on cover.
         self._add_to_position(order.ts_code, "short", shares, fill.price, fill.cost_basis, order.trade_date)
+        self.contracts.append(
+            self._new_contract(
+                kind="slo", ts_code=order.ts_code, trade_date=order.trade_date,
+                open_price=fill.price, shares=shares, sell_amount=fill.notional,
+            )
+        )
         return self._fill(order, fill.price, shares, "open")
 
     def _reduce(self, order: Order, bar: pd.Series, raw_price: float, *, amount, apply_slippage: bool = True) -> Order:
         pos = self.positions.get(order.ts_code)
-        want_side = "short" if order.action == "cover" else ("long" if order.action == "sell" else None)
+        want_side = {"cover": "short", "sell": "long", "sell_repay": "long"}.get(order.action)
         if pos is None:
             return self._reject(order, "no_position")
         if want_side is not None and pos.side != want_side:
             return self._reject(order, f"side_mismatch:{order.action}:{pos.side}")
+        if order.action == "sell_repay" and self._fin_amount_outstanding() <= 1e-9:
+            return self._reject(order, "no_fin_debt")
         order.side = pos.side
         sellable = pos.sellable_quantity
         if sellable <= 0:
@@ -683,7 +949,20 @@ class SimBroker:
         if pos.side == "short" and MarketData.limit_up_blocked_at_price(bar, raw_price):
             return self._reject(order, "limit_up_blocked_cover")
         price = self.profile.slipped_price(raw_price, is_buy=is_buy) if apply_slippage else raw_price
-        self._reduce_position(pos, shares, price, order.trade_date)
+        fill = self._reduce_position(pos, shares, price, order.trade_date)
+        if order.action == "sell_repay" and fill is not None:
+            # 卖券还款: the sold shares come off the code's fin contracts, and the net
+            # proceeds (already banked by _reduce_position) repay 融资 debt interest-
+            # first FIFO; any surplus simply stays in cash.
+            release_fin_shares(self.contracts, order.ts_code, shares)
+            repaid = repay_fin(self.contracts, max(0.0, fill.cash_delta), release_shares=False)
+            self.cash -= repaid["applied"]
+            self.interest_paid_total += repaid["interest_paid"]
+            if repaid["applied"] > 0:
+                self._event(
+                    "debt_repaid", trade_date=order.trade_date, ts_code=order.ts_code,
+                    kind="fin", via="sell_repay", order_id=order.order_id, **repaid,
+                )
         return self._fill(order, price, shares, "close" if order.ts_code not in self.positions else "reduce")
 
     # ---- replay lifecycle ----
@@ -694,16 +973,11 @@ class SimBroker:
             bar = self.market.bar(trade_date, pos.ts_code)
             if bar is not None and pd.notna(bar.get("close")):
                 pos.last_price = float(bar["close"])
-            if pos.side == "short":
-                # Borrow fee accrues every CALENDAR day held (weekends/holidays
-                # included), so charge the calendar-day gap since this short's last
-                # mark (1 day on its first mark) — not a flat per-trade-day fee, which
-                # would undercount by ~31% over the ~252 trade days in a 365-day year.
-                gap_days = _calendar_day_gap(pos.last_mark_date, trade_date)
-                fee = pos.quantity * pos.entry_price * self.profile.short_borrow_fee_annual / 365.0 * gap_days
-                self.cash -= fee
-                self.borrow_fees += fee
-                pos.last_mark_date = str(trade_date)
+        if self.is_credit and self.contracts:
+            # 融资利息/融券费 accrue every CALENDAR day (weekends/holidays included)
+            # into each contract and are paid from cash at repayment; both credit
+            # formulas count the accrued balance meanwhile.
+            self.interest_accrued_total += accrue_debt_interest(self.contracts, trade_date)
         ratio = self.maintenance_ratio()
         if ratio is not None and ratio < self.profile.maintenance_closeout_ratio:
             self._event("forced_close_triggered", trade_date=trade_date, maintenance_ratio=ratio)
@@ -745,16 +1019,68 @@ class SimBroker:
         return True
 
     def equity(self) -> float:
+        """Net assets: cash plus long market value, minus 融券 liability (marked
+        borrowed shares), 融资 principal, and accrued unpaid interest — open debt is
+        netted here rather than force-settled, so liquidation leaves equity intact."""
         long_value = sum(pos.market_value for pos in self.positions.values() if pos.side == "long")
-        short_liability = sum(pos.short_liability for pos in self.positions.values())
-        return self.cash + long_value - short_liability
+        return (
+            self.cash
+            + long_value
+            - self._slo_mv_outstanding()
+            - self._fin_amount_outstanding()
+            - self._interest_outstanding()
+        )
 
     def maintenance_ratio(self) -> float | None:
-        short_liability = sum(pos.short_liability for pos in self.positions.values())
-        if short_liability <= 0:
+        """维持担保比例 (None for a stock account or with no credit debt)."""
+        if not self.is_credit:
             return None
         long_value = sum(pos.market_value for pos in self.positions.values() if pos.side == "long")
-        return (self.cash + long_value) / short_liability
+        return credit_maintenance_ratio(
+            self.cash,
+            long_value,
+            self._fin_amount_outstanding(),
+            self._slo_mv_outstanding(),
+            self._interest_outstanding(),
+        )
+
+    def enable_bail_balance(self) -> float:
+        """保证金可用余额 per the 实施细则 formula (broker_core docstring)."""
+        if not self.is_credit:
+            raise ValueError("enable_bail_balance requires a credit account")
+        last_price = {pos.ts_code: pos.last_price for pos in self.positions.values()}
+        long_qty = {
+            pos.ts_code: pos.quantity for pos in self.positions.values() if pos.side == "long"
+        }
+        fin_terms: list[tuple[float, float]] = []
+        for contract in self.contracts:
+            if contract.kind != "fin" or contract.closed:
+                continue
+            # Financed shares can be sold via plain 担保品卖出 without repaying; the
+            # attributed market value is clamped to what is still held, so a sold-out
+            # contract books its full principal as 浮亏 (at 100%) until repaid.
+            held = long_qty.get(contract.ts_code, 0)
+            attributed = min(contract.shares, held)
+            long_qty[contract.ts_code] = held - attributed
+            fin_terms.append(
+                (attributed * last_price.get(contract.ts_code, contract.open_price), contract.principal)
+            )
+        collateral_mv = sum(qty * last_price[code] for code, qty in long_qty.items())
+        slo_terms = [
+            (contract.sell_amount, contract.shares * last_price.get(contract.ts_code, contract.open_price))
+            for contract in self.contracts
+            if contract.kind == "slo" and not contract.closed
+        ]
+        return enable_bail_balance(
+            self.cash,
+            collateral_mv,
+            fin_terms,
+            slo_terms,
+            self._interest_outstanding(),
+            assure_ratio=self.profile.assure_ratio,
+            fin_margin_ratio=self.profile.fin_margin_ratio,
+            slo_margin_ratio=self.profile.effective_slo_margin_ratio,
+        )
 
     # ---- internals ----
 
@@ -813,10 +1139,10 @@ class SimBroker:
         *,
         forced: bool = False,
         price_label: str = "price",
-    ) -> None:
+    ):
         shares = min(shares, pos.sellable_quantity)
         if shares <= 0:
-            return
+            return None
         self.traded_notional += shares * price
         # ``price`` is already the fill price (slipped by the caller), so the shared
         # reduce projection runs with apply_slippage=False.
@@ -829,6 +1155,13 @@ class SimBroker:
         self.cash += fill.cash_delta
         self.stamp_duty_paid += fill.duty
         self.fees_paid += fill.fee
+        if pos.side == "short":
+            # Any short reduce is 买券还券 (or forced/mandatory liquidation): the
+            # covered shares repay the code's 融券 contracts FIFO and the repaid
+            # fraction's accrued interest falls due from cash now.
+            repaid = repay_slo(self.contracts, pos.ts_code, shares)
+            self.cash -= repaid["interest_due"]
+            self.interest_paid_total += repaid["interest_due"]
         realized = (
             fill.cash_delta - basis_released if pos.side == "long" else basis_released + fill.cash_delta
         )
@@ -871,6 +1204,7 @@ class SimBroker:
                 forced=forced,
                 price_label=price_label,
             )
+        return fill
 
     def _fill(self, order: Order, price: float, shares: int, kind: str) -> Order:
         order.status = "filled"
@@ -927,27 +1261,105 @@ class SimBroker:
     def _lot_floor(amount: object) -> int:
         return lot_floor(amount)
 
-    def _short_margin_occupied(self) -> float:
-        return sum(
-            pos.quantity * pos.entry_price * self.profile.effective_short_margin_ratio
-            for pos in self.positions.values()
-            if pos.side == "short"
-        )
-
     def _short_proceeds_locked(self) -> float:
         """Net short-sale proceeds held as locked collateral (融券卖出所得资金).
 
         Banked into ``cash`` when the short opens and released proportionally on
-        cover (``pos.entry_cost`` for a short tracks exactly this). They are part of
-        account equity but are NOT deployable for new positions, so a short never
-        frees up its own proceeds as buying power."""
+        cover (``pos.entry_cost`` for a short tracks exactly this). They may only
+        fund 买券还券, never new positions, so they are excluded from
+        ``available_cash``."""
         return sum(pos.entry_cost for pos in self.positions.values() if pos.side == "short")
 
     def available_cash(self) -> float:
-        """Cash deployable for new positions: literal ``cash`` minus the margin
-        reserved against open shorts and minus the locked short-sale proceeds. With
-        no shorts this equals ``cash``, so long-only accounting is unchanged."""
-        return self.cash - self._short_margin_occupied() - self._short_proceeds_locked()
+        """Cash deployable for cash/担保品 buys: literal ``cash`` minus the locked
+        short-sale proceeds. Margin is NOT subtracted here — 保证金占用 is a computed
+        constraint that gates new credit ops via :meth:`enable_bail_balance`, not
+        frozen cash (matching the real credit-account model). On a stock account
+        this equals ``cash``."""
+        return self.cash - self._short_proceeds_locked()
+
+    def _fin_amount_outstanding(self) -> float:
+        return sum(c.principal for c in self.contracts if c.kind == "fin" and not c.closed)
+
+    def _slo_sell_amount_outstanding(self) -> float:
+        return sum(c.sell_amount for c in self.contracts if c.kind == "slo" and not c.closed)
+
+    def _slo_mv_outstanding(self) -> float:
+        # Borrowed shares stay in lock-step with the short positions (cover and
+        # liquidation repay contracts as they reduce), so the marked position value
+        # is the 融券负债市值.
+        return sum(pos.short_liability for pos in self.positions.values())
+
+    def _interest_outstanding(self) -> float:
+        return sum(c.interest_accrued for c in self.contracts)
+
+    def _new_contract(
+        self,
+        *,
+        kind: str,
+        ts_code: str,
+        trade_date: str,
+        open_price: float,
+        principal: float = 0.0,
+        shares: int = 0,
+        sell_amount: float = 0.0,
+    ) -> DebtContract:
+        self._compact_seq += 1
+        rate = self.profile.fin_rate_annual if kind == "fin" else self.profile.slo_rate_annual
+        return DebtContract(
+            compact_id="D%06d" % self._compact_seq,
+            kind=kind,
+            ts_code=str(ts_code),
+            open_date=str(trade_date),
+            open_price=float(open_price),
+            year_rate=rate,
+            principal=float(principal),
+            shares=int(shares),
+            sell_amount=float(sell_amount),
+            business_balance=float(principal or sell_amount),
+            business_vol=int(shares),
+        )
+
+    def _credit_target_reject(self, ts_code: str) -> bool:
+        """融资标的 gate: margin_secs carries no 融资/融券 split, so fin_buy shares
+        the shortable set (and its per-fill-day refresh); ``theoretical_short`` mode
+        lifts the gate for research runs, mirroring the short-inventory modes."""
+        if self.profile.short_inventory_mode == "theoretical_short":
+            return False
+        eligible = self.shortable_by_date.get(self.current_date, self.shortable_codes)
+        return str(ts_code) not in eligible
+
+    def _direct_repay(self, amount: float, *, order_id: str, reason: str = "", submitted_at: str = "") -> str:
+        """直接还款: an immediate cash operation (no order book, no bar matching).
+        The applied amount is clamped to deployable cash and the outstanding 融资
+        debt (interest first, FIFO); zero applicability rejects."""
+        order = Order(
+            ts_code="", action="direct_repay", side="long",
+            requested_amount=int(amount), trade_date=self.current_date,
+            decision_time=str(submitted_at or ""), reason=str(reason or "direct_repay"),
+            price_label="cash_op", op_type=optype.DIRECT_REPAY, order_id=order_id,
+        )
+        self.orders.append(order)
+        owed = self._fin_amount_outstanding() + sum(
+            c.interest_accrued for c in self.contracts if c.kind == "fin"
+        )
+        if owed <= 1e-9:
+            self._reject(order, "no_fin_debt")
+            return order_id
+        applicable = min(float(amount), self.available_cash(), owed)
+        if applicable <= 1e-9:
+            self._reject(order, "insufficient_cash")
+            return order_id
+        repaid = repay_fin(self.contracts, applicable, release_shares=True)
+        self.cash -= repaid["applied"]
+        self.interest_paid_total += repaid["interest_paid"]
+        order.status = "filled"
+        order.filled_quantity = int(repaid["applied"])
+        self._event(
+            "debt_repaid", trade_date=self.current_date, order_id=order_id,
+            kind="fin", via="direct_repay", **repaid,
+        )
+        return order_id
 
     def _ledger(self, ts_code: str, *, side: str, kind: str, price: float, quantity: int, trade_date: str, realized_pnl: float | None = None) -> None:
         record = {
@@ -1053,27 +1465,21 @@ def _limit_fill_price(order: WorkingOrder, bar: pd.Series, *, use_close: bool = 
     return limit if (high is not None and pd.notna(high) and float(high) >= limit) else None
 
 
-def _calendar_day_gap(prev_date: str, trade_date: str) -> int:
-    """Calendar days of borrow accrual for a short between marks.
-
-    1 on a short's first mark (``prev_date`` empty); otherwise the number of
-    calendar days between the previous mark and this trade date (weekends and
-    holidays included). 0 if marked again on the same date (idempotent)."""
-    if not prev_date:
-        return 1
-    prev = pd.to_datetime(str(prev_date), format="%Y%m%d")
-    cur = pd.to_datetime(str(trade_date), format="%Y%m%d")
-    return max(0, int((cur - prev).days))
-
-
 class TraderProtocol(Protocol):
-    """The xtquant-aligned surface that the backtest ``SimBroker`` and a live
-    adapter (a ``QMTBroker`` wrapping ``xt_trader``) both expose, so order plumbing
-    is backend-agnostic. Names and parameters mirror miniQMT ``order_stock`` etc."""
+    """The official-QMT-aligned surface that the backtest ``SimBroker`` and a live
+    adapter (``QMTBroker``) both expose, so order plumbing is backend-agnostic.
 
-    def order_stock(self, order_type: str, stock_code: str, order_volume: int | None, price_type: str, price: float | None, **kwargs: object) -> str: ...
-    def cancel_order_stock(self, order_id: str) -> bool: ...
-    def query_stock_orders(self, cancelable_only: bool = False) -> list[dict[str, object]]: ...
-    def query_stock_trades(self, ts_code: str | None = None) -> list[dict[str, object]]: ...
-    def query_stock_positions(self) -> list[dict[str, object]]: ...
-    def query_stock_asset(self) -> dict[str, object]: ...
+    Methods mirror the in-client strategy API (``passorder``/``cancel``/
+    ``get_trade_detail_data`` plus the credit queries); the record-field mapping to
+    the official ``m_*`` object attributes is tabled in
+    docs/environment_design.md §3.2. ``passorder`` returns the order id the
+    official flow recovers via ``get_last_order_id`` immediately after submitting
+    with a unique ``user_order_id`` (投资备注) — a live adapter implements exactly
+    that pair."""
+
+    def passorder(self, op_type: int, order_type: int, account_id: str, order_code: str, pr_type: int, price: float | None, volume: int | None, **kwargs: object) -> str: ...
+    def cancel(self, order_id: str, account_id: str = "", account_type: str = "", **kwargs: object) -> bool: ...
+    def get_trade_detail_data(self, account_id: str = "", account_type: str = "", data_type: str = "ORDER", strategy_name: str = "") -> list[dict[str, object]]: ...
+    def get_debt_contract(self, account_id: str = "") -> list[dict[str, object]]: ...
+    def get_assure_contract(self, account_id: str = "") -> list[dict[str, object]]: ...
+    def get_enable_short_contract(self, account_id: str = "") -> list[dict[str, object]]: ...

@@ -1,13 +1,29 @@
-"""Dependency-light deterministic fill-projection core (docs/environment_design.md §3).
+"""Dependency-light deterministic fill-projection and credit-math core
+(docs/environment_design.md §3).
 
 Pure stdlib (no ``autotrade``/``pandas`` import), but host-only: this module is NOT
 shipped into the Agent sandbox image. Its single consumer is the authoritative host
 :class:`~autotrade.environment.broker.SimBroker`, which projects every order's
 money/share outcome from the functions here (commission, stamp duty, slippage, lot
-sizing, the open/reduce cash deltas, and the short margin / locked-proceeds
-buying-power model). Only this deterministic math lives here; bar-level gates
-(suspension, price limits, shortable inventory, T+1 sellable) and position
-bookkeeping stay with the broker, which holds the market data and position state.
+sizing, the open/reduce cash deltas) and delegates the credit-account math to the
+``DebtContract`` helpers (interest accrual, FIFO repayment, 保证金可用余额 and
+维持担保比例 per the exchange 融资融券交易实施细则). Only this deterministic math
+lives here; bar-level gates (suspension, price limits, shortable inventory, T+1
+sellable) and position bookkeeping stay with the broker, which holds the market
+data and position state.
+
+Credit formulas follow the SSE/SZSE 融资融券交易实施细则 (see the SSE reader at
+https://www.sse.com.cn/services/tradingservice/margin/edu/c/10074042/files/a1f1c4833302451fb9130dbb94116c56.pdf):
+
+* 维持担保比例 = (现金 + 信用账户证券市值合计)
+  / (融资买入金额 + 融券卖出证券数量×市价 + 利息及费用合计)
+* 保证金可用余额 = 现金 + Σ(充抵保证金证券市值×折算率)
+  + Σ[(融资买入证券市值 − 融资买入金额)×折算率]
+  + Σ[(融券卖出金额 − 融券卖出证券市值)×折算率]
+  − Σ融券卖出金额 − Σ融资买入金额×融资保证金比例
+  − Σ融券卖出证券市值×融券保证金比例 − 利息及费用
+  (浮亏侧折算率按 100% 计——细则规定融资市值低于买入金额、或融券市值高于卖出金额时
+  该项按 100% 折算全额扣减。)
 
 The sandbox driver (``main_ctx_driver.py`` — the only module baked into the image) is
 deliberately stdlib-only and does NO intra-tick fill projection: within a tick the
@@ -19,6 +35,7 @@ from this core, so nothing here needs to stay in sync with sandbox-visible state
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 LOT_SIZE = 100
 STAMP_DUTY_CUTOVER = "20230828"  # sell-side stamp duty halved to 0.05% from this date
@@ -27,15 +44,15 @@ STAMP_DUTY_CUTOVER = "20230828"  # sell-side stamp duty halved to 0.05% from thi
 @dataclass(frozen=True)
 class CostModel:
     """The deterministic cost parameters that turn a raw price + share count into a
-    fill price, commission, stamp duty, and short margin (a flattened view of the
-    profile's economics, with ``short_margin_ratio`` already resolved)."""
+    fill price, commission, stamp duty, and 融券 margin (a flattened view of the
+    profile's economics, with ``slo_margin_ratio`` already resolved)."""
 
     commission_bps: float = 1.0
     min_commission_cny: float = 5.0
     stamp_duty_sell_bps_before_cutover: float = 10.0
     stamp_duty_sell_bps_from_cutover: float = 5.0
     slippage_bps: float = 5.0
-    short_margin_ratio: float = 1.0
+    slo_margin_ratio: float = 1.0
 
     def commission(self, notional: float) -> float:
         return max(notional * self.commission_bps / 10_000.0, self.min_commission_cny)
@@ -100,14 +117,17 @@ def project_open(
     shares: int,
     trade_date: str,
     apply_slippage: bool = True,
+    financed: bool = False,
 ) -> OpenFill:
-    """Project a long buy or short open at ``raw_price`` for ``shares`` lots.
+    """Project a long buy (cash or 融资), or a 融券 short open, at ``raw_price``.
 
-    A long buy may only deploy available cash (``required_cash = notional + fee``). A
-    short banks its net proceeds into cash but locks them plus margin, so its buying
-    power requirement is ``margin + fee + duty`` and its locked collateral is the net
-    proceeds. ``apply_slippage`` is True for marketable fills, False for limit/auction
-    fills (where ``raw_price`` is already the fill price)."""
+    A cash/担保品 buy deploys available cash (``required_cash = notional + fee``). A
+    ``financed`` (融资) buy moves no cash at open — the notional plus fee become the
+    debt contract's principal (``cost_basis``) and the broker gates it on 保证金可用
+    余额, so ``required_cash`` is 0 here. A short banks its net proceeds into cash but
+    locks them plus margin (``required_cash = margin + fee + duty``); its locked
+    collateral is the net proceeds. ``apply_slippage`` is True for marketable fills,
+    False for limit/auction fills (where ``raw_price`` is already the fill price)."""
     is_buy = side == "long"
     price = cost.slipped_price(raw_price, is_buy=is_buy) if apply_slippage else float(raw_price)
     notional = shares * price
@@ -115,11 +135,13 @@ def project_open(
     if side == "long":
         return OpenFill(
             side="long", price=price, shares=shares, fee=fee, duty=0.0, margin=0.0,
-            notional=notional, cash_delta=-(notional + fee), required_cash=notional + fee,
+            notional=notional,
+            cash_delta=0.0 if financed else -(notional + fee),
+            required_cash=0.0 if financed else notional + fee,
             cost_basis=notional + fee,
         )
     duty = cost.stamp_duty_on_sale(notional, trade_date)
-    margin = notional * cost.short_margin_ratio
+    margin = notional * cost.slo_margin_ratio
     proceeds = notional - fee - duty
     return OpenFill(
         side="short", price=price, shares=shares, fee=fee, duty=duty, margin=margin,
@@ -166,3 +188,234 @@ def project_reduce(
         duty = 0.0
         cash_delta = -(notional + fee)
     return ReduceFill(side=side, price=price, shares=shares, fee=fee, duty=duty, notional=notional, cash_delta=cash_delta)
+
+
+# ---- credit account (信用账户) math ----
+
+
+@dataclass
+class DebtContract:
+    """One open 融资/融券 负债合约 (the sim's minimal StkCompacts mapping).
+
+    ``kind="fin"``: ``principal`` is the outstanding financed amount (open notional
+    plus the financed open fee); ``shares`` are the financed shares still attributed
+    to this contract — used for the 保证金可用余额 浮盈/浮亏 term and clamped to the
+    held position when marked (plain 担保品卖出 may sell financed shares without
+    repaying; the formula then books the full 浮亏).
+
+    ``kind="slo"``: ``shares`` are the borrowed shares outstanding and
+    ``sell_amount`` the gross 融券卖出金额 still outstanding (the formula subtracts
+    it from cash — the sim banked the NET proceeds, so this is conservative by fees).
+
+    Interest accrues per CALENDAR day into ``interest_accrued`` and is paid from
+    cash at repayment, interest first (先息后本).
+    """
+
+    compact_id: str
+    kind: str  # "fin" | "slo"
+    ts_code: str
+    open_date: str
+    open_price: float
+    year_rate: float
+    principal: float = 0.0
+    shares: int = 0
+    sell_amount: float = 0.0
+    interest_accrued: float = 0.0
+    last_accrual_date: str = ""
+    business_balance: float = 0.0  # original principal (fin) / sell amount (slo)
+    business_vol: int = 0  # original shares
+
+    @property
+    def closed(self) -> bool:
+        return self.principal <= 1e-9 and self.shares <= 0 and self.interest_accrued <= 1e-9
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "compact_id": self.compact_id,
+            "compact_type": self.kind,
+            "ts_code": self.ts_code,
+            "open_date": self.open_date,
+            "open_price": self.open_price,
+            "year_rate": self.year_rate,
+            "real_compact_balance": self.principal,
+            "real_compact_vol": self.shares,
+            "sell_amount": self.sell_amount,
+            "compact_interest": self.interest_accrued,
+            "business_balance": self.business_balance,
+            "business_vol": self.business_vol,
+            "compact_status": (
+                "open"
+                if self.principal >= self.business_balance - 1e-9 and self.shares >= self.business_vol
+                else "partial"
+            ),
+        }
+
+
+def calendar_day_gap(prev_date: str, trade_date: str) -> int:
+    """Calendar days of interest accrual between marks: 1 on the first mark
+    (``prev_date`` empty), otherwise the calendar-day delta (weekends and holidays
+    included); 0 when re-marked on the same date (idempotent)."""
+    if not prev_date:
+        return 1
+    prev = datetime.strptime(str(prev_date), "%Y%m%d")
+    cur = datetime.strptime(str(trade_date), "%Y%m%d")
+    return max(0, (cur - prev).days)
+
+
+def accrue_debt_interest(contracts: list[DebtContract], trade_date: str) -> float:
+    """Accrue per-calendar-day interest on every open contract; returns the delta.
+
+    融资 interest accrues on the outstanding principal; 融券 fee accrues on the
+    outstanding borrowed shares at their open (sell) price — the standard
+    financing-cost convention. Nothing is debited from cash here; accrued interest
+    is carried on the contract until repayment and enters both credit formulas."""
+    total = 0.0
+    for contract in contracts:
+        if contract.principal <= 1e-9 and contract.shares <= 0:
+            continue
+        gap = calendar_day_gap(contract.last_accrual_date, trade_date)
+        contract.last_accrual_date = str(trade_date)
+        if gap <= 0:
+            continue
+        base = contract.principal if contract.kind == "fin" else contract.shares * contract.open_price
+        fee = base * contract.year_rate / 365.0 * gap
+        contract.interest_accrued += fee
+        total += fee
+    return total
+
+
+def _open_fifo(contracts: list[DebtContract], kind: str, ts_code: str | None = None) -> list[DebtContract]:
+    return sorted(
+        (
+            contract
+            for contract in contracts
+            if contract.kind == kind
+            and not contract.closed
+            and (ts_code is None or contract.ts_code == str(ts_code))
+        ),
+        key=lambda contract: (contract.open_date, contract.compact_id),
+    )
+
+
+def repay_fin(
+    contracts: list[DebtContract],
+    amount: float,
+    *,
+    release_shares: bool,
+) -> dict[str, float]:
+    """Apply a cash ``amount`` to 融资 contracts FIFO, interest first then principal.
+
+    ``release_shares=True`` (直接还款) releases each contract's financed shares in
+    proportion to the principal repaid — they become ordinary collateral.
+    ``release_shares=False`` (卖券还款) leaves shares untouched because the sale
+    itself already reduced them via :func:`release_fin_shares`. Returns the applied
+    totals; the caller debits cash by ``applied``."""
+    remaining = max(0.0, float(amount))
+    interest_paid = principal_paid = 0.0
+    for contract in _open_fifo(contracts, "fin"):
+        if remaining <= 1e-9:
+            break
+        pay_interest = min(contract.interest_accrued, remaining)
+        contract.interest_accrued -= pay_interest
+        remaining -= pay_interest
+        interest_paid += pay_interest
+        if remaining <= 1e-9 or contract.principal <= 1e-9:
+            continue
+        pay_principal = min(contract.principal, remaining)
+        if release_shares and contract.principal > 0:
+            released = int(round(contract.shares * pay_principal / contract.principal))
+            contract.shares = max(0, contract.shares - released)
+        contract.principal -= pay_principal
+        remaining -= pay_principal
+        principal_paid += pay_principal
+        if contract.principal <= 1e-9:
+            contract.shares = 0
+    applied = interest_paid + principal_paid
+    return {"applied": applied, "interest_paid": interest_paid, "principal_paid": principal_paid}
+
+
+def release_fin_shares(contracts: list[DebtContract], ts_code: str, shares: int) -> int:
+    """Attribute ``shares`` sold via 卖券还款 to the code's 融资 contracts FIFO."""
+    remaining = max(0, int(shares))
+    released = 0
+    for contract in _open_fifo(contracts, "fin", ts_code):
+        if remaining <= 0:
+            break
+        take = min(contract.shares, remaining)
+        contract.shares -= take
+        remaining -= take
+        released += take
+    return released
+
+
+def repay_slo(contracts: list[DebtContract], ts_code: str, shares: int) -> dict[str, float]:
+    """Repay ``shares`` of borrowed stock (买券还券 or liquidation) FIFO.
+
+    Reduces the code's 融券 contracts and releases their gross sell amount
+    proportionally; the repaid fraction's accrued interest falls due now (the
+    caller debits it from cash). Returns ``shares_repaid`` and ``interest_due``."""
+    remaining = max(0, int(shares))
+    shares_repaid = 0
+    interest_due = 0.0
+    for contract in _open_fifo(contracts, "slo", ts_code):
+        if remaining <= 0:
+            break
+        take = min(contract.shares, remaining)
+        if take <= 0:
+            continue
+        fraction = take / contract.shares
+        interest_due += contract.interest_accrued * fraction
+        contract.interest_accrued -= contract.interest_accrued * fraction
+        contract.sell_amount -= contract.sell_amount * fraction
+        contract.shares -= take
+        remaining -= take
+        shares_repaid += take
+    return {"shares_repaid": float(shares_repaid), "interest_due": interest_due}
+
+
+def enable_bail_balance(
+    cash: float,
+    collateral_mv: float,
+    fin_terms: list[tuple[float, float]],
+    slo_terms: list[tuple[float, float]],
+    interest_total: float,
+    *,
+    assure_ratio: float,
+    fin_margin_ratio: float,
+    slo_margin_ratio: float,
+) -> float:
+    """保证金可用余额 per the exchange 实施细则 formula (module docstring).
+
+    ``cash`` is the literal credit-account cash (it includes banked 融券 net
+    proceeds; the formula's −Σ融券卖出金额 term removes the gross amount, so the
+    sim is conservative by the open fees). ``collateral_mv`` is the market value of
+    long shares NOT attributed to 融资 contracts. ``fin_terms`` are per-contract
+    ``(融资买入证券市值, 融资买入金额)`` pairs; ``slo_terms`` are per-contract
+    ``(融券卖出金额, 融券卖出证券市值)`` pairs. 浮亏 terms are folded at 100% per
+    the 细则; ``assure_ratio`` is the flat 担保品折算率 approximation."""
+    bail = cash + collateral_mv * assure_ratio
+    for fin_mv, fin_amount in fin_terms:
+        gain = fin_mv - fin_amount
+        bail += gain * (assure_ratio if gain >= 0 else 1.0)
+        bail -= fin_amount * fin_margin_ratio
+    for slo_amount, slo_mv in slo_terms:
+        gain = slo_amount - slo_mv
+        bail += gain * (assure_ratio if gain >= 0 else 1.0)
+        bail -= slo_amount
+        bail -= slo_mv * slo_margin_ratio
+    return bail - interest_total
+
+
+def credit_maintenance_ratio(
+    cash: float,
+    securities_mv: float,
+    fin_amount_total: float,
+    slo_mv_total: float,
+    interest_total: float,
+) -> float | None:
+    """维持担保比例 = (现金 + 证券市值) / (融资金额 + 融券市值 + 利息费用);
+    None when the account carries no credit debt."""
+    debt = fin_amount_total + slo_mv_total + interest_total
+    if debt <= 1e-9:
+        return None
+    return (cash + securities_mv) / debt

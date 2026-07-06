@@ -432,6 +432,8 @@ class _Broker:
         account = state.get("account") or {}
         self.account = account
         self.positions = state.get("positions") or []
+        self._account_type = str(account.get("account_type", "CREDIT") or "CREDIT").lower()
+        self._debt_contracts = state.get("debt_contracts") or []
         self._cur_time = str(state.get("cur_time", "") or "")
         self._cur_datetime = str(state.get("cur_datetime", "") or "")
         self._tick_key = _safe_name(self._cur_datetime or self._cur_time or "tick")
@@ -519,6 +521,26 @@ class _Broker:
             return ""
         return (base + timedelta(minutes=float(budget_minutes or 0.0))).isoformat()
 
+    @property
+    def account_type(self):
+        """The run's single account type: "stock" (cash only) or "credit" (两融)."""
+        return self._account_type
+
+    @property
+    def credit(self):
+        """Credit-account view (维保比例/可用保证金/负债/额度/利率), reflecting the
+        FILLED state at the start of this tick; None on a stock account."""
+        return self.account.get("credit")
+
+    def debt_contracts(self, ts_code=None):
+        """Open 融资/融券 负债合约 records (含未还金额/量、已计未付利息), optionally
+        for one code. Empty on a stock account or with no open debt."""
+        code = None if ts_code is None else str(ts_code)
+        return [
+            dict(record) for record in self._debt_contracts
+            if code is None or str(record.get("ts_code")) == code
+        ]
+
     def buy(self, ts_code, amount=None, weight=None, limit=None, valid_bars=None, reason=None, **kwargs):
         self._require_substep("buy")
         return self._order("buy", ts_code, amount, weight, limit, valid_bars, reason)
@@ -527,13 +549,46 @@ class _Broker:
         self._require_substep("sell")
         return self._order("sell", ts_code, amount, None, limit, valid_bars, reason)
 
+    def fin_buy(self, ts_code, amount=None, weight=None, limit=None, valid_bars=None, reason=None, **kwargs):
+        """融资买入: opens a fin debt contract (notional+fee financed, daily interest);
+        gated by 保证金可用余额, the margin_secs target set, and the fin quota."""
+        self._require_substep("fin_buy")
+        self._require_credit("fin_buy")
+        return self._order("fin_buy", ts_code, amount, weight, limit, valid_bars, reason)
+
     def short(self, ts_code, amount=None, weight=None, limit=None, valid_bars=None, reason=None, **kwargs):
         self._require_substep("short")
+        self._require_credit("short")
         return self._order("short", ts_code, amount, weight, limit, valid_bars, reason)
 
     def cover(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None, **kwargs):
         self._require_substep("cover")
+        self._require_credit("cover")
         return self._order("cover", ts_code, amount, None, limit, valid_bars, reason)
+
+    def sell_repay(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None, **kwargs):
+        """卖券还款: sells held shares and applies the net proceeds to 融资 debt
+        (interest first, oldest contract first); any surplus stays as cash."""
+        self._require_substep("sell_repay")
+        self._require_credit("sell_repay")
+        return self._order("sell_repay", ts_code, amount, None, limit, valid_bars, reason)
+
+    def direct_repay(self, amount, reason=None, **kwargs):
+        """直接还款: repays 融资 debt from cash (interest first, oldest contract
+        first). ``amount`` is CNY, clamped to deployable cash and the outstanding
+        debt; settles at its submission tick without bar matching."""
+        self._require_substep("direct_repay")
+        self._require_credit("direct_repay")
+        value = float(amount)
+        if value <= 0:
+            raise ValueError("direct_repay amount must be a positive CNY value")
+        order_id = self._new_order_id()
+        self._actions.append({
+            "action": "direct_repay", "amount": value, "order_id": order_id,
+            "reason": reason, "submitted_at": self._cur_datetime,
+            "submitted_time": self._cur_time, "_substep": self._cur_substep,
+        })
+        return order_id
 
     def close(self, ts_code, reason=None, **kwargs):
         self._require_substep("close")
@@ -549,7 +604,7 @@ class _Broker:
     def cancel(self, order_id, reason=None, **kwargs):
         """Cancel a still-pending order returned by ``ctx.broker.pending()``.
 
-        Mirrors live ``cancel_order_stock(order_id)`` at the strategy layer. The host
+        Mirrors the live ``cancel(order_id, ...)`` at the strategy layer. The host
         removes the order across the substep-delay / submit-lag / working-order queues;
         the cancelled id is also dropped from this tick's ``pending()`` view so a
         same-tick re-scan does not re-see it.
@@ -574,6 +629,14 @@ class _Broker:
             "ctx.broker.%s() must be called inside ctx.substep(name, budget_minutes=B); "
             "wrap every broker action in a positive-budget substep so runtime and "
             "submission latency are accounted consistently" % op
+        )
+
+    def _require_credit(self, op):
+        if self._account_type == "credit":
+            return
+        raise RuntimeError(
+            "ctx.broker.%s() requires a credit (信用) account; this experiment runs a "
+            "stock (普通) account, which supports only buy/sell/close/cancel" % op
         )
 
     def _new_order_id(self):

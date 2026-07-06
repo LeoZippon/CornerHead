@@ -110,7 +110,9 @@ def main(ctx):
         if p is None or ctx.broker.position(c) != 0:
             return
         obs = {"avail0": ctx.broker.available_cash, "cash0": ctx.broker.cash, "p": p}
-        ctx.broker.short(c, weight=0.2, reason="short1")
+        # 融券卖出 must be a limit order; 19.8 == the activation bar's reference
+        # price in this fixture, so the uptick rule passes and the order fills.
+        ctx.broker.short(c, weight=0.2, limit=19.8, reason="short1")
         obs["avail1"] = ctx.broker.available_cash
         obs["cash1"] = ctx.broker.cash
         obs["pos1"] = ctx.broker.position(c)
@@ -131,7 +133,7 @@ def main(ctx):
             return
         if ctx.price(c) is None or ctx.broker.position(c) != 0:
             return
-        ctx.broker.short(c, weight=0.2, reason="short")
+        ctx.broker.short(c, weight=0.2, limit=19.8, reason="short")
         pos_after_short = ctx.broker.position(c)
         avail_after_short = ctx.broker.available_cash
         ctx.broker.sell(c, amount=1000, reason="wrong_sell_on_short")  # side mismatch
@@ -584,7 +586,7 @@ class MainCtxReplayTest(unittest.TestCase):
 
     def test_opens_new_position_mid_replay(self) -> None:
         result = self._run()
-        orders = result.broker.query_stock_orders()
+        orders = result.broker.get_trade_detail_data(data_type="ORDER")
         buys = [o for o in orders if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1, orders)
         # The entry happens on day 2, proving a position can open after the decision time.
@@ -611,7 +613,7 @@ class MainCtxReplayTest(unittest.TestCase):
                 main_policy=policy,
                 execution_lag_bars=1,  # this test exercises the open-bar synthesis, not the lag
             )
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
 
     def test_substep_broker_actions_do_not_project_intra_tick(self) -> None:
@@ -649,7 +651,7 @@ class MainCtxReplayTest(unittest.TestCase):
         # Both delayed buys are still submitted on this light substep and filled by the broker.
         filled = {
             o["ts_code"]
-            for o in result.broker.query_stock_orders()
+            for o in result.broker.get_trade_detail_data(data_type="ORDER")
             if o["action"] == "buy" and o["status"] == "filled"
         }
         self.assertEqual(filled, {"000001.SZ", "000002.SZ"})
@@ -683,7 +685,7 @@ class MainCtxReplayTest(unittest.TestCase):
         self.assertEqual(obs["pos1"], 0)
         self.assertEqual(obs["avail1"], obs["avail0"])
         self.assertEqual(obs["cash1"], obs["cash0"])
-        shorts = [o for o in result.broker.query_stock_orders() if o["action"] == "short" and o["status"] == "filled"]
+        shorts = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "short" and o["status"] == "filled"]
         self.assertEqual(len(shorts), 1)
 
     def test_projection_rejects_side_mismatched_reduce(self) -> None:
@@ -733,7 +735,7 @@ class MainCtxReplayTest(unittest.TestCase):
         # within the bar it was decided on.
         (self.sandbox.paths.agent_output / "main.py").write_text(AUCTION_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _auction_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         # The 09:25 decision fills at the first CONTINUOUS bar (09:31), so it is a taker
         # fill: continuous price label and slippage apply (only the open/close call
@@ -785,7 +787,7 @@ def main(ctx):
             )
         # main(ctx) asserted the staged write was hidden at 09:25, then bought once it
         # merged; one staged write is recorded and merged.
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         audit = result.state_staging_audit or []
         self.assertEqual(len(audit), 1)
@@ -836,7 +838,7 @@ def main(ctx):
                 replay, BrokerProfile(initial_cash=1_000_000.0),
                 shortable_codes=frozenset(), main_policy=policy,
             )
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         staged = [a for a in (result.state_staging_audit or []) if a["substep"] == "read_old"]
         self.assertEqual(len(staged), 1)   # only the changed "v2", not the seeded copy
@@ -870,13 +872,13 @@ def main(ctx):
                 shortable_codes=frozenset(),
                 main_policy=policy, timeview_enabled=True, snapshot_dir=snap,
             )
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)  # main asserted the as-of view, then bought
 
     def test_limit_order_fills_at_limit_when_bar_reaches_it(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(LIMIT_FILL_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _limit_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "minute:09:33")
         # Maker fill at exactly the limit price — no taker slippage.
@@ -885,7 +887,7 @@ def main(ctx):
     def test_limit_order_auto_cancels_when_unfilled(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(LIMIT_CANCEL_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _limit_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 0)  # 9.50 never reached
         cancels = [
             e for e in result.broker.events
@@ -920,7 +922,7 @@ def main(ctx):
     def test_pending_query_dedups_in_flight_orders(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(PENDING_DEDUP_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _dense_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         # The 09:30 order fills at 09:32 (execution_lag_bars=2); at 09:31 the real
         # position is still flat, so without ctx.broker.pending() the strategy would
         # submit a duplicate. The working-order query collapses it to a single buy.
@@ -938,7 +940,7 @@ def main(ctx):
                 shortable_codes=frozenset(), main_policy=policy,
                 replay_intraday_1min=_dense_minutes(), execution_lag_bars=3,
             )
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(buys, [])
         cancels = [
             e for e in result.broker.events
@@ -960,7 +962,7 @@ def main(ctx):
                 shortable_codes=frozenset(), main_policy=policy,
                 replay_intraday_1min=_limit_minutes(), execution_lag_bars=1,
             )
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(buys, [])
         cancels = [
             e for e in result.broker.events
@@ -971,13 +973,13 @@ def main(ctx):
     def test_same_tick_pending_records_have_documented_fields(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(SAME_TICK_PENDING_FIELDS_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _dense_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)  # main(ctx) assertions passed, then the order filled later
 
     def test_same_tick_buy_then_cancel_has_no_net_main_action(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(BUY_THEN_CANCEL_SAME_TICK_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _dense_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(buys, [])
         main_actions = [e for e in result.broker.events if e["event_type"] == "main_actions"]
         self.assertEqual(main_actions, [])
@@ -992,7 +994,7 @@ def main(ctx):
         # execution_lag_bars=2 fills it at 09:35.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_LATENCY_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _substep_delay_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "minute:09:35")
         events = [e for e in result.broker.events if e.get("event_type") == "main_actions" and e.get("delayed_from_substep")]
@@ -1063,7 +1065,7 @@ def main(ctx):
         # the current decision minute and fills at the normal lag from 09:30.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_HALF_BUDGET_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _substep_delay_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "minute:09:32")
 
@@ -1072,7 +1074,7 @@ def main(ctx):
         # 09:31, then fills at 09:33.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_LIGHT_BUDGET_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _substep_delay_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "minute:09:33")
         events = [e for e in result.broker.events if e.get("event_type") == "main_actions" and e.get("delayed_from_substep")]
@@ -1083,7 +1085,7 @@ def main(ctx):
         # released at 09:30 and then fills two bars later.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_AUCTION_SMALL_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _substep_delay_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "minute:09:32")
         events = [e for e in result.broker.events if e.get("event_type") == "main_actions" and e.get("delayed_from_substep")]
@@ -1094,7 +1096,7 @@ def main(ctx):
         # tick is still 09:30; fill follows the regular lag from that submit tick.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_AUCTION_LARGE_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _substep_delay_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "minute:09:32")
         events = [e for e in result.broker.events if e.get("event_type") == "main_actions" and e.get("delayed_from_substep")]
@@ -1106,7 +1108,7 @@ def main(ctx):
         # cancel it before actual submission.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_PENDING_DELAY_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _substep_delay_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
 
     def test_substep_pending_is_visible_within_same_tick(self) -> None:
@@ -1114,16 +1116,16 @@ def main(ctx):
         # so generic de-dup/cancel hygiene can be shared with normal submit-lag orders.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_SAME_TICK_PENDING_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _substep_delay_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         self.assertFalse(
-            any(o.get("reason") == "duplicate_due_to_missing_pending" for o in result.broker.query_stock_orders())
+            any(o.get("reason") == "duplicate_due_to_missing_pending" for o in result.broker.get_trade_detail_data(data_type="ORDER"))
         )
 
     def test_cancel_removes_substep_delayed_action_before_release(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_CANCEL_DELAYED_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _substep_delay_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(buys, [])
         cancels = [
             e for e in result.broker.events
@@ -1139,7 +1141,7 @@ def main(ctx):
         # silently rolled into a later off-session or next-day tick.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_LATE_NO_FILL_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _late_no_fill_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(buys, [])
         unfilled = [
             e for e in result.broker.events
@@ -1245,7 +1247,7 @@ def main(ctx):
     def test_preopen_0915_tick_has_no_price_but_fills_at_open(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(PREOPEN_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _auction_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)  # the 09:15 guard requires ctx.price is None
         self.assertEqual(buys[0]["price_label"], "auction")
         self.assertEqual(buys[0]["trade_date"], "20220104")
@@ -1255,7 +1257,7 @@ def main(ctx):
     def test_auction_buy_rejected_at_one_sided_limit_up_open(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(AUCTION_MAIN, encoding="utf-8")
         result = self._run_with(_limit_up_open_replay())
-        rejects = [o for o in result.broker.query_stock_orders() if o["status"] == "rejected"]
+        rejects = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["status"] == "rejected"]
         self.assertTrue(any(o["reject_reason"] == "limit_up_blocked_buy" for o in rejects))
 
     def test_forced_liquidation_and_profit(self) -> None:
@@ -1314,7 +1316,7 @@ def main(ctx):
         self.assertGreater(result.offsession_ticks, 0)
         self.assertGreater(result.intraday_ticks, 0)
         self.assertEqual(result.total_ticks, result.intraday_ticks + result.offsession_ticks)
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 0)  # the post-close 21:00 order never fills
         self.assertTrue(any(e["event_type"] == "main_actions_unfilled" for e in result.broker.events))
 
@@ -1339,7 +1341,7 @@ def main(ctx):
                 replay_intraday_1min=_dense_minutes(), offsession_tick_minutes=180,
             )
         buys = [
-            o for o in result.broker.query_stock_orders()
+            o for o in result.broker.get_trade_detail_data(data_type="ORDER")
             if o["action"] == "buy" and o["status"] == "filled"
         ]
         self.assertEqual(len(buys), 0)
@@ -1380,7 +1382,7 @@ def main(ctx):
                 shortable_codes=frozenset(), main_policy=policy,
                 replay_intraday_1min=minutes,
             )
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
         self.assertEqual(buys[0]["price_label"], "auction")
         # Fills at the 15:00 close (10.6), not the 15:00 open (10.5); auction, no slippage.
@@ -1398,7 +1400,7 @@ def main(ctx):
         )
         (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _auction_minutes())
-        buys = [o for o in result.broker.query_stock_orders() if o["action"] == "buy" and o["status"] == "filled"]
+        buys = [o for o in result.broker.get_trade_detail_data(data_type="ORDER") if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)  # the cur_datetime assert passed, then it bought
 
 

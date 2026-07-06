@@ -41,7 +41,7 @@ from autotrade.environment.backtest_engine import (
     _serve_nl_requests,
     hide_snapshot_slots_from_agent,
 )
-from autotrade.environment.broker import _ACTION_TO_ORDER_TYPE, SimBroker, xtconstant
+from autotrade.environment.broker import SimBroker, optype, prtype
 from autotrade.environment.data.contracts import sim_datetime
 from autotrade.environment.runtime import sanitize_for_log
 from autotrade.environment.state_staging import StateStager
@@ -53,10 +53,10 @@ _ACTION_ALIASES = {
     "close_long": "sell",
     "close_short": "cover",
     "exit": "close",
+    "margin_buy": "fin_buy",
     "cancel_order": "cancel",
-    "cancel_order_stock": "cancel",
 }
-_ORDER_ACTIONS = {"buy", "sell", "short", "cover", "close"}
+_ORDER_ACTIONS = {"buy", "sell", "short", "cover", "close", "fin_buy", "sell_repay", "direct_repay"}
 _SUPPORTED_ACTIONS = _ORDER_ACTIONS | {"cancel"}
 
 
@@ -411,7 +411,7 @@ def run_main_ctx_replay(
         if on_progress is not None and (
             day_idx - last_progress_idx >= 30 or now - last_progress_time >= 30.0
         ):
-            on_progress(str(trade_date), day_idx, total_days, now - replay_start, len(broker.query_stock_orders()))
+            on_progress(str(trade_date), day_idx, total_days, now - replay_start, len(broker.orders))
             last_progress_idx, last_progress_time = day_idx, now
         if trade_date != exit_date:
             minute_seed = minute_market.rows_for_date(trade_date) if minute_market is not None else _empty_minute_rows()
@@ -425,7 +425,7 @@ def run_main_ctx_replay(
                 real_index = {tick.minute_key: i for i, tick in enumerate(t for t in plan if t.is_real)}
                 n_real = len(real_index)
                 # Decisions wait out the submit lag, then enter the Broker's order book
-                # (order_stock) at their activation bar. Substep-wrapped broker actions
+                # (passorder) at their activation bar. Substep-wrapped broker actions
                 # are first delayed until ready_at, then treated as submitted at the
                 # ready/orderable tick and mapped through this same activation logic.
                 incoming: dict[int, list[tuple[dict[str, object], bool, bool]]] = {}
@@ -864,43 +864,60 @@ def _place_actions_at_tick(
 
 
 def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool, is_close_auction: bool = False) -> bool:
-    """Translate a ``main()`` action into a Broker ``order_stock`` submission.
+    """Translate a ``main()`` action into a Broker ``passorder`` submission.
 
-    ``limit`` (a fixed price) routes to a ``FIX_PRICE`` order resting ``valid_bars``
-    bars (default 1); otherwise a ``MARKET_PEER_PRICE_FIRST`` order valid that bar.
-    ``close`` is always a market exit. ``is_close_auction`` marks a 15:00 close-auction
-    order so it fills at the activation bar's close. Returns False if unsupported."""
+    ``limit`` (a fixed price) routes to a 指定价 order resting ``valid_bars`` bars
+    (default 1); otherwise a 对手价 market order valid that bar. ``close`` has no
+    official op: it resolves to the held side's market exit at submission (the
+    activation tick is also the match tick, so there is no drift window).
+    ``direct_repay`` follows the official 1102 (amount in CNY) convention and needs
+    no bar. ``is_close_auction`` marks a 15:00 close-auction order so it fills at
+    the activation bar's close. Returns False if unsupported."""
     name = _action_name(action)
+    order_kwargs = {
+        "user_order_id": str(action.get("order_id") or ""),
+        "reason": str(action.get("reason") or name),
+        "submitted_at": str(action.get("submitted_at") or ""),
+    }
+    if name == "direct_repay":
+        amount = _float_or_none(action.get("amount"))
+        if amount is None or amount <= 0 or not broker.is_credit:
+            return False
+        broker.passorder(optype.DIRECT_REPAY, 1102, "", "", prtype.PEER, 0, amount, **order_kwargs)
+        return True
     ts_code = str(action.get("ts_code", "")).strip()
     if name not in _ORDER_ACTIONS or not ts_code:
         return False
     limit = _float_or_none(action.get("limit")) if name != "close" else None
     if limit is not None and limit <= 0:
         limit = None
-    order_type = "CLOSE_POSITION" if name == "close" else _ACTION_TO_ORDER_TYPE[name]
-    price_type = xtconstant.FIX_PRICE if limit is not None else xtconstant.MARKET_PEER_PRICE_FIRST
-    valid_bars = max(1, _int_or_none(action.get("valid_bars")) or 1) if limit is not None else 1
-    broker.order_stock(
-        order_type,
+    if name == "close":
+        name = "cover" if broker.position_quantity(ts_code) < 0 else "sell"
+    try:
+        op_type = broker.op_for_action(name)
+    except ValueError:
+        return False
+    broker.passorder(
+        op_type,
+        1101,
+        "",
         ts_code,
-        _int_or_none(action.get("amount")),
-        price_type,
+        prtype.FIX if limit is not None else prtype.PEER,
         limit or 0,
+        _int_or_none(action.get("amount")),
         weight=_float_or_none(action.get("weight")),
-        valid_bars=valid_bars,
+        valid_bars=max(1, _int_or_none(action.get("valid_bars")) or 1) if limit is not None else 1,
         is_auction=is_auction,
         auction_close=is_close_auction,
-        reason=str(action.get("reason") or name),
-        order_id=str(action.get("order_id") or "") or None,
-        submitted_at=str(action.get("submitted_at") or ""),
+        **order_kwargs,
     )
     return True
 
 
 def _cancel_day_end_orders(broker: SimBroker, *, trade_date: str, minute_key: str | None = None) -> None:
     """Auto-void any still-working day orders after the final matchable bar."""
-    for order in broker.query_stock_orders(cancelable_only=True):
-        broker.cancel_order_stock(
+    for order in broker.working_orders():
+        broker.cancel(
             str(order["order_id"]),
             reason="day_end_unfilled",
             trade_date=trade_date,
@@ -924,7 +941,7 @@ def _cancel_pending_order(
     delayed_actions: list[_DelayedAction] | None = None,
 ) -> bool:
     """Cancel a live working order, submit-lag order, or unreleased substep action."""
-    if broker.cancel_order_stock(order_id, reason=reason, trade_date=trade_date, minute_key=minute_key):
+    if broker.cancel(order_id, reason=reason, trade_date=trade_date, minute_key=minute_key):
         return True
     for index, items in list(incoming.items()):
         kept: list[tuple[dict[str, object], bool, bool]] = []
@@ -988,17 +1005,15 @@ def _pending_view(
     """Working orders the Agent can see via ``ctx.broker.pending(ts_code)``: the
     Broker's cancelable book plus decisions still inside the submit lag or delayed
     by a substep, so de-dup holds across the whole decision-to-fill window."""
-    records = [_pending_record(record, now=now) for record in broker.query_stock_orders(cancelable_only=True)]
+    records = [_pending_record(record, now=now) for record in broker.working_orders()]
     for item in delayed_actions or []:
         action = item.action
-        code = str(action.get("ts_code", ""))
-        if not code:
-            continue
         records.append(
             _pending_record(
                 {
                     "order_id": action.get("order_id"),
-                    "ts_code": code,
+                    # direct_repay carries no ts_code; it still shows as pending ("").
+                    "ts_code": str(action.get("ts_code", "")),
                     "action": str(action.get("action", "")),
                     "order_volume": action.get("amount"),
                     "weight": action.get("weight"),
@@ -1015,25 +1030,23 @@ def _pending_view(
         )
     for items in incoming.values():
         for action, _is_auction, _is_close_auction in items:
-            code = str(action.get("ts_code", ""))
-            if code:
-                records.append(
-                    _pending_record(
-                        {
-                            "order_id": action.get("order_id"),
-                            "ts_code": code,
-                            "action": str(action.get("action", "")),
-                            "order_volume": action.get("amount"),
-                            "weight": action.get("weight"),
-                            "price": action.get("limit"),
-                            "status": "pending",
-                            "submitted_at": action.get("submitted_at"),
-                            "reason": action.get("reason"),
-                            "pending_stage": "submit_lag",
-                        },
-                        now=now,
-                    )
+            records.append(
+                _pending_record(
+                    {
+                        "order_id": action.get("order_id"),
+                        "ts_code": str(action.get("ts_code", "")),
+                        "action": str(action.get("action", "")),
+                        "order_volume": action.get("amount"),
+                        "weight": action.get("weight"),
+                        "price": action.get("limit"),
+                        "status": "pending",
+                        "submitted_at": action.get("submitted_at"),
+                        "reason": action.get("reason"),
+                        "pending_stage": "submit_lag",
+                    },
+                    now=now,
                 )
+            )
     grouped: dict[str, list[dict[str, object]]] = {}
     for record in records:
         grouped.setdefault(str(record.get("ts_code", "")), []).append(record)
@@ -1102,8 +1115,9 @@ def _market_state(
         "cur_date": str(trade_date),
         "cur_time": str(minute_key or ""),
         "cur_datetime": str(cur_datetime or ""),
-        "account": _jsonable(broker.query_stock_asset()),
-        "positions": _jsonable(broker.query_stock_positions()),
+        "account": _jsonable(broker.get_trade_detail_data(data_type="ACCOUNT")[0]),
+        "positions": _jsonable(broker.get_trade_detail_data(data_type="POSITION")),
+        "debt_contracts": _jsonable(broker.get_debt_contract()) if broker.is_credit else [],
         "cash": float(broker.cash),
         "bars": bars,
         "asof_dir": asof_dir,

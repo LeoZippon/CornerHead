@@ -320,7 +320,7 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
     long_pnl = sum(e["realized_pnl"] for e in realized if e["side"] == "long")
     short_pnl = sum(e["realized_pnl"] for e in realized if e["side"] == "short")
     wins = sum(1 for e in realized if e["realized_pnl"] > 0)
-    orders = broker.query_stock_orders()
+    orders = broker.get_trade_detail_data(data_type="ORDER")
     per_stock = [
         {
             "ts_code": event["ts_code"],
@@ -360,7 +360,8 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "fees_paid": float(broker.fees_paid),
         "stamp_duty_paid": float(broker.stamp_duty_paid),
         "slippage_bps_assumed": broker.profile.slippage_bps,
-        "short_borrow_fees": float(broker.borrow_fees),
+        "credit_interest_accrued": float(broker.interest_accrued_total),
+        "credit_interest_paid": float(broker.interest_paid_total),
         "forced_close_events": sum(1 for e in broker.events if e["event_type"] == "forced_close_triggered"),
         "replay_granularity": result.granularity,
         "replay_wall_seconds": result.replay_wall_seconds,
