@@ -1,3 +1,12 @@
+2026-07-05 QMT 官方 API 对齐重构：股票/信用账户分离（feat/qmt-credit-broker）
+
+- 依官方全功能 QMT 客户端内 Python 策略 API（`external_references/gjzq-da-qmt`，12k 行接口文档逐节提取）重构 Broker 边界：`TraderProtocol` 由 xtquant 6 方法改为 `passorder`（官方 opType 码）/`cancel`/`get_trade_detail_data`(ACCOUNT/POSITION/ORDER/DEAL)/信用查询（`get_debt_contract`/`get_assure_contract`/`get_enable_short_contract`）；旧 `order_stock`/`query_stock_*` 全部移除（无兼容 shim），m_* 字段映射表进 env docs §3.2。
+- 账户分离：`broker_profile.account_type ∈ {stock, credit}`（默认 credit）。信用账户全量落地：融资买入 27（开 `DebtContract` 负债合约，本金+佣金计息、开仓不动现金）、融券卖出 28、买券还券 29、卖券还款 31（净所得先息后本 FIFO 还融资）、直接还款 32（现金即时结算、官方 1102 金额口径）、担保品买卖 33/34；30 直接还券有意不支持（单票单侧持仓下结构性不可达，docs 注明）。普通账户仅 23/24，信用原语 driver 层抛错。
+- 信用会计按交易所实施细则精确实现（broker_core 纯函数 + 引用 SSE 解读 PDF）：维持担保比例 =(现金+证券市值)/(融资+融券市值+利息)，跌破 1.30 强平（融资负债不因清仓消失、继续计息，权益已净额）；保证金可用余额 = 现金+担保品×折算率+浮盈浮亏项（亏侧 100%）−占用−利息，门控新融资/融券；利息按自然日计入合约、偿还时付现（替代旧的逐日现金扣借券费）；融券卖出所得冻结口径不变。新增：融券必须限价 + uptick 申报规则（低于激活 bar 参考价拒 `slo_sell_uptick_rule`）、融资标的门控（margin_secs 同集合、逐成交日）、授信额度 knobs。available_cash 改为"现金−融券冻结所得"（保证金占用不再冻结现金——更贴近真实信用账户）。
+- Agent 面：`ctx.broker` 新增 `fin_buy`/`sell_repay`/`direct_repay`/`credit`/`debt_contracts()`；buy/sell/short/cover/close/cancel 语义不变。Fold 提示词动作表+信用经济学段、facts `broker_replay`（account_type/双保证金比例/利率/折算率/额度）、模板 README、PROMPTS.md 重导出（幂等）。
+- 迁移架构（objective 2，QMT_documentation §2.2 重写）：**用户定案——实盘执行全走客户端内置 Python API（ContextInfo/passorder/get_trade_detail_data），xtquant/miniQMT 弃用**。落定架构 = 用户所提"远端常驻脚本轮询本地订单库"方案（经官方文档核验可行且为该运行时正确形态）：决策侧 `main(ctx)` 跑在自有 Python（现代依赖，不能进客户端内置 3.6.8），`QMTBroker` 实现为文件桥（passorder/cancel→inbox 订单文件；get_trade_detail_data→读回写快照）；执行侧客户端内常驻策略（标准库-only、零网络）`run_time` 定时轮询 inbox + `passorder(quickTrade=2)` + 投资备注幂等去重 + 回调回写 + 慢定时器权威快照（官方运行时单线程 → 禁阻塞/watchdog/HTTP）。零售 QMT 无原生文件单模块（证伪该备选）；7 项待真机验证的开放问题记录在案。§4.3/§6.3/§8 同步去 xtquant 化。
+- 验证：full suite 468 OK（449→468，broker 测试重写 + 信用新测试）；`git diff --check` clean；PROMPTS.md 幂等；沙箱镜像重建（driver 变更；顺带修 .dockerignore 漏排 archive/ 44G 致构建上下文 46.8GB 的问题）+ Docker e2e 复验。五份 living docs 同步。
+
 2026-07-02 GPT 四文档结构合并的核验与修复
 
 - GPT 在外部把 data/env/agent/pipeline 四份 living docs 的章节大幅合并重编号（如 env 9 章→4 章；术语表降级为加粗块、导航改为紧凑 TOC），并同步改了 13 个源文件的文档引用与 PROMPTS.md。按用户要求核验三问：结构是否合理、是否引发 doc↔码不一致、是否遗漏实现细节。
