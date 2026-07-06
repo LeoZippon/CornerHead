@@ -157,6 +157,21 @@ class PhasePromptTest(unittest.TestCase):
         self.assertIn("tree.txt", convergence)
         self.assertIn("[failed]", convergence)
 
+    def test_fold_directive_section_is_optional_and_framed_as_hypothesis(self):
+        base = dict(fold_info={"fold_id": "f"}, acceptance_rules={})
+        without = build_system_prompt(**base)
+        self.assertNotIn("研究者本 Fold 指令", without)
+        with_directive = build_system_prompt(**base, fold_directive="优先检验行业中性化后的动量残差。")
+        self.assertIn("研究者本 Fold 指令（用户注入）", with_directive)
+        self.assertIn("优先检验行业中性化后的动量残差。", with_directive)
+        # Framed as a hypothesis that never relaxes hard constraints.
+        self.assertIn("研究假设", with_directive)
+        directive_idx = with_directive.index("研究者本 Fold 指令")
+        self.assertLess(with_directive.index("# 环境与配置"), directive_idx)
+        self.assertLess(directive_idx, with_directive.index("# 动作与流程"))
+        # Whitespace-only directives collapse to the no-section prompt.
+        self.assertEqual(build_system_prompt(**base, fold_directive="  \n"), without)
+
     def test_fold_strategy_interfaces_are_inside_action_section(self):
         prompt = build_system_prompt(fold_info={"fold_id": "f"}, acceptance_rules={})
 

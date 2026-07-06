@@ -109,6 +109,7 @@ class AgentSessionRunner:
         phase: str = "exploration",
         step_tree_enabled: bool = False,
         taste_prompt: str = "",
+        fold_directive: str = "",
         meta_learning_directive: str = "",
         mode: str = "fold",
         web_search_providers: Mapping[str, WebSearchProvider] | None = None,
@@ -151,6 +152,8 @@ class AgentSessionRunner:
                 prompt_kwargs["convergence_prompt"] = convergence_prompt
             if taste_prompt:
                 prompt_kwargs["taste_prompt"] = taste_prompt
+            if fold_directive:
+                prompt_kwargs["fold_directive"] = fold_directive
             self.system_prompt = build_system_prompt(**prompt_kwargs)
         self.shell = SandboxShellTool(ctx)
         self.artifact_io = ArtifactIOTool(ctx)

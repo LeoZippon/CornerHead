@@ -87,6 +87,11 @@ def main() -> int:
         help="Optional Taste text injected into an ordinary Fold; ignored in meta-learning mode.",
     )
     parser.add_argument(
+        "--fold-directive-file",
+        type=Path,
+        help="Optional UTF-8 researcher directive injected into this ordinary Fold's system prompt.",
+    )
+    parser.add_argument(
         "--parent-output",
         type=Path,
         help="Optional frozen parent output/ artifact directory for this single session.",
@@ -114,12 +119,15 @@ def main() -> int:
         parser.error("--parent-models requires --parent-output")
     if args.mode == "meta-learning" and args.taste_file:
         parser.error("--taste-file is only meaningful with --mode fold")
+    if args.mode == "meta-learning" and args.fold_directive_file:
+        parser.error("--fold-directive-file is only meaningful with --mode fold")
     image = args.sandbox_image or DEFAULT_IMAGE
     if not args.local_dev and not args.skip_image_check:
         _require_docker_image(image)
 
     meta_learning_directive = resolve_meta_learning_directive(parser, args)
     taste_prompt = args.taste_file.read_text(encoding="utf-8") if args.taste_file else ""
+    fold_directive = args.fold_directive_file.read_text(encoding="utf-8") if args.fold_directive_file else ""
 
     config = _build_config(repo_root, args, meta_learning_directive)
     proxies = build_proxies(args)
@@ -162,7 +170,13 @@ def main() -> int:
             "experiment_dir": str(config.experiment_dir),
         }
     else:
-        outcome = pipeline.run_fold(fold, epoch_id=args.epoch_id, parent=parent, taste_prompt=taste_prompt)
+        outcome = pipeline.run_fold(
+            fold,
+            epoch_id=args.epoch_id,
+            parent=parent,
+            taste_prompt=taste_prompt,
+            fold_directive=fold_directive,
+        )
         result = {
             "status": "ok",
             "mode": args.mode,

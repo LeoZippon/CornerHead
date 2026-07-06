@@ -268,6 +268,7 @@ class ExperimentPipeline:
         epoch_id: str,
         parent: FrozenArtifact | None,
         taste_prompt: str = "",
+        fold_directive: str = "",
     ) -> FoldOutcome:
         run_id = new_id("run")
         sandbox, docker = self._start_sandbox(run_id)
@@ -357,6 +358,9 @@ class ExperimentPipeline:
                 **self._replay_config_fields(),
                 "sandbox_spec": self._active_sandbox_spec.to_record(),
                 "taste_prompt": taste_prompt,
+                # Researcher-injected per-fold direction (HITL). Prompt-level input
+                # like taste_prompt: recorded for audit, never hashed into artifacts.
+                "fold_directive": fold_directive.strip(),
             },
         )
         trace = AgentTraceWriter(
@@ -430,6 +434,7 @@ class ExperimentPipeline:
                 "run_id": run_id,
                 **fold.to_record(),
                 "parent_strategy_artifact_id": parent.artifact_id if parent else None,
+                "fold_directive": fold_directive.strip() or None,
                 "finish_reason": session_summary.get("finish_status"),
                 "fold_status": fold_status,
                 "accept_reasons": accept_reasons,
@@ -473,6 +478,7 @@ class ExperimentPipeline:
         parent: FrozenArtifact | None,
         previous_taste: str = "",
         visible_fold: FoldSpec | None = None,
+        directive_override: str | None = None,
     ) -> tuple[FrozenArtifact | None, str]:
         if self.meta_learner is None:
             raise RuntimeError("no meta learner configured")
@@ -588,7 +594,11 @@ class ExperimentPipeline:
                     "previous_taste": bool(previous_taste.strip()),
                 },
                 "taste_output": "/mnt/agent/workspace/taste.md",
-                "meta_learning_directive": self.config.meta_learning_directive.strip(),
+                # HITL runs may supply a per-epoch directive; the config default
+                # stays the experiment-level directive from the CLI.
+                "meta_learning_directive": (
+                    self.config.meta_learning_directive if directive_override is None else directive_override
+                ).strip(),
                 "web_search_engines": [],
             },
         )
@@ -915,7 +925,14 @@ class ExperimentPipeline:
 
     # ---- held-out ----
 
-    def run_heldout(self, final: FrozenArtifact, trading_days: list[str], *, epoch_id: str) -> list[dict[str, object]]:
+    def run_heldout(
+        self,
+        final: FrozenArtifact,
+        trading_days: list[str],
+        *,
+        epoch_id: str,
+        skip_labels: frozenset[str] | set[str] | None = None,
+    ) -> list[dict[str, object]]:
         periods = heldout_periods(
             self.config.heldout_first_period,
             self.config.heldout_last_period,
@@ -924,6 +941,11 @@ class ExperimentPipeline:
         )
         summaries: list[dict[str, object]] = []
         for index, period in enumerate(periods):
+            # Interactive resume: periods that already hold a heldout ledger record
+            # are skipped so a re-run cannot append duplicate records. The enumerate
+            # index stays label-stable for result_name.
+            if skip_labels and str(period["label"]) in skip_labels:
+                continue
             run_id = new_id("run")
             sandbox, docker = self._start_sandbox(run_id)
             paths = sandbox.paths

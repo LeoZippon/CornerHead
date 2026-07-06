@@ -250,6 +250,7 @@ def render() -> str:
                 experiment_facts=SAMPLE_EXPERIMENT_FACTS,
                 step_tree_enabled=True,
                 taste_prompt="优先探索可迁移的价格-成交量结构；谨慎处理单一题材经验。",
+                fold_directive="示例：本 Fold 优先检验行业中性化后的动量残差；若与验证证据冲突可降级。",
             ),
         ),
         ("Fold Agent 协议模板（PROTOCOL_INSTRUCTION）", PROTOCOL_INSTRUCTION),

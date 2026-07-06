@@ -385,6 +385,20 @@ META_LEARNING_INSTRUCTION = """\
 """
 
 
+def build_fold_directive_section(fold_directive: str) -> str:
+    directive = fold_directive.strip()
+    if not directive:
+        return ""
+    return (
+        "## 研究者本 Fold 指令（用户注入）\n"
+        "下面内容是本 Fold 启动前由研究者提供的可选探索方向。"
+        "请把它当作需要检验和细化的研究假设，而不是已验证结论；"
+        "它不替代也不放宽提交合同、修改约束、PIT 与数据可见性等任何硬约束。"
+        "如果它与 evidence、验收规则或执行约束冲突，可以调整、降级或拒绝，并说明原因。\n\n"
+        f"{directive}"
+    )
+
+
 def build_system_prompt(
     *,
     fold_info: dict[str, object],
@@ -395,6 +409,7 @@ def build_system_prompt(
     phase: str = "exploration",
     step_tree_enabled: bool = False,
     taste_prompt: str = "",
+    fold_directive: str = "",
 ) -> str:
     env_parts = [FOLD_ENV_SECTION]
     if experiment_facts:
@@ -408,6 +423,9 @@ def build_system_prompt(
         env_parts.append(STEP_TREE_SECTION.replace("# Step 产物树", "## Step 产物树"))
     if taste_prompt.strip():
         env_parts.append(f"## 本 Epoch 的 Taste（元学习注入）\n{taste_prompt.strip()}")
+    directive_section = build_fold_directive_section(fold_directive)
+    if directive_section:
+        env_parts.append(directive_section)
 
     # Phase-conditional guidance: anti-overfit always applies; the convergence
     # bias (smaller/simpler, stop when marginal) is injected only in the
