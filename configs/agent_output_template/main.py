@@ -7,9 +7,13 @@ version) and holds it to the mandatory final-day liquidation. Replace the
 placeholder screen in ``_screen`` with your own signal.
 
 Key ``ctx`` surface (advanced helpers in ``candidate.py`` / ``trading.py`` + ``README.md``):
-  ``ctx.account`` / ``ctx.positions``                 account snapshot / per-symbol holdings (cash: ``ctx.broker.cash``)
+  ``ctx.account`` / ``ctx.positions``                 dual-account snapshots / per-symbol holdings (rows carry ``account``)
+  ``ctx.broker.stock`` / ``ctx.broker.credit``         per-account cash/available_cash views
   ``ctx.price(code)`` / ``ctx.bar(code)``              this tick's price/bar (None pre-auction)
-  ``ctx.broker.buy/sell/short/cover/close(code, weight=...|amount=...)``  place orders; returns ``order_id``
+  ``ctx.broker.buy/sell(...)``                         stock account (long-only cash)
+  ``ctx.broker.credit_buy/credit_sell/fin_buy/short/cover/sell_repay/direct_repay``  credit account (两融)
+  ``ctx.broker.transfer(amount, from_account, to_account)``  cash move between the two accounts
+  ``ctx.broker.close(code, account=...)``              market exit; account= required if both hold the code
   ``ctx.broker.pending(code=None)`` / ``ctx.broker.cancel(order_id)``      query/cancel working orders
   ``ctx.asof_dir`` / ``ctx.asof_version``              rolling point-in-time data view + its version
   ``ctx.snapshot_dir`` / ``ctx.model_dir``             frozen research snapshot / model artifacts

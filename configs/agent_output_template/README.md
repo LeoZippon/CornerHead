@@ -97,23 +97,30 @@ fixed cadence, and wraps up by `14:57` — rather than screening on every tick.
 `ctx` exposes (rebuilt each tick):
 
 - `ctx.cur_date` (`"YYYYMMDD"`), `ctx.cur_time` (`"HH:MM"`).
-- `ctx.account` (account snapshot) and `ctx.positions` (per-symbol holdings snapshot); cash via `ctx.broker.cash`.
+- `ctx.account` (both account snapshots + combined `total_assets`) and `ctx.positions`
+  (per-symbol holdings, each row tagged with its `account`); cash per account via
+  `ctx.broker.stock["cash"/"available_cash"]` and `ctx.broker.credit[...]`.
 - `ctx.cur_datetime` — ISO Beijing timestamp (`+08:00`) for the tick.
 - `ctx.price(ts_code)`, `ctx.bar(ts_code)`, `ctx.bars` — the current tick only
   (`None` at the 09:15 info tick and off-session ticks; future bars never visible).
-- `ctx.broker`: `.buy/sell/short/cover/close(ts_code, amount=None, weight=None,
-  limit=None, valid_bars=1, reason=None)` returning `order_id`,
-  `.cancel(order_id, reason=None)`, `.cash`, `.position(ts_code)`,
-  `.pending(ts_code=None)` (working orders; no argument returns all). `limit=P`
-  makes it a limit order; the optional `reason=` is an audit annotation the driver
-  records without affecting matching.
-- Credit-account (信用账户, the default) extras: `.fin_buy(...)` (融资买入 — no cash
-  moves; principal+fee become an interest-accruing debt contract), `.sell_repay(...)`
-  (卖券还款 — sale proceeds repay 融资 debt interest-first), `.direct_repay(amount)`
-  (直接还款 from cash), `.credit` (维保比例/保证金可用余额/负债 view),
-  `.debt_contracts(ts_code=None)`. `short` must be a LIMIT order priced at/above the
-  reference price (融券 uptick rule) — quote `limit=ctx.price(code)` or higher. On a
-  `stock` account (see facts `broker_replay.account_type`) the credit verbs raise.
+- `ctx.broker`: every run holds TWO separate accounts (own cash/positions/T+1;
+  they never back each other). Stock account (long-only cash): `.buy/sell(...)`.
+  Credit account: `.credit_buy/credit_sell(...)` (担保品买卖), `.fin_buy(...)`
+  (融资买入 — no cash moves; principal+fee become an interest-accruing debt
+  contract), `.short/cover(...)` (融券), `.sell_repay(...)` (卖券还款 — sale
+  proceeds repay 融资 debt interest-first), `.direct_repay(amount)` (直接还款).
+  All order verbs accept `(ts_code, amount=None, weight=None, limit=None,
+  valid_bars=1, reason=None)` and return `order_id`; `weight` is a fraction of
+  the TARGET account's initial cash. `.transfer(amount, from_account,
+  to_account)` moves cash between the accounts (locked 融券 proceeds never
+  transfer; outbound credit transfers require 维保比例 ≥ the withdraw line while
+  debt is outstanding). `.close(ts_code, account=None)` market-exits a position
+  — pass `account=` when both accounts hold the code. `.cancel(order_id)`,
+  `.position(ts_code, account=None)` (default nets across accounts),
+  `.pending(ts_code=None)` (records carry `account`), `.stock` / `.credit`
+  account views, `.debt_contracts(ts_code=None)`. `limit=P` makes it a limit
+  order; `short` must be a LIMIT order priced at/above the reference price
+  (融券 uptick rule) — quote `limit=ctx.price(code)` or higher.
 - `ctx.nl(ts_code?, prompt="...")` — point-in-time NL Sub Agent for single-stock
   or event/theme/sector/macro text analysis (its text corpus also rolls on the
   refresh nodes; frozen research corpus always visible).
