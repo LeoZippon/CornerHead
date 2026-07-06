@@ -5,7 +5,12 @@
 data
 datasets
 results
+reports
 wandb
+mlruns
+archive
+raw_data
+artifacts
 experiments
 logs
 .runtime
