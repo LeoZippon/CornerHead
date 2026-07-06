@@ -97,13 +97,13 @@ fixed cadence, and wraps up by `14:57` — rather than screening on every tick.
 `ctx` exposes (rebuilt each tick):
 
 - `ctx.cur_date` (`"YYYYMMDD"`), `ctx.cur_time` (`"HH:MM"`).
-- `ctx.account`, `ctx.positions` (read-only snapshots); available cash via `ctx.broker.cash`.
+- `ctx.account` (account snapshot) and `ctx.positions` (per-symbol holdings snapshot); cash via `ctx.broker.cash`.
 - `ctx.cur_datetime` — ISO Beijing timestamp (`+08:00`) for the tick.
 - `ctx.price(ts_code)`, `ctx.bar(ts_code)`, `ctx.bars` — the current tick only
   (`None` at the 09:15 info tick and off-session ticks; future bars never visible).
 - `ctx.broker`: `.buy/sell/short/cover/close(ts_code, amount=None, weight=None,
   limit=None, valid_bars=1, reason=None)` returning `order_id`,
-  `.cancel(order_id, reason=None)`, `.money`/`.cash`, `.position(ts_code)`,
+  `.cancel(order_id, reason=None)`, `.cash`, `.position(ts_code)`,
   `.pending(ts_code=None)` (working orders; no argument returns all). `limit=P`
   makes it a limit order; the optional `reason=` is an audit annotation the driver
   records without affecting matching.

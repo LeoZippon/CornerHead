@@ -144,7 +144,7 @@ FOLD_ACTION_SECTION = """\
 | `ctx.broker.cancel` | order_id, reason? | 撤销 `pending()` 返回的未成交委托（substep 延迟队列、提交延迟队列或 Broker 当日订单簿） |
 | `ctx.broker.pending` | ts_code? | 有参返回该票在途单；无参返回全部在途单。记录含 `order_id`、`submitted_at`、`age_minutes`、`status`，可能含 `pending_stage`；`substep_delay` 的 age 从生成 tick 起算，ready 后进入 `submit_lag` 则从实际提交 tick 起算 |
 | `ctx.broker.position` | ts_code | 已成交持仓（不含在途），是持仓真相源 |
-| `ctx.broker.money` / `.cash` | （无） | 现金视图，每 tick 反映已成交结果（含真实佣金/滑点）；substep 内未成交计划不改变它 |
+| `ctx.broker.cash` | （无） | 现金视图，每 tick 反映已成交结果（含真实佣金/滑点）；substep 内未成交计划不改变它 |
 | `ctx.broker.available_cash` | （无） | 当前已成交状态下的可部署买力（现金扣融券保证金与冻结所得）；substep 内新发出的 broker action 是提交计划，不会立刻改变 cash/position/available_cash |
 
 `amount` 是股数（按 100 股向下对齐），`weight` 是初始权益的名义比例；二者择一。`limit=P` 为限价单，缺省为市价单。只在显式可报单/交易分钟 tick 提交新订单；off-session tick 写计划。`ctx.broker` 下单/撤单原语必须在 `ctx.substep` 内调用：`0 < B < 1` 的轻量块按当前决策分钟提交并统计耗时，`B>=1` 的动作等到 `ready_at` 后第一个可报单 tick 才提交，再按常规成交延迟撮合。

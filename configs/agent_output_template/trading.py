@@ -64,7 +64,7 @@ def example_swing_t(ctx, ts_code: str) -> None:
     band = float(ctx.params.get("percent", 0.05))
     entry = float(pos.get("entry_price") or price)
     sellable = int(pos.get("sellable_quantity", 0) or 0)
-    if price <= entry * (1 - band) and ctx.broker.money >= price * 100:
+    if price <= entry * (1 - band) and ctx.broker.cash >= price * 100:
         ctx.broker.buy(ts_code, amount=100, reason="swing_dip")
     elif sellable >= 100 and price >= entry * (1 + band):
         ctx.broker.sell(ts_code, amount=100, reason="swing_rally")

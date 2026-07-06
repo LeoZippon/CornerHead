@@ -462,10 +462,6 @@ class _Broker:
         return self._cash
 
     @property
-    def money(self):
-        return self._cash
-
-    @property
     def available_cash(self):
         """Deployable buying power (cash minus short margin and locked proceeds) in the
         FILLED broker state at the start of this tick. Substep broker actions are

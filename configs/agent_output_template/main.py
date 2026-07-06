@@ -7,7 +7,7 @@ version) and holds it to the mandatory final-day liquidation. Replace the
 placeholder screen in ``_screen`` with your own signal.
 
 Key ``ctx`` surface (advanced helpers in ``candidate.py`` / ``trading.py`` + ``README.md``):
-  ``ctx.positions`` / ``ctx.account``                 current holdings / account state (cash: ``ctx.broker.cash``)
+  ``ctx.account`` / ``ctx.positions``                 account snapshot / per-symbol holdings (cash: ``ctx.broker.cash``)
   ``ctx.price(code)`` / ``ctx.bar(code)``              this tick's price/bar (None pre-auction)
   ``ctx.broker.buy/sell/short/cover/close(code, weight=...|amount=...)``  place orders; returns ``order_id``
   ``ctx.broker.pending(code=None)`` / ``ctx.broker.cancel(order_id)``      query/cancel working orders
