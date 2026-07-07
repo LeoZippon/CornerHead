@@ -101,21 +101,29 @@ a:hover { text-decoration: underline; }
 
 main { max-width: 1380px; margin: 1.6rem auto; padding: 0 clamp(14px, 3vw, 34px) 5rem; }
 
-/* buttons */
+/* buttons — flat system: no drop shadows, no native (WebKit) chrome; state
+   reads through background/border tints, focus through a keyboard-only ring. */
 .btn {
-  display: inline-flex; align-items: center; gap: 0.45rem;
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.45rem;
+  appearance: none; -webkit-appearance: none;
   border: 1px solid var(--border); background: var(--panel); color: var(--text);
-  border-radius: 9px; padding: 0.45rem 0.95rem; font-size: 0.9rem; cursor: pointer;
-  transition: border-color .15s, color .15s, background .15s, box-shadow .15s;
+  border-radius: 9px; padding: 0.45rem 0.95rem; font: inherit;
+  font-size: 0.9rem; line-height: 1.45; cursor: pointer; box-shadow: none;
+  text-decoration: none; user-select: none;
+  transition: border-color .12s, color .12s, background .12s;
 }
-.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn:hover { background: var(--hover-bg); border-color: var(--accent); color: var(--accent); text-decoration: none; }
+.btn:active { background: var(--accent-soft); }
+.btn:focus { outline: none; }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn.primary:hover { filter: brightness(1.08); color: #fff; box-shadow: var(--shadow); }
+.btn.primary:hover { background: color-mix(in srgb, var(--accent) 88%, #000); border-color: color-mix(in srgb, var(--accent) 88%, #000); color: #fff; }
+.btn.primary:active { background: color-mix(in srgb, var(--accent) 78%, #000); }
 .btn.danger { color: var(--bad); border-color: var(--danger-border); }
-.btn.danger:hover { background: var(--bad-soft); }
+.btn.danger:hover { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn.small { padding: 0.3rem 0.85rem; font-size: 0.875rem; }
-.btn.icon { padding: 0.3rem 0.6rem; font-size: 1rem; line-height: 1; }
+.btn.small { padding: 0.28rem 0.8rem; font-size: 0.875rem; }
+.btn.icon { padding: 0.28rem 0.6rem; font-size: 1rem; line-height: 1; }
 
 /* badges */
 .badge {
@@ -206,9 +214,13 @@ textarea.prompt-editor { min-height: 55vh; font-size: 0.845rem; }
 .control-bar { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
 .control-bar .spacer { flex: 1; }
 .mode-note { font-size: 0.875rem; color: var(--muted); }
-.control-bar select, .zoom-select {
-  border: 1px solid var(--border); border-radius: 8px; padding: 0.4rem 0.6rem; font-size: 0.905rem;
-  background: var(--input-bg); color: var(--text);
+.control-bar select, .zoom-select, .field select {
+  appearance: none; -webkit-appearance: none;
+  border: 1px solid var(--border); border-radius: 8px; padding: 0.4rem 1.7rem 0.4rem 0.6rem;
+  font-size: 0.905rem; background-color: var(--input-bg); color: var(--text); box-shadow: none;
+  /* custom chevron so appearance:none keeps an affordance */
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%2368717f' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 0.6rem center;
 }
 
 /* tables */
@@ -330,6 +342,7 @@ details.test-audit summary { cursor: pointer; color: var(--warn); font-weight: 6
   width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.7rem; font-size: 0.94rem;
   background: var(--input-bg); color: var(--text);
 }
+.field select { padding-right: 1.7rem; }
 .field input:focus, .field select:focus, .field textarea:focus, textarea.directive:focus {
   outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
 }
