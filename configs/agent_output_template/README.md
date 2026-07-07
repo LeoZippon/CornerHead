@@ -127,32 +127,19 @@ without `limit=` is rejected; cross-minute substep actions are not orders until
 
 `ctx` exposes (rebuilt each tick):
 
-- `ctx.cur_date` (`"YYYYMMDD"`), `ctx.cur_time` (`"HH:MM"`).
-- `ctx.account` (both account snapshots + combined `total_assets`) and `ctx.positions`
-  (per-symbol holdings, each row tagged with its `account`); cash per account via
-  `ctx.broker.stock["cash"/"available_cash"]` and `ctx.broker.credit[...]`.
-- `ctx.cur_datetime` — ISO Beijing timestamp (`+08:00`) for the tick.
-- `ctx.price(ts_code)`, `ctx.bar(ts_code)`, `ctx.bars` — the current tick only
-  (`None` at the 09:15 info tick and off-session ticks; future bars never visible).
-- `ctx.broker`: every run holds TWO separate accounts (own cash/positions/T+1;
-  they never back each other). See the quick reference above for method names.
-  Calculate share counts explicitly from visible cash/price and round to the
-  exchange lot rule before calling order verbs. `limit=P` makes a limit order;
-  `short` must be a limit order priced at/above the reference price (融券 uptick
-  rule) — quote `limit=ctx.price(code)` or higher.
-- `ctx.nl(ts_code?, prompt="...")` — point-in-time NL Sub Agent for single-stock
-  or event/theme/sector/macro text analysis (its text corpus also rolls on the
-  refresh nodes; frozen research corpus always visible).
-- `ctx.asof_dir` — per-tick rolling point-in-time view; one directory per data
-  domain (`daily`, `events`, `macro`, `fundamentals`, `intraday_1min`), read with
-  `pd.read_parquet(ctx.asof_dir / "daily")`. A row appears only once its real
-  refresh job has finished by the sim clock, so the daily cross-section is through
-  the prior trading day intraday (today's bar is `ctx.bars`/`ctx.price`).
-- `ctx.asof_version` — changes only when the view actually rolls; cache an asof
-  read by it and recompute only when it changes.
-- `ctx.snapshot_dir` (frozen research baseline), `ctx.model_dir` (persisted
-  parameters), `ctx.state_dir` (managed cross-tick state, only available inside
-  `ctx.substep`), `ctx.params`.
+| ctx surface | Environment contract |
+|---|---|
+| `ctx.cur_date` / `ctx.cur_time` / `ctx.cur_datetime` | Current sim date, minute, and Asia/Shanghai ISO timestamp; this clock drives Timeview, substep `ready_at`, delayed submission, and matching |
+| `ctx.account` / `ctx.positions` | Read-only dual-account snapshot and per-symbol position rows; position rows include `account` |
+| `ctx.price(ts_code)` / `ctx.bar(ts_code)` / `ctx.bars` | Current tick-visible bars only; future bars are never visible, and 09:15 plus ordinary off-session ticks usually have no realtime price |
+| `ctx.broker` | Broker queries, order/cancel verbs, and margin primitives; order/cancel calls must be inside `ctx.substep`; see the broker quick reference above |
+| `ctx.substep(name, budget_minutes=B)` | Strategy-step budget context; declares compute time, state `ready_at`, and broker action submit timing |
+| `ctx.nl(ts_code?, prompt="...")` | Point-in-time NL Sub Agent for single-stock or event/theme/sector/macro text analysis; must run inside `ctx.substep` and follows sim-clock text visibility |
+| `ctx.asof_dir` | Per-tick rolling, refresh-node-gated parquet PIT view: `daily`, `events`, `macro`, `fundamentals`, `intraday_1min` |
+| `ctx.asof_version` | Changes only when Timeview actually rolls; cache as-of reads by this value |
+| `ctx.snapshot_dir` | Frozen research baseline snapshot; does not roll during replay |
+| `ctx.state_dir` | Managed cross-tick state directory; only available inside `ctx.substep`, with writes staged until `ready_at` |
+| `ctx.model_dir` / `ctx.params` | Read-only persisted model artifacts and run params; data that must persist across backtests belongs in `models/` before replay |
 
 `amount` is a share count (lot-aligned to 100). The Broker enforces cash and
 保证金可用余额, T+1 sellable balance, lot size, price limits, suspension,

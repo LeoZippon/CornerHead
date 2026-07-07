@@ -1,6 +1,6 @@
 """Simulated Broker aligned with the official full-QMT in-client trading API.
 
-The host boundary mirrors QMT's strategy API (docs/environment_design.md §3.3):
+The host boundary mirrors QMT's strategy API (docs/environment_design.md §3.4):
 ``passorder`` submits by official ``opType`` code, ``cancel`` withdraws,
 ``get_trade_detail_data`` returns ACCOUNT/POSITION/ORDER/DEAL records, and the
 credit queries (``get_debt_contract``/``get_assure_contract``/
@@ -489,7 +489,7 @@ class SimBroker:
             raise ValueError(f"unknown broker action {action!r}")
         return pair
 
-    # ---- official-API queries (docs/environment_design.md §3.3) ----
+    # ---- official-API queries (docs/environment_design.md §3.4) ----
 
     def get_trade_detail_data(
         self,
@@ -1953,7 +1953,7 @@ class TraderProtocol(Protocol):
     Methods mirror the in-client strategy API (``passorder``/``cancel``/
     ``get_trade_detail_data`` plus the credit queries); the record-field mapping to
     the official ``m_*`` object attributes is tabled in
-    docs/environment_design.md §3.3. ``passorder`` returns the order id the
+    docs/environment_design.md §3.4. ``passorder`` returns the order id the
     official flow recovers via ``get_last_order_id`` immediately after submitting
     with a unique ``user_order_id`` (投资备注) — a live adapter implements exactly
     that pair."""

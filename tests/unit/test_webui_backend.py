@@ -107,10 +107,35 @@ class WebuiBackendTest(unittest.TestCase):
                     "validation_result": {"total_return": 0.10, "sharpe": 1.0, "max_drawdown": 0.05},
                     "test_result": {"total_return": 0.20, "sharpe": 1.5, "max_drawdown": 0.04},
                 },
+                {
+                    "record_type": "heldout",
+                    "experiment_id": experiment_id,
+                    "epoch_id": "epoch_001",
+                    "fold_id": "heldout_2023Q1",
+                    "run_id": "run_heldout",
+                    "test_result": {"total_return": -0.03, "sharpe": -0.2, "max_drawdown": 0.08},
+                },
             ],
         )
+        import pandas as pd
+
+        orders_dir = experiment_dir / "artifacts" / "run_001" / "results" / "valid_000"
+        orders_dir.mkdir(parents=True)
+        pd.DataFrame(
+            [
+                {"order_id": "o1", "account": "stock", "ts_code": "000001.SZ", "action": "buy",
+                 "requested_amount": 500, "filled_quantity": 500, "price": 10.0, "status": "filled",
+                 "reject_reason": "", "decision_time": "09:32", "trade_date": "20220104"},
+                {"order_id": "o2", "account": "stock", "ts_code": "000001.SZ", "action": "sell",
+                 "requested_amount": 500, "filled_quantity": 500, "price": 11.0, "status": "filled",
+                 "reject_reason": "", "decision_time": "10:00", "trade_date": "20220105"},
+                {"order_id": "o3", "account": "credit", "ts_code": "600000.SH", "action": "buy",
+                 "requested_amount": 200, "filled_quantity": 0, "price": None, "status": "rejected",
+                 "reject_reason": "limit_up_blocked_buy", "decision_time": "09:33", "trade_date": "20220104"},
+            ]
+        ).to_parquet(orders_dir / "orders.parquet", index=False)
         trace_dir = experiment_dir / "artifacts" / "run_001"
-        trace_dir.mkdir(parents=True)
+        trace_dir.mkdir(parents=True, exist_ok=True)
         events = [
             {"event_type": "llm_call", "seq": 0, "usage": {"total_tokens": 1000, "prompt_tokens": 800, "completion_tokens": 200}},
             {"event_type": "llm_call", "seq": 1, "usage": {"total_tokens": 2000, "prompt_tokens": 1500, "completion_tokens": 500}},
@@ -378,6 +403,33 @@ class WebuiBackendTest(unittest.TestCase):
             (raw / "daily" / f"trade_date={day}.parquet").write_bytes(b"")
         self.assertEqual(_dataset_coverage(raw, "daily"), ("20200102", "20240105"))
         self.assertIsNone(_dataset_coverage(raw, "stk_mins_1min_by_date"))
+
+    def test_summary_carries_per_period_heldout_returns(self) -> None:
+        payload = self.client.get("/api/experiments").json()
+        hitl = next(e for e in payload["experiments"] if e["experiment_id"] == "exp_hitl")
+        self.assertEqual(hitl["heldout_returns"], [{"label": "2023Q1", "return": -0.03}])
+        self.assertAlmostEqual(hitl["metrics"]["cum_heldout_return"], -0.03)
+
+    def test_fold_orders_stats_rows_and_csv_export(self) -> None:
+        data = self.client.get("/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/orders").json()
+        self.assertEqual(data["result"], "valid_000")
+        stats = data["stats"]
+        self.assertEqual((stats["orders"], stats["filled"], stats["rejected"]), (3, 2, 1))
+        self.assertAlmostEqual(stats["turnover"], 500 * 10.0 + 500 * 11.0)
+        self.assertEqual(stats["by_action"], {"buy": 2, "sell": 1})
+        self.assertEqual(stats["reject_reasons"], {"limit_up_blocked_buy": 1})
+        self.assertEqual(len(stats["daily"]), 2)
+        self.assertEqual(len(data["rows"]), 3)
+        csv_response = self.client.get(
+            "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/orders.csv", params={"result": "valid_000"}
+        )
+        self.assertEqual(csv_response.status_code, 200)
+        self.assertIn("attachment", csv_response.headers.get("content-disposition", ""))
+        self.assertEqual(len(csv_response.text.strip().splitlines()), 4)  # header + 3 orders
+        missing = self.client.get(
+            "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/orders.csv", params={"result": "nope"}
+        )
+        self.assertEqual(missing.status_code, 404)
 
     def test_analysis_endpoint_serves_existing_markdown(self) -> None:
         payload = self.client.get("/api/experiments/exp_hitl/analysis/epoch_001/fold_2022Q1").json()

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Mapping
 
@@ -136,6 +137,13 @@ def summarize_experiment(experiment_dir: Path) -> dict[str, object]:
                         "test_return": _first_metric(record, "test_result", "total_return"),
                     }
                     for record in folds
+                ],
+                "heldout_returns": [
+                    {
+                        "label": str(record.get("fold_id", "")).removeprefix("heldout_"),
+                        "return": _first_metric(record, "test_result", "total_return"),
+                    }
+                    for record in sorted(heldout, key=lambda r: str(r.get("fold_id")))
                 ],
                 "created_at": _created_at(experiment_dir),
             }
@@ -300,6 +308,103 @@ def _public_params(params: Mapping[str, object]) -> dict[str, object]:
 def analysis_available(hitl_dir: Path, epoch_id: str, fold_id: str) -> bool:
     md_path, _meta = analysis_paths(hitl_dir / ANALYSIS_DIR_NAME, epoch_id, fold_id)
     return md_path.exists()
+
+
+_RESULT_NAME = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def fold_orders(
+    experiments_root: Path,
+    experiment_id: str,
+    epoch_id: str,
+    fold_id: str,
+    *,
+    result: str | None = None,
+    max_rows: int = 500,
+) -> dict[str, object]:
+    """Order stream + aggregate stats for one fold backtest result dir.
+
+    Defaults to the latest validation result; test results are only served when
+    explicitly requested (the console keeps them inside the guarded audit block).
+    """
+    import pandas as pd
+
+    experiment_dir = resolve_experiment_dir(experiments_root, experiment_id)
+    records = _read_ledger_records(experiment_dir)
+    record = latest_fold_records(records).get((epoch_id, fold_id))
+    if record is None:
+        raise KeyError(f"no fold record for {epoch_id}/{fold_id}")
+    results_root = experiment_dir / "artifacts" / str(record.get("run_id")) / "results"
+    available = sorted(
+        entry.name
+        for entry in (results_root.iterdir() if results_root.is_dir() else [])
+        if entry.is_dir() and (entry / "orders.parquet").exists()
+    )
+    valid_results = [name for name in available if not name.startswith("test")]
+    chosen = result or (valid_results[-1] if valid_results else None)
+    if chosen is None or not _RESULT_NAME.match(chosen) or chosen not in available:
+        raise KeyError(f"no orders for result {chosen!r}; available: {available}")
+    df = pd.read_parquet(results_root / chosen / "orders.parquet")
+    filled = df[df["status"] == "filled"] if "status" in df.columns else df
+    amount = (filled["filled_quantity"] * filled["price"]).fillna(0.0) if len(filled) else None
+    daily = []
+    if len(filled) and "trade_date" in filled.columns:
+        grouped = filled.assign(_amount=amount).groupby("trade_date")
+        daily = [
+            {"trade_date": str(date), "filled_count": int(len(group)), "amount": float(group["_amount"].sum())}
+            for date, group in grouped
+        ]
+    top_codes = []
+    if len(filled) and "ts_code" in filled.columns:
+        by_code = filled.assign(_amount=amount).groupby("ts_code")["_amount"].sum().nlargest(8)
+        top_codes = [{"ts_code": str(code), "amount": float(value)} for code, value in by_code.items()]
+    def _counts(column: str) -> dict[str, int]:
+        if column not in df.columns:
+            return {}
+        return {str(k): int(v) for k, v in df[column].value_counts().items()}
+    stats = {
+        "orders": int(len(df)),
+        "filled": int(len(filled)),
+        "rejected": int((df["status"] == "rejected").sum()) if "status" in df.columns else 0,
+        "turnover": float(amount.sum()) if amount is not None else 0.0,
+        "by_action": _counts("action"),
+        "by_account": _counts("account"),
+        "reject_reasons": {
+            str(k): int(v)
+            for k, v in df.loc[df.get("status") == "rejected", "reject_reason"].value_counts().head(6).items()
+        } if "reject_reason" in df.columns else {},
+        "daily": daily,
+        "top_codes": top_codes,
+    }
+    rows = json.loads(df.head(max_rows).to_json(orient="records", force_ascii=False))
+    return {
+        "result": chosen,
+        "available": valid_results,
+        "test_results": [name for name in available if name.startswith("test")],
+        "stats": stats,
+        "rows": rows,
+        "row_count": int(len(df)),
+        "truncated": len(df) > max_rows,
+    }
+
+
+def fold_orders_csv(
+    experiments_root: Path, experiment_id: str, epoch_id: str, fold_id: str, *, result: str
+) -> tuple[str, str]:
+    """CSV export of one result dir's full order stream; returns (filename, csv)."""
+    import pandas as pd
+
+    experiment_dir = resolve_experiment_dir(experiments_root, experiment_id)
+    record = latest_fold_records(_read_ledger_records(experiment_dir)).get((epoch_id, fold_id))
+    if record is None:
+        raise KeyError(f"no fold record for {epoch_id}/{fold_id}")
+    if not _RESULT_NAME.match(result or ""):
+        raise KeyError(f"invalid result name: {result!r}")
+    path = experiment_dir / "artifacts" / str(record.get("run_id")) / "results" / result / "orders.parquet"
+    if not path.exists():
+        raise KeyError(f"no orders for result {result!r}")
+    df = pd.read_parquet(path)
+    return f"{experiment_id}__{epoch_id}__{fold_id}__{result}_orders.csv", df.to_csv(index=False)
 
 
 def resolve_experiment_dir(experiments_root: Path, experiment_id: str) -> Path:

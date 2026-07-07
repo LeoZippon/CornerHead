@@ -23,6 +23,11 @@ ANALYSIS_SCHEMA_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 900.0
 MAX_FILE_CHARS = 20_000
 MAX_TOTAL_CHARS = 60_000
+# The DeepSeek client's config default (1200) is far too small for a full
+# markdown review plus reasoning tokens; request an explicit generous budget
+# and escalate once if the provider still stops at finish_reason=length.
+DEFAULT_MAX_TOKENS = 6000
+RETRY_MAX_TOKENS = 16000
 _TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".cfg", ".ini", ".csv"}
 
 # Validation-only projection of the fold ledger record. test_result and the
@@ -56,6 +61,7 @@ FOLD_ANALYSIS_SYSTEM_PROMPT = """\
   4. `验证表现解读` — 结合验证摘要与 Step 历史，说明表现来源与稳健性，注意区分运气与结构性收益。
   5. `下一 Fold 可探索方向` — 2-4 条具体、可检验的改进假设，供研究者写入下一个 Fold 的指令；\
 不要包含具体日历日期或特定月份行情经验。
+- 全文控制在 1500 字以内：结论先行、逐节精炼，宁可少而准。
 - 所有结论必须能从给定材料推出；材料不足时明确说不确定，不要脑补。\
 """
 
@@ -180,7 +186,19 @@ def analyze_fold(
         "guarded_view": "validation_only",
     }
     try:
-        response = proxy.complete(messages, json_mode=False, timeout_seconds=timeout_seconds)
+        try:
+            response = proxy.complete(
+                messages, json_mode=False, timeout_seconds=timeout_seconds, max_tokens=DEFAULT_MAX_TOKENS
+            )
+        except Exception as exc:
+            # Reasoning tokens count against the output budget on some models;
+            # a length stop is retried once with a much larger ceiling.
+            if "finish_reason=length" not in str(exc):
+                raise
+            meta["retried_after_length_stop"] = True
+            response = proxy.complete(
+                messages, json_mode=False, timeout_seconds=timeout_seconds, max_tokens=RETRY_MAX_TOKENS
+            )
     except Exception as exc:
         meta.update(status="error", error=f"{type(exc).__name__}: {exc}")
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")

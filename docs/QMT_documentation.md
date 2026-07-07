@@ -87,7 +87,7 @@
 ### 2.1 统一逐 tick 实盘环路
 
 - 本地 executor 在 Asia/Shanghai 真实时钟上按与回测相同的 24h tick 网格逐时间片推进，每个 tick 调用同一个 `main(ctx)`，并通过同一套 `ctx.broker.*` 原语下单和撤销未成交委托：普通账户 `buy`/`sell`，信用账户 `credit_buy`/`credit_sell`/`fin_buy`/`short`/`cover`/`sell_repay`/`direct_repay`，加 `close`/`cancel`/`transfer`。实盘同样持有普通 + 信用两个账户，opType 决定订单归属账户。
-- 回测的 `SimBroker` 已实现 `TraderProtocol`，其接口与官方全功能 QMT 客户端内 Python 策略 API 对齐：`passorder`（按官方 opType 码：普通 23/24；信用 27/28/29/31/32/33/34）、`cancel`、`get_trade_detail_data`（ACCOUNT/POSITION/ORDER/DEAL）与信用查询（`get_debt_contract`/`get_assure_contract`/`get_enable_short_contract`）。字段级映射表见 `environment_design.md` §3.3。实盘只需一个满足同一 protocol 的 `QMTBroker` 适配器，即可 drop-in 替换回测 broker，策略代码无需改动：`passorder` 以唯一 `user_order_id`（投资备注 `m_strRemark`）提交并立即按官方 `get_last_order_id` 语义返回委托号；`ctx.broker.pending()` 对应当日可撤委托查询，返回的 `order_id` 可传给 `ctx.broker.cancel(order_id)`（适配器按备注解析委托号）。
+- 回测的 `SimBroker` 已实现 `TraderProtocol`，其接口与官方全功能 QMT 客户端内 Python 策略 API 对齐：`passorder`（按官方 opType 码：普通 23/24；信用 27/28/29/31/32/33/34）、`cancel`、`get_trade_detail_data`（ACCOUNT/POSITION/ORDER/DEAL）与信用查询（`get_debt_contract`/`get_assure_contract`/`get_enable_short_contract`）。字段级映射表见 `environment_design.md` §3.4。实盘只需一个满足同一 protocol 的 `QMTBroker` 适配器，即可 drop-in 替换回测 broker，策略代码无需改动：`passorder` 以唯一 `user_order_id`（投资备注 `m_strRemark`）提交并立即按官方 `get_last_order_id` 语义返回委托号；`ctx.broker.pending()` 对应当日可撤委托查询，返回的 `order_id` 可传给 `ctx.broker.cancel(order_id)`（适配器按备注解析委托号）。
 - `QMTBroker` 的实现形态是**文件桥**（xtquant 不采用）：`main(ctx)` 与决策环路运行在我们自己的 Python 环境（策略依赖现代 pandas/torch，不能跑在客户端内置 Python 3.6.8 里），`QMTBroker.passorder/cancel` 把委托/撤单写成 inbox 订单文件，`get_trade_detail_data` 读客户端内执行器回写的 ack/fill/state 快照；QMT 客户端内的常驻策略脚本（§2.2）用**内置 API 同名函数**逐条落地。协议两端函数名与语义一一对应，桥只做文件搬运。
 - 盘前集合竞价（09:15 info tick / 09:25 撮合开盘）与 14:57 收盘集合竞价从回测原样沿用，实盘 tick 网格在这些节点上的决策与下单语义与回测一致。
 - 普通非交易 off-session tick 不提交交易所委托；它只更新本地研究状态、策略 state 或待报计划。`transfer` 是 09:14 前提交的盘前资金划转申请，不是交易所委托。若需要盘前下单，应先在 off-session 生成计划，再在 09:15/09:25 这类交易所接收委托的节点提交。
@@ -294,7 +294,7 @@ setx CQ_MAX_PRINCIPAL "100000"
 }
 ```
 
-`op_type` 取官方 passorder 操作码（普通 23/24；信用 27/28/29/31/32/33/34，与 `environment_design.md` §3.3 一致）；`side` 保留为人读冗余，执行器以 `op_type` 为准并校验两者一致。
+`op_type` 取官方 passorder 操作码（普通 23/24；信用 27/28/29/31/32/33/34，与 `environment_design.md` §3.4 一致）；`side` 保留为人读冗余，执行器以 `op_type` 为准并校验两者一致。
 
 ### 7.2 执行语义
 

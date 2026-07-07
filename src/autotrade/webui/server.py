@@ -273,6 +273,34 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             background=BackgroundTask(zip_path.unlink, missing_ok=True),
         )
 
+    # ---- fold orders ----------------------------------------------------------------
+    @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/orders")
+    def get_fold_orders(
+        experiment_id: str, epoch_id: str, fold_id: str, result: str | None = Query(None)
+    ) -> dict[str, object]:
+        _experiment_dir(experiment_id)
+        try:
+            return registry.fold_orders(manager.experiments_root, experiment_id, epoch_id, fold_id, result=result)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/orders.csv")
+    def get_fold_orders_csv(
+        experiment_id: str, epoch_id: str, fold_id: str, result: str = Query(...)
+    ) -> PlainTextResponse:
+        _experiment_dir(experiment_id)
+        try:
+            filename, csv_text = registry.fold_orders_csv(
+                manager.experiments_root, experiment_id, epoch_id, fold_id, result=result
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return PlainTextResponse(
+            csv_text,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     # ---- analysis -----------------------------------------------------------------
     @app.get("/api/experiments/{experiment_id}/analysis/{epoch_id}/{fold_id}")
     def get_analysis(experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:

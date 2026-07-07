@@ -365,6 +365,60 @@ function cumulativeReturnChart(rows, { width = 640, height = 220 } = {}) {
   return bindChartTips(wrap);
 }
 
+function fmtAmount(value) {
+  const n = Number(value) || 0;
+  if (Math.abs(n) >= 1e8) return `¥${(n / 1e8).toFixed(2)}亿`;
+  if (Math.abs(n) >= 1e4) return `¥${(n / 1e4).toFixed(1)}万`;
+  return `¥${n.toFixed(0)}`;
+}
+
+/* Single-series bar chart (no legend needed for one series); direct value
+   labels when the set is small, tooltips always. */
+function singleSeriesBarChart(rows, { width = 640, height = 200, fmt = fmtPct } = {}) {
+  const INK = themeInk();
+  const color = INK.validColor; // categorical slot 1
+  const values = rows.map((row) => row.value).filter((v) => v !== null && v !== undefined);
+  if (!rows.length || !values.length) return el("div", { class: "hint" }, "暂无数据");
+  const signed = values.some((v) => v < 0);
+  const maxAbs = niceCeil(Math.max(1e-9, ...values.map(Math.abs)));
+  const padL = 56, padR = 10, padB = 30, padT = signed ? 8 : 18;
+  const plotW = width - padL - padR, plotH = height - padT - padB;
+  const zeroY = signed ? padT + plotH / 2 : padT + plotH;
+  const scale = signed ? plotH / 2 : plotH;
+  const yOf = (v) => zeroY - (v / maxAbs) * scale;
+  const svg = [];
+  for (const frac of signed ? [-1, -0.5, 0.5, 1] : [0.5, 1]) {
+    const y = yOf(frac * maxAbs);
+    svg.push(`<line x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}" stroke="${INK.grid}" stroke-width="1"/>`);
+    svg.push(`<text x="${padL - 6}" y="${y + 3.5}" text-anchor="end" font-size="11" fill="${INK.muted}">${escapeHtml(fmt(frac * maxAbs))}</text>`);
+  }
+  svg.push(`<line x1="${padL}" y1="${zeroY}" x2="${width - padR}" y2="${zeroY}" stroke="${INK.baseline}" stroke-width="1"/>`);
+  const groupW = plotW / rows.length;
+  const barW = Math.max(4, Math.min(24, groupW - 6));
+  const showTipLabels = rows.length <= 8;
+  const labelEvery = Math.max(1, Math.ceil(rows.length / 12));
+  rows.forEach((row, index) => {
+    const cx = padL + groupW * index + groupW / 2;
+    const value = row.value;
+    if (value === null || value === undefined) return;
+    const tip = `${row.label} ${fmt(value)}`;
+    svg.push(`<path d="${barPath(cx - barW / 2, zeroY, yOf(value), barW)}" fill="${color}" data-tip="${escapeHtml(tip)}"/>`);
+    if (showTipLabels) {
+      const labelY = value >= 0 ? yOf(value) - 5 : yOf(value) + 13;
+      svg.push(`<text x="${cx}" y="${labelY}" text-anchor="middle" font-size="11" fill="${INK.muted}">${escapeHtml(fmt(value))}</text>`);
+    }
+    if (index % labelEvery === 0) {
+      svg.push(`<text x="${cx}" y="${height - 8}" text-anchor="middle" font-size="11" fill="${INK.muted}">${escapeHtml(String(row.label))}</text>`);
+    }
+  });
+  const wrap = el("div", { class: "svg-chart" });
+  const svgHost = el("div", {});
+  svgHost.innerHTML = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${svg.join("")}</svg>`;
+  wrap.append(svgHost);
+  wrap.__rerender = () => singleSeriesBarChart(rows, { width, height, fmt });
+  return bindChartTips(wrap);
+}
+
 /* Stat tiles: label + semibold value (proportional figures). */
 function statTilesRow(tiles) {
   return el("div", { class: "tiles" },
@@ -521,7 +575,19 @@ function pickBestExperiment(list) {
 function heroPanel(item) {
   const metrics = item.metrics || {};
   const rows = (item.fold_returns || []).map((row) => ({ ...row, epoch_label: row.epoch_id }));
+  const heldoutRows = (item.heldout_returns || [])
+    .filter((row) => row.return !== null && row.return !== undefined)
+    .map((row) => ({ label: row.label, value: row.return }));
   const panel = el("div", { class: "panel hero", id: "hero-panel" });
+  const charts = el("div", { class: "charts-row section-gap" },
+    el("div", { class: "chart-cell" }, el("h4", {}, "逐 Fold 收益"), foldReturnsChart(rows)),
+    el("div", { class: "chart-cell" }, el("h4", {}, "累计收益曲线"), cumulativeReturnChart(rows)),
+  );
+  if (heldoutRows.length) {
+    charts.append(el("div", { class: "chart-cell" },
+      el("h4", {}, "Held-out 各期收益（最终样本外）"),
+      singleSeriesBarChart(heldoutRows, { fmt: fmtPct })));
+  }
   panel.append(
     el("div", { class: "control-bar" },
       el("span", { class: "hero-crown" }, "🏆"),
@@ -531,16 +597,13 @@ function heroPanel(item) {
       el("span", { class: "mode-note" }, "当前最佳实验（按累计测试收益）"),
     ),
     el("div", { class: "section-gap" }, statTilesRow([
+      { label: "Held-out 收益（最终样本外）", value: fmtPct(metrics.cum_heldout_return), cls: `hero-key ${signCls(metrics.cum_heldout_return)}` },
       { label: "累计测试收益", value: fmtPct(metrics.cum_test_return), cls: signCls(metrics.cum_test_return) },
       { label: "累计验证收益", value: fmtPct(metrics.cum_valid_return), cls: signCls(metrics.cum_valid_return) },
-      { label: "Held-out 收益", value: fmtPct(metrics.cum_heldout_return), cls: signCls(metrics.cum_heldout_return) },
       { label: "平均测试 Sharpe", value: metrics.mean_test_sharpe === null || metrics.mean_test_sharpe === undefined ? "—" : Number(metrics.mean_test_sharpe).toFixed(2) },
       { label: "已完成 Fold", value: String(item.folds_recorded ?? 0) },
     ])),
-    el("div", { class: "charts-row section-gap" },
-      el("div", { class: "chart-cell" }, el("h4", {}, "逐 Fold 收益"), foldReturnsChart(rows)),
-      el("div", { class: "chart-cell" }, el("h4", {}, "累计收益曲线"), cumulativeReturnChart(rows)),
-    ),
+    charts,
   );
   return panel;
 }
@@ -1359,6 +1422,8 @@ function loadFoldExtras(experimentId, epochId, foldId) {
     }
     filesPanel.append(chips, viewer);
     wrap.append(filesPanel);
+    // Validation-backtest order stream: stats, charts, table, CSV export.
+    wrap.append(ordersNode(experimentId, epochId, foldId));
     // Analysis.
     wrap.append(analysisNode(experimentId, epochId, foldId, fold.analysis || {}));
     // Test audit, collapsed with warning.
@@ -1374,9 +1439,92 @@ function loadFoldExtras(experimentId, epochId, foldId) {
           kvRow("测试 Sharpe", test.sharpe !== undefined && test.sharpe !== null ? Number(test.sharpe).toFixed(2) : "—"),
           kvRow("测试回撤", fmtPct(test.max_drawdown)),
         ),
+        el("div", { class: "section-gap" }, el("a", {
+          class: "btn small",
+          href: `/api/experiments/${encodeURIComponent(experimentId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}/orders.csv?result=test_000`,
+        }, "⬇ 测试期交易明细 CSV")),
       ));
     }
   })();
+  return wrap;
+}
+
+const ORDER_TABLE_COLUMNS = [
+  ["trade_date", "日期"], ["decision_time", "决策时点"], ["ts_code", "代码"], ["action", "动作"],
+  ["account", "账户"], ["requested_amount", "委托量"], ["filled_quantity", "成交量"],
+  ["price", "价格"], ["status", "状态"], ["reject_reason", "拒单原因"],
+];
+
+/* Validation-backtest transaction details: stats tiles, per-day amount chart,
+   order table, CSV export. Result switcher covers the fold's valid_* runs. */
+function ordersNode(experimentId, epochId, foldId) {
+  const base = `/api/experiments/${encodeURIComponent(experimentId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}`;
+  const body = el("div", {});
+  const wrap = el("div", { class: "section-gap" },
+    el("h4", { style: "margin-bottom:0.4rem" }, "交易明细（验证回测）"), body);
+  async function load(result) {
+    body.innerHTML = "";
+    body.append(el("div", { class: "loading" }, "加载交易明细…"));
+    let data;
+    try {
+      data = await api(`${base}/orders${result ? `?result=${encodeURIComponent(result)}` : ""}`);
+    } catch (error) {
+      body.innerHTML = "";
+      body.append(el("div", { class: "hint" }, `无交易明细：${error.message}`));
+      return;
+    }
+    body.innerHTML = "";
+    const bar = el("div", { class: "control-bar" });
+    if ((data.available || []).length > 1) {
+      for (const name of data.available) {
+        bar.append(el("span", {
+          class: `file-chip${name === data.result ? " active" : ""}`,
+          onclick: () => load(name),
+        }, name));
+      }
+    } else {
+      bar.append(el("span", { class: "mode-note" }, data.result));
+    }
+    bar.append(el("span", { class: "spacer" }), el("a", {
+      class: "btn small",
+      href: `${base}/orders.csv?result=${encodeURIComponent(data.result)}`,
+    }, "⬇ 导出 CSV"));
+    const stats = data.stats || {};
+    const byAction = stats.by_action || {};
+    body.append(bar, el("div", { class: "section-gap" }, statTilesRow([
+      { label: "订单 / 成交 / 拒单", value: `${stats.orders} / ${stats.filled} / ${stats.rejected}` },
+      { label: "成交额", value: fmtAmount(stats.turnover) },
+      { label: "买 / 卖", value: `${byAction.buy || 0} / ${byAction.sell || 0}` },
+      { label: "信用/做空动作", value: String((byAction.credit_buy || 0) + (byAction.credit_sell || 0) + (byAction.fin_buy || 0) + (byAction.short || 0) + (byAction.cover || 0) + (byAction.sell_repay || 0)) },
+    ])));
+    const daily = (stats.daily || []).map((d) => ({ label: String(d.trade_date).slice(4), value: d.amount }));
+    if (daily.length) {
+      body.append(el("h4", { class: "section-gap" }, "逐日成交金额"),
+        singleSeriesBarChart(daily, { fmt: fmtAmount, height: 180 }));
+    }
+    if (Object.keys(stats.reject_reasons || {}).length) {
+      body.append(el("div", { class: "stats-chips section-gap" },
+        ...Object.entries(stats.reject_reasons).map(([reason, count]) =>
+          el("span", { class: "stat-chip" }, `拒单 ${reason} ×${count}`))));
+    }
+    const rows = data.rows || [];
+    if (rows.length) {
+      const table = el("table", { class: "data section-gap" },
+        el("tr", {}, ...ORDER_TABLE_COLUMNS.map(([, label]) => el("th", {}, label))),
+        ...rows.slice(0, 80).map((row) => el("tr", {}, ...ORDER_TABLE_COLUMNS.map(([key]) => {
+          let value = row[key];
+          if (key === "price" && value !== null && value !== undefined) value = Number(value).toFixed(3);
+          return el("td", {}, value === null || value === undefined ? "—" : String(value));
+        }))),
+      );
+      const box = el("div", { class: "orders-table-box" }, table);
+      body.append(box);
+      if (data.row_count > Math.min(rows.length, 80)) {
+        body.append(el("div", { class: "hint" }, `表格显示前 ${Math.min(rows.length, 80)} 条，共 ${data.row_count} 条 —— 完整明细请导出 CSV。`));
+      }
+    }
+  }
+  load(null);
   return wrap;
 }
 
@@ -1428,6 +1576,13 @@ function metaResultPanel(session) {
 function heldoutPanel(session) {
   const records = session.records || [];
   const panel = el("div", { class: "panel section-gap" }, el("h4", {}, "Held-out 冻结测试"));
+  const chartRows = records
+    .map((record) => ({
+      label: String(record.fold_id || "").replace("heldout_", ""),
+      value: (record.test_result || {}).total_return,
+    }))
+    .filter((row) => row.value !== null && row.value !== undefined);
+  if (chartRows.length) panel.append(singleSeriesBarChart(chartRows, { fmt: fmtPct }), el("div", { class: "section-gap" }));
   panel.append(el("table", { class: "data" },
     el("tr", {}, el("th", {}, "区间"), el("th", {}, "收益"), el("th", {}, "Sharpe"), el("th", {}, "回撤")),
     ...records.map((record) => {

@@ -511,6 +511,36 @@ class FoldAnalysisTest(unittest.TestCase):
             self.assertEqual(meta["status"], "ok")
             self.assertEqual(meta["guarded_view"], "validation_only")
 
+    def test_analyze_fold_retries_once_on_length_stop(self) -> None:
+        from autotrade.pipelines.fold_analysis import DEFAULT_MAX_TOKENS, RETRY_MAX_TOKENS
+
+        calls: list[int] = []
+
+        class LengthOnceProxy:
+            provider = "fake"
+            model = "fake-model"
+            def complete(self, messages, *, json_mode, timeout_seconds, max_tokens=None):
+                calls.append(max_tokens)
+                if len(calls) == 1:
+                    raise RuntimeError("deepseek request failed: DeepSeek response stopped with finish_reason=length")
+                from types import SimpleNamespace
+                return SimpleNamespace(content="## 策略逻辑概述\n重试成功。", usage={"total_tokens": 5})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            strategy = Path(tmp) / "strategy"
+            strategy.mkdir()
+            (strategy / "main.py").write_text("pass\n", encoding="utf-8")
+            out_dir = Path(tmp) / "analysis"
+            record = {"epoch_id": "epoch_001", "fold_id": "fold_2022Q1"}
+            md_path = analyze_fold(
+                LengthOnceProxy(), ledger_record=record, strategy_dir=strategy, model_dir=None, out_dir=out_dir
+            )
+            self.assertIn("重试成功", md_path.read_text(encoding="utf-8"))
+            self.assertEqual(calls, [DEFAULT_MAX_TOKENS, RETRY_MAX_TOKENS])
+            meta = json.loads((out_dir / "epoch_001__fold_2022Q1.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["status"], "ok")
+            self.assertTrue(meta["retried_after_length_stop"])
+
     def test_read_strategy_files_orders_main_first_and_skips_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             strategy = Path(tmp)
