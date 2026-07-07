@@ -23,7 +23,9 @@
   --gain: #d03b3b;
   --loss: #1a8a4a;
   --run: #2456c4;
-  --input-bg: #fbfcfe;
+  /* Inputs read as toned "wells", clearly distinct from white panels/buttons. */
+  --input-bg: #f2f4f8;
+  --input-border: #cdd4de;
   --hover-bg: #f2f5fa;
   --chip-bg: #ececf1;
   --code-bg: #f6f8fa;
@@ -57,7 +59,8 @@
   --gain: #e06c6c;
   --loss: #3dbb77;
   --run: #3987e5;
-  --input-bg: #161a22;
+  --input-bg: #13161d;
+  --input-border: #3a4150;
   --hover-bg: #222835;
   --chip-bg: #262c38;
   --code-bg: #161a22;
@@ -108,7 +111,7 @@ main { max-width: 1380px; margin: 1.6rem auto; padding: 0 clamp(14px, 3vw, 34px)
   appearance: none; -webkit-appearance: none;
   border: 1px solid var(--border); background: var(--panel); color: var(--text);
   border-radius: 9px; padding: 0.45rem 0.95rem; font: inherit;
-  font-size: 0.9rem; line-height: 1.45; cursor: pointer; box-shadow: none;
+  font-size: 0.9rem; font-weight: 600; line-height: 1.45; cursor: pointer; box-shadow: none;
   text-decoration: none; user-select: none;
   transition: border-color .12s, color .12s, background .12s;
 }
@@ -235,7 +238,7 @@ table.data th:first-child, table.data td:first-child { text-align: left; }
 
 /* directive editor */
 textarea.directive {
-  width: 100%; min-height: 8rem; border: 1px solid var(--border); border-radius: 10px;
+  width: 100%; min-height: 8rem; border: 1px solid var(--input-border); border-radius: 10px;
   padding: 0.7rem 0.8rem; font: 0.94rem/1.55 var(--mono); resize: vertical;
   background: var(--input-bg); color: var(--text);
 }
@@ -339,13 +342,18 @@ details.test-audit summary { cursor: pointer; color: var(--warn); font-weight: 6
 .field .help { font-size: 0.845rem; color: var(--muted); margin-top: 3px; line-height: 1.45; }
 .help.derived-hint { color: var(--accent); }
 .field input[type="text"], .field input[type="number"], .field select, .field textarea {
-  width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.7rem; font-size: 0.94rem;
-  background: var(--input-bg); color: var(--text);
+  width: 100%; border: 1px solid var(--input-border); border-radius: 8px; padding: 0.5rem 0.7rem; font-size: 0.94rem;
+  /* background-color (not the shorthand) so the select chevron image survives */
+  background-color: var(--input-bg); color: var(--text);
 }
-.field select { padding-right: 1.7rem; }
+.field select { padding-right: 1.7rem; background-color: var(--input-bg); }
+/* Numeric fields read as numeric: right-aligned tabular figures. */
+.field input[type="number"] { text-align: right; font-variant-numeric: tabular-nums; }
 .field input:focus, .field select:focus, .field textarea:focus, textarea.directive:focus {
-  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+  outline: none; border-color: var(--accent); background-color: var(--panel);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
+input[type="checkbox"] { accent-color: var(--accent); }
 .field.checkbox { display: flex; gap: 0.6rem; align-items: flex-start; }
 .field.checkbox input { margin-top: 0.3rem; width: 1.06rem; height: 1.06rem; }
 .check-group { display: flex; gap: 1.1rem; flex-wrap: wrap; padding: 0.3rem 0; }
