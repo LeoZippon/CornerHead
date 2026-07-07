@@ -112,8 +112,8 @@ class WebuiBackendTest(unittest.TestCase):
         trace_dir = experiment_dir / "artifacts" / "run_001"
         trace_dir.mkdir(parents=True)
         events = [
-            {"event_type": "llm_call", "seq": 0, "usage": {"total_tokens": 1000}},
-            {"event_type": "llm_call", "seq": 1, "usage": {"total_tokens": 2000}},
+            {"event_type": "llm_call", "seq": 0, "usage": {"total_tokens": 1000, "prompt_tokens": 800, "completion_tokens": 200}},
+            {"event_type": "llm_call", "seq": 1, "usage": {"total_tokens": 2000, "prompt_tokens": 1500, "completion_tokens": 500}},
             {"event_type": "shell", "seq": 2},
             {"event_type": "backtest_start", "seq": 3},
             {"event_type": "backtest", "seq": 4, "replay_wall_seconds": 88.5},
@@ -165,6 +165,8 @@ class WebuiBackendTest(unittest.TestCase):
         # No trade calendar under the tmp repo root: period pickers degrade to text.
         self.assertEqual(schema["period_options"], {})
         self.assertEqual(fields["first_test_period"]["type"], "string")
+        # Filled per-epoch on the detail page instead of at creation.
+        self.assertNotIn("meta_learning_directive", fields)
         self.assertTrue(all(field.get("help") for field in fields.values()))
 
     def test_period_options_and_defaults_from_calendar(self) -> None:
@@ -330,6 +332,8 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(stats["counts"]["llm_call"], 2)
         self.assertEqual(stats["counts"]["shell"], 1)
         self.assertEqual(stats["llm_total_tokens"], 3000)
+        self.assertEqual(stats["llm_prompt_tokens"], 2300)
+        self.assertEqual(stats["llm_completion_tokens"], 700)
         self.assertAlmostEqual(stats["backtest_wall_seconds"], 88.5)
         self.assertTrue(stats["in_backtest"])  # 2 starts, 1 terminal event
         self.assertEqual(stats["total_events"], 6)

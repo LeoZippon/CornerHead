@@ -16494,3 +16494,22 @@ Changes (12 items):
 12. CornerHead SVG logo (gradient corner bracket + head dot) in the top bar.
 
 Validation: full suite 519 OK (+5 tests: trace stats, download, prompt preview incl. heldout/unknown guards, dataset coverage bounds, extended param→config/broker mapping); `node --check` OK; server restarted on 38888 (detached workers unaffected) and verified live against the running test2: stats counts match the offline analysis, schema clamped, preview 20.5k chars with taste embedded and test_period absent; `git diff --check` clean.
+
+## 2026-07-07 Console iteration 5 + backtest runtime profiling (feat/hitl-webui)
+
+UI changes (items 1-4):
+- Fluid rem type scale: `html { font-size: clamp(15px, 12px + 0.3vw, 20px) }`, every component size converted px→rem — a 16" MacBook (1728px effective) now renders ≈17.2px base without touching the zoom selector; full mobile adaptation (tables become horizontally scrollable blocks, full-screen modal, 44px touch targets, 2-col tiles, stacked page heads at ≤760/≤560px).
+- trace/stats now sums prompt/completion tokens separately; chips render 输入/输出 with `xxx k tokens` / `x.x M tokens` formatting. Live datum (test2 fold run): 3.76M input / 39k output of the 3.80M total — input dominated (context re-sends), worth watching for cache hit ratio rather than output cost.
+- Logo reduced to a single right-angle bracket + head dot (gradient, miter corner).
+- meta_learning_directive removed from the creation form (kept in PARAM_DEFAULTS/API); it is entered per-epoch on the detail page (directive panel), which already overrides via run_meta_learning(directive_override=).
+
+Backtest runtime profiling (item 5) — measured phase_seconds from test2/run_ac0514ed9b35 (9 backtests, all linear in tick count; 20-day full validation = 882s over 5985 ticks ≈ 147ms/tick) + Opus code-path audit of main_ctx_engine/timeview/driver:
+- timeview_build 361.9s (60ms/tick): `Timeview.refresh` per tick (a) recomputes the INVARIANT `executor.map_path(host_dir)` — ~6 `Path.resolve()` filesystem walks per call (executor.py map_path; timeview.py refresh) — and (b) the events domain runs `datasets.astype(str).unique()` over the full events frame per tick for its visibility signature. daily/intraday rolls are no-ops (no available_at column). Which of (a)/(b) dominates needs a runtime profile; both are per-tick-invariant and cacheable.
+- strategy_compute 320.9s (54ms/tick) of which agent substep code only ~41s (~7ms/tick): the rest is per-tick full-universe `bars` construction + `_jsonable` + JSON over the docker-exec stdin/stdout RPC + driver-side re-parse/ctx-rebuild + response round trip (main_ctx_engine._request / main_ctx_driver). Payload = every code in the minute group, every tick.
+- Unattributed ~200s (33ms/tick): `_market_state` assembly sits BEFORE the strategy phase timer (account/positions/debt records ×2 `_jsonable` walks, pending views, `datetime.strptime` per tick in sim_datetime).
+- Off-session ticks (1368 of 5985, 23%) cannot fill orders but run the full timeview+state+RPC path (~140-150s of the 882s).
+- broker_match 0.1s, nl_service 0, state_merge 0 — matching, staging, and NL are NOT the problem; the harness per-tick overhead is (~93% of wall vs ~5% strategy compute).
+- Ranked opportunities (recorded, NOT implemented): 1) cache the asof_dir mapping once per replay; 2) slim/replace the per-tick full-universe JSON bars handoff (referenced-codes subset or columnar/shared-memory channel); 3) skip account/debt assembly + coarsen grid on off-session ticks; 4) cache the events dataset-name set + drop the double _jsonable walk; 5) precompute sim_datetime per (date, minute). Items 1/4/5 are low-risk;
+  2/3 need design care (ctx contract semantics).
+
+Validation: full suite 519 OK; `node --check` OK; server restarted (workers unaffected — test2 had meanwhile frozen its fold and moved to held-out) and token split verified against the collected fold run; `git diff --check` clean.

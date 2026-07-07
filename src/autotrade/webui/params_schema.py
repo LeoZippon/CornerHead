@@ -72,8 +72,8 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "analysis_model", "group": "运行控制", "label": "策略分析模型", "type": "choice",
      "choices": list(MODEL_CHOICES),
      "help": "生成 Fold 策略分析所用的 DeepSeek 模型。"},
-    {"key": "meta_learning_directive", "group": "运行控制", "label": "元学习探索方向（可选）", "type": "text",
-     "help": "实验级研究方向，注入每个 Epoch 的元学习提示词；各 Epoch 也可在运行前单独覆盖。"},
+    # meta_learning_directive 有意不进创建表单：进入实验详情页后在元学习会话
+    # 的指令面板填写（逐 Epoch 可覆盖），避免创建时与详情页两处重复输入。
     # 预算与验收
     {"key": "max_fold_minutes", "group": "预算与验收", "label": "单 Fold 推理时长（分钟）", "type": "int",
      "help": "每个 Fold 和元学习会话的推理墙钟上限；回测耗时独立计算并回补。"},

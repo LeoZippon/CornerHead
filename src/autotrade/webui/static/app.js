@@ -1055,6 +1055,13 @@ const STAT_CHIPS = [
   ["context_compaction", "🗜 压缩"],
 ];
 
+function fmtTokens(count) {
+  const n = Number(count) || 0;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)} M tokens`;
+  if (n >= 1000) return `${Math.round(n / 1000)} k tokens`;
+  return `${n} tokens`;
+}
+
 function statsChipsRow(stats) {
   const counts = stats.counts || {};
   const row = el("div", { class: "stats-chips" });
@@ -1064,8 +1071,13 @@ function statsChipsRow(stats) {
     if (key === "backtest" && stats.backtest_wall_seconds) text += `（Σ ${fmtDuration(stats.backtest_wall_seconds)}）`;
     row.append(el("span", { class: "stat-chip" }, text));
   }
-  if (stats.llm_total_tokens) {
-    row.append(el("span", { class: "stat-chip" }, `Σ tokens ${(stats.llm_total_tokens / 1000).toFixed(0)}k`));
+  if (stats.llm_prompt_tokens || stats.llm_completion_tokens) {
+    row.append(
+      el("span", { class: "stat-chip" }, `输入 ${fmtTokens(stats.llm_prompt_tokens)}`),
+      el("span", { class: "stat-chip" }, `输出 ${fmtTokens(stats.llm_completion_tokens)}`),
+    );
+  } else if (stats.llm_total_tokens) {
+    row.append(el("span", { class: "stat-chip" }, `Σ ${fmtTokens(stats.llm_total_tokens)}`));
   }
   return row;
 }

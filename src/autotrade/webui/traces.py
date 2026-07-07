@@ -72,6 +72,8 @@ def trace_stats(path: Path) -> dict[str, object]:
     counts: dict[str, int] = {}
     backtest_wall = 0.0
     llm_tokens = 0
+    prompt_tokens = 0
+    completion_tokens = 0
     last_ts: str | None = None
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
@@ -97,6 +99,8 @@ def trace_stats(path: Path) -> dict[str, object]:
                 if isinstance(usage, dict):
                     try:
                         llm_tokens += int(usage.get("total_tokens") or 0)
+                        prompt_tokens += int(usage.get("prompt_tokens") or 0)
+                        completion_tokens += int(usage.get("completion_tokens") or 0)
                     except (TypeError, ValueError):
                         pass
     return {
@@ -104,6 +108,8 @@ def trace_stats(path: Path) -> dict[str, object]:
         "total_events": sum(counts.values()),
         "backtest_wall_seconds": round(backtest_wall, 1),
         "llm_total_tokens": llm_tokens,
+        "llm_prompt_tokens": prompt_tokens,
+        "llm_completion_tokens": completion_tokens,
         "in_backtest": counts.get("backtest_start", 0) > counts.get("backtest", 0),
         "last_event_ts": last_ts,
         "trace_bytes": path.stat().st_size,
