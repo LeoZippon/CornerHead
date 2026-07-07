@@ -190,11 +190,14 @@ function themeInk() {
   if (currentTheme() === "dark") {
     return {
       validColor: "#3987e5", testColor: "#199e70",
+      // Lighter steps of the same hues: the short-side stack segment.
+      validLight: "#7fb2ef", testLight: "#5ec49a",
       grid: "#2b303c", baseline: "#4a5163", muted: "#98a0af", faint: "#6f7787", ring: "#1b1f28",
     };
   }
   return {
     validColor: "#2a78d6", testColor: "#1baf7a",
+    validLight: "#86b6ef", testLight: "#66cfa4",
     grid: "#e9ebf1", baseline: "#c2c7d2", muted: "#68717f", faint: "#a5abb8", ring: "#ffffff",
   };
 }
@@ -246,6 +249,18 @@ function niceCeil(value) {
   return 10 * mag;
 }
 
+/* Stack segment between two y levels; the far (data-end) edge may be rounded. */
+function segmentPath(x, yNear, yFar, w, roundFar) {
+  const top = Math.min(yNear, yFar), bottom = Math.max(yNear, yFar);
+  const h = Math.max(bottom - top, 1);
+  if (!roundFar) return `M${x},${top} H${x + w} V${bottom} H${x} Z`;
+  const r = Math.min(4, w / 2, h);
+  if (yFar < yNear) { // grows upward: round the top corners
+    return `M${x},${bottom} L${x},${top + r} Q${x},${top} ${x + r},${top} L${x + w - r},${top} Q${x + w},${top} ${x + w},${top + r} L${x + w},${bottom} Z`;
+  }
+  return `M${x},${top} L${x + w},${top} L${x + w},${bottom - r} Q${x + w},${bottom} ${x + w - r},${bottom} L${x + r},${bottom} Q${x},${bottom} ${x},${bottom - r} Z`;
+}
+
 /* Rounded data-end bar: square at the baseline, 4px radius at the value end. */
 function barPath(x, zeroY, valueY, w) {
   const up = valueY < zeroY;
@@ -269,7 +284,25 @@ function foldReturnsChart(rows, { width = 640, height = 220, mini = false, serie
   };
   const validKey = series ? series[0].key : "valid_return";
   const testKey = series ? series[1].key : "test_return";
-  const values = rows.flatMap((row) => [row[validKey], row[testKey]]).filter((v) => v !== null && v !== undefined);
+  // Long/short ride INSIDE the default bars as stacked shades of each series'
+  // hue (lighter step = short side); minis and custom series stay solid totals.
+  const splitKeys = { [validKey]: ["valid_long", "valid_short"], [testKey]: ["test_long", "test_short"] };
+  const lightFor = { [validKey]: INK.validLight, [testKey]: INK.testLight };
+  const hasSplit = !series && !mini
+    && rows.some((row) => row.valid_long !== null && row.valid_long !== undefined);
+  const barExtents = (row, key) => {
+    if (hasSplit && row[splitKeys[key][0]] !== null && row[splitKeys[key][0]] !== undefined) {
+      const parts = [row[splitKeys[key][0]] || 0, row[splitKeys[key][1]] || 0];
+      return [
+        parts.filter((v) => v > 0).reduce((a, b) => a + b, 0),
+        parts.filter((v) => v < 0).reduce((a, b) => a + b, 0),
+      ];
+    }
+    return [row[key], row[key]];
+  };
+  const values = rows
+    .flatMap((row) => [...barExtents(row, validKey), ...barExtents(row, testKey)])
+    .filter((v) => v !== null && v !== undefined);
   if (!rows.length || !values.length) return el("div", { class: "hint" }, "暂无收益数据");
   const maxAbs = niceCeil(Math.max(0.005, ...values.map(Math.abs)));
   const padL = mini ? 42 : 50, padR = 10, padB = mini ? 26 : 36, padT = 8;
@@ -289,8 +322,8 @@ function foldReturnsChart(rows, { width = 640, height = 220, mini = false, serie
   rows.forEach((row, index) => {
     const cx = padL + groupW * index + groupW / 2;
     const bars = [
-      { v: row[validKey], series: SERIES.valid, x: cx - barW - 1 }, // 2px surface gap between the pair
-      { v: row[testKey], series: SERIES.test, x: cx + 1 },
+      { v: row[validKey], key: validKey, series: SERIES.valid, x: cx - barW - 1 }, // 2px surface gap between the pair
+      { v: row[testKey], key: testKey, series: SERIES.test, x: cx + 1 },
     ];
     for (const bar of bars) {
       if (bar.v === null || bar.v === undefined) continue;
@@ -304,7 +337,36 @@ function foldReturnsChart(rows, { width = 640, height = 220, mini = false, serie
         }
         if (row.fold_status) lines.push(`状态 ${row.fold_status}`);
       }
-      svg.push(`<path d="${barPath(bar.x, zeroY, yOf(bar.v), barW)}" fill="${bar.series.color}" data-tip="${escapeHtml(lines.join("\n"))}"/>`);
+      const tip = escapeHtml(lines.join("\n"));
+      const [longVal, shortVal] = hasSplit
+        ? [row[splitKeys[bar.key][0]], row[splitKeys[bar.key][1]]]
+        : [null, null];
+      if (longVal === null || longVal === undefined) {
+        svg.push(`<path d="${barPath(bar.x, zeroY, yOf(bar.v), barW)}" fill="${bar.series.color}" data-tip="${tip}"/>`);
+        continue;
+      }
+      // Stacked long (solid) + short (lighter shade of the same hue), positives
+      // up / negatives down, 2px surface gap between stacked segments; the
+      // outermost segment in each direction carries the rounded data-end.
+      const segments = [
+        { v: longVal || 0, color: bar.series.color },
+        { v: shortVal || 0, color: lightFor[bar.key] },
+      ].filter((seg) => seg.v !== 0);
+      let up = 0, down = 0;
+      const drawn = [];
+      for (const seg of segments) {
+        if (seg.v > 0) { drawn.push({ ...seg, from: up, to: up + seg.v, dir: 1 }); up += seg.v; }
+        else { drawn.push({ ...seg, from: down, to: down + seg.v, dir: -1 }); down += seg.v; }
+      }
+      for (const seg of drawn) {
+        const isOuter = seg.dir > 0 ? seg.to === up : seg.to === down;
+        const gap = seg.from === 0 ? 0 : 2; // surface gap toward the baseline side
+        const yNear = yOf(seg.from) - seg.dir * gap;
+        svg.push(`<path d="${segmentPath(bar.x, yNear, yOf(seg.to), barW, isOuter)}" fill="${seg.color}" data-tip="${tip}"/>`);
+      }
+      if (!drawn.length) {
+        svg.push(`<path d="${barPath(bar.x, zeroY, yOf(bar.v), barW)}" fill="${bar.series.color}" data-tip="${tip}"/>`);
+      }
     }
     if (index % labelEvery === 0) {
       const label = String(row.fold_id || "").replace(/^fold_/, "");
@@ -314,8 +376,15 @@ function foldReturnsChart(rows, { width = 640, height = 220, mini = false, serie
       }
     }
   });
-  const wrap = el("div", { class: "svg-chart" },
-    chartLegend([SERIES.valid, SERIES.test]));
+  const legendItems = hasSplit
+    ? [
+        { color: SERIES.valid.color, label: "验证·多头" },
+        { color: INK.validLight, label: "验证·空头" },
+        { color: SERIES.test.color, label: "测试·多头" },
+        { color: INK.testLight, label: "测试·空头" },
+      ]
+    : [SERIES.valid, SERIES.test];
+  const wrap = el("div", { class: "svg-chart" }, chartLegend(legendItems));
   const svgHost = el("div", {});
   svgHost.innerHTML = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${svg.join("")}</svg>`;
   wrap.append(svgHost);
@@ -629,14 +698,6 @@ function heroPanel(item) {
       el("h4", {}, "Held-out 各期收益（最终样本外）"),
       singleSeriesBarChart(heldoutRows, { fmt: fmtPct })));
   }
-  if (rows.some((row) => row.test_long !== null && row.test_long !== undefined)) {
-    charts.append(el("div", { class: "chart-cell" },
-      el("h4", {}, "多 / 空收益拆解（测试期）"),
-      foldReturnsChart(rows, { series: [
-        { key: "test_long", label: "多头" },
-        { key: "test_short", label: "空头（含融券）" },
-      ] })));
-  }
   panel.append(
     el("div", { class: "control-bar" },
       el("span", { class: "hero-crown" }, "🏆"),
@@ -929,15 +990,6 @@ async function renderDetailPage(experimentId, selectedKey) {
       el("div", { class: "chart-cell" }, el("h4", {}, "逐 Fold 收益（验证 vs 测试）"), foldReturnsChart(chartRows)),
       el("div", { class: "chart-cell" }, el("h4", {}, "累计收益曲线"), cumulativeReturnChart(chartRows)),
     );
-    // Trade-type decomposition (long vs short, test period) when recorded.
-    if (chartRows.some((row) => row.test_long !== null && row.test_long !== undefined)) {
-      charts.append(el("div", { class: "chart-cell" },
-        el("h4", {}, "多 / 空收益拆解（测试期）"),
-        foldReturnsChart(chartRows, { series: [
-          { key: "test_long", label: "多头" },
-          { key: "test_short", label: "空头（含融券）" },
-        ] })));
-    }
     // Tile order standardized with the homepage hero: Held-out → test → valid.
     container.append(el("div", { class: "panel section-gap" },
       statTilesRow([
