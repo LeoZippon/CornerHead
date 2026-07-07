@@ -34,10 +34,13 @@ bars; ordinary off-session ticks are for research, state updates, and plan hando
 Orders map to live QMT `order_stock` types (no broker-side stop/conditional
 order). An order reaches the book a **later bar**, `execution_lag_bars` ahead
 (default 2, modelling submit latency), never within the bar you decided on: a
-plain call is a **market order** (fills at that bar's open + slippage); `limit=P`
-is a **limit order** (FIX_PRICE) that rests until a bar's `[low, high]` reaches P
-and fills without slippage: at a favorable open if the bar opens through P,
-otherwise at P after an intrabar touch. It auto-cancels after `valid_bars` bars.
+plain call is a **market order** (fills at its bar's open + slippage; if the code
+prints no bar that minute it keeps working and fills at the day's next traded
+bar, else the day-end sweep cancels it); `limit=P` is a **limit order**
+(FIX_PRICE) that fills without slippage: at a favorable open if the bar opens
+through P, otherwise at P only when the bar trades STRICTLY through it — a bare
+touch (low == P on a buy, high == P on a sell) counts as queued, unfilled. It
+auto-cancels after `valid_bars` bars.
 Query `ctx.broker.pending(code)` to skip codes with an order still in flight, or
 `ctx.broker.pending()` to scan all pending orders and `ctx.broker.cancel(order_id)`
 to cancel stale unfilled orders. Cross-minute `ctx.substep` actions are not broker
@@ -156,7 +159,9 @@ without `limit=` is rejected; cross-minute substep actions are not orders until
 For direct text processing, read `pd.read_parquet(Path(str(ctx.asof_dir)) / "text_index")`
 and join rows to `ctx.asof_dir / "text_library"` via each row's `library_file` and `text_id`.
 
-`amount` is a share count (lot-aligned to 100). The Broker enforces cash and
+`amount` is a share count (SH/SZ main board and ChiNext: multiples of 100; STAR:
+200 minimum then 1-share steps; BSE: 100 minimum then 1-share steps). The Broker
+enforces cash and
 保证金可用余额, T+1 sellable balance, lot size, price limits, suspension,
 margin-target eligibility and credit
 quotas, per-calendar-day debt interest, the maintenance-ratio forced close, and

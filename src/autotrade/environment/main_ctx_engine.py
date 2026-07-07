@@ -1159,6 +1159,9 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
         valid_bars=max(1, _int_or_none(action.get("valid_bars")) or 1) if limit is not None else 1,
         is_auction=is_auction,
         auction_close=is_close_auction,
+        # A market order may now rest across printless bars: keep it reserving
+        # buying power at its decision-time price estimate.
+        reserve_price=_float_or_none(action.get("_reserve_price")),
         **order_kwargs,
     )
     return True

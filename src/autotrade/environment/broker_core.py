@@ -56,6 +56,10 @@ def is_star_market(ts_code: str) -> bool:
     return code.endswith(".SH") and code[:3] in {"688", "689"}
 
 
+def is_bse_market(ts_code: str) -> bool:
+    return str(ts_code).upper().endswith(".BJ")
+
+
 def afterhours_available(ts_code: str, trade_date: str) -> bool:
     """Whether the code's board offers after-hours fixed-price trading on this date."""
     date = str(trade_date)

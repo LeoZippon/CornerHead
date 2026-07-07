@@ -60,6 +60,7 @@ from autotrade.environment.broker_core import (
     accrue_debt_interest,
     credit_maintenance_ratio,
     enable_bail_balance,
+    is_bse_market,
     is_star_market,
     project_open,
     project_reduce,
@@ -402,6 +403,10 @@ class WorkingOrder:
     # open (09:25) auction or a continuous order fills at its bar OPEN.
     auction_close: bool = False
     uptick_checked: bool = False
+    # Decision-time price estimate for a MARKET order so it keeps reserving cash /
+    # bail balance while resting across printless bars (a limit order reserves at
+    # its own price).
+    reserve_price: float | None = None
 
     @property
     def is_limit(self) -> bool:
@@ -417,6 +422,7 @@ class WorkingOrder:
             "order_volume": self.volume,
             "price_type": self.price_type,
             "price": self.price,
+            "reserve_price": self.reserve_price,
             "status": "working",
             "submitted_at": self.submitted_at,
             "remaining_bars": self.remaining_bars,
@@ -671,6 +677,7 @@ class SimBroker:
         valid_bars: int = 1,
         is_auction: bool = False,
         auction_close: bool = False,
+        reserve_price: float | None = None,
         reason: str = "",
         submitted_at: str = "",
     ) -> str:
@@ -741,6 +748,7 @@ class SimBroker:
                 remaining_bars=max(1, int(valid_bars or 1)),
                 is_auction=bool(is_auction),
                 auction_close=bool(auction_close),
+                reserve_price=(None if is_limit else reserve_price),
                 reason=str(reason or action),
                 submitted_at=str(submitted_at or ""),
             )
@@ -840,7 +848,27 @@ class SimBroker:
         survivors: list[WorkingOrder] = []
         for order in self._book:
             bar = _bar_for_code(minute_group, order.ts_code)
-            if order.action == "short" and not order.uptick_checked and bar is not None:
+            if bar is None:
+                # The code printed no bar this minute. A market order keeps working
+                # until the day's next bar with trades (an auction order that missed
+                # its single-price bar rolls into continuous matching and loses the
+                # slippage-free auction treatment, as an unmatched 集合竞价 order
+                # does); the day-end sweep is its backstop. A limit order's
+                # time-in-force still counts down on the market bar grid.
+                if not order.is_limit:
+                    order.is_auction = False
+                    order.auction_close = False
+                    survivors.append(order)
+                elif order.remaining_bars <= 1:
+                    self._event(
+                        "order_cancelled", trade_date=trade_date, minute_key=minute_key,
+                        ts_code=order.ts_code, order_id=order.order_id, reason="expired_unfilled",
+                    )
+                else:
+                    order.remaining_bars -= 1
+                    survivors.append(order)
+                continue
+            if order.action == "short" and not order.uptick_checked:
                 # 融券卖出申报价不得低于最新成交价: checked once, when the order first
                 # reaches the exchange (its activation bar). An aggressive limit below
                 # the reference price would have been rejected at 申报.
@@ -856,7 +884,7 @@ class SimBroker:
                     self.orders.append(rejected)
                     self._reject(rejected, "slo_sell_uptick_rule")
                     continue
-            price = _limit_fill_price(order, bar, use_close=order.auction_close) if bar is not None else None
+            price = _limit_fill_price(order, bar, use_close=order.auction_close)
             if price is not None:
                 self.execute(
                     order.ts_code,
@@ -1352,7 +1380,23 @@ class SimBroker:
             self._event("exit_blocked_limit_up", ts_code=ts_code, side=pos.side, trade_date=trade_date, forced=forced)
             return False
         price = self.profile.slipped_price(raw_price, is_buy=pos.side == "short")
-        self._reduce_position(state, pos, sellable, price, trade_date, forced=forced, price_label="close")
+        side = pos.side
+        fill = self._reduce_position(state, pos, sellable, price, trade_date, forced=forced, price_label="close")
+        if forced and state.name == "credit" and side == "long" and fill is not None:
+            # 强平所得偿还融资负债 (interest first, oldest first): the broker keeps
+            # the liquidation proceeds against outstanding 融资 debt rather than
+            # leaving the principal accruing interest. Voluntary 担保品卖出 keeps
+            # its proceeds in cash (only sell_repay repays by choice), and the
+            # exit-day mandatory liquidation nets debt in equity as before.
+            release_fin_shares(state.contracts, ts_code, sellable)
+            repaid = repay_fin(state.contracts, max(0.0, fill.cash_delta), release_shares=False)
+            if repaid["applied"] > 0:
+                state.cash -= repaid["applied"]
+                self.interest_paid_total += repaid["interest_paid"]
+                self._event(
+                    "debt_repaid", trade_date=trade_date, ts_code=ts_code,
+                    kind="fin", via="forced_close", **repaid,
+                )
         return True
 
     def account_equity(self, account: str) -> float:
@@ -1638,6 +1682,11 @@ class SimBroker:
         shares = int(rounded)
         if is_star_market(ts_code):
             if shares < STAR_MIN_LOT_SIZE:
+                return 0, "amount_below_lot_size"
+            return shares, None
+        if is_bse_market(ts_code):
+            # BSE: minimum 100 shares, then 1-share increments (no 100-lot multiple rule).
+            if shares < LOT_SIZE:
                 return 0, "amount_below_lot_size"
             return shares, None
         if shares < LOT_SIZE:
@@ -2067,10 +2116,11 @@ def _limit_fill_price(order: WorkingOrder, bar: pd.Series, *, use_close: bool = 
     Market orders fill at the bar reference price: the bar OPEN by default, or the
     bar CLOSE for a close (15:00) call-auction order (``use_close``) so a 14:57
     close-auction decision settles at the day's close, not its open. A limit order
-    fills only when the bar's range reaches the limit: buy/cover orders fill at the
+    fills only when the bar trades THROUGH the limit: buy/cover orders fill at the
     reference price when it is already at or below the limit, otherwise at the limit
-    after an intrabar dip; sell/short orders symmetrically fill at an already-favorable
-    reference price, otherwise at the limit."""
+    when the bar low goes STRICTLY below it — a bare touch (low == limit) leaves the
+    resting order in the unmodelled queue at that price, unfilled. Sell/short orders
+    are symmetric (high strictly above the limit)."""
     ref_price = _close_price(bar) if use_close else _open_price(bar)
     if order.price is None or ref_price is None:
         return ref_price
@@ -2079,11 +2129,11 @@ def _limit_fill_price(order: WorkingOrder, bar: pd.Series, *, use_close: bool = 
         if ref_price <= limit:
             return ref_price
         low = bar.get("low")
-        return limit if (low is not None and pd.notna(low) and float(low) <= limit) else None
+        return limit if (low is not None and pd.notna(low) and float(low) < limit) else None
     if ref_price >= limit:
         return ref_price
     high = bar.get("high")
-    return limit if (high is not None and pd.notna(high) and float(high) >= limit) else None
+    return limit if (high is not None and pd.notna(high) and float(high) > limit) else None
 
 
 class TraderProtocol(Protocol):

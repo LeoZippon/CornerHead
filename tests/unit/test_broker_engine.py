@@ -953,6 +953,131 @@ class CorporateActionTest(unittest.TestCase):
         self.assertGreater(stats["long_return"], -0.0001)  # ≈ round-trip costs only
 
 
+class FillRealismTest(unittest.TestCase):
+    """Fill-model realism: strict trade-through limit fills, market orders resting
+    across printless minutes, forced-close proceeds repaying 融资 debt, BSE lots."""
+
+    def make_broker(self, **profile_kw):
+        profile = BrokerProfile(**profile_kw)
+        return SimBroker(profile, MarketData(REPLAY), shortable_codes=frozenset({"000001.SZ", "000002.SZ"}))
+
+    @staticmethod
+    def bar_group(open_, high, low, close, code="000001.SZ"):
+        return pd.DataFrame([{"ts_code": code, "open": open_, "high": high, "low": low, "close": close}])
+
+    def test_limit_buy_needs_strict_trade_through(self):
+        broker = self.make_broker()
+        broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.8, 1000, valid_bars=3)
+        # A bare touch (low == limit) leaves the order resting in the queue.
+        broker.match_bar("20220104", "09:31", self.bar_group(10.0, 10.1, 9.8, 9.9))
+        self.assertEqual(len(broker.working_orders()), 1)
+        self.assertEqual(broker.position_quantity("000001.SZ"), 0)
+        # Trading strictly through the limit fills at the limit.
+        broker.match_bar("20220104", "09:32", self.bar_group(10.0, 10.1, 9.79, 9.9))
+        self.assertEqual(broker.position_quantity("000001.SZ"), 1000)
+        fill = next(e for e in broker.events if e["event_type"] == "order_filled")
+        self.assertEqual(fill["price"], 9.8)
+
+    def test_limit_sell_needs_strict_trade_through(self):
+        broker = self.make_broker()
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.roll_to_date("20220105")
+        broker.passorder(optype.STOCK_SELL, 1101, "", "000001.SZ", prtype.FIX, 10.6, 1000, valid_bars=3)
+        broker.match_bar("20220105", "09:31", self.bar_group(10.5, 10.6, 10.4, 10.5))  # touch only
+        self.assertEqual(len(broker.working_orders()), 1)
+        broker.match_bar("20220105", "09:32", self.bar_group(10.5, 10.61, 10.4, 10.5))  # through
+        self.assertEqual(broker.position_quantity("000001.SZ"), 0)
+
+    def test_market_order_rests_across_printless_minutes(self):
+        broker = self.make_broker()
+        broker.roll_to_date("20220104")
+        cash_before = _asset(broker, "stock")["available_cash"]
+        broker.passorder(
+            optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 1000, reserve_price=10.0
+        )
+        empty = pd.DataFrame(columns=["ts_code", "open", "high", "low", "close"])
+        for minute in ("09:31", "09:32", "09:33"):
+            broker.match_bar("20220104", minute, empty)
+        # Still working after printless minutes, and still reserving buying power.
+        self.assertEqual(len(broker.working_orders()), 1)
+        self.assertLess(_asset(broker, "stock")["available_cash"], cash_before - 9000)
+        broker.match_bar("20220104", "09:40", self.bar_group(10.2, 10.3, 10.1, 10.2))
+        self.assertEqual(broker.position_quantity("000001.SZ"), 1000)
+        fill = next(e for e in broker.events if e["event_type"] == "order_filled")
+        self.assertAlmostEqual(fill["price"], BrokerProfile().slipped_price(10.2, is_buy=True))
+
+    def test_unmatched_auction_order_rolls_into_continuous_matching(self):
+        broker = self.make_broker()
+        broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 1000, is_auction=True)
+        empty = pd.DataFrame(columns=["ts_code", "open", "high", "low", "close"])
+        broker.match_bar("20220104", "09:30", empty)  # missed its single-price bar
+        broker.match_bar("20220104", "09:31", self.bar_group(10.0, 10.1, 9.9, 10.0))
+        fill = next(e for e in broker.events if e["event_type"] == "order_filled")
+        # Continuous taker fill: the auction's slippage-free treatment is gone.
+        self.assertEqual(fill["price_label"], "minute:09:31")
+        self.assertAlmostEqual(fill["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
+
+    def test_limit_order_time_in_force_still_counts_printless_minutes(self):
+        broker = self.make_broker()
+        broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.5, 1000, valid_bars=2)
+        empty = pd.DataFrame(columns=["ts_code", "open", "high", "low", "close"])
+        broker.match_bar("20220104", "09:31", empty)
+        broker.match_bar("20220104", "09:32", empty)
+        self.assertEqual(broker.working_orders(), [])
+        cancel = next(e for e in broker.events if e["event_type"] == "order_cancelled")
+        self.assertEqual(cancel["reason"], "expired_unfilled")
+
+    def test_forced_close_proceeds_repay_fin_debt(self):
+        crash = make_daily(
+            [
+                ("20220104", "000001.SZ", 10.0, 10.0, 11.0, 9.0, False),
+                ("20220105", "000001.SZ", 0.9, 0.9, 0.99, 0.81, False),
+                ("20220106", "000001.SZ", 0.9, 0.9, 0.99, 0.81, False),
+            ]
+        )
+        # Just enough credit cash to open the financed position; the crash then
+        # drops the maintenance ratio through the 1.30 closeout line.
+        broker = SimBroker(
+            BrokerProfile(credit_initial_cash=60_000.0),
+            MarketData(crash),
+            shortable_codes=frozenset({"000001.SZ"}),
+        )
+        broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=5000)
+        broker.mark_to_market("20220104")
+        principal = sum(c.principal for c in broker.credit.contracts if c.kind == "fin")
+        self.assertGreater(principal, 50_000.0)
+        # The crash breaches the maintenance line; the forced close's proceeds must
+        # repay the 融资 contracts (interest first) instead of idling in cash.
+        broker.mark_to_market("20220105")
+        self.assertTrue(any(e["event_type"] == "forced_close_triggered" for e in broker.events))
+        repaid = next(e for e in broker.events if e["event_type"] == "debt_repaid" and e.get("via") == "forced_close")
+        self.assertGreater(repaid["principal_paid"], 4_000.0)  # ~5000 shares × ~0.9 net of costs
+        self.assertGreater(repaid["interest_paid"], 0.0)
+        remaining = sum(c.principal for c in broker.credit.contracts if c.kind == "fin" and not c.closed)
+        self.assertAlmostEqual(remaining, principal - repaid["principal_paid"], places=6)
+        # No further interest on the repaid part; equity still nets the shortfall.
+        self.assertLess(broker.account_equity("credit"), 60_000.0)
+
+    def test_voluntary_credit_sell_keeps_proceeds_in_cash(self):
+        broker = self.make_broker()
+        broker.execute("000002.SZ", "credit_buy", trade_date="20220104", raw_price=20.0, amount=500)
+        broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.roll_to_date("20220105")
+        principal = sum(c.principal for c in broker.credit.contracts if c.kind == "fin")
+        broker.execute("000002.SZ", "credit_sell", trade_date="20220105", raw_price=19.0, amount=500)
+        # Selling plain collateral does not force-repay 融资 debt (only sell_repay does).
+        self.assertAlmostEqual(
+            sum(c.principal for c in broker.credit.contracts if c.kind == "fin"), principal
+        )
+
+    def test_bse_lot_rule_allows_single_share_increments_above_100(self):
+        self.assertEqual(SimBroker.validate_share_amount(150, "830799.BJ"), (150, None))
+        self.assertEqual(SimBroker.validate_share_amount(101, "430047.BJ"), (101, None))
+        self.assertEqual(SimBroker.validate_share_amount(99, "830799.BJ"), (0, "amount_below_lot_size"))
+        # Non-BSE boards keep the 100-multiple rule.
+        self.assertEqual(SimBroker.validate_share_amount(150, "000001.SZ"), (0, "amount_not_lot_aligned"))
+
+
 # After-hours-eligible replay: main-board dates on/after the 2026-07-06 rule
 # revision that extended 盘后固定价格交易 to all A-shares.
 AH_REPLAY = make_daily(
@@ -1156,11 +1281,13 @@ class ReplayIntegrationTest(unittest.TestCase):
 
     def test_unshortable_code_is_rejected_during_replay(self):
         # 融券卖出 must quote a limit at/above the reference price; the margin_secs
-        # inventory gate then rejects the fill for a non-shortable code.
+        # inventory gate then rejects the fill for a non-shortable code. The limit
+        # equals the activation bar's reference (19.5 close) so the order is
+        # marketable there — a bare touch of the day high no longer fills.
         def go_short(state):
             if state["cur_time"] != "09:25" or _held(state, "000002.SZ"):
                 return []
-            return [{"action": "short", "ts_code": "000002.SZ", "amount": 1000, "limit": 20.0}]
+            return [{"action": "short", "ts_code": "000002.SZ", "amount": 1000, "limit": 19.5}]
 
         replay = run_main_ctx_replay(
             REPLAY,
@@ -1173,10 +1300,11 @@ class ReplayIntegrationTest(unittest.TestCase):
     def test_dynamic_shortability_gates_on_fill_day_set(self):
         # The short fills same-day at 20220104; the broker must consult that day's
         # per-day margin_secs set, independent of the frozen decision-day set (W7).
+        # Limit 19.5 = the activation bar reference, so the order is marketable.
         def go_short(state):
             if state["cur_time"] != "09:25" or _held(state, "000002.SZ"):
                 return []
-            return [{"action": "short", "ts_code": "000002.SZ", "amount": 1000, "limit": 20.0}]
+            return [{"action": "short", "ts_code": "000002.SZ", "amount": 1000, "limit": 19.5}]
 
         # Frozen set empty, but the fill day's per-day set allows the short.
         allowed = run_main_ctx_replay(

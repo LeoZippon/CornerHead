@@ -135,7 +135,7 @@
 | `stamp_duty_sell_bps_before_cutover` | 10.0 | 印花税（卖出侧，切换日前，万十） |
 | `stamp_duty_sell_bps_from_cutover` | 5.0 | 印花税（切换日起，万五） |
 | `broker_core.STAMP_DUTY_CUTOVER`（常量） | `20230828` | 印花税减半切换日 |
-| `slippage_bps` | 5.0 | 市价 taker 滑点（限价/竞价成交不计滑点） |
+| `slippage_bps` | 5.0 | 市价 taker 滑点（限价/竞价/盘后定价成交不计滑点）；固定值、与订单规模和买卖价差无关——已记录的研究假设 |
 | `broker_core.LOT_SIZE`（常量） | 100 | 普通 A 股一手股数；科创板为 200 股起、之后 1 股递增 |
 | `max_total_holdings` | None | 最大持仓数（默认交给 Agent 自控） |
 | `max_single_name_weight` | None | 单票权重上限（默认交给 Agent 自控） |
@@ -149,7 +149,7 @@
 | `slo_margin_ratio` | 1.0 | 融券保证金比例 |
 | `slo_margin_ratio_private_fund` | 1.2 | 私募适用的融券保证金比例（`is_private_fund=True` 时生效） |
 | `is_private_fund` | False | 选择融券保证金档位 |
-| `fin_rate_annual` | 0.0835 | 融资利率（年化，研究假设，按自然日 /360 计入合约） |
+| `fin_rate_annual` | 0.0835 | 融资利率（年化，研究假设，按自然日 /360 计入合约；无按月结息周期，利息在偿还/平仓时一次付清——已记录的研究假设） |
 | `slo_rate_annual` | 0.085 | 融券费率（年化，研究假设，按自然日 /360 计入合约） |
 | `debt_contract_term_days` | 180 | 融资/融券负债合约期限（自然日） |
 | `debt_contract_auto_extend` | True | 合约到期时自动展期并记录审计事件 |
