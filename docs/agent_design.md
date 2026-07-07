@@ -246,7 +246,7 @@ def main(ctx) -> None:
 
 Environment 按回放 tick 逐 tick 调用一次 `main(ctx)`（一次覆盖全市场），没有 `trade_intents` 映射。`main` 自己决定时序：每个 tick 都可核对持仓/在途，在 `ctx.substep` 内维护 `ctx.state_dir` 计划，并在选定时点（如盘前或收盘前）筛选新目标；只有显式可报单 tick（09:15/09:25/14:57）或有真实行情的交易分钟 tick 才在 `ctx.substep` 内调用 `ctx.broker` 的 `ts_code` 原语开/平仓或撤销未成交委托。普通 off-session tick 只做研究、状态更新和计划交接，不报单。Broker 执行约束并记录成交/撤单。建议把横截面筛选/开仓放在 `candidate.py`，把按 `ts_code` 的持仓管理/做T/平仓/撤单放在 `trading.py`，由 `main` 在合适时点调用，并让每个实质步骤都有明确 substep 名和正预算。
 
-**成交时序与延迟**：所有会读写 `ctx.state_dir`、调用 `ctx.broker`/`ctx.nl()` 或做实质筛选/推理的步骤都必须包进 `with ctx.substep(name, budget_minutes=B):`。`B>0`、tick 内 `name` 唯一；`0 < B < 1` 视为本决策分钟内完成，`B>=1` 的状态写入和 broker action 等到 `ready_at` 后第一个可报单 tick 才可见/提交。未 ready 的跨分钟动作不是 Broker 委托，不进 `pending()`；普通 off-session tick 只写计划、不提交交易所订单。完整撮合、竞价、撤单、延迟和拒单记账定义见 `environment_design.md` §3.4。
+**成交时序与延迟**：所有会读写 `ctx.state_dir`、调用 `ctx.broker`/`ctx.nl()` 或做实质筛选/推理的步骤都必须包进 `with ctx.substep(name, budget_minutes=B):`。`B>0`、tick 内 `name` 唯一；`0 < B < 1` 视为本决策分钟内完成，`B>=1` 的状态写入和 broker action 等到 `ready_at` 后第一个可报单 tick 才可见/提交。未 ready 的跨分钟动作不是 Broker 委托，不进 `pending()`；普通 off-session tick 只写计划、不提交交易所订单。完整撮合、竞价、撤单和拒单记账见 `environment_design.md` §3.5；substep 延迟和状态门控见 §3.6。
 
 成本与频率：`main(ctx)` 每 tick 调用，但筛选、模型推理和 `ctx.nl()` 等重操作应只在少数选定时点执行、模型在首个 tick 加载/缓存，不要每个 tick 跑。`ctx.nl()` 受 NL 调用配额约束（见 §3.3 与 `environment_design.md` §2.4）；`backtest` 独立计时、单 Fold 有回测次数上限。跨 tick 暂存（如当日目标）写入 `ctx.state_dir`；Broker 是持仓真相源，`state_dir` 只存策略自身的规则/目标。
 

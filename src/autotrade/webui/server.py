@@ -24,7 +24,26 @@ from autotrade.pipelines.interactive import ANALYSIS_DIR_NAME, HITL_DIR_NAME, PA
 from . import registry
 from .manager import ExperimentManager, ManagerError, MAX_RUNNING_EXPERIMENTS
 from .params_schema import parameter_schema
-from .traces import read_trace_page, resolve_trace_path, stream_trace
+from .traces import read_trace_page, resolve_trace_path, stream_trace, trace_stats
+
+# Datasets whose partition coverage bounds the selectable backtest periods: the
+# replay needs minute bars, so their intersection with the daily lake is the
+# honest "data exists" window (issue: pre-coverage periods fail at runtime).
+_COVERAGE_DATASETS = ("daily", "stk_mins_1min_by_date")
+
+
+def _dataset_coverage(raw_dir: Path, dataset: str) -> tuple[str, str] | None:
+    root = raw_dir / dataset
+    if not root.is_dir():
+        return None
+    dates = [
+        entry.name[len("trade_date="):-len(".parquet")]
+        for entry in root.glob("trade_date=*.parquet")
+    ]
+    dates = [d for d in dates if len(d) == 8 and d.isdigit()]
+    if not dates:
+        return None
+    return min(dates), max(dates)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -98,11 +117,20 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     def _trading_days() -> list[str]:
         # Loaded once per process; without a calendar (dev/test roots) the
         # period pickers degrade to text inputs instead of failing the schema.
+        # The calendar is clamped to the datasets' actual partition coverage so
+        # the pickers cannot offer periods without downloaded/processed data.
         if "days" not in trading_days_cache:
             try:
                 from autotrade.pipelines.folds import load_sse_trading_days
 
-                trading_days_cache["days"] = load_sse_trading_days(repo_root / "data" / "raw")
+                raw_dir = repo_root / "data" / "raw"
+                days = load_sse_trading_days(raw_dir)
+                coverages = [c for c in (_dataset_coverage(raw_dir, name) for name in _COVERAGE_DATASETS) if c]
+                if coverages:
+                    low = max(c[0] for c in coverages)
+                    high = min(c[1] for c in coverages)
+                    days = [day for day in days if low <= day <= high]
+                trading_days_cache["days"] = days
             except Exception:  # noqa: BLE001 - schema must stay served
                 trading_days_cache["days"] = None
         return trading_days_cache["days"] or []
@@ -266,7 +294,101 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"status": "started"}
 
+    # ---- prompt preview -------------------------------------------------------------
+    @app.post("/api/experiments/{experiment_id}/prompt-preview")
+    def post_prompt_preview(experiment_id: str, payload: dict = Body(...)) -> dict[str, object]:
+        """Assemble the session's system prompt for pre-approval review.
+
+        The runtime-generated 当前实验事实 JSON block (built from the live run
+        manifest/runtime_env/data_summary) cannot exist before the sandbox is
+        prepared, so the preview renders the documented fallback (fold info +
+        acceptance rules verbatim); every other section — role, environment,
+        taste, researcher directive, actions, contract, prohibitions — is the
+        exact text the Agent will receive.
+        """
+        experiment_dir = _experiment_dir(experiment_id)
+        session_key = str(payload.get("session_key") or "")
+        directive = str(payload.get("directive") or "")
+        hitl_dir = experiment_dir / HITL_DIR_NAME
+        schedule = read_json(hitl_dir / "schedule.json")
+        sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
+        entry = next((s for s in sessions if s.get("key") == session_key), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"unknown session: {session_key}")
+        kind = str(entry.get("kind"))
+        if kind == "heldout":
+            raise HTTPException(status_code=400, detail="held-out runs have no agent session or system prompt")
+        params = read_json(hitl_dir / PARAMS_NAME)
+        from autotrade.pipelines.interactive import PARAM_DEFAULTS
+        from autotrade.agent.prompts import build_meta_learning_prompt, build_system_prompt
+
+        def param(key: str):
+            return params.get(key, PARAM_DEFAULTS.get(key))
+
+        if kind == "meta_learning":
+            prompt = build_meta_learning_prompt(
+                experiment_directive=directive.strip() or str(param("meta_learning_directive") or ""),
+            )
+        else:
+            epoch_id = str(entry.get("epoch_id") or "epoch_001")
+            try:
+                epoch_index = int(epoch_id.rsplit("_", 1)[-1])
+            except ValueError:
+                epoch_index = 1
+            taste = ""
+            for record in registry._read_ledger_records(experiment_dir):
+                if record.get("record_type") == "meta_learning" and str(record.get("epoch_id")) == epoch_id:
+                    taste_path = record.get("taste_path")
+                    if taste_path and Path(str(taste_path)).exists():
+                        taste = Path(str(taste_path)).read_text(encoding="utf-8").strip()
+            # The runtime facts block redacts the test schedule from the agent;
+            # keep the preview's fallback consistent (no test_period).
+            fold_info = {
+                key: entry.get(key)
+                for key in ("fold_id", "input_window", "validation_period", "valid_decision_time")
+                if entry.get(key) is not None
+            }
+            prompt = build_system_prompt(
+                fold_info=fold_info,
+                acceptance_rules={
+                    "min_return": param("min_return"),
+                    "min_sharpe": param("min_sharpe"),
+                    "max_drawdown": param("max_drawdown"),
+                    "require_complete_validation": True,
+                },
+                phase="convergence" if epoch_index >= int(param("convergence_start_epoch") or 3) else "exploration",
+                step_tree_enabled=not bool(param("disable_step_tree")),
+                taste_prompt=taste,
+                fold_directive=directive,
+            )
+        return {
+            "kind": kind,
+            "prompt": prompt,
+            "note": (
+                "预览包含 Agent 将收到的全部静态段（角色/环境/Taste/研究者指令/动作/提交合同/禁止行为）。"
+                "运行时「当前实验事实」JSON 由沙箱准备完成后的 run manifest 等生成，此处以 Fold 信息与验收规则原文代替；"
+                "该块只是事实索引，不含额外指令。"
+            ),
+        }
+
     # ---- traces --------------------------------------------------------------------
+    @app.get("/api/experiments/{experiment_id}/trace/stats")
+    def get_trace_stats(experiment_id: str, run_id: str | None = Query(None)) -> dict[str, object]:
+        experiment_dir = _experiment_dir(experiment_id)
+        path = resolve_trace_path(experiment_dir, run_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="no trace available for this run")
+        return {"trace_path": str(path), **trace_stats(path)}
+
+    @app.get("/api/experiments/{experiment_id}/trace/download")
+    def get_trace_download(experiment_id: str, run_id: str | None = Query(None)) -> FileResponse:
+        experiment_dir = _experiment_dir(experiment_id)
+        path = resolve_trace_path(experiment_dir, run_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="no trace available for this run")
+        filename = f"{experiment_id}__{run_id or path.parent.name}__agent_trace.jsonl"
+        return FileResponse(path, media_type="application/x-ndjson", filename=filename)
+
     @app.get("/api/experiments/{experiment_id}/trace")
     def get_trace(
         experiment_id: str,

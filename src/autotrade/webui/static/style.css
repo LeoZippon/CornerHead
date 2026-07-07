@@ -308,6 +308,29 @@ details.advanced .form-grid { margin-top: 9px; }
 .section-gap { margin-top: 16px; }
 .loading { color: var(--muted); padding: 22px; text-align: center; }
 
+/* logo, zoom, clickable cards, hero, stats chips, trace content */
+.brand .logo { display: block; }
+.zoom-select {
+  border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px;
+  font-size: 14px; background: var(--input-bg); color: var(--text);
+}
+.card.clickable { cursor: pointer; }
+.card.clickable h3 a:hover { text-decoration: none; }
+.panel.hero { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft), var(--shadow-lift); }
+.hero-crown { font-size: 22px; }
+.stats-chips { display: flex; gap: 9px; flex-wrap: wrap; margin: 4px 0 10px; }
+.stat-chip {
+  background: var(--panel-2); border: 1px solid var(--row-border); border-radius: 999px;
+  padding: 3px 13px; font-size: 13.5px; color: var(--text); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.trace-event .llm-content {
+  margin: 7px 0 2px; white-space: pre-wrap; word-break: break-word;
+  font-size: 14.5px; line-height: 1.55; color: var(--text);
+}
+.trace-event .tool-brief { font-family: var(--mono); font-size: 12.5px; color: var(--muted); word-break: break-all; }
+.help.derived-hint { color: var(--accent); }
+
 /* responsive breakpoints */
 @media (max-width: 1080px) {
   .detail { grid-template-columns: 1fr; }

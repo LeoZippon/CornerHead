@@ -79,6 +79,31 @@ PARAM_DEFAULTS: dict[str, object] = {
     "convergence_start_epoch": 3,
     "disable_step_tree": False,
     "nl_failure_policy": "return_error_with_audit",
+    # Session / replay budgets (ExperimentConfig fields, no CLI dests).
+    "max_steps_per_fold": 10,
+    "max_backtests_per_fold": 30,
+    "finalize_before_deadline_seconds": 300,
+    "per_call_timeout_seconds": 300,
+    "meta_memory_max_epochs": 3,
+    "record_failed_attempts": True,
+    "meta_sandbox_rebuild_timeout_seconds": 1800,
+    "meta_sandbox_image_keep": 3,
+    "offsession_tick_minutes": 15,
+    "execution_lag_bars": 2,
+    "decision_max_sim_minutes": 60.0,
+    "backtest_max_seconds_per_decision": 300.0,
+    "backtest_max_seconds_per_trading_day": 900.0,
+    "nl_max_calls_per_decision_day": 10,
+    "nl_max_calls_per_backtest": None,
+    # Broker profile overrides (dataclasses.replace over the default profile).
+    "stock_initial_cash": 500_000.0,
+    "credit_initial_cash": 500_000.0,
+    "commission_bps": 1.0,
+    "slippage_bps": 5.0,
+    "max_total_holdings": None,
+    "max_single_name_weight": None,
+    "fin_rate_annual": 0.0835,
+    "slo_rate_annual": 0.085,
     "min_return": 0.0,
     "min_sharpe": 0.0,
     "max_drawdown": 0.25,
@@ -179,11 +204,14 @@ def resolve_options(params: Mapping[str, object], repo_root: Path) -> SimpleName
 
 def build_config_from_options(options: SimpleNamespace, *, repo_root: Path) -> ExperimentConfig:
     """Mirror run_experiment.py's config construction from resolved options."""
+    from dataclasses import replace as dc_replace
+
     from .assembly import (
         build_meta_learning_managed_proxy_spec,
         build_meta_learning_sandbox_spec,
         build_snapshot_config,
     )
+    from autotrade.environment.broker import BrokerProfile
     from autotrade.environment.sandbox import SandboxSpec
 
     from .config import AcceptanceRules
@@ -194,6 +222,19 @@ def build_config_from_options(options: SimpleNamespace, *, repo_root: Path) -> E
         options,
         repo_root=repo_root,
         sandbox_spec=meta_learning_sandbox_spec,
+    )
+    broker_profile = dc_replace(
+        BrokerProfile(),
+        stock_initial_cash=float(options.stock_initial_cash),
+        credit_initial_cash=float(options.credit_initial_cash),
+        commission_bps=float(options.commission_bps),
+        slippage_bps=float(options.slippage_bps),
+        max_total_holdings=int(options.max_total_holdings) if options.max_total_holdings is not None else None,
+        max_single_name_weight=(
+            float(options.max_single_name_weight) if options.max_single_name_weight is not None else None
+        ),
+        fin_rate_annual=float(options.fin_rate_annual),
+        slo_rate_annual=float(options.slo_rate_annual),
     )
     return ExperimentConfig(
         experiment_id=str(options.experiment_id),
@@ -208,21 +249,41 @@ def build_config_from_options(options: SimpleNamespace, *, repo_root: Path) -> E
         epochs=int(options.epochs),
         window_months=int(options.window_months),
         max_fold_minutes=int(options.max_fold_minutes),
+        finalize_before_deadline_seconds=int(options.finalize_before_deadline_seconds),
+        per_call_timeout_seconds=int(options.per_call_timeout_seconds),
+        max_steps_per_fold=int(options.max_steps_per_fold),
+        max_backtests_per_fold=int(options.max_backtests_per_fold),
+        offsession_tick_minutes=int(options.offsession_tick_minutes),
+        execution_lag_bars=int(options.execution_lag_bars),
+        decision_max_sim_minutes=(
+            float(options.decision_max_sim_minutes) if options.decision_max_sim_minutes is not None else None
+        ),
+        backtest_max_seconds_per_decision=float(options.backtest_max_seconds_per_decision),
+        backtest_max_seconds_per_trading_day=float(options.backtest_max_seconds_per_trading_day),
+        nl_max_calls_per_decision_day=int(options.nl_max_calls_per_decision_day),
+        nl_max_calls_per_backtest=(
+            int(options.nl_max_calls_per_backtest) if options.nl_max_calls_per_backtest is not None else None
+        ),
         snapshot_config=build_snapshot_config(options),
         nl_failure_policy=str(options.nl_failure_policy),
         convergence_start_epoch=int(options.convergence_start_epoch),
         meta_learning_directive=str(options.meta_learning_directive),
+        meta_memory_max_epochs=int(options.meta_memory_max_epochs),
         step_tree_enabled=not bool(options.disable_step_tree),
+        record_failed_attempts=bool(options.record_failed_attempts),
         acceptance=AcceptanceRules(
             min_return=float(options.min_return),
             min_sharpe=float(options.min_sharpe),
             max_drawdown=float(options.max_drawdown),
             require_complete_validation=True,
         ),
+        broker_profile=broker_profile,
         sandbox_spec=sandbox_spec,
         meta_learning_sandbox_spec=meta_learning_sandbox_spec,
         meta_learning_managed_proxy=meta_learning_managed_proxy,
         meta_sandbox_rebuild_enabled=not bool(options.disable_meta_sandbox_rebuild),
+        meta_sandbox_rebuild_timeout_seconds=int(options.meta_sandbox_rebuild_timeout_seconds),
+        meta_sandbox_image_keep=int(options.meta_sandbox_image_keep),
         use_docker=not bool(options.local_dev),
     )
 

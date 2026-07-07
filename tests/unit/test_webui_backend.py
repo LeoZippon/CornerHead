@@ -111,7 +111,14 @@ class WebuiBackendTest(unittest.TestCase):
         )
         trace_dir = experiment_dir / "artifacts" / "run_001"
         trace_dir.mkdir(parents=True)
-        events = [{"event_type": "llm_call", "seq": index} for index in range(3)]
+        events = [
+            {"event_type": "llm_call", "seq": 0, "usage": {"total_tokens": 1000}},
+            {"event_type": "llm_call", "seq": 1, "usage": {"total_tokens": 2000}},
+            {"event_type": "shell", "seq": 2},
+            {"event_type": "backtest_start", "seq": 3},
+            {"event_type": "backtest", "seq": 4, "replay_wall_seconds": 88.5},
+            {"event_type": "backtest_start", "seq": 5},
+        ]
         (trace_dir / "agent_trace.jsonl").write_text(
             "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
         )
@@ -236,7 +243,7 @@ class WebuiBackendTest(unittest.TestCase):
     # ---- trace paging ----------------------------------------------------------------
     def test_trace_pagination_and_partial_tail(self) -> None:
         first = self.client.get("/api/experiments/exp_hitl/trace", params={"run_id": "run_001"}).json()
-        self.assertEqual(len(first["events"]), 3)
+        self.assertEqual(len(first["events"]), 6)
         self.assertTrue(first["eof"])
         again = self.client.get(
             "/api/experiments/exp_hitl/trace", params={"run_id": "run_001", "offset": first["next_offset"]}
@@ -317,6 +324,56 @@ class WebuiBackendTest(unittest.TestCase):
         gone = self.client.delete("/api/experiments/exp_legacy", params={"confirm": "exp_legacy"})
         self.assertEqual(gone.status_code, 200)
         self.assertFalse((self.experiments_root / "exp_legacy").exists())
+
+    def test_trace_stats_counts_and_backtest_credit(self) -> None:
+        stats = self.client.get("/api/experiments/exp_hitl/trace/stats", params={"run_id": "run_001"}).json()
+        self.assertEqual(stats["counts"]["llm_call"], 2)
+        self.assertEqual(stats["counts"]["shell"], 1)
+        self.assertEqual(stats["llm_total_tokens"], 3000)
+        self.assertAlmostEqual(stats["backtest_wall_seconds"], 88.5)
+        self.assertTrue(stats["in_backtest"])  # 2 starts, 1 terminal event
+        self.assertEqual(stats["total_events"], 6)
+
+    def test_trace_download_serves_raw_jsonl(self) -> None:
+        response = self.client.get("/api/experiments/exp_hitl/trace/download", params={"run_id": "run_001"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.text.strip().splitlines()), 6)
+        self.assertIn("attachment", response.headers.get("content-disposition", ""))
+
+    def test_prompt_preview_embeds_directive_and_guards_heldout(self) -> None:
+        fold = self.client.post(
+            "/api/experiments/exp_hitl/prompt-preview",
+            json={"session_key": "epoch_001/fold_2022Q2", "directive": "试试低波动组合"},
+        )
+        self.assertEqual(fold.status_code, 200, fold.text)
+        prompt = fold.json()["prompt"]
+        self.assertIn("研究者本 Fold 指令（用户注入）", prompt)
+        self.assertIn("试试低波动组合", prompt)
+        self.assertNotIn("test_period", prompt)  # preview mirrors the runtime redaction
+        meta = self.client.post(
+            "/api/experiments/exp_hitl/prompt-preview",
+            json={"session_key": "epoch_001/meta_learning", "directive": "研究流动性冲击"},
+        )
+        self.assertEqual(meta.status_code, 200)
+        self.assertIn("研究流动性冲击", meta.json()["prompt"])
+        heldout = self.client.post(
+            "/api/experiments/exp_hitl/prompt-preview", json={"session_key": "heldout"}
+        )
+        self.assertEqual(heldout.status_code, 400)
+        missing = self.client.post(
+            "/api/experiments/exp_hitl/prompt-preview", json={"session_key": "nope"}
+        )
+        self.assertEqual(missing.status_code, 404)
+
+    def test_dataset_coverage_reads_partition_bounds(self) -> None:
+        from autotrade.webui.server import _dataset_coverage
+
+        raw = self.repo_root / "data" / "raw"
+        (raw / "daily").mkdir(parents=True)
+        for day in ("20200102", "20240105"):
+            (raw / "daily" / f"trade_date={day}.parquet").write_bytes(b"")
+        self.assertEqual(_dataset_coverage(raw, "daily"), ("20200102", "20240105"))
+        self.assertIsNone(_dataset_coverage(raw, "stk_mins_1min_by_date"))
 
     def test_analysis_endpoint_serves_existing_markdown(self) -> None:
         payload = self.client.get("/api/experiments/exp_hitl/analysis/epoch_001/fold_2022Q1").json()

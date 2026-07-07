@@ -61,6 +61,55 @@ def read_trace_page(path: Path, *, offset: int = 0, max_bytes: int = DEFAULT_PAG
     return {"events": events, "next_offset": next_offset, "eof": next_offset >= size}
 
 
+def trace_stats(path: Path) -> dict[str, object]:
+    """Aggregate per-event-type counts and headline totals from one trace file.
+
+    Powers the live operations dashboard: LLM/tool call counts, cumulative
+    backtest wall-time (which is credited back to the reasoning deadline), and
+    whether a backtest is currently in flight (started without a terminal event).
+    """
+    path = Path(path)
+    counts: dict[str, int] = {}
+    backtest_wall = 0.0
+    llm_tokens = 0
+    last_ts: str | None = None
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            kind = str(event.get("event_type") or "event")
+            counts[kind] = counts.get(kind, 0) + 1
+            last_ts = str(event.get("ts") or last_ts or "")
+            if kind == "backtest":
+                try:
+                    backtest_wall += float(event.get("replay_wall_seconds") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+            elif kind == "llm_call":
+                usage = event.get("usage")
+                if isinstance(usage, dict):
+                    try:
+                        llm_tokens += int(usage.get("total_tokens") or 0)
+                    except (TypeError, ValueError):
+                        pass
+    return {
+        "counts": counts,
+        "total_events": sum(counts.values()),
+        "backtest_wall_seconds": round(backtest_wall, 1),
+        "llm_total_tokens": llm_tokens,
+        "in_backtest": counts.get("backtest_start", 0) > counts.get("backtest", 0),
+        "last_event_ts": last_ts,
+        "trace_bytes": path.stat().st_size,
+    }
+
+
 def stream_trace(experiment_dir: Path, run_id: str | None, *, offset: int = 0) -> Iterator[str]:
     """SSE generator: replay from ``offset``, then live-tail until the run ends.
 

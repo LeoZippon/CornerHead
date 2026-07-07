@@ -28,13 +28,42 @@ function applyTheme(theme) {
   if (button) button.textContent = theme === "dark" ? "☀️" : "🌙";
 }
 
+/* Theme switches must not rebuild the page (that would restart the live trace
+   stream); only the SVG charts need repainting — they re-render in place. */
+function refreshCharts() {
+  document.querySelectorAll(".svg-chart").forEach((node) => {
+    if (typeof node.__rerender === "function") node.replaceWith(node.__rerender());
+  });
+}
+
 (function initTheme() {
   let stored = null;
   try { stored = localStorage.getItem("ch_theme"); } catch { /* private mode */ }
   const preferred = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   applyTheme(stored === "dark" || stored === "light" ? stored : preferred);
   const button = document.getElementById("theme-toggle");
-  if (button) button.addEventListener("click", () => { applyTheme(currentTheme() === "dark" ? "light" : "dark"); route(); });
+  if (button) button.addEventListener("click", () => {
+    applyTheme(currentTheme() === "dark" ? "light" : "dark");
+    refreshCharts();
+  });
+})();
+
+/* Per-device UI scale: port-forwarded browsers and embedded webviews disagree
+   wildly about effective size; the choice persists per browser profile. */
+(function initZoom() {
+  const select = document.getElementById("ui-zoom");
+  if (!select) return;
+  let stored = null;
+  try { stored = localStorage.getItem("ch_zoom"); } catch { /* private mode */ }
+  const apply = (value) => {
+    document.body.style.zoom = value;
+    try { localStorage.setItem("ch_zoom", value); } catch { /* private mode */ }
+  };
+  if (stored && [...select.options].some((option) => option.value === stored)) {
+    select.value = stored;
+    apply(stored);
+  }
+  select.addEventListener("change", () => apply(select.value));
 })();
 
 /* Session keys contain "/" (epoch_001/fold_2022Q1); in the hash they travel as
@@ -275,6 +304,7 @@ function foldReturnsChart(rows, { width = 640, height = 220, mini = false } = {}
   const svgHost = el("div", {});
   svgHost.innerHTML = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${svg.join("")}</svg>`;
   wrap.append(svgHost);
+  wrap.__rerender = () => foldReturnsChart(rows, { width, height, mini });
   return bindChartTips(wrap);
 }
 
@@ -331,6 +361,7 @@ function cumulativeReturnChart(rows, { width = 640, height = 220 } = {}) {
   const svgHost = el("div", {});
   svgHost.innerHTML = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${svg.join("")}</svg>`;
   wrap.append(svgHost);
+  wrap.__rerender = () => cumulativeReturnChart(rows, { width, height });
   return bindChartTips(wrap);
 }
 
@@ -355,6 +386,9 @@ function route() {
   document.querySelectorAll(".modal-mask").forEach((node) => node.remove());
   const hash = location.hash || "#/";
   const expMatch = hash.match(/^#\/exp\/([^/]+)(?:\/(.*))?$/);
+  // The live trace panel (SSE stream + accumulated events) survives navigation
+  // within the same experiment; it is torn down only when leaving it.
+  if (livePanel && (!expMatch || decodeURIComponent(expMatch[1]) !== livePanel.expId)) destroyLivePanel();
   if (expMatch) renderDetailPage(decodeURIComponent(expMatch[1]), expMatch[2] ? sessionKeyFromUrl(expMatch[2]) : null);
   else renderHomePage();
 }
@@ -376,9 +410,11 @@ async function renderHomePage() {
     el("button", { class: "btn primary", onclick: openCreateModal }, "＋ 新建实验"),
   );
   const container = el("div", {});
+  const best = pickBestExperiment(payload.experiments);
+  if (best) container.append(heroPanel(best), el("div", { class: "section-gap" }));
   container.append(el("div", { class: "page-head" },
     el("h2", {}, "实验列表"),
-    el("span", { class: "sub" }, "点击实验查看 Epoch/Fold 结果、运行状态与 Agent Trace"),
+    el("span", { class: "sub" }, "点击实验卡片查看 Epoch/Fold 结果、运行状态与 Agent Trace"),
   ));
   if (!payload.experiments.length) {
     container.append(el("div", { class: "empty" }, "还没有实验 —— 点右上角「新建实验」开始。"));
@@ -402,13 +438,19 @@ async function renderHomePageSilent() {
   const fresh = el("div", { class: "grid" });
   for (const item of payload.experiments) fresh.append(experimentCard(item));
   grid.replaceWith(fresh);
+  const hero = document.getElementById("hero-panel");
+  const best = pickBestExperiment(payload.experiments);
+  if (hero && best) hero.replaceWith(heroPanel(best));
 }
 
 function experimentCard(item) {
   const metrics = item.metrics || {};
   const total = item.total_sessions, done = item.completed_sessions || 0;
   const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
-  const card = el("div", { class: "card" });
+  const card = el("div", {
+    class: "card clickable",
+    onclick: () => { location.hash = `#/exp/${encodeURIComponent(item.experiment_id)}`; },
+  });
   card.append(
     el("h3", {},
       el("a", { href: `#/exp/${encodeURIComponent(item.experiment_id)}` }, item.experiment_id),
@@ -437,13 +479,12 @@ function experimentCard(item) {
   if ((item.fold_returns || []).length) {
     card.append(foldReturnsChart(item.fold_returns.map((row) => ({ ...row, epoch_label: row.epoch_id })), { width: 400, height: 130, mini: true }));
   }
-  const actions = el("div", { class: "actions" },
-    el("a", { class: "btn small", href: `#/exp/${encodeURIComponent(item.experiment_id)}` }, "打开"),
-  );
+  const actions = el("div", { class: "actions" });
   if (item.kind === "hitl" && ["interrupted", "stopped", "failed", "created"].includes(item.state)) {
     actions.append(el("button", {
       class: "btn small primary",
-      onclick: async () => {
+      onclick: async (event) => {
+        event.stopPropagation();
         try {
           await api(`/api/experiments/${encodeURIComponent(item.experiment_id)}/control`, { method: "POST", body: JSON.stringify({ action: "resume" }) });
           toast("已请求恢复运行");
@@ -455,11 +496,53 @@ function experimentCard(item) {
   if (!item.worker_alive) {
     actions.append(el("button", {
       class: "btn small danger",
-      onclick: () => confirmDeleteExperiment(item.experiment_id),
+      onclick: (event) => { event.stopPropagation(); confirmDeleteExperiment(item.experiment_id); },
     }, "删除"));
   }
-  card.append(actions);
+  if (actions.children.length) card.append(actions);
   return card;
+}
+
+/* Best-performing experiment hero: ranked by cumulative test return (falls
+   back to validation when no test results yet). */
+function pickBestExperiment(list) {
+  const scored = list
+    .filter((item) => (item.fold_returns || []).length)
+    .map((item) => ({
+      item,
+      score: item.metrics?.cum_test_return ?? item.metrics?.cum_valid_return ?? null,
+    }))
+    .filter((entry) => entry.score !== null);
+  if (!scored.length) return null;
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0].item;
+}
+
+function heroPanel(item) {
+  const metrics = item.metrics || {};
+  const rows = (item.fold_returns || []).map((row) => ({ ...row, epoch_label: row.epoch_id }));
+  const panel = el("div", { class: "panel hero", id: "hero-panel" });
+  panel.append(
+    el("div", { class: "control-bar" },
+      el("span", { class: "hero-crown" }, "🏆"),
+      el("h3", { style: "margin:0" },
+        el("a", { href: `#/exp/${encodeURIComponent(item.experiment_id)}` }, item.experiment_id)),
+      stateBadge(item.state),
+      el("span", { class: "mode-note" }, "当前最佳实验（按累计测试收益）"),
+    ),
+    el("div", { class: "section-gap" }, statTilesRow([
+      { label: "累计测试收益", value: fmtPct(metrics.cum_test_return), cls: signCls(metrics.cum_test_return) },
+      { label: "累计验证收益", value: fmtPct(metrics.cum_valid_return), cls: signCls(metrics.cum_valid_return) },
+      { label: "Held-out 收益", value: fmtPct(metrics.cum_heldout_return), cls: signCls(metrics.cum_heldout_return) },
+      { label: "平均测试 Sharpe", value: metrics.mean_test_sharpe === null || metrics.mean_test_sharpe === undefined ? "—" : Number(metrics.mean_test_sharpe).toFixed(2) },
+      { label: "已完成 Fold", value: String(item.folds_recorded ?? 0) },
+    ])),
+    el("div", { class: "charts-row section-gap" },
+      el("div", { class: "chart-cell" }, el("h4", {}, "逐 Fold 收益"), foldReturnsChart(rows)),
+      el("div", { class: "chart-cell" }, el("h4", {}, "累计收益曲线"), cumulativeReturnChart(rows)),
+    ),
+  );
+  return panel;
 }
 
 function metricNode(label, value) {
@@ -624,6 +707,25 @@ function repopulatePeriodSelects(inputs) {
     const wanted = options.includes(previous) ? previous : defaults[key];
     if (wanted && options.includes(wanted)) entry.input.value = wanted;
   }
+  updateValidationHint(inputs);
+}
+
+/* Folds are named by their TEST period; surface the derived validation period
+   so the naming never reads as ambiguous. */
+function updateValidationHint(inputs) {
+  const entry = inputs.get("first_test_period");
+  if (!entry || entry.field.type !== "period" || !entry.input) return;
+  const cadence = inputs.get("fold_period").input.value;
+  const options = (createSchema.period_options || {})[cadence] || [];
+  const index = options.indexOf(entry.input.value);
+  if (!entry.__hint) {
+    entry.__hint = el("div", { class: "help derived-hint" });
+    entry.input.parentElement.append(entry.__hint);
+    entry.input.addEventListener("change", () => updateValidationHint(inputs));
+  }
+  entry.__hint.textContent = index > 0
+    ? `↳ 首个 Fold：验证区间 ${options[index - 1]} → 测试区间 ${options[index]}（验证区间自动取测试周期的前一周期）`
+    : "";
 }
 
 function collectParams(inputs) {
@@ -667,10 +769,16 @@ function closeModal() { $modalRoot.innerHTML = ""; }
 
 /* ---------------- detail page ---------------- */
 
-let traceSource = null;
+let livePanel = null; // {expId, key, node, source, timers, refresh}
+
+function destroyLivePanel() {
+  if (!livePanel) return;
+  try { livePanel.source.close(); } catch { /* already closed */ }
+  for (const timer of livePanel.timers) clearInterval(timer);
+  livePanel = null;
+}
 
 async function renderDetailPage(experimentId, selectedKey) {
-  if (traceSource) { traceSource.close(); traceSource = null; }
   $main.innerHTML = '<div class="loading">加载中…</div>';
   $topbarRight.innerHTML = "";
   let detail;
@@ -837,10 +945,18 @@ function sessionDetailPanel(detail, selectedKey) {
   if (session.kind === "meta_learning" && done) panel.append(metaResultPanel(session));
   if (session.kind === "heldout" && done) panel.append(heldoutPanel(session));
   if (done && session.record && session.record.run_id) {
+    const statsHost = el("div", {});
     panel.append(el("div", { class: "panel section-gap" },
       el("h4", {}, "Agent Trace（回放）"),
+      statsHost,
       traceReplayNode(detail.experiment_id, session.record.run_id),
     ));
+    (async () => {
+      try {
+        const stats = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stats?run_id=${encodeURIComponent(session.record.run_id)}`);
+        statsHost.append(statsChipsRow(stats));
+      } catch { /* trace may be absent for legacy runs */ }
+    })();
   }
   if (!done && !running && !waiting) {
     panel.append(el("div", { class: "panel section-gap" }, el("div", { class: "empty" }, "该会话尚未开始。")));
@@ -881,6 +997,10 @@ function directivePanel(detail, session, waiting) {
       class: "btn",
       onclick: () => send({ action: "set_directive", session_key: session.key, directive: textarea.value }, "指令已保存"),
     }, "保存指令"));
+    buttons.append(el("button", {
+      class: "btn",
+      onclick: () => openPromptPreview(detail, session, textarea.value, { approved, waiting, send }),
+    }, "预览完整系统提示词"));
   }
   if ((detail.control || {}).mode === "step" && !approved) {
     buttons.append(el("button", {
@@ -891,11 +1011,74 @@ function directivePanel(detail, session, waiting) {
     buttons.append(el("span", { class: "badge state-completed" }, "已批准"));
   }
   panel.append(buttons);
-  if (waiting) panel.append(el("div", { class: "hint" }, "worker 正在等待此会话的批准。"));
+  if (waiting) panel.append(el("div", { class: "hint" }, "worker 正在等待此会话的批准。建议先预览完整系统提示词，确认注入内容无误后再批准。"));
   return panel;
 }
 
+/* Review-then-approve: assemble the session's system prompt (with the draft
+   directive embedded) for inspection before the session is allowed to start. */
+async function openPromptPreview(detail, session, directive, { approved, waiting, send }) {
+  let data;
+  try {
+    data = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/prompt-preview`, {
+      method: "POST",
+      body: JSON.stringify({ session_key: session.key, directive }),
+    });
+  } catch (error) { toast(`预览失败：${error.message}`, true); return; }
+  const footer = [el("button", { class: "btn", onclick: closeModal }, "关闭")];
+  if ((detail.control || {}).mode === "step" && !approved) {
+    footer.push(el("button", {
+      class: "btn primary",
+      onclick: () => {
+        closeModal();
+        send({ action: "approve", session_key: session.key, directive }, "已批准，会话即将启动");
+      },
+    }, waiting ? "确认无误，批准并启动" : "确认无误，预先批准"));
+  }
+  showModal(`系统提示词预览 — ${session.key}`,
+    el("div", {},
+      el("div", { class: "hint" }, data.note),
+      el("pre", { class: "code-view section-gap", style: "white-space:pre-wrap; max-height:58vh" }, data.prompt),
+      el("div", { class: "hint" }, `共 ${data.prompt.length} 字符。修改指令请关闭后在指令框编辑，再重新预览。`),
+    ),
+    footer);
+}
+
+const STAT_CHIPS = [
+  ["llm_call", "🤖 LLM"],
+  ["web_search", "🔍 搜索"],
+  ["web_fetch", "🌐 抓取"],
+  ["backtest", "📊 回测"],
+  ["shell", "🖥 Shell"],
+  ["explore", "🧭 Explore"],
+  ["read", "📄 读取"],
+  ["context_compaction", "🗜 压缩"],
+];
+
+function statsChipsRow(stats) {
+  const counts = stats.counts || {};
+  const row = el("div", { class: "stats-chips" });
+  for (const [key, label] of STAT_CHIPS) {
+    if (!counts[key]) continue;
+    let text = `${label} ${counts[key]}`;
+    if (key === "backtest" && stats.backtest_wall_seconds) text += `（Σ ${fmtDuration(stats.backtest_wall_seconds)}）`;
+    row.append(el("span", { class: "stat-chip" }, text));
+  }
+  if (stats.llm_total_tokens) {
+    row.append(el("span", { class: "stat-chip" }, `Σ tokens ${(stats.llm_total_tokens / 1000).toFixed(0)}k`));
+  }
+  return row;
+}
+
 function liveTracePanel(detail, session) {
+  // Reuse the streaming panel across page rebuilds and session navigation so
+  // the SSE stream, scroll position, and accumulated events survive.
+  if (livePanel && livePanel.expId === detail.experiment_id && livePanel.key === session.key
+      && livePanel.source.readyState !== EventSource.CLOSED) {
+    livePanel.refresh(detail);
+    return livePanel.node;
+  }
+  destroyLivePanel();
   const panel = el("div", { class: "panel" }, el("h4", {}, `实时 Agent Trace — ${session.key}`));
   const status = detail.status || {};
   const tools = el("div", { class: "trace-tools" });
@@ -905,17 +1088,18 @@ function liveTracePanel(detail, session) {
     type: "checkbox", checked: "checked",
     onchange: (event) => { autoScroll = event.target.checked; },
   }), " 自动滚动");
-  const countdown = el("span", { class: "badge state-running_session", style: "display:none", title: "Fold 推理截止倒计时；回测墙钟独立计时并回补，不占用该额度" });
+  const countdown = el("span", {
+    class: "badge state-running_session", style: "display:none",
+    title: "推理截止倒计时 = 名义 deadline + 已回补的回测墙钟；回测执行中独立计时",
+  });
   tools.append(el("span", { class: "badge state-running_session" }, "streaming"), countdown, scrollToggle);
-  // Sandbox/snapshot preparation can take minutes before the first Agent
-  // event; show a live elapsed indicator so it never looks stuck.
+  const statsHost = el("div", {});
   const prepText = el("span", {}, "");
   const prep = el("div", { class: "prep-indicator" }, el("span", { class: "spinner" }), prepText);
-  panel.append(tools, prep, box);
+  panel.append(tools, statsHost, prep, box);
   let sawEvent = false;
-  const url = `/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stream`;
-  traceSource = new EventSource(url);
-  traceSource.onmessage = (event) => {
+  const source = new EventSource(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stream`);
+  source.onmessage = (event) => {
     try {
       sawEvent = true;
       prep.style.display = "none";
@@ -924,59 +1108,129 @@ function liveTracePanel(detail, session) {
       if (autoScroll) box.scrollTop = box.scrollHeight;
     } catch { /* skip malformed */ }
   };
-  traceSource.addEventListener("eof", () => {
+  source.addEventListener("eof", () => {
     box.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
-    traceSource.close();
+    source.close();
   });
-  traceSource.onerror = () => { /* EventSource auto-reconnects */ };
+  source.onerror = () => { /* EventSource auto-reconnects */ };
   let deadlineMs = status.fold_deadline_at ? Date.parse(status.fold_deadline_at) : null;
-  const startedMs = status.session_started_at ? Date.parse(status.session_started_at) : Date.now();
+  let startedMs = status.session_started_at ? Date.parse(status.session_started_at) : Date.now();
+  let creditSeconds = 0;
+  let inBacktest = false;
   const tick = () => {
     if (!sawEvent) {
       const elapsed = (Date.now() - startedMs) / 1000;
       prepText.textContent = `沙箱与数据快照准备中（已 ${fmtDuration(elapsed)}）… 首个 Agent 事件到达后开始流式显示`;
     }
     if (deadlineMs) {
-      const remain = (deadlineMs - Date.now()) / 1000;
       countdown.style.display = "";
-      countdown.textContent = remain >= 0 ? `推理剩余 ${fmtDuration(remain)}` : `收尾中 +${fmtDuration(-remain)}`;
+      if (inBacktest) {
+        countdown.textContent = `回测执行中（独立计时，已回补 ${fmtDuration(creditSeconds)}）`;
+      } else {
+        const remain = (deadlineMs + creditSeconds * 1000 - Date.now()) / 1000;
+        countdown.textContent = remain >= 0
+          ? `推理剩余 ${fmtDuration(remain)}（含回补 ${fmtDuration(creditSeconds)}）`
+          : `收尾中 +${fmtDuration(-remain)}`;
+      }
     }
   };
-  tick();
-  liveTimers.push(setInterval(tick, 1000));
-  // The deadline appears once the run manifest is written; poll status for it.
-  liveTimers.push(setInterval(async () => {
+  const pollStats = async () => {
+    try {
+      const stats = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stats`);
+      creditSeconds = Number(stats.backtest_wall_seconds) || 0;
+      inBacktest = Boolean(stats.in_backtest);
+      statsHost.innerHTML = "";
+      statsHost.append(statsChipsRow(stats));
+    } catch { /* trace not started yet */ }
     try {
       const fresh = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/status`);
       const raw = fresh.raw_status || {};
       if (raw.fold_deadline_at) deadlineMs = Date.parse(raw.fold_deadline_at);
+      if (raw.session_started_at) startedMs = Date.parse(raw.session_started_at);
     } catch { /* transient */ }
-  }, 6000));
+  };
+  tick();
+  pollStats();
+  const timers = [setInterval(tick, 1000), setInterval(pollStats, 5000)];
+  livePanel = {
+    expId: detail.experiment_id,
+    key: session.key,
+    node: panel,
+    source,
+    timers,
+    refresh: (freshDetail) => {
+      const rawStatus = freshDetail.status || {};
+      if (rawStatus.fold_deadline_at) deadlineMs = Date.parse(rawStatus.fold_deadline_at);
+    },
+  };
   return panel;
 }
 
+/* Replay loader: batched pages, collapsible, with a raw .jsonl download so the
+   browser never has to hold a 20MB trace as DOM just to archive it. */
 function traceReplayNode(experimentId, runId) {
-  const box = el("div", { class: "trace-box" });
-  const button = el("button", {
-    class: "btn small",
-    onclick: async () => {
-      button.disabled = true;
-      let offset = 0;
-      try {
-        for (let page = 0; page < 40; page += 1) {
-          const data = await api(`/api/experiments/${encodeURIComponent(experimentId)}/trace?run_id=${encodeURIComponent(runId)}&offset=${offset}`);
-          for (const event of data.events) box.append(traceEventNode(event));
-          offset = data.next_offset;
-          if (data.eof) break;
-        }
-        box.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
-      } catch (error) {
-        box.append(el("div", { class: "hint" }, `加载失败：${error.message}`));
+  const box = el("div", { class: "trace-box", style: "display:none" });
+  const info = el("span", { class: "hint", style: "margin:0" }, "");
+  let offset = 0, loadedEvents = 0, eof = false, expanded = false, loading = false;
+  const moreButton = el("button", { class: "btn small", style: "display:none" }, "继续加载");
+  const toggleButton = el("button", { class: "btn small" }, "加载 trace");
+  async function loadBatch() {
+    if (loading || eof) return;
+    loading = true;
+    moreButton.disabled = true;
+    try {
+      // ~2MB / batch keeps even huge traces incremental.
+      for (let page = 0; page < 4 && !eof; page += 1) {
+        const data = await api(`/api/experiments/${encodeURIComponent(experimentId)}/trace?run_id=${encodeURIComponent(runId)}&offset=${offset}`);
+        for (const event of data.events) box.append(traceEventNode(event));
+        loadedEvents += data.events.length;
+        offset = data.next_offset;
+        eof = Boolean(data.eof);
       }
-    },
-  }, "加载完整 trace");
-  return el("div", {}, button, box);
+      info.textContent = `已加载 ${loadedEvents} 个事件${eof ? "（全部）" : "，可继续加载"}`;
+      if (eof) box.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
+    } catch (error) {
+      info.textContent = `加载失败：${error.message}`;
+    } finally {
+      loading = false;
+      moreButton.disabled = false;
+      moreButton.style.display = eof || !expanded ? "none" : "";
+    }
+  }
+  toggleButton.addEventListener("click", async () => {
+    expanded = !expanded;
+    box.style.display = expanded ? "" : "none";
+    toggleButton.textContent = expanded ? "收起 trace" : loadedEvents ? "展开 trace" : "加载 trace";
+    moreButton.style.display = expanded && !eof && loadedEvents ? "" : "none";
+    if (expanded && !loadedEvents) await loadBatch();
+  });
+  moreButton.addEventListener("click", loadBatch);
+  const download = el("a", {
+    class: "btn small",
+    href: `/api/experiments/${encodeURIComponent(experimentId)}/trace/download?run_id=${encodeURIComponent(runId)}`,
+  }, "⬇ 下载完整 .jsonl");
+  return el("div", {}, el("div", { class: "control-bar" }, toggleButton, moreButton, download, info), box);
 }
+
+/* Event rendering (Claude-Code-like): LLM natural-language output rides in
+   full; reasoning and tool payloads collapse and materialize only on expand,
+   so the DOM stays light even over long traces. */
+function lazyDetails(summaryText, build) {
+  const details = el("details", {}, el("summary", {}, summaryText));
+  details.addEventListener("toggle", () => {
+    if (details.open && !details.__filled) {
+      details.__filled = true;
+      details.append(build());
+    }
+  });
+  return details;
+}
+
+const TOOL_BRIEF_KEYS = [
+  "action", "tool", "cmd", "command", "pattern", "path", "query", "engine", "perspective",
+  "mode", "result_name", "replay_window", "exit_code", "duration_seconds", "replay_wall_seconds",
+  "reason", "error_type", "name",
+];
 
 function traceEventNode(event) {
   const type = event.event_type || "event";
@@ -990,20 +1244,25 @@ function traceEventNode(event) {
     event.status ? el("span", {}, String(event.status)) : null,
   );
   node.append(head);
-  let brief = "";
-  if (type === "llm_call") {
-    brief = String(event.content || "").slice(0, 600);
+  if (type === "llm_call" || type === "explore_llm_call") {
     const toolCalls = (event.tool_calls || []).map((call) => call.function && call.function.name).filter(Boolean);
     if (toolCalls.length) head.append(el("span", {}, `→ ${toolCalls.join(", ")}`));
+    const reasoning = String(event.reasoning_content || "");
+    if (reasoning) {
+      node.append(lazyDetails(`推理过程（${(reasoning.length / 1000).toFixed(1)}k 字符）`, () => el("pre", {}, reasoning)));
+    }
+    const content = String(event.content || "").trim();
+    if (content) node.append(el("div", { class: "llm-content" }, content));
   } else if (event.raw) {
-    brief = String(event.raw).slice(0, 400);
+    node.append(el("pre", {}, String(event.raw).slice(0, 400)));
   } else {
-    const payload = { ...event };
-    for (const key of ["event_type", "ts", "call_id", "parent_call_id", "experiment_id", "epoch_id", "fold_id", "run_id", "conversation_id", "step_id", "phase"]) delete payload[key];
-    brief = JSON.stringify(payload, null, 1).slice(0, 400);
+    const brief = TOOL_BRIEF_KEYS
+      .filter((key) => event[key] !== undefined && event[key] !== null && event[key] !== "")
+      .map((key) => `${key}=${String(typeof event[key] === "object" ? JSON.stringify(event[key]) : event[key]).slice(0, 120)}`)
+      .join("  ");
+    if (brief) head.append(el("span", { class: "tool-brief" }, brief));
   }
-  if (brief) node.append(el("pre", {}, brief));
-  node.append(el("details", {}, el("summary", {}, "完整事件"), el("pre", {}, JSON.stringify(event, null, 2))));
+  node.append(lazyDetails("完整事件 JSON", () => el("pre", {}, JSON.stringify(event, null, 2))));
   return node;
 }
 

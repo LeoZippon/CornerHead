@@ -16470,3 +16470,27 @@ Changes:
 - Theming: full CSS-variable refactor with a `[data-theme=dark]` palette; toggle button persists to localStorage and defaults to `prefers-color-scheme`; charts read theme at render (dark series = palette dark steps `#3987e5`/`#199e70`, validated with the dataviz validator against the dark panel `#1b1f28`: band/chroma/CVD dE 69.8/contrast all PASS; temp validator copy removed after use); marker rings use the panel surface color.
 
 Validation: full suite 514 OK; `node --check` app.js OK; server restarted on 127.0.0.1:38888 (`<title>CornerHead</title>` served, themed CSS live); `git diff --check` clean.
+
+## 2026-07-07 Trace review + console iteration 4 (feat/hitl-webui)
+
+Task: verify the user's live experiment traces, explain the long "wrap-up", then 12 console fixes/features.
+
+Trace review (test2 / run_ac0514ed9b35, month fold_202512, 20-min budget):
+- Healthy session: 44 llm_calls (median 8s, max 63s, 7.7 min total), 72 shell, 14 read, 4 explore (25 explore_llm_calls), 6 backtests (89/89/89/882/174s + one in flight), 1 context_summary, 2.33M tokens.
+- "Wrap-up taking long" diagnosis: NOT wrap-up (no wrap-up prompt had fired). The nominal deadline (03:54:53) had passed by 21+ min, but backtest wall-time is credited back to the reasoning deadline by design (~2195s accumulated). The console's countdown badge ignored the credit and displayed "收尾中 +XX" — misleading UI, correct pipeline behavior. Fixed by crediting `trace/stats.backtest_wall_seconds` into the countdown and showing a distinct "回测执行中（独立计时）" badge while a backtest runs.
+
+Changes (12 items):
+1. Per-device UI scale selector (90–150%, body.zoom, localStorage) — resolves the port-forwarded-browser vs VS Code embedded-webview font-size mismatch; base CSS unchanged at 16px.
+2. Pre-approval prompt review: POST `/prompt-preview` assembles the real `build_system_prompt`/`build_meta_learning_prompt` output (taste from the epoch's ledger record, draft directive, phase, step-tree flag); the runtime facts block is represented by the documented fallback and — like the runtime projection — excludes the test schedule. Directive panel gained 预览完整系统提示词 → modal → 确认无误，批准并启动.
+3. Replay trace panel: collapsible toggle, batched loading (~2MB/click), and raw `.jsonl` download via `/trace/download`.
+4. Kept test-period naming (folds are named by test period across ledger/docs); clarified labels/help and added a dynamic derived-validation hint (first fold: validation X → test Y).
+5. Trace memory: adopted option 3 + download link — LLM natural-language content renders in full; reasoning_content and full event JSON materialize into the DOM only on expand (lazyDetails); tool events render as one-line briefs; live stream stays capped at 400 nodes. Rejected: as-is full rendering (DOM blowup on 20MB traces) and plain truncation (loses the NL narrative).
+6. Homepage cards fully clickable; dedicated 打开 button removed; secondary buttons stopPropagation.
+7. Best-experiment hero section (max cum test return, falls back to validation) with stat tiles + both charts.
+8. Parameter form expanded per parameters_reference: step/backtest/NL budgets, replay-execution knobs, broker cash/fees/holdings caps, meta memory + derived-image knobs (~20 new fields, mostly under collapsed 高级参数; new groups 回放执行 / Broker 账户). Single-sourced via PARAM_DEFAULTS → build_config_from_options (BrokerProfile via dataclasses.replace); paths/credential/env-name/auction-time knobs deliberately omitted.
+9. Theme toggle now repaints only the SVG charts in place (`__rerender` hooks); the live trace panel is cached keyed by (experiment, session) and survives page rebuilds and session navigation — SSE stream, scroll position, and accumulated events persist; destroyed only when leaving the experiment.
+10. Live operations dashboard: GET `/trace/stats` aggregates per-event-type counts, cumulative backtest wall seconds, Σtokens, in-flight-backtest flag; rendered as chips in the live panel (5s poll) and once for completed replays.
+11. Period pickers now clamp the trading calendar to the intersection of daily and stk_mins_1min_by_date partition coverage (minute data starts 2020-01-02 → quarter options 66 → 26, 2020Q1..2026Q2), so un-backtestable ranges cannot be selected.
+12. CornerHead SVG logo (gradient corner bracket + head dot) in the top bar.
+
+Validation: full suite 519 OK (+5 tests: trace stats, download, prompt preview incl. heldout/unknown guards, dataset coverage bounds, extended param→config/broker mapping); `node --check` OK; server restarted on 38888 (detached workers unaffected) and verified live against the running test2: stats counts match the offline analysis, schema clamped, preview 20.5k chars with taste embedded and test_period absent; `git diff --check` clean.

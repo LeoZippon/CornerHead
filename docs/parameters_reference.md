@@ -88,7 +88,7 @@
 
 ## 3. 回放执行与预算
 
-定义：`src/autotrade/pipelines/config.py`（逐项写入 run manifest）；回放限时语义见 `environment_design.md` §3.5。
+定义：`src/autotrade/pipelines/config.py`（逐项写入 run manifest）；回放限时语义见 `environment_design.md` §3.7。
 
 | 参数 | 默认 | 约束对象 |
 |---|---:|---|
@@ -115,7 +115,7 @@
 | `nl_failure_policy` | `return_error_with_audit` | NL 失败时对策略的返回策略 |
 | NL 单次调用超时（派生） | `0.8 ×` 单决策上限 | 为决策 tick 的其余计算留余量（`tools/backtest.py`） |
 
-有意不设固定回测总上限：总耗时上界 = 交易日数 × 单日上限（`environment_design.md` §3.5）。
+有意不设固定回测总上限：总耗时上界 = 交易日数 × 单日上限（`environment_design.md` §3.7）。
 
 ## 4. Broker profile（账户、成本与信用）
 
@@ -255,7 +255,11 @@
 | `MAX_RUNNING_EXPERIMENTS`（常量） | 4 | 控制台并行运行实验数上限 |
 | 控制台默认绑定 | `127.0.0.1:38888` | `scripts/webui/run_webui.py --host/--port`；无鉴权，仅回环或可信反代 |
 | 控制台模型选项 | v4-pro / v4-flash | 创建表单仅暴露 v4 接口；chat/reasoner 走 API/params.json |
-| 控制台周期选择器 | 交易日历派生 | 四个周期参数按 Fold 周期从 SSE 日历枚举完整可回测周期并给推荐默认；无日历时退化为文本输入 |
+| 控制台周期选择器 | 交易日历∩数据覆盖 | 四个周期参数按 Fold 周期从 SSE 日历枚举完整可回测周期（再按 daily/分钟线分区覆盖裁剪）并给推荐默认；无日历时退化为文本输入 |
+| 控制台可调参数扩展 | 见 §2/§3/§4 各默认 | 表单另暴露 Step/回测/NL 预算、回放执行旋钮、Broker 资金/费用/持仓上限、元学习记忆与派生镜像旋钮（多数收在「高级参数」折叠区），经 `PARAM_DEFAULTS`→`build_config_from_options` 单源生效 |
+| 系统提示词预览 | `prompt-preview` 端点 | 批准前装配 Fold/元学习系统提示词（含 Taste/指令；不含运行时事实块与测试排程）供人工审阅 |
+| trace 统计/下载 | `trace/stats` / `trace/download` | 按事件类型聚合的实时运行统计（含回测累计墙钟，用于倒计时回补显示）与原始 JSONL 下载 |
+| 界面缩放 | 90%–150%（默认 100%） | 顶栏缩放选择器，按浏览器 localStorage 记忆（跨设备渲染差异的本地补偿） |
 | 控制台隐藏参数 | 路径/凭据变量名/local_dev | `raw_dir`、模板/事件路径、`tavily/semantic_scholar_api_key_env`、`local_dev` 不进表单，仅 API/params.json 可设 |
 | 分析内容预算（常量） | 单文件 20k / 总 60k 字符 | `fold_analysis.read_strategy_files` 的策略代码内联预算 |
 | HITL work root | `.runtime/sandboxes/<experiment_id>` | 控制台创建实验的专属 sandbox 根（删除实验时一并清理） |

@@ -365,6 +365,48 @@ class ResolveOptionsTest(unittest.TestCase):
         self.assertEqual(options.web_search_engines, ("tavily", "semantic_scholar"))
         self.assertTrue(options.analysis_enabled)
 
+    def test_extended_params_flow_into_config_and_broker_profile(self) -> None:
+        from autotrade.pipelines.interactive import build_config_from_options
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            options = resolve_options(
+                {
+                    "experiment_id": "exp1",
+                    "first_test_period": "2022Q1",
+                    "last_test_period": "2022Q2",
+                    "heldout_first_period": "2023Q1",
+                    "heldout_last_period": "2023Q1",
+                    "max_steps_per_fold": 5,
+                    "max_backtests_per_fold": 12,
+                    "meta_memory_max_epochs": 1,
+                    "nl_max_calls_per_decision_day": 4,
+                    "nl_max_calls_per_backtest": 20,
+                    "offsession_tick_minutes": 0,
+                    "stock_initial_cash": 1_000_000,
+                    "credit_initial_cash": 250_000,
+                    "commission_bps": 2.5,
+                    "max_total_holdings": 15,
+                    "max_single_name_weight": 0.2,
+                },
+                repo_root,
+            )
+            config = build_config_from_options(options, repo_root=repo_root)
+        self.assertEqual(config.max_steps_per_fold, 5)
+        self.assertEqual(config.max_backtests_per_fold, 12)
+        self.assertEqual(config.meta_memory_max_epochs, 1)
+        self.assertEqual(config.nl_max_calls_per_decision_day, 4)
+        self.assertEqual(config.nl_max_calls_per_backtest, 20)
+        self.assertEqual(config.offsession_tick_minutes, 0)
+        self.assertEqual(config.broker_profile.stock_initial_cash, 1_000_000.0)
+        self.assertEqual(config.broker_profile.credit_initial_cash, 250_000.0)
+        self.assertEqual(config.broker_profile.commission_bps, 2.5)
+        self.assertEqual(config.broker_profile.max_total_holdings, 15)
+        self.assertEqual(config.broker_profile.max_single_name_weight, 0.2)
+        # Defaults untouched elsewhere.
+        self.assertEqual(config.broker_profile.slippage_bps, 5.0)
+        self.assertEqual(config.backtest_max_seconds_per_decision, 300.0)
+
     def test_metadata_keys_are_ignored(self) -> None:
         options = resolve_options(
             {
