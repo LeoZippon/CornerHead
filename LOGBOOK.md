@@ -26,6 +26,7 @@
 - Fold 分析（guarded test view，用户定）：`pipelines/fold_analysis.py` 预定义中文模板经 LLMProxy 生成策略分析——输入只含验证期证据（投影排除 test_result/test_period），测试期结果在 UI 单独折叠「事后审计」区并警示不得写入后续指令；分析失败仅记 status 不阻断，可在控制台重新生成。
 - 验证：full suite 511 OK（483→511：+15 interactive、+12 webui backend、+1 prompt）；`git diff --check` clean；PROMPTS.md 重导出（含 fold 指令示例节）；真实控制面 smoke（38888 端口）：列出 23 个历史实验只读、创建→step 门控 waiting_user→set_directive→stop 干净退出→resume 重启 worker→确认式删除全通；修 2 个 smoke 发现的缺陷（params 元数据键 `_created_at` 误拒；退出 worker 成僵尸致 pid 误判存活——status_pid_alive 识别 Z 态 + 服务 SIGCHLD=SIG_IGN）。
 - 文档：pipeline_design 新增第 5 章（门控/续跑/控制台/防泄漏）；agent_design 补研究者 Fold 指令术语；parameters_reference 新增 §9 HITL 参数。后续部署形态（远端轻量服务器只承载交互层）已记入 §5.3。真实 DeepSeek+Docker 的完整 HITL Fold 运行待用户显式触发（与 RA4 同口径）。
+- 数字输入跟进：取消右对齐（保留 tabular-nums）；原生 WebKit spinner 不可样式化——统一隐藏，int 字段改自绘 ▲▼ 步进按钮（stepUp/Down + change 事件、hover/active 主题化、tabindex=-1 不抢焦点），float 字段（step=any 无法步进）保持纯输入。
 - 表单区分度跟进：输入框与按钮此前同为近白底+同描边难以区分——输入类统一改「凹槽」视觉（--input-bg 调为页面底色调、--input-border 加深一档，聚焦时底色回白+accent 环），按钮字重升 600 保持白底动作感，数字输入右对齐+tabular-nums 与文本框区分，checkbox accent-color 主题化；.field 复合规则改 background-color 避免吞掉下拉 chevron。
 - 按钮跟进：改扁平按钮体系——appearance:none 去除 WebKit 原生控件着色（Safari 上按钮/下拉的系统阴影与渐变即「显示缺陷」来源）、主按钮 hover 阴影移除（状态改走底色/描边加深，color-mix 计算按压色）、focus-visible 键盘环、下拉统一自绘 chevron（appearance:none 后补充可见性提示）。
 - 导航栏跟进：topbar 设 min-height 4rem——首页含主按钮时最高，详情页右侧为空导致高度收缩、切页跳动；定高后跨页一致。

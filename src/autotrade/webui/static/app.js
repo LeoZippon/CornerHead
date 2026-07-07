@@ -869,6 +869,21 @@ function fieldNode(field, inputs) {
     if (field.type === "float") input.setAttribute("step", "any");
     input.value = field.default ?? "";
     if (field.optional) input.placeholder = "留空使用默认";
+    if (field.type === "int") {
+      // Native WebKit spinners are hidden (unstylable); draw our own steppers.
+      const step = (direction) => {
+        if (direction > 0) input.stepUp(); else input.stepDown();
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      const host = el("div", { class: "number-input" }, input,
+        el("div", { class: "spin-col" },
+          el("button", { type: "button", class: "spin", tabindex: "-1", onclick: () => step(1) }, "▲"),
+          el("button", { type: "button", class: "spin", tabindex: "-1", onclick: () => step(-1) }, "▼"),
+        ));
+      inputs.set(field.key, { field, input });
+      wrap.append(host, el("div", { class: "help" }, field.help || ""));
+      return wrap;
+    }
   }
   inputs.set(field.key, { field, input });
   wrap.append(input, el("div", { class: "help" }, field.help || ""));
