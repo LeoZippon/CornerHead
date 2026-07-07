@@ -354,6 +354,59 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(fundamentals["business_key"].tolist(), ["k2"])
             self.assertIn("available_at", fundamentals.columns)
 
+    def test_replay_slot_builds_corporate_actions_from_dividend_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            build_raw(raw)
+            events_root = Path(tmp) / "fund_events"
+
+            def dividend(**overrides):
+                base = {
+                    "dataset": "dividend", "ts_code": "000001.SZ", "end_date": "20210630",
+                    "div_proc": "实施", "ex_date": "20211008", "record_date": "20211007",
+                    "pay_date": "20211008", "div_listdate": None, "cash_div": 0.45,
+                    "cash_div_tax": 0.5, "stk_div": None, "stk_bo_rate": None, "stk_co_rate": None,
+                    "available_at": "2021-09-25T18:00:00+08:00",
+                    "available_at_rule": "source:imp_ann_date_or_ann_date", "available_month": "202109",
+                    "business_key": "d1", "source_path": "x", "source_hash": "h", "source_row_id": 0,
+                }
+                return base | overrides
+
+            write(
+                events_root / "dividend" / "available_month=202109.parquet",
+                pd.DataFrame(
+                    [
+                        # Superseded revision of the same event: the later announcement wins.
+                        dividend(cash_div_tax=0.4),
+                        dividend(available_at="2021-09-26T18:00:00+08:00"),
+                        # Same code, second event on the same ex-date: amounts sum.
+                        dividend(end_date="20201231", cash_div_tax=0.1, stk_div=0.5, business_key="d2"),
+                        # Plan-stage row and an out-of-window ex-date are both excluded.
+                        dividend(div_proc="预案", cash_div_tax=9.9, business_key="d3"),
+                        dividend(ex_date="20211201", business_key="d4"),
+                    ]
+                ),
+            )
+            write(
+                events_root / "dividend" / "available_month=202110.parquet",
+                # Announced only after its own ex-date: a revision artifact, dropped.
+                pd.DataFrame([dividend(ex_date="20211008", available_at="2021-10-09T18:00:00+08:00", business_key="d5")]),
+            )
+            out = Path(tmp) / "replay"
+            manifest = SnapshotBuilder(raw, events_root).build_replay_slot(
+                "20211007", "20211011", out, label="valid", config=CONFIG
+            )
+            actions = pd.read_parquet(out / "corporate_actions.parquet")
+            self.assertEqual(len(actions), 1)
+            row = actions.iloc[0]
+            self.assertEqual((row["ts_code"], row["ex_date"]), ("000001.SZ", "20211008"))
+            self.assertAlmostEqual(float(row["cash_per_share"]), 0.6)  # 0.5 (kept revision) + 0.1
+            self.assertAlmostEqual(float(row["stock_per_share"]), 0.5)
+            self.assertEqual(row["record_date"], "20211007")
+            meta = manifest["domains"]["corporate_actions"]
+            self.assertEqual(meta["rows"], 1)
+            self.assertEqual(meta["dropped"]["announced_after_ex_date"], 1)
+
     def test_missing_configured_dataset_fails_fast(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"

@@ -35,7 +35,12 @@ add_repo_src(__file__)
 import pandas as pd
 
 from autotrade.environment.backtest_engine import compute_return_stats
-from autotrade.environment.broker import BrokerProfile, load_shortable_by_date, load_shortable_codes
+from autotrade.environment.broker import (
+    BrokerProfile,
+    load_corporate_actions_by_date,
+    load_shortable_by_date,
+    load_shortable_codes,
+)
 from autotrade.environment.executor import DockerExecutor
 from autotrade.environment.main_ctx_engine import MainPolicyRunner, run_main_ctx_replay
 from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, SandboxSpec, link_copytree
@@ -119,6 +124,7 @@ def main() -> int:
                 BrokerProfile(**_profile_kwargs(dict(manifest["broker_profile"]))),
                 shortable_codes=load_shortable_codes(view, decision_time[:10].replace("-", "")),
                 shortable_by_date=load_shortable_by_date(paths.valid),
+                corporate_actions_by_date=load_corporate_actions_by_date(paths.valid),
                 main_policy=policy,
                 replay_intraday_1min=replay_minutes,
                 auction_enabled=bool(manifest.get("auction_enabled", True)),

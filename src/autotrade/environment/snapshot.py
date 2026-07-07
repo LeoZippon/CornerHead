@@ -358,6 +358,13 @@ class SnapshotBuilder:
             )
             domains["intraday_1min"] = minutes_meta
 
+        started = time.perf_counter()
+        actions, actions_meta = self._build_corporate_actions(start_key, end_key, period_end)
+        profiles["corporate_actions.parquet"] = _write_with_profile(
+            output_dir / "corporate_actions.parquet", actions, build_seconds=time.perf_counter() - started
+        )
+        domains["corporate_actions"] = actions_meta
+
         manifest = {
             "snapshot_id": new_id("replay"),
             "kind": "replay_slot",
@@ -376,6 +383,82 @@ class SnapshotBuilder:
         manifest["snapshot_hash"] = _snapshot_hash(output_dir)
         _write_manifest(output_dir, manifest)
         return manifest
+
+    _CORPORATE_ACTION_COLUMNS = (
+        "ts_code", "ex_date", "record_date", "pay_date", "div_listdate",
+        "cash_per_share", "stock_per_share",
+    )
+
+    def _build_corporate_actions(
+        self, start_key: str, end_key: str, period_end: pd.Timestamp
+    ) -> tuple[pd.DataFrame, dict[str, object]]:
+        """Implemented dividend events with an ex-date inside the replay window,
+        one row per (ts_code, ex_date): SimBroker's ex-date corporate-action truth
+        (docs/environment_design.md §3.2). Not an agent input — agent visibility of
+        dividends stays announcement-gated via the PIT fundamental events.
+
+        ``cash_per_share`` is the gross (税前) per-share cash amount and
+        ``stock_per_share`` the combined 送转 ratio. Announcements are read without
+        a lower available_at bound (an ex-date can trail its 实施公告 by weeks), a
+        row announced only after its own ex-date is dropped as a revision artifact,
+        and same-day events for one code are summed (they share the record-date
+        share base)."""
+        raw = read_fundamental_events(
+            self.fundamental_events_root,
+            period_end.isoformat(),
+            datasets=("dividend",),
+            require_partitions=False,
+        )
+        empty = pd.DataFrame(columns=list(self._CORPORATE_ACTION_COLUMNS))
+        dropped = {"missing_ex_date": 0, "announced_after_ex_date": 0}
+        meta: dict[str, object] = {"rows": 0, "datasets": ["dividend"], "dropped": dropped}
+        if raw.empty:
+            return empty, meta
+        required = {
+            "ts_code", "end_date", "div_proc", "ex_date", "available_at",
+            "cash_div", "cash_div_tax", "stk_div", "stk_bo_rate", "stk_co_rate",
+            "record_date", "pay_date", "div_listdate",
+        }
+        missing = sorted(required - set(raw.columns))
+        if missing:
+            raise ValueError(f"dividend events missing columns: {missing}")
+        frame = raw[raw["div_proc"].astype(str) == "实施"].copy()
+        for column in ("ex_date", "record_date", "pay_date", "div_listdate"):
+            frame[column] = frame[column].astype("string").str.strip().fillna("")
+        dropped["missing_ex_date"] = int((frame["ex_date"] == "").sum())
+        frame = frame[(frame["ex_date"] >= start_key) & (frame["ex_date"] <= end_key)]
+        if frame.empty:
+            return empty, meta
+        announced = frame["available_at"].astype(str).str[:10].str.replace("-", "", regex=False)
+        late = announced > frame["ex_date"]
+        dropped["announced_after_ex_date"] = int(late.sum())
+        frame = frame[~late]
+        # Latest announced version per dividend event, then per-share amounts with
+        # the documented fallbacks (cash_div_tax is gross; stk_div is the combined
+        # 送股+转增 ratio; audit.py records the unit semantics).
+        frame = frame.sort_values("available_at").drop_duplicates(["ts_code", "end_date", "ex_date"], keep="last")
+        cash = pd.to_numeric(frame["cash_div_tax"], errors="coerce")
+        cash = cash.fillna(pd.to_numeric(frame["cash_div"], errors="coerce")).fillna(0.0)
+        bo = pd.to_numeric(frame["stk_bo_rate"], errors="coerce").fillna(0.0)
+        co = pd.to_numeric(frame["stk_co_rate"], errors="coerce").fillna(0.0)
+        stock = pd.to_numeric(frame["stk_div"], errors="coerce").fillna(bo + co)
+        frame = frame.assign(cash_per_share=cash.clip(lower=0.0), stock_per_share=stock.clip(lower=0.0))
+        frame = frame[(frame["cash_per_share"] > 0.0) | (frame["stock_per_share"] > 0.0)]
+        if frame.empty:
+            return empty, meta
+        out = (
+            frame.groupby(["ts_code", "ex_date"], as_index=False)
+            .agg(
+                cash_per_share=("cash_per_share", "sum"),
+                stock_per_share=("stock_per_share", "sum"),
+                record_date=("record_date", "first"),
+                pay_date=("pay_date", "first"),
+                div_listdate=("div_listdate", "max"),
+            )
+            .sort_values(["ex_date", "ts_code"], ignore_index=True)
+        )
+        meta["rows"] = int(len(out))
+        return out[list(self._CORPORATE_ACTION_COLUMNS)], meta
 
     def _read_minutes_range(self, start_key: str, end_key: str) -> tuple[pd.DataFrame, dict[str, object]]:
         dataset_dir = self.raw_dir / "stk_mins_1min_by_date"

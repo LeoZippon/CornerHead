@@ -156,6 +156,8 @@ FOLD_ACTION_SECTION = """\
 
 信用账户经济学（与交易所实施细则一致）：融资/融券利息按自然日 /360 计入合约、还款/还券时以现金支付（先息后本、最老合约优先）；融资买入股份卖出时必须用 `sell_repay` 先还融资负债；维保比例 = (信用账户现金+证券市值)/(融资负债+融券市值+利息)——**只计信用账户资产，普通账户不作担保**——低于平仓线（见 facts `maintenance_closeout_ratio`）强制平掉信用账户持仓（普通账户不受影响）；融券卖出所得现金被冻结、只能用于买券还券、不可划转；新的融资/融券操作受保证金可用余额（信用现金+担保品市值×折算率−占用−浮亏）约束。两账户初始资金见 facts `stock_initial_cash` / `credit_initial_cash`，可用盘前 `transfer` 重新配置（信用划出受提取线约束）。
 
+公司行为（除权日盘前自动处理，见 facts `corporate_actions`）：多头持仓在除权日贷记现金红利（税前 × (1−`dividend_tax_rate`)）并按送转比例增股（成本连续，红股上市日晚于除权日时先锁定）；融券空头按税前全额补偿现金红利、应还股数按送转比例调增。持有跨除权日不再被记为纯亏损；配股未建模。
+
 `ctx` 其他字段：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`、`ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`、`ctx.substep(name, budget_minutes=B)`、`ctx.asof_dir`、`ctx.asof_version`、`ctx.snapshot_dir`、`ctx.model_dir`、`ctx.state_dir`、`ctx.nl(ts_code?, prompt=...)`。
 
 轻量委托管理例子（每个 tick 可运行，用小预算子步骤统一统计耗时和撤单提交时点）：
@@ -738,6 +740,8 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             "order_lot_size": 100,
             "price_limit_enforced": True,
             "suspension_enforced": True,
+            "corporate_actions": profile.get("corporate_actions"),
+            "dividend_tax_rate": profile.get("dividend_tax_rate"),
             "execution_lag_bars": manifest.get("execution_lag_bars"),
             "auction_close_time": manifest.get("auction_close_time"),
             "offsession_tick_minutes": manifest.get("offsession_tick_minutes"),

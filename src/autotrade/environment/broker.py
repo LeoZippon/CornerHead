@@ -34,12 +34,15 @@ The Broker still enforces every A-share market rule (docs/environment_design.md
 §3.2/§3.5): cash/margin, T+1 sellable balance, lot size, limit up/down, suspension, the
 configured short-inventory mode (default ``proxy_margin_secs``), the 融券卖出
 limit-price rule (申报价不得低于最新成交价 — shorts must be limit orders), optional
-concentration limits, commission, stamp duty, slippage, and forced close. Every
+concentration limits, commission, stamp duty, slippage, and forced close. Ex-date
+corporate actions (cash dividends, 送转 bonus shares) apply to both sides at the
+day roll — longs are credited, 融券 shorts compensate the lender. Every
 order/reject is recorded.
 """
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from datetime import datetime
 import math
@@ -62,10 +65,12 @@ from autotrade.environment.broker_core import (
     release_fin_shares,
     repay_fin,
     repay_slo,
+    scale_slo_contracts,
 )
 from autotrade.environment.runtime import new_id
 
 SHORT_INVENTORY_MODES = ("proxy_margin_secs", "broker_inventory", "theoretical_short")
+CORPORATE_ACTION_MODES = ("modeled", "disabled")
 ACCOUNT_TYPES = ("stock", "credit")
 
 
@@ -101,8 +106,14 @@ class BrokerProfile:
     assure_ratio: float = 0.70  # flat 担保品折算率 approximation
     fin_max_quota: float | None = None  # 融资授信额度 (None = ungated)
     slo_max_quota: float | None = None  # 融券授信额度 (None = ungated)
-    # Dividends/rights against short positions are intentionally not modeled yet.
-    short_corporate_actions: str = "disabled"
+    # Ex-date corporate actions (cash dividends and 送转 share bonuses) applied to
+    # both long and short positions at roll_to_date; "disabled" is a research
+    # isolation switch. 配股 (rights issues) are not modeled.
+    corporate_actions: str = "modeled"
+    # Flat research haircut on cash dividends credited to longs — the real
+    # differential 0/10%/20% tax settled at sale by holding period is not modeled.
+    # Shorts always compensate the lender the gross amount.
+    dividend_tax_rate: float = 0.0
     maintenance_closeout_ratio: float = 1.30
     # Reference lines recorded for audit only; the engine enforces just
     # maintenance_closeout_ratio (forced close), not these two.
@@ -123,6 +134,10 @@ class BrokerProfile:
             raise ValueError("combined initial cash must be positive")
         if self.short_inventory_mode not in SHORT_INVENTORY_MODES:
             raise ValueError(f"unsupported short_inventory_mode={self.short_inventory_mode}")
+        if self.corporate_actions not in CORPORATE_ACTION_MODES:
+            raise ValueError(f"unsupported corporate_actions={self.corporate_actions}")
+        if not 0.0 <= self.dividend_tax_rate < 1.0:
+            raise ValueError("dividend_tax_rate must be in [0, 1)")
         if self.max_total_holdings is not None and self.max_total_holdings <= 0:
             raise ValueError("max_total_holdings must be positive")
         if self.max_single_name_weight is not None and self.max_single_name_weight <= 0:
@@ -182,7 +197,8 @@ class BrokerProfile:
             "assure_ratio": self.assure_ratio,
             "fin_max_quota": self.fin_max_quota,
             "slo_max_quota": self.slo_max_quota,
-            "short_corporate_actions": self.short_corporate_actions,
+            "corporate_actions": self.corporate_actions,
+            "dividend_tax_rate": self.dividend_tax_rate,
             "maintenance_closeout_ratio": self.maintenance_closeout_ratio,
             "maintenance_warning_ratio": self.maintenance_warning_ratio,
             "maintenance_withdraw_ratio": self.maintenance_withdraw_ratio,
@@ -440,9 +456,17 @@ class SimBroker:
         *,
         shortable_codes: frozenset[str],
         shortable_by_date: dict[str, frozenset[str]] | None = None,
+        corporate_actions_by_date: dict[str, list[dict[str, object]]] | None = None,
     ) -> None:
         self.profile = profile
         self.market = market
+        # Ex-date corporate actions from the replay slot (environment market truth,
+        # not an agent input — the agent's dividend view stays announcement-gated):
+        # {ex_date: [{ts_code, cash_per_share, stock_per_share, record_date, ...}]}.
+        self.corporate_actions_by_date = dict(corporate_actions_by_date or {})
+        self._corporate_actions_applied: set[str] = set()
+        self.dividend_cash_received = 0.0  # net cash credited to longs
+        self.dividend_compensation_paid = 0.0  # gross cash debited from shorts
         # Frozen decision-day margin_secs set (the agent's snapshot view), used as the
         # fallback when a fill day is absent from the per-day map below. margin_secs
         # carries no 担保品/融资/融券 split, so the same set gates credit_buy,
@@ -916,8 +940,109 @@ class SimBroker:
         hold reports its full ``sellable_quantity`` from the day's first off-session
         tick rather than only after that day's first fill. Idempotent and
         deterministic: ``execute``/``mark_to_market`` still call ``_advance_date`` as
-        a safety net, and re-rolling to the same date is a no-op."""
+        a safety net, and re-rolling to the same date is a no-op. Ex-date corporate
+        actions apply here — once per date, before the day's first tick (盘前到账)."""
         self._advance_date(trade_date)
+        if self.profile.corporate_actions == "modeled":
+            self._apply_corporate_actions(str(trade_date))
+
+    # ---- corporate actions (docs/environment_design.md §3.2) ----
+
+    def _apply_corporate_actions(self, trade_date: str) -> None:
+        """Apply the date's ex-date events to every held position, once per date.
+
+        Runs at the start of the ex-date before any tick, so entitlement is the
+        overnight position — the record-date close holding. Longs are credited the
+        cash dividend (net of the flat ``dividend_tax_rate``) and the 送转 bonus
+        shares; shorts compensate the lender the gross cash amount and owe the
+        post-conversion share count (their 融券 contracts scale in step).
+        ``last_price`` is rebased to the theoretical ex price so marks, maintenance
+        and equity stay continuous even when the code does not trade that day."""
+        if trade_date in self._corporate_actions_applied:
+            return
+        self._corporate_actions_applied.add(trade_date)
+        for action in self.corporate_actions_by_date.get(trade_date, ()):
+            ts_code = str(action.get("ts_code") or "")
+            cash = float(action.get("cash_per_share") or 0.0)
+            bonus_ratio = float(action.get("stock_per_share") or 0.0)
+            if not ts_code or (cash <= 0.0 and bonus_ratio <= 0.0):
+                continue
+            record_date = str(action.get("record_date") or "")
+            expected = self._previous_trade_date(trade_date)
+            if record_date and expected and record_date != expected:
+                # Entitlement is still applied on the overnight position; the gap
+                # (e.g. the code was suspended on its record date) is audit-logged.
+                self._event(
+                    "corporate_action_calendar_gap", trade_date=trade_date, ts_code=ts_code,
+                    record_date=record_date, expected_record_date=expected,
+                )
+            for state in self.accounts.values():
+                pos = state.positions.get(ts_code)
+                if pos is None or pos.quantity <= 0:
+                    continue
+                if cash > 0.0:
+                    self._apply_cash_dividend(state, pos, cash, trade_date)
+                if bonus_ratio > 0.0:
+                    self._apply_share_bonus(
+                        state, pos, bonus_ratio, trade_date, str(action.get("div_listdate") or "")
+                    )
+                pos.last_price = max((pos.last_price - cash) / (1.0 + bonus_ratio), 0.0)
+
+    def _apply_cash_dividend(self, state: AccountState, pos: Position, per_share: float, trade_date: str) -> None:
+        gross = pos.quantity * per_share
+        if pos.side == "long":
+            amount = gross * (1.0 - self.profile.dividend_tax_rate)
+            state.cash += amount
+            self.dividend_cash_received += amount
+        else:
+            # 融券期间权益补偿: the borrower owes the lender the full distribution.
+            amount = -gross
+            state.cash -= gross
+            self.dividend_compensation_paid += gross
+        self._event(
+            "dividend_cash", trade_date=trade_date, ts_code=pos.ts_code, account=state.name,
+            side=pos.side, per_share=per_share, quantity=pos.quantity, amount=amount,
+        )
+
+    def _apply_share_bonus(
+        self, state: AccountState, pos: Position, per_share: float, trade_date: str, div_listdate: str
+    ) -> None:
+        if pos.side == "short":
+            # The lender is owed the post-conversion count: each open 融券 contract
+            # scales in place (interest basis preserved) and the position follows,
+            # keeping the position/contract share invariant.
+            bonus = scale_slo_contracts(state.contracts, pos.ts_code, per_share)
+        else:
+            bonus = int(pos.quantity * per_share)
+        if bonus <= 0:
+            return
+        # Rebase the average entry so cost basis — and later realized P&L — stay
+        # continuous across the ex-date; entry_cost (cash actually paid/locked) is
+        # untouched. 融资 contracts also stay untouched: bonus shares on financed
+        # positions are ordinary collateral, not new financed shares.
+        pos.entry_price = pos.entry_price * pos.quantity / (pos.quantity + bonus)
+        pos.quantity += bonus
+        locked_until = ""
+        if pos.side == "long" and div_listdate > trade_date:
+            # 红股上市日晚于除权日: the bonus shares count toward value now but stay
+            # unsellable until div_listdate. A later same-day buy folds this lock
+            # back to the ex-date (single-lock approximation, audit event above).
+            prev = self._previous_trade_date(div_listdate)
+            if prev and prev >= trade_date:
+                pos.locked_today += bonus
+                pos.locked_date = max(pos.locked_date, prev)
+                locked_until = div_listdate
+        self._event(
+            "bonus_shares", trade_date=trade_date, ts_code=pos.ts_code, account=state.name,
+            side=pos.side, per_share=per_share, quantity=bonus,
+            **({"locked_until": locked_until} if locked_until else {}),
+        )
+
+    def _previous_trade_date(self, date_key: str) -> str | None:
+        """The last replay trade date strictly before ``date_key``, or None."""
+        dates = self.market.trade_dates
+        index = bisect_left(dates, str(date_key))
+        return dates[index - 1] if index > 0 else None
 
     # ---- fundamental primitives ----
 
@@ -1882,6 +2007,25 @@ def load_shortable_by_date(replay_dir: str | Path) -> dict[str, frozenset[str]]:
         str(date): frozenset(group["ts_code"].astype(str))
         for date, group in rows.groupby(rows["trade_date"].astype(str))
     }
+
+
+def load_corporate_actions_by_date(replay_dir: str | Path) -> dict[str, list[dict[str, object]]]:
+    """Ex-date corporate actions from a replay slot, keyed by ex_date.
+
+    Environment-side market truth consumed by SimBroker at ``roll_to_date`` (the
+    agent's dividend visibility stays announcement-gated through the PIT
+    fundamental events). Empty when the slot predates the corporate_actions
+    domain; the broker then applies none — matching that slot's build-time world."""
+    path = Path(replay_dir) / "corporate_actions.parquet"
+    if not path.exists():
+        return {}
+    actions = pd.read_parquet(path)
+    if actions.empty:
+        return {}
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for row in actions.to_dict("records"):
+        grouped.setdefault(str(row.get("ex_date") or ""), []).append(row)
+    return grouped
 
 
 def _bar_for_code(minute_group: pd.DataFrame, ts_code: str) -> pd.Series | None:

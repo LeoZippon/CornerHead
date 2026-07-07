@@ -1,3 +1,9 @@
+2026-07-07 多空公司行为落地：除权日红利/送转进回放（fix/corporate-actions）
+
+- 关闭第四轮审计 High「多头公司行为缺失」：raw 价回放把除权缺口记为多头纯亏损/空头意外盈利、红利不进收益与归因、且 PIT 可见的分红公告会教 Agent 在除权日前清仓（错误世界模型）。采用显式除权日事件（非复权价——涨跌停/手数/uptick/QMT 实盘全在 raw 价空间）。
+- 回放槽新增 `corporate_actions.parquet`（已实施分红按 `ex_date` 入窗；公告晚于除权日的修订行剔除、最新公告版本胜出、同日同票求和；Environment 侧市场事实，Agent 可见性仍按公告日门控，无 PIT 泄漏）。`SimBroker.roll_to_date` 除权日盘前一次性处理：多头贷记现金（税前 ×(1−`dividend_tax_rate`，默认 0)）+ 送转增股（成本连续、红股按 `div_listdate` 解锁）；融券空头按税前全额补偿、逐张合约股数按送转调增（计费基数不变、持仓/合约不变量保持）；`last_price` 重定为理论除权价（停牌除权日权益也连续）。profile 弃 inert `short_corporate_actions`，新增被消费的 `corporate_actions="modeled"` + `dividend_tax_rate`；旧 manifest/旧回放槽兼容（缺文件=旧行为）。归因：红利入 long/short P&L（不进 trade_count/win_rate），summary 新增 `dividend_cash_received`/`dividend_compensation_paid`。已记录残差：配股、pay_date 滞后、零碎股取整。
+- 验证：full suite 539 OK（+11：10 broker CA 测试含权益连续性/税率/锁定解锁/空头补偿与干净平仓/日历缺口/停牌除权/loader 回环/回放归因≈realized+红利；1 snapshot builder 测试）；`git diff --check` clean；PROMPTS.md 重导出（公司行为段+2 facts）；五份 living docs 中 env/data/参数速查同步。前置：上一会话遗留的 timeview 文本域 WIP 已按用户指示先行提交（8d5ac20）。
+
 2026-07-07 HITL 交互式运行 + Web 控制台（feat/hitl-webui）
 
 - 新增 human-in-the-loop 层：`pipelines/interactive.py` 的 `InteractiveExperimentRunner` 按 run() 同序驱动 run_meta_learning/run_fold/run_heldout，会话边界门控（auto/step 模式、pause/stop、逐会话批准+指令）；控制面 = `experiments/<id>/hitl/` 单写者原子 JSON（params/control/status/schedule）；账本级续跑（跳过已记录会话、父产物链按冻结路径重建+hash 核验、Taste 从 taste.md 恢复、held-out 按 `skip_labels` 只补缺失周期、孤儿冻结目录显式拒绝）。

@@ -153,7 +153,11 @@ and join rows to `ctx.asof_dir / "text_library"` via each row's `library_file` a
 保证金可用余额, T+1 sellable balance, lot size, price limits, suspension,
 margin-target eligibility and credit
 quotas, per-calendar-day debt interest, the maintenance-ratio forced close, and
-reserves the final replay date for mandatory liquidation. The Broker is the source
+reserves the final replay date for mandatory liquidation. Ex-date corporate
+actions apply automatically before the ex-date's first tick: longs are credited
+cash dividends and 送转 bonus shares (cost basis stays continuous), 融券 shorts
+compensate the lender in cash and owe the post-conversion share count — holding
+through an ex-date is no longer booked as a raw price-gap loss. The Broker is the source
 of truth for positions and reflects **filled** positions only;
 `ctx.broker.pending(code)` exposes orders still working between decision and fill,
 so gate re-entry/exit on both. For light order hygiene, run this every tick inside

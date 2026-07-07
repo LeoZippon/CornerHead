@@ -157,7 +157,8 @@
 | `maintenance_closeout_ratio` | 1.30 | 维持担保比例平仓线（触发时只强平信用账户；普通账户不作担保） |
 | `maintenance_warning_ratio` | 1.40 | 警戒参考线，仅审计记录 |
 | `maintenance_withdraw_ratio` | 3.00 | 提取线：信用账户有负债时，现金划出（`transfer`）后维保比例不得低于该线 |
-| `short_corporate_actions` | `disabled` | 空头分红/配股暂不建模 |
+| `corporate_actions` | `modeled` | 除权日现金红利/送转处理（多头贷记、空头补偿；`disabled` 为研究隔离开关；配股未建模） |
+| `dividend_tax_rate` | 0.0 | 多头现金红利的平坦研究税率（差别化红利税未建模；空头恒按税前全额补偿） |
 
 ## 5. Agent 会话与上下文管理
 

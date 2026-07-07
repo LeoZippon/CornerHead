@@ -143,7 +143,7 @@ flowchart LR
 | 财务指标 | `fina_indicator_vip` | 按报告期 | 无 `f_ann_date` 时用 `ann_date` |
 | 业绩预告 | `forecast_vip` | 按公告月 | 预期修正事件 |
 | 业绩快报 | `express_vip` | 按公告月 | 财报前置信息 |
-| 分红送股 | `dividend` | 按股票代码 | 只用 `imp_ann_date/ann_date` 判断可见性 |
+| 分红送股 | `dividend` | 按股票代码 | 只用 `imp_ann_date/ann_date` 判断可见性；另作为 Broker 除权日公司行为输入（回放槽 `corporate_actions.parquet`，按 `ex_date` 键入，见 environment_design §3.2） |
 | 审计意见 | `fina_audit` | 按股票代码 | 审计风险 |
 | 主营业务构成 | `fina_mainbz_vip` | 按股票代码 | 业务结构 |
 | 披露计划 | `disclosure_date` | 按报告期 | 披露计划和实际披露日 |
@@ -471,7 +471,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 | `daily` / `daily_basic` | 行级 `available_at` 为当日收盘后（次一交易日生效）；Timeview 另由 `cn_evening_full`（约次日 02:05 完成）门禁，故交易日内横截面日频只到 D-1，当日数据要到次日约 02:05 才落库可见，09:25 信号不得使用当日数据 |
 | 分钟线 | `available_at=trade_time`，视为该分钟 bar close 后可见；历史分钟随 `cn_evening_full` 晚间滚动落库，当日实时 bar 由引擎 `ctx.bars` 提供、不走持久化视图 |
 | 财务 | 优先 `f_ann_date`，否则 `ann_date`；多版本按决策时点选择；`fundamental_events` 由 `cn_nightly_pit_event_build`（约 03:50）落库后可查 |
-| 分红 | 只用 `imp_ann_date/ann_date` 判断可见性，`ex_date/record_date/pay_date` 是未来事件属性 |
+| 分红 | Agent 可见性只用 `imp_ann_date/ann_date` 判断，`ex_date/record_date/pay_date` 是未来事件属性；Broker 侧另按 `ex_date` 消费已实施分红作为除权日市场事实（Environment 输入、非 Agent 输入，不构成 PIT 泄漏） |
 | 宏观 | 优先发布时间或 `cn_schedule.publish_date`，否则保守延后；Timeview 随 `cn_evening_full` 落库 |
 | 全球事件 | 有具体 `time` 时使用 `date+time`，否则当日收盘后可见；Timeview 随 `cn_evening_full` 落库 |
 | 文本 | 优先 `rec_time/pub_time/pubtime/datetime/create_time`；有日期基准的字段须通过 -1~+3 天合理性检查，否则按日期保守回退（见 §1.7）；`cctv_news/news` 盘前另由 `cn_preopen_text_backfill_0855` 回补 |

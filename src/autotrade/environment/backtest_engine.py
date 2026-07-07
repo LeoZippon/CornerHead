@@ -317,8 +317,16 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
     annualized = float((1.0 + total_return) ** (1.0 / years) - 1.0) if total_return > -1.0 else -1.0
     realized = [event for event in broker.events if event["event_type"] in {"position_closed", "position_reduced"}]
     full_closes = [event for event in broker.events if event["event_type"] == "position_closed"]
-    long_pnl = sum(e["realized_pnl"] for e in realized if e["side"] == "long")
-    short_pnl = sum(e["realized_pnl"] for e in realized if e["side"] == "short")
+    # Ex-date cash dividends (credited to longs, debited from shorts as lender
+    # compensation) belong to side attribution but are not trades: they enter
+    # long/short P&L, never trade_count or win_rate.
+    dividends = [event for event in broker.events if event["event_type"] == "dividend_cash"]
+    long_pnl = sum(e["realized_pnl"] for e in realized if e["side"] == "long") + sum(
+        e["amount"] for e in dividends if e["side"] == "long"
+    )
+    short_pnl = sum(e["realized_pnl"] for e in realized if e["side"] == "short") + sum(
+        e["amount"] for e in dividends if e["side"] == "short"
+    )
     wins = sum(1 for e in realized if e["realized_pnl"] > 0)
     orders = broker.get_trade_detail_data(account_type="STOCK", data_type="ORDER") + broker.get_trade_detail_data(
         account_type="CREDIT", data_type="ORDER"
@@ -369,6 +377,8 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "slippage_bps_assumed": broker.profile.slippage_bps,
         "credit_interest_accrued": float(broker.interest_accrued_total),
         "credit_interest_paid": float(broker.interest_paid_total),
+        "dividend_cash_received": float(broker.dividend_cash_received),
+        "dividend_compensation_paid": float(broker.dividend_compensation_paid),
         "forced_close_events": sum(1 for e in broker.events if e["event_type"] == "forced_close_triggered"),
         "replay_granularity": result.granularity,
         "replay_wall_seconds": result.replay_wall_seconds,

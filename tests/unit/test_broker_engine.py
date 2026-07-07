@@ -758,6 +758,201 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual(private_restored.effective_slo_margin_ratio, 1.2)
 
 
+# Ex-date replay: 000001.SZ closes 10.0, then opens the next day 0.5 lower — the
+# raw price gap the 0.5/share cash dividend explains.
+CA_REPLAY = make_daily(
+    [
+        ("20220104", "000001.SZ", 10.0, 10.0, 11.0, 9.0, False),
+        ("20220105", "000001.SZ", 9.5, 9.5, 10.45, 8.55, False),
+        ("20220106", "000001.SZ", 9.5, 9.5, 10.45, 8.55, False),
+        ("20220104", "000002.SZ", 20.0, 20.0, 22.0, 18.0, False),
+        ("20220105", "000002.SZ", 13.0, 13.0, 14.3, 11.7, False),
+        ("20220106", "000002.SZ", 13.0, 13.0, 14.3, 11.7, False),
+    ]
+)
+
+
+class CorporateActionTest(unittest.TestCase):
+    def make_broker(self, actions, *, daily=CA_REPLAY, shortable=("000001.SZ", "000002.SZ"), **profile_kw):
+        return SimBroker(
+            BrokerProfile(**profile_kw),
+            MarketData(daily),
+            shortable_codes=frozenset(shortable),
+            corporate_actions_by_date=actions,
+        )
+
+    @staticmethod
+    def action(**overrides):
+        base = {
+            "ts_code": "000001.SZ", "ex_date": "20220105", "record_date": "20220104",
+            "pay_date": "20220105", "div_listdate": "", "cash_per_share": 0.5, "stock_per_share": 0.0,
+        }
+        return base | overrides
+
+    def _events(self, broker, event_type):
+        return [e for e in broker.events if e["event_type"] == event_type]
+
+    def test_long_cash_dividend_credited_and_marks_stay_continuous(self):
+        broker = self.make_broker({"20220105": [self.action()]})
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.mark_to_market("20220104")
+        cash_before, equity_before = broker.stock.cash, broker.equity()
+        broker.roll_to_date("20220105")
+        self.assertAlmostEqual(broker.stock.cash, cash_before + 500.0)
+        # last_price rebases to the theoretical ex price, so the cash credit and the
+        # mark drop cancel: equity is continuous across the roll (no tax haircut).
+        self.assertAlmostEqual(broker.stock.positions["000001.SZ"].last_price, 9.5)
+        self.assertAlmostEqual(broker.equity(), equity_before)
+        event = self._events(broker, "dividend_cash")[0]
+        self.assertEqual((event["side"], event["account"]), ("long", "stock"))
+        self.assertAlmostEqual(event["amount"], 500.0)
+        self.assertAlmostEqual(broker.dividend_cash_received, 500.0)
+        # Re-rolling the same date must not double-credit.
+        broker.roll_to_date("20220105")
+        self.assertAlmostEqual(broker.stock.cash, cash_before + 500.0)
+
+    def test_dividend_tax_rate_haircuts_the_long_credit(self):
+        broker = self.make_broker({"20220105": [self.action()]}, dividend_tax_rate=0.10)
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.mark_to_market("20220104")
+        cash_before, equity_before = broker.stock.cash, broker.equity()
+        broker.roll_to_date("20220105")
+        self.assertAlmostEqual(broker.stock.cash, cash_before + 450.0)
+        self.assertAlmostEqual(broker.equity(), equity_before - 50.0)
+
+    def test_share_bonus_rebases_entry_and_locks_until_listdate(self):
+        actions = {"20220105": [self.action(cash_per_share=0.0, stock_per_share=0.5, div_listdate="20220106")]}
+        broker = self.make_broker(actions)
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        pos = broker.stock.positions["000001.SZ"]
+        entry_cost, entry_price = pos.entry_cost, pos.entry_price
+        broker.roll_to_date("20220105")
+        self.assertEqual(pos.quantity, 1500)
+        # Average-cost continuity: total entry value and cash basis are unchanged.
+        self.assertAlmostEqual(pos.entry_price * 1500, entry_price * 1000)
+        self.assertEqual(pos.entry_cost, entry_cost)
+        # Bonus shares list on 20220106: sellable stays at the original 1000 today.
+        self.assertEqual(broker.sellable_quantity("stock", "000001.SZ"), 1000)
+        self.assertEqual(self._events(broker, "bonus_shares")[0]["locked_until"], "20220106")
+        broker.roll_to_date("20220106")
+        self.assertEqual(broker.sellable_quantity("stock", "000001.SZ"), 1500)
+
+    def test_share_bonus_listing_on_ex_date_is_sellable_immediately(self):
+        actions = {"20220105": [self.action(cash_per_share=0.0, stock_per_share=0.5, div_listdate="20220105")]}
+        broker = self.make_broker(actions)
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.roll_to_date("20220105")
+        self.assertEqual(broker.sellable_quantity("stock", "000001.SZ"), 1500)
+
+    def test_short_compensates_gross_cash_and_scales_liability(self):
+        # 000002.SZ pays 0.5/share and converts 0.5/share; the short owes both.
+        actions = {"20220105": [self.action(ts_code="000002.SZ", cash_per_share=0.5, stock_per_share=0.5)]}
+        broker = self.make_broker(actions, dividend_tax_rate=0.10)  # tax never applies to shorts
+        broker.execute("000002.SZ", "short", trade_date="20220104", raw_price=20.0, amount=1000)
+        broker.mark_to_market("20220104")
+        cash_before, equity_before = broker.credit.cash, broker.equity()
+        contract = next(c for c in broker.credit.contracts if c.kind == "slo")
+        interest_base = contract.shares * contract.open_price
+        broker.roll_to_date("20220105")
+        pos = broker.credit.positions["000002.SZ"]
+        self.assertEqual(pos.quantity, 1500)
+        self.assertEqual(contract.shares, 1500)
+        self.assertAlmostEqual(contract.shares * contract.open_price, interest_base)  # fee basis preserved
+        self.assertAlmostEqual(broker.credit.cash, cash_before - 500.0)
+        self.assertAlmostEqual(broker.dividend_compensation_paid, 500.0)
+        # Marks: 1000 × 20 liability becomes 1500 × 13 + 500 compensation — continuous.
+        self.assertAlmostEqual(pos.last_price, 13.0)
+        self.assertAlmostEqual(broker.equity(), equity_before, places=6)
+        # The scaled liability covers cleanly: the position/contract invariant held.
+        cover = broker.execute("000002.SZ", "cover", trade_date="20220105", raw_price=13.0, amount=1500)
+        self.assertEqual(cover.status, "filled")
+        self.assertNotIn("000002.SZ", broker.credit.positions)
+        self.assertTrue(all(c.closed for c in broker.credit.contracts))
+
+    def test_disabled_mode_and_unheld_codes_are_untouched(self):
+        broker = self.make_broker({"20220105": [self.action()]}, corporate_actions="disabled")
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        cash_before = broker.stock.cash
+        broker.roll_to_date("20220105")
+        self.assertEqual(broker.stock.cash, cash_before)
+        self.assertEqual(self._events(broker, "dividend_cash"), [])
+
+        held_nothing = self.make_broker({"20220105": [self.action(ts_code="000002.SZ")]})
+        held_nothing.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        held_nothing.roll_to_date("20220105")
+        self.assertEqual(self._events(held_nothing, "dividend_cash"), [])
+
+    def test_record_date_gap_is_audited_but_still_applied(self):
+        broker = self.make_broker({"20220105": [self.action(record_date="20211230")]})
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        cash_before = broker.stock.cash
+        broker.roll_to_date("20220105")
+        gap = self._events(broker, "corporate_action_calendar_gap")[0]
+        self.assertEqual(gap["expected_record_date"], "20220104")
+        self.assertAlmostEqual(broker.stock.cash, cash_before + 500.0)
+
+    def test_suspended_ex_date_still_applies_and_rebases_the_stale_mark(self):
+        suspended = make_daily(
+            [
+                ("20220104", "000001.SZ", 10.0, 10.0, 11.0, 9.0, False),
+                ("20220105", "000001.SZ", None, None, None, None, True),
+                ("20220106", "000001.SZ", 9.5, 9.5, 10.45, 8.55, False),
+            ]
+        )
+        broker = self.make_broker({"20220105": [self.action()]}, daily=suspended)
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.mark_to_market("20220104")
+        equity_before = broker.equity()
+        broker.roll_to_date("20220105")
+        broker.mark_to_market("20220105")  # suspended: no close, the rebased mark stands
+        self.assertAlmostEqual(broker.stock.positions["000001.SZ"].last_price, 9.5)
+        self.assertAlmostEqual(broker.equity(), equity_before)
+
+    def test_loader_reads_slot_file_and_tolerates_absence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from autotrade.environment.broker import load_corporate_actions_by_date
+
+            self.assertEqual(load_corporate_actions_by_date(tmp), {})
+            frame = pd.DataFrame(
+                [
+                    self.action(),
+                    self.action(ts_code="000002.SZ", ex_date="20220106", cash_per_share=0.2),
+                ]
+            )
+            frame.to_parquet(Path(tmp) / "corporate_actions.parquet", index=False)
+            loaded = load_corporate_actions_by_date(tmp)
+            self.assertEqual(sorted(loaded), ["20220105", "20220106"])
+            self.assertEqual(loaded["20220105"][0]["ts_code"], "000001.SZ")
+            self.assertAlmostEqual(loaded["20220106"][0]["cash_per_share"], 0.2)
+
+    def test_replay_folds_dividends_into_returns_and_attribution(self):
+        def buy_hold(state):
+            if state["cur_time"] != "09:25" or state["cur_date"] != "20220104" or _held(state, "000001.SZ"):
+                return []
+            return [{"action": "buy", "ts_code": "000001.SZ", "amount": 1000}]
+
+        replay = run_main_ctx_replay(
+            CA_REPLAY,
+            BrokerProfile(),
+            shortable_codes=frozenset(),
+            corporate_actions_by_date={"20220105": [self.action()]},
+            main_policy=FakeMainPolicy(buy_hold),
+        )
+        stats = compute_return_stats(replay)
+        self.assertAlmostEqual(stats["dividend_cash_received"], 500.0)
+        realized = sum(
+            e["realized_pnl"]
+            for e in replay.broker.events
+            if e["event_type"] in {"position_closed", "position_reduced"}
+        )
+        initial = replay.broker.initial_equity
+        # The dividend is inside both total return (via cash/equity) and the long
+        # attribution; without it the raw ex-date gap would read as a ~500 CNY loss.
+        self.assertAlmostEqual(stats["final_equity"], initial + realized + 500.0, places=6)
+        self.assertAlmostEqual(stats["long_return"], (realized + 500.0) / initial, places=9)
+        self.assertGreater(stats["long_return"], -0.0001)  # ≈ round-trip costs only
+
+
 class ReplayIntegrationTest(unittest.TestCase):
     def test_main_runs_each_bar_and_liquidates_at_exit(self):
         # Decide once at the 09:25 pre-open tick; next-bar execution fills it, and

@@ -358,6 +358,28 @@ def release_fin_shares(contracts: list[DebtContract], ts_code: str, shares: int)
     return released
 
 
+def scale_slo_contracts(contracts: list[DebtContract], ts_code: str, bonus_per_share: float) -> int:
+    """Grow a code's open 融券 contracts for an ex-date 送转 (share bonus/conversion).
+
+    The lender is owed the post-conversion share count, so each contract's
+    outstanding ``shares`` grow by ``floor(shares * bonus_per_share)``;
+    ``open_price`` is rebased so ``shares * open_price`` (the 融券费 accrual basis
+    and the bail-balance fallback mark) is unchanged. Returns the total shares
+    added, which the caller adds to the short position to keep the
+    position/contract share invariant."""
+    added_total = 0
+    for contract in contracts:
+        if contract.kind != "slo" or contract.closed or contract.ts_code != str(ts_code):
+            continue
+        added = int(contract.shares * bonus_per_share)
+        if added <= 0:
+            continue
+        contract.open_price = contract.open_price * contract.shares / (contract.shares + added)
+        contract.shares += added
+        added_total += added
+    return added_total
+
+
 def repay_slo(contracts: list[DebtContract], ts_code: str, shares: int) -> dict[str, float]:
     """Repay ``shares`` of borrowed stock (买券还券 or liquidation) FIFO.
 

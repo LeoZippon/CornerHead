@@ -84,6 +84,8 @@ SAMPLE_MANIFEST = {
         "slo_max_quota": None,
         "maintenance_closeout_ratio": 1.30,
         "maintenance_withdraw_ratio": 3.00,
+        "corporate_actions": "modeled",
+        "dividend_tax_rate": 0.0,
     },
     "nl_failure_policy": "return_error_with_audit",
     "step_tree_enabled": True,

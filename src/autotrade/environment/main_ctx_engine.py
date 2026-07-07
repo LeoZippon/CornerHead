@@ -324,6 +324,7 @@ def run_main_ctx_replay(
     *,
     shortable_codes: frozenset[str],
     shortable_by_date: dict[str, frozenset[str]] | None = None,
+    corporate_actions_by_date: dict[str, list[dict[str, object]]] | None = None,
     main_policy: MainPolicyRunner,
     replay_intraday_1min: pd.DataFrame | None = None,
     auction_enabled: bool = True,
@@ -396,7 +397,13 @@ def run_main_ctx_replay(
     )
     granularity = "minute" if minute_market is not None else "daily"
     entry_date, exit_date = market.trade_dates[0], market.trade_dates[-1]
-    broker = SimBroker(profile, market, shortable_codes=shortable_codes, shortable_by_date=shortable_by_date)
+    broker = SimBroker(
+        profile,
+        market,
+        shortable_codes=shortable_codes,
+        shortable_by_date=shortable_by_date,
+        corporate_actions_by_date=corporate_actions_by_date,
+    )
     timeview = (
         Timeview(
             host_dir=main_policy.paths.workspace / ".asof",

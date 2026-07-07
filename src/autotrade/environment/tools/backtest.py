@@ -26,7 +26,12 @@ from autotrade.environment.artifacts import (
     model_artifact_hash,
 )
 from autotrade.environment.backtest_engine import BacktestError, compute_return_stats
-from autotrade.environment.broker import BrokerProfile, load_shortable_by_date, load_shortable_codes
+from autotrade.environment.broker import (
+    BrokerProfile,
+    load_corporate_actions_by_date,
+    load_shortable_by_date,
+    load_shortable_codes,
+)
 from autotrade.environment.main_ctx_engine import MainPolicyRunner, run_main_ctx_replay
 from autotrade.environment.nl.context import CompanyContextStore
 from autotrade.environment.nl.engine import NLSubAgentConfig, NLSubAgentEngine, TextRetriever
@@ -254,6 +259,7 @@ class BacktestTool:
                         profile,
                         shortable_codes=shortable,
                         shortable_by_date=shortable_by_date,
+                        corporate_actions_by_date=load_corporate_actions_by_date(replay_dir),
                         main_policy=policy,
                         replay_intraday_1min=replay_minutes,
                         auction_enabled=bool(manifest.get("auction_enabled", True)),
