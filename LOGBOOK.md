@@ -6,6 +6,7 @@
 - Fold 分析（guarded test view，用户定）：`pipelines/fold_analysis.py` 预定义中文模板经 LLMProxy 生成策略分析——输入只含验证期证据（投影排除 test_result/test_period），测试期结果在 UI 单独折叠「事后审计」区并警示不得写入后续指令；分析失败仅记 status 不阻断，可在控制台重新生成。
 - 验证：full suite 511 OK（483→511：+15 interactive、+12 webui backend、+1 prompt）；`git diff --check` clean；PROMPTS.md 重导出（含 fold 指令示例节）；真实控制面 smoke（38888 端口）：列出 23 个历史实验只读、创建→step 门控 waiting_user→set_directive→stop 干净退出→resume 重启 worker→确认式删除全通；修 2 个 smoke 发现的缺陷（params 元数据键 `_created_at` 误拒；退出 worker 成僵尸致 pid 误判存活——status_pid_alive 识别 Z 态 + 服务 SIGCHLD=SIG_IGN）。
 - 文档：pipeline_design 新增第 5 章（门控/续跑/控制台/防泄漏）；agent_design 补研究者 Fold 指令术语；parameters_reference 新增 §9 HITL 参数。后续部署形态（远端轻量服务器只承载交互层）已记入 §5.3。真实 DeepSeek+Docker 的完整 HITL Fold 运行待用户显式触发（与 RA4 同口径）。
+- 展示跟进：`20251101..20251130` 的 `..` 是账本/manifest 的内部序列化格式（period_bounds 亦接受其为输入），存储格式不动；前端新增 fmtPeriodRange/fmtDate，验证区间与 Held-out 起止统一渲染为 `2025-11-01 ～ 2025-11-30`。
 - 详情页跟进：①「策略分析（LLM，仅验证期证据）」拆为独立卡片（与 Fold 结果平级，自取数：pending 自动轮询刷新、显示模型/生成时间/截断重试标记、重新生成后自动刷新）；②Held-out 冻结测试区加料——统计瓦片（累计收益/平均 Sharpe/最差单期回撤/正收益期数/多空累计贡献）+ 各期收益条形图 + 累计收益曲线（≥2 期时），表格增起止日期、多头/空头、订单数列。
 - 配色跟进：盈亏色改 A 股惯例红涨绿跌——新增独立 --gain（红）/--loss（绿）变量（明暗双主题），.num/.tile-value/.metric 的 pos/neg 全部切换；状态语义色（completed 绿 / failed 红、danger 按钮等）保持不变，图表系列色（身份编码）不受影响。
 - 图表跟进：逐 Fold 收益图（首页+详情共用组件）改为条内堆叠展示多/空——每根验证/测试条按多头（本色）/空头（同色系浅一档）正负向堆叠（2px 表面间隙、外端 4px 圆角），图例扩为四项，legacy 无拆解数据时回退纯色总量条、卡片 mini 图保持总量；撤销此前独立的多/空拆解图（首页+详情）。堆叠高度为多空归因之和，费用/未实现差额以悬浮提示中的总收益口径为准。

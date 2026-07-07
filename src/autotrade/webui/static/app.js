@@ -76,6 +76,19 @@ function sessionKeyFromUrl(segment) {
   return decodeURIComponent(segment).replaceAll("~", "/");
 }
 
+/* Ledger period ranges are serialized as "YYYYMMDD..YYYYMMDD"; render them
+   as human dates without touching the stored format. */
+function fmtPeriodRange(value) {
+  const match = /^(\d{4})(\d{2})(\d{2})\.\.(\d{4})(\d{2})(\d{2})$/.exec(String(value || ""));
+  if (!match) return value || "—";
+  return `${match[1]}-${match[2]}-${match[3]} ～ ${match[4]}-${match[5]}-${match[6]}`;
+}
+
+function fmtDate(value) {
+  const match = /^(\d{4})(\d{2})(\d{2})$/.exec(String(value || ""));
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : String(value || "—");
+}
+
 function fmtDuration(totalSeconds) {
   const seconds = Math.max(0, Math.floor(totalSeconds));
   const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), s = seconds % 60;
@@ -1597,7 +1610,7 @@ function foldResultPanel(detail, session) {
     { label: "多 / 空拆解", value: `${fmtPct(validation.long_return)} / ${fmtPct(validation.short_return)}` },
   ])));
   const meta = el("table", { class: "kv section-gap" },
-    kvRow("验证区间", record.validation_period || session.validation_period || "—"),
+    kvRow("验证区间", fmtPeriodRange(record.validation_period || session.validation_period)),
     kvRow("冻结产物", record.frozen_strategy_artifact_id || "—"),
     (record.accept_reasons || []).length ? kvRow("未接受原因", (record.accept_reasons || []).join("；")) : null,
   );
@@ -1898,7 +1911,7 @@ function heldoutPanel(session) {
       const period = record.period || {};
       return el("tr", {},
         el("td", {}, String(record.fold_id || "").replace("heldout_", "")),
-        el("td", {}, period.start && period.end ? `${period.start}–${period.end}` : "—"),
+        el("td", {}, period.start && period.end ? `${fmtDate(period.start)} ～ ${fmtDate(period.end)}` : "—"),
         el("td", { class: numClass(result.total_return) }, fmtPct(result.total_return)),
         el("td", { class: numClass(result.long_return) }, fmtPct(result.long_return)),
         el("td", { class: numClass(result.short_return) }, fmtPct(result.short_return)),
