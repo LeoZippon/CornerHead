@@ -340,6 +340,34 @@ class WebuiBackendTest(unittest.TestCase):
         legacy = self.client.post("/api/experiments/exp_legacy/control", json={"action": "pause"})
         self.assertEqual(legacy.status_code, 400)
 
+    def test_prompt_override_and_rerun_fold_controls(self) -> None:
+        override = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_prompt_override", "session_key": "epoch_001/fold_2022Q1", "directive": "FULL PROMPT"},
+        )
+        self.assertEqual(override.json()["control"]["prompt_overrides"], {"epoch_001/fold_2022Q1": "FULL PROMPT"})
+        cleared = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_prompt_override", "session_key": "epoch_001/fold_2022Q1", "directive": ""},
+        )
+        self.assertEqual(cleared.json()["control"]["prompt_overrides"], {})
+        # Only the LATEST recorded fold may be re-run.
+        wrong = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "rerun_fold", "session_key": "epoch_001/fold_2022Q2"},
+        )
+        self.assertEqual(wrong.status_code, 400)
+        self.assertIn("只能重跑最新完成的 Fold", wrong.json()["detail"])
+        with patch.object(ExperimentManager, "start_worker", return_value={"spawned_pid": 7}):
+            ok = self.client.post(
+                "/api/experiments/exp_hitl/control",
+                json={"action": "rerun_fold", "session_key": "epoch_001/fold_2022Q1"},
+            )
+        self.assertEqual(ok.status_code, 200, ok.text)
+        control = ok.json()["control"]
+        self.assertIn("epoch_001/fold_2022Q1", control["rerun_sessions"])
+        self.assertNotIn("epoch_001/fold_2022Q1", control["approved_sessions"])
+
     def test_delete_requires_confirm_and_no_live_worker(self) -> None:
         missing_confirm = self.client.delete("/api/experiments/exp_legacy")
         self.assertEqual(missing_confirm.status_code, 400)

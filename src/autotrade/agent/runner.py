@@ -110,6 +110,7 @@ class AgentSessionRunner:
         step_tree_enabled: bool = False,
         taste_prompt: str = "",
         fold_directive: str = "",
+        system_prompt_override: str = "",
         meta_learning_directive: str = "",
         mode: str = "fold",
         web_search_providers: Mapping[str, WebSearchProvider] | None = None,
@@ -154,7 +155,12 @@ class AgentSessionRunner:
                 prompt_kwargs["taste_prompt"] = taste_prompt
             if fold_directive:
                 prompt_kwargs["fold_directive"] = fold_directive
-            self.system_prompt = build_system_prompt(**prompt_kwargs)
+            # HITL: a researcher-edited prompt replaces the assembled one wholesale
+            # (including the runtime facts block); the manifest records the override.
+            if system_prompt_override.strip():
+                self.system_prompt = system_prompt_override
+            else:
+                self.system_prompt = build_system_prompt(**prompt_kwargs)
         self.shell = SandboxShellTool(ctx)
         self.artifact_io = ArtifactIOTool(ctx)
         self.web_fetch = AgentWebFetchTool(ctx)

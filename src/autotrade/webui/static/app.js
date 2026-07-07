@@ -294,8 +294,17 @@ function foldReturnsChart(rows, { width = 640, height = 220, mini = false, serie
     ];
     for (const bar of bars) {
       if (bar.v === null || bar.v === undefined) continue;
-      const tip = `${String(row.fold_id || "")} ${bar.series.label} ${(bar.v * 100).toFixed(2)}%`;
-      svg.push(`<path d="${barPath(bar.x, zeroY, yOf(bar.v), barW)}" fill="${bar.series.color}" data-tip="${escapeHtml(tip)}"/>`);
+      // Rich hover: headline value plus the row's full breakdown.
+      const lines = [`${String(row.fold_id || "")} ｜ ${bar.series.label} ${(bar.v * 100).toFixed(2)}%`];
+      if (!series) {
+        lines.push(`验证 ${fmtPct(row.valid_return)} ｜ 测试 ${fmtPct(row.test_return)}`);
+        if (row.valid_long !== null && row.valid_long !== undefined) {
+          lines.push(`多头 验证 ${fmtPct(row.valid_long)} / 测试 ${fmtPct(row.test_long)}`);
+          lines.push(`空头 验证 ${fmtPct(row.valid_short)} / 测试 ${fmtPct(row.test_short)}`);
+        }
+        if (row.fold_status) lines.push(`状态 ${row.fold_status}`);
+      }
+      svg.push(`<path d="${barPath(bar.x, zeroY, yOf(bar.v), barW)}" fill="${bar.series.color}" data-tip="${escapeHtml(lines.join("\n"))}"/>`);
     }
     if (index % labelEvery === 0) {
       const label = String(row.fold_id || "").replace(/^fold_/, "");
@@ -440,17 +449,36 @@ window.addEventListener("hashchange", route);
 window.addEventListener("DOMContentLoaded", route);
 
 function route() {
+  const hash = location.hash || "#/";
+  const expMatch = hash.match(/^#\/exp\/([^/]+)(?:\/(.*))?$/);
+  const expId = expMatch ? decodeURIComponent(expMatch[1]) : null;
+  const key = expMatch && expMatch[2] ? sessionKeyFromUrl(expMatch[2]) : null;
+  // Session switch within an already-rendered experiment swaps only the right
+  // panel: no page rebuild, no scroll jump, live stream and timers untouched.
+  if (expMatch && key && detailView && detailView.experimentId === expId
+      && document.body.contains(detailView.listHost)) {
+    selectSession(key);
+    return;
+  }
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   for (const timer of liveTimers) clearInterval(timer);
   liveTimers = [];
   document.querySelectorAll(".modal-mask").forEach((node) => node.remove());
-  const hash = location.hash || "#/";
-  const expMatch = hash.match(/^#\/exp\/([^/]+)(?:\/(.*))?$/);
   // The live trace panel (SSE stream + accumulated events) survives navigation
   // within the same experiment; it is torn down only when leaving it.
-  if (livePanel && (!expMatch || decodeURIComponent(expMatch[1]) !== livePanel.expId)) destroyLivePanel();
-  if (expMatch) renderDetailPage(decodeURIComponent(expMatch[1]), expMatch[2] ? sessionKeyFromUrl(expMatch[2]) : null);
-  else renderHomePage();
+  if (livePanel && (!expMatch || expId !== livePanel.expId)) destroyLivePanel();
+  if (expMatch) renderDetailPage(expId, key);
+  else { detailView = null; renderHomePage(); }
+}
+
+function selectSession(key) {
+  detailView.selectedKey = key;
+  const fresh = sessionDetailPanel(detailView.detail, key);
+  detailView.rightHost.replaceWith(fresh);
+  detailView.rightHost = fresh;
+  detailView.listHost.querySelectorAll(".session-item").forEach((node) => {
+    node.classList.toggle("selected", node.dataset.key === key);
+  });
 }
 
 /* ---------------- home page ---------------- */
@@ -531,11 +559,12 @@ function experimentCard(item) {
   } else if (item.folds_recorded) {
     card.append(el("div", { class: "meta-line" }, `账本记录：${item.folds_recorded} 个 Fold ｜ ${item.heldout_recorded || 0} 个 held-out`));
   }
-  card.append(el("div", { class: "metrics" },
-    metricNode("累计验证", metrics.cum_valid_return),
-    metricNode("累计测试", metrics.cum_test_return),
-    metricNode("Held-out", metrics.cum_heldout_return),
-  ));
+  // Same component + order as the hero and detail pages (Held-out first).
+  card.append(statTilesRow([
+    { label: "Held-out 收益", value: fmtPct(metrics.cum_heldout_return), cls: signCls(metrics.cum_heldout_return) },
+    { label: "累计测试收益", value: fmtPct(metrics.cum_test_return), cls: signCls(metrics.cum_test_return) },
+    { label: "累计验证收益", value: fmtPct(metrics.cum_valid_return), cls: signCls(metrics.cum_valid_return) },
+  ]));
   if ((item.fold_returns || []).length) {
     card.append(foldReturnsChart(item.fold_returns.map((row) => ({ ...row, epoch_label: row.epoch_id })), { width: 400, height: 130, mini: true }));
   }
@@ -563,18 +592,24 @@ function experimentCard(item) {
   return card;
 }
 
-/* Best-performing experiment hero: ranked by cumulative test return (falls
-   back to validation when no test results yet). */
+/* Best-performing experiment hero: ranked by mean test-period Sharpe (falls
+   back to cumulative test/validation return when Sharpe is unavailable). */
 function pickBestExperiment(list) {
   const scored = list
     .filter((item) => (item.fold_returns || []).length)
     .map((item) => ({
       item,
-      score: item.metrics?.cum_test_return ?? item.metrics?.cum_valid_return ?? null,
+      sharpe: item.metrics?.mean_test_sharpe ?? null,
+      ret: item.metrics?.cum_test_return ?? item.metrics?.cum_valid_return ?? null,
     }))
-    .filter((entry) => entry.score !== null);
+    .filter((entry) => entry.sharpe !== null || entry.ret !== null);
   if (!scored.length) return null;
-  scored.sort((a, b) => b.score - a.score);
+  scored.sort((a, b) => {
+    if (a.sharpe !== null && b.sharpe !== null) return b.sharpe - a.sharpe;
+    if (a.sharpe !== null) return -1;
+    if (b.sharpe !== null) return 1;
+    return b.ret - a.ret;
+  });
   return scored[0].item;
 }
 
@@ -594,13 +629,21 @@ function heroPanel(item) {
       el("h4", {}, "Held-out 各期收益（最终样本外）"),
       singleSeriesBarChart(heldoutRows, { fmt: fmtPct })));
   }
+  if (rows.some((row) => row.test_long !== null && row.test_long !== undefined)) {
+    charts.append(el("div", { class: "chart-cell" },
+      el("h4", {}, "多 / 空收益拆解（测试期）"),
+      foldReturnsChart(rows, { series: [
+        { key: "test_long", label: "多头" },
+        { key: "test_short", label: "空头（含融券）" },
+      ] })));
+  }
   panel.append(
     el("div", { class: "control-bar" },
       el("span", { class: "hero-crown" }, "🏆"),
       el("h3", { style: "margin:0" },
         el("a", { href: `#/exp/${encodeURIComponent(item.experiment_id)}` }, item.experiment_id)),
       stateBadge(item.state),
-      el("span", { class: "mode-note" }, "当前最佳实验（按累计测试收益）"),
+      el("span", { class: "mode-note" }, "当前最佳实验（按测试期平均 Sharpe）"),
     ),
     el("div", { class: "section-gap" }, statTilesRow([
       { label: "Held-out 收益（最终样本外）", value: fmtPct(metrics.cum_heldout_return), cls: `hero-key ${signCls(metrics.cum_heldout_return)}` },
@@ -612,13 +655,6 @@ function heroPanel(item) {
     charts,
   );
   return panel;
-}
-
-function metricNode(label, value) {
-  return el("div", { class: "metric" },
-    el("span", { class: `v ${value === null || value === undefined ? "" : value >= 0 ? "pos" : "neg"}` }, fmtPct(value)),
-    el("span", { class: "k" }, label),
-  );
 }
 
 function confirmDeleteExperiment(experimentId) {
@@ -656,6 +692,9 @@ async function openCreateModal() {
   const hasPeriodOptions = Object.keys(schema.period_options || {}).length > 0;
   const inputs = new Map();
   const body = el("div", {});
+  // Validation errors surface at the TOP of the (scrollable) modal body.
+  const errorBox = el("div", {});
+  body.append(errorBox);
   body.append(el("p", { class: "hint" },
     hasPeriodOptions
       ? "所有参数均有默认值。周期从交易日历自动生成，仅列出数据完整、可回测的周期；切换 Fold 周期后选项与推荐值随之更新。"
@@ -681,8 +720,6 @@ async function openCreateModal() {
     repopulatePeriodSelects(inputs);
     cadenceEntry.input.addEventListener("change", () => repopulatePeriodSelects(inputs));
   }
-  const errorBox = el("div", {});
-  body.append(errorBox);
   showModal("新建实验", body, [
     el("button", { class: "btn", onclick: closeModal }, "取消"),
     el("button", {
@@ -698,6 +735,8 @@ async function openCreateModal() {
         } catch (error) {
           errorBox.innerHTML = "";
           errorBox.append(el("div", { class: "form-error" }, `创建失败：${error.message}`));
+          const scroller = errorBox.closest(".body");
+          if (scroller) scroller.scrollTop = 0;
         } finally { event.target.disabled = false; }
       },
     }, "创建并启动"),
@@ -838,6 +877,7 @@ function closeModal() { $modalRoot.innerHTML = ""; }
 
 /* ---------------- detail page ---------------- */
 
+let detailView = null; // {experimentId, detail, listHost, rightHost, selectedKey}
 let livePanel = null; // {expId, key, node, source, timers, refresh}
 
 function destroyLivePanel() {
@@ -873,7 +913,9 @@ async function renderDetailPage(experimentId, selectedKey) {
     el("div", { class: "sub" },
       `进度 ${detail.completed_sessions ?? 0}/${detail.total_sessions ?? "?"}`,
       status.error ? ` ｜ 错误：${status.error}` : "",
-      status.analysis_error ? ` ｜ 分析：${status.analysis_error}` : "",
+      // A worker-recorded analysis error is only current while that worker
+      // lives; stale failures are visible per fold in the analysis section.
+      detail.worker_alive && status.analysis_error ? ` ｜ 分析：${status.analysis_error}` : "",
     ),
   );
   const container = el("div", {});
@@ -909,8 +951,11 @@ async function renderDetailPage(experimentId, selectedKey) {
     ));
   }
   const layout = el("div", { class: "detail section-gap" });
-  layout.append(sessionListPanel(detail, selectedKey), sessionDetailPanel(detail, selectedKey));
+  const listHost = sessionListPanel(detail, selectedKey);
+  const rightHost = sessionDetailPanel(detail, selectedKey);
+  layout.append(listHost, rightHost);
   container.append(layout);
+  detailView = { experimentId, detail, listHost, rightHost, selectedKey };
   $main.innerHTML = "";
   $main.append(container);
   pollTimer = setInterval(async () => {
@@ -988,6 +1033,7 @@ function sessionListPanel(detail, selectedKey) {
     const validReturn = session.record && session.record.validation_result ? session.record.validation_result.total_return : null;
     const item = el("div", {
       class: `session-item${session.key === selectedKey ? " selected" : ""}`,
+      "data-key": session.key,
       onclick: () => { location.hash = `#/exp/${encodeURIComponent(detail.experiment_id)}/${sessionKeyToUrl(session.key)}`; },
     },
       el("span", { class: `dot ${dotClass}` }),
@@ -1016,12 +1062,19 @@ function sessionDetailPanel(detail, selectedKey) {
   const waiting = isCurrent && detail.state === "waiting_user";
   const done = Boolean(session.record || (session.records || []).length);
 
-  // Directive editor for sessions that have not run yet (HITL only).
-  if (detail.kind === "hitl" && !done && !running) {
+  // Directive editor for sessions that have not run yet — and for a recorded
+  // fold whose re-run is waiting for approval (prompt edits land here).
+  if (detail.kind === "hitl" && (!done || waiting) && !running) {
     panel.append(directivePanel(detail, session, waiting));
   }
   if (running) panel.append(liveTracePanel(detail, session));
-  if (session.kind === "fold" && done) panel.append(foldResultPanel(detail, session));
+  if (session.kind === "fold" && done) {
+    panel.append(foldResultPanel(detail, session));
+    const recordedFolds = (detail.sessions || []).filter((s) => s.kind === "fold" && s.record);
+    if (detail.kind === "hitl" && recordedFolds.length && recordedFolds[recordedFolds.length - 1].key === session.key) {
+      panel.append(rerunPanel(detail, session));
+    }
+  }
   if (session.kind === "meta_learning" && done) panel.append(metaResultPanel(session));
   if (session.kind === "heldout" && done) panel.append(heldoutPanel(session));
   if (done && session.record && session.record.run_id) {
@@ -1069,18 +1122,23 @@ function directivePanel(detail, session, waiting) {
     try {
       await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`, { method: "POST", body: JSON.stringify(payload) });
       toast(note);
-      route();
+      refreshDetail();
     } catch (error) { toast(error.message, true); }
   };
   if (session.kind !== "heldout") {
-    buttons.append(el("button", {
-      class: "btn",
-      onclick: () => send({ action: "set_directive", session_key: session.key, directive: textarea.value }, "指令已保存"),
-    }, "保存指令"));
+    if (session.kind === "fold") {
+      buttons.append(el("button", {
+        class: "btn",
+        onclick: () => openPromptEditor(detail, session, textarea.value),
+      }, "编辑完整系统提示词"));
+    }
     buttons.append(el("button", {
       class: "btn",
       onclick: () => openPromptPreview(detail, session, textarea.value, { approved, waiting, send }),
     }, "预览完整系统提示词"));
+    if ((detail.control?.prompt_overrides || {})[session.key]) {
+      buttons.append(el("span", { class: "badge state-waiting_user" }, "已覆盖系统提示词"));
+    }
   }
   if ((detail.control || {}).mode === "step" && !approved) {
     buttons.append(el("button", {
@@ -1095,16 +1153,77 @@ function directivePanel(detail, session, waiting) {
   return panel;
 }
 
+/* Re-fetch the experiment payload and swap both detail panels in place —
+   control-state changes update without a page rebuild or scroll jump. */
+async function refreshDetail() {
+  if (!detailView) { route(); return; }
+  try {
+    const detail = await api(`/api/experiments/${encodeURIComponent(detailView.experimentId)}`);
+    detailView.detail = detail;
+    const list = sessionListPanel(detail, detailView.selectedKey);
+    detailView.listHost.replaceWith(list);
+    detailView.listHost = list;
+    if (detailView.selectedKey) selectSession(detailView.selectedKey);
+  } catch { route(); }
+}
+
+/* Full system-prompt editor: saves a verbatim per-session override. */
+async function openPromptEditor(detail, session, directive) {
+  const existing = (detail.control?.prompt_overrides || {})[session.key];
+  let text = existing || "";
+  if (!text) {
+    try {
+      const data = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/prompt-preview`, {
+        method: "POST",
+        body: JSON.stringify({ session_key: session.key, directive }),
+      });
+      text = data.prompt;
+    } catch (error) { toast(`加载失败：${error.message}`, true); return; }
+  }
+  const editor = el("textarea", { class: "directive prompt-editor", spellcheck: "false" });
+  editor.value = text;
+  const send = async (payload, note) => {
+    try {
+      await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`, { method: "POST", body: JSON.stringify(payload) });
+      toast(note);
+      closeModal();
+      refreshDetail();
+    } catch (error) { toast(error.message, true); }
+  };
+  const footer = [el("button", { class: "btn", onclick: closeModal }, "取消")];
+  if (existing) {
+    footer.push(el("button", {
+      class: "btn danger",
+      onclick: () => send({ action: "set_prompt_override", session_key: session.key, directive: "" }, "已清除覆盖，恢复自动装配"),
+    }, "清除覆盖"));
+  }
+  footer.push(el("button", {
+    class: "btn primary",
+    onclick: () => send({ action: "set_prompt_override", session_key: session.key, directive: editor.value }, "已保存系统提示词覆盖"),
+  }, "保存为本会话系统提示词"));
+  showModal(`编辑系统提示词 — ${session.key}`,
+    el("div", {},
+      el("div", { class: "hint warn" },
+        "保存后本会话将【原样】使用此文本作为系统提示词：运行时不再注入自动生成的「当前实验事实」JSON 与其它自动段落，请保留必要的协议/合同/禁止行为段落。清除覆盖即恢复自动装配。覆盖内容会记录进 run manifest 供审计。"),
+      editor,
+    ), footer);
+}
+
 /* Review-then-approve: assemble the session's system prompt (with the draft
    directive embedded) for inspection before the session is allowed to start. */
 async function openPromptPreview(detail, session, directive, { approved, waiting, send }) {
+  const override = (detail.control?.prompt_overrides || {})[session.key];
   let data;
-  try {
-    data = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/prompt-preview`, {
-      method: "POST",
-      body: JSON.stringify({ session_key: session.key, directive }),
-    });
-  } catch (error) { toast(`预览失败：${error.message}`, true); return; }
+  if (override) {
+    data = { prompt: override, note: "当前已设置系统提示词覆盖，运行时将原样使用以下文本（不再自动装配）。" };
+  } else {
+    try {
+      data = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/prompt-preview`, {
+        method: "POST",
+        body: JSON.stringify({ session_key: session.key, directive }),
+      });
+    } catch (error) { toast(`预览失败：${error.message}`, true); return; }
+  }
   const footer = [el("button", { class: "btn", onclick: closeModal }, "关闭")];
   if ((detail.control || {}).mode === "step" && !approved) {
     footer.push(el("button", {
@@ -1358,6 +1477,48 @@ function traceEventNode(event) {
   return node;
 }
 
+/* Re-run the latest recorded fold with a revised directive / system prompt. */
+function rerunPanel(detail, session) {
+  const alive = detail.worker_alive;
+  const panel = el("div", { class: "panel section-gap" },
+    el("h4", { class: "subsection-title" }, "重跑本 Fold（最新完成）"),
+    el("div", { class: "hint" },
+      "追加一次全新的 Fold 会话：账本新增记录（旧记录保留供审计），冻结产物以重跑标签另存，已有 Held-out 结果将在重跑后自动重放。启动后在本会话的指令面板修改指令或系统提示词，再批准运行。"),
+  );
+  const bar = el("div", { class: "control-bar section-gap" });
+  if (alive) {
+    bar.append(el("span", { class: "hint warn", style: "margin:0" }, "worker 运行中——先「停止」或「强制终止」后方可重跑。"));
+  } else {
+    bar.append(el("button", {
+      class: "btn primary",
+      onclick: () => {
+        showModal("确认重跑该 Fold？", el("div", {},
+          el("p", {}, `将重跑 ${session.key}，并使现有 Held-out 结果过期（重跑完成后自动重放 Held-out）。`),
+          el("p", { class: "hint" }, "重跑会话默认等待批准：批准前可修改本 Fold 指令或编辑完整系统提示词。"),
+        ), [
+          el("button", { class: "btn", onclick: closeModal }, "取消"),
+          el("button", {
+            class: "btn primary",
+            onclick: async () => {
+              closeModal();
+              try {
+                await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`, {
+                  method: "POST",
+                  body: JSON.stringify({ action: "rerun_fold", session_key: session.key }),
+                });
+                toast("重跑已启动，等待批准");
+                route();
+              } catch (error) { toast(error.message, true); }
+            },
+          }, "确认重跑"),
+        ]);
+      },
+    }, "修改提示词并重跑"));
+  }
+  panel.append(bar);
+  return panel;
+}
+
 function foldResultPanel(detail, session) {
   const record = session.record || {};
   const validation = record.validation_result || {};
@@ -1429,7 +1590,7 @@ function loadFoldExtras(experimentId, epochId, foldId) {
     // Strategy files + download.
     const filesPanel = el("div", {},
       el("div", { class: "control-bar" },
-        el("h4", { style: "margin:0" }, "冻结策略代码"),
+        el("h4", { class: "subsection-title" }, "冻结策略代码"),
         el("span", { class: "spacer" }),
         el("a", {
           class: "btn small",
@@ -1495,7 +1656,7 @@ function ordersNode(experimentId, epochId, foldId) {
   const base = `/api/experiments/${encodeURIComponent(experimentId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}`;
   const body = el("div", {});
   const wrap = el("div", { class: "section-gap" },
-    el("h4", { style: "margin-bottom:0.4rem" }, "交易明细（验证回测）"), body);
+    el("h4", { class: "subsection-title", style: "margin-bottom:0.4rem" }, "交易明细（验证回测）"), body);
   let loading = false;
   async function load(result) {
     // No flash: keep the current content (dimmed) until the new data arrives.
@@ -1573,7 +1734,7 @@ function ordersNode(experimentId, epochId, foldId) {
 function analysisNode(experimentId, epochId, foldId, analysisInfo) {
   const wrap = el("div", { class: "section-gap" });
   const head = el("div", { class: "control-bar" },
-    el("h4", { style: "margin:0" }, "策略分析（LLM，仅验证期证据）"),
+    el("h4", { class: "subsection-title" }, "策略分析（LLM，仅验证期证据）"),
     el("span", { class: "spacer" }),
   );
   const body = el("div", {});

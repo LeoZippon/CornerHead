@@ -167,6 +167,14 @@ main { max-width: 1380px; margin: 1.6rem auto; padding: 0 clamp(14px, 3vw, 34px)
   box-shadow: var(--shadow); padding: 0.95rem 1.1rem;
 }
 .panel h4 { margin: 0 0 0.6rem; font-size: 0.875rem; color: var(--muted); font-weight: 600; letter-spacing: .02em; }
+/* Inside a panel, .section-gap on a heading must still win the top margin. */
+.panel h4.section-gap { margin-top: 1rem; }
+/* Sub-section headings that must outrank their body text. */
+h4.subsection-title, .panel h4.subsection-title {
+  margin: 0; font-size: 1.02rem; font-weight: 700; color: var(--text); letter-spacing: 0;
+}
+.chart-tip { white-space: pre-line; }
+textarea.prompt-editor { min-height: 55vh; font-size: 0.845rem; }
 .panel.hero { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft), var(--shadow-lift); }
 .hero-crown { font-size: 1.2rem; }
 

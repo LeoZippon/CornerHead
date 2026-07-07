@@ -166,6 +166,28 @@ class ExperimentManager:
                 control.directives[session_key] = directive
             else:
                 control.directives.pop(session_key, None)
+        elif action == "set_prompt_override":
+            if not session_key:
+                raise ManagerError("set_prompt_override requires session_key")
+            if directive and directive.strip():
+                control.prompt_overrides[session_key] = directive
+            else:
+                control.prompt_overrides.pop(session_key, None)
+        elif action == "rerun_fold":
+            if not session_key:
+                raise ManagerError("rerun_fold requires session_key")
+            self._validate_rerun_target(experiment_dir, session_key)
+            state = experiment_state(experiment_dir)
+            if state.get("worker_alive"):
+                raise ManagerError("先停止运行中的 worker（停止/强制终止）再重跑该 Fold")
+            import uuid
+
+            control.rerun_sessions[session_key] = uuid.uuid4().hex[:12]
+            # Step-mode gating: the re-run must be re-approved (prompt edits land first).
+            control.approved_sessions = tuple(k for k in control.approved_sessions if k != session_key)
+            control.request = None
+            write_control(control_path, control)
+            return {"control": control.to_record(), **self.start_worker(experiment_id)}
         elif action == "terminate":
             status = read_status(hitl_dir / STATUS_NAME)
             if not status_pid_alive(status):
@@ -176,6 +198,24 @@ class ExperimentManager:
             raise ManagerError(f"unknown control action: {action!r}")
         write_control(control_path, control)
         return {"control": control.to_record()}
+
+    def _validate_rerun_target(self, experiment_dir: Path, session_key: str) -> None:
+        """Only the LATEST recorded fold may be re-run: earlier folds already
+        fed their frozen artifacts into successors, so re-running them would
+        break the parent chain the later records were built on."""
+        from .registry import latest_fold_records, _read_ledger_records
+
+        schedule = read_json(experiment_dir / HITL_DIR_NAME / "schedule.json")
+        sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
+        fold_keys = [str(s.get("key")) for s in sessions if s.get("kind") == "fold"]
+        if session_key not in fold_keys:
+            raise ManagerError(f"{session_key!r} is not a fold session")
+        recorded = latest_fold_records(_read_ledger_records(experiment_dir))
+        recorded_keys = [key for key in fold_keys if tuple(key.split("/", 1)) in recorded]
+        if not recorded_keys:
+            raise ManagerError("该实验还没有已完成的 Fold 可重跑")
+        if session_key != recorded_keys[-1]:
+            raise ManagerError(f"只能重跑最新完成的 Fold（{recorded_keys[-1]}）——更早的 Fold 已被后续继承")
 
     # ---- deletion ------------------------------------------------------------
     def delete_experiment(self, experiment_id: str) -> dict[str, object]:

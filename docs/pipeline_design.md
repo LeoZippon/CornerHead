@@ -564,7 +564,7 @@ experiments/<experiment_id>/
 
 门控语义：`request=stop` 在下一个会话边界干净退出；`request=pause` 让 worker 在当前会话结束后阻塞等待；`mode=step` 要求每个会话被显式批准后才启动（批准时可附带指令）；`mode=auto` 连续执行、可随时暂停。暂停/停止永远落在会话边界，不打断执行中的 Fold；`terminate`（SIGTERM）是唯一的中途强制手段，被中断的 Fold 无账本记录，恢复时整体重跑。
 
-**研究者指令**：每个会话可注入一段可选指令文本。普通 Fold 的指令经 `run_fold(fold_directive=...)` 以「研究者本 Fold 指令（用户注入）」节注入系统提示词，并记录在 run manifest 与 fold 账本记录中（不进入 agent 可见账本投影，不参与产物 hash）；元学习会话的指令经 `run_meta_learning(directive_override=...)` 覆盖实验级 `meta_learning_directive`。指令按待检验假设措辞注入，不放宽提交合同、修改约束与 PIT 边界；研究者不得在指令中写入测试期/held-out 结果或具体日历日期（见 5.3 防泄漏）。单会话审计入口对应支持 `--fold-directive-file`。
+**研究者指令**：每个会话可注入一段可选指令文本。普通 Fold 的指令经 `run_fold(fold_directive=...)` 以「研究者本 Fold 指令（用户注入）」节注入系统提示词，并记录在 run manifest 与 fold 账本记录中（不进入 agent 可见账本投影，不参与产物 hash）；元学习会话的指令经 `run_meta_learning(directive_override=...)` 覆盖实验级 `meta_learning_directive`。指令按待检验假设措辞注入，不放宽提交合同、修改约束与 PIT 边界；研究者不得在指令中写入测试期/held-out 结果或具体日历日期（见 5.3 防泄漏）。单会话审计入口对应支持 `--fold-directive-file`。Fold 会话另支持**系统提示词整体覆盖**（`control.json.prompt_overrides`）：批准前研究者可基于预览文本编辑并保存完整系统提示词，运行时原样替代自动装配（含运行时事实块，不再注入），覆盖标记记入 run manifest 与账本（`system_prompt_overridden`）。**重跑最新 Fold**（`rerun_sessions[key]=rerun_id`，控制台 `rerun_fold` 动作）：仅允许重跑最新已记录的 Fold（更早 Fold 已被后续继承）、要求 worker 已停止；重跑追加新账本记录（旧记录保留审计）、冻结产物带 `__r<id>` 标签避免冲突、完成后自动重放 held-out；读取侧（控制台/registry）对 fold 与 held-out 均取每键最新记录。
 
 ### 5.2 续跑与状态恢复
 

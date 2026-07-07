@@ -60,6 +60,16 @@ def latest_fold_records(records: list[dict[str, object]]) -> dict[tuple[str, str
     return latest
 
 
+def latest_heldout_records(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Latest record per held-out period (append-only ledger; a fold re-run
+    replays held-out, so earlier period records are superseded, not removed)."""
+    latest: dict[str, dict[str, object]] = {}
+    for record in records:
+        if record.get("record_type") == "heldout":
+            latest[str(record.get("fold_id"))] = record
+    return [latest[key] for key in sorted(latest)]
+
+
 def _compound(returns: list[float]) -> float | None:
     if not returns:
         return None
@@ -106,7 +116,7 @@ def summarize_experiment(experiment_dir: Path) -> dict[str, object]:
         records = _read_ledger_records(experiment_dir)
         folds = list(latest_fold_records(records).values())
         folds.sort(key=lambda record: (str(record.get("epoch_id")), str(record.get("test_period") or record.get("fold_id"))))
-        heldout = [record for record in records if record.get("record_type") == "heldout"]
+        heldout = latest_heldout_records(records)
         meta = [record for record in records if record.get("record_type") == "meta_learning"]
         schedule = read_json(experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME)
         sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else None
@@ -205,7 +215,7 @@ def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, o
     meta_map = {
         str(record.get("epoch_id")): record for record in records if record.get("record_type") == "meta_learning"
     }
-    heldout_records = [record for record in records if record.get("record_type") == "heldout"]
+    heldout_records = latest_heldout_records(records)
     schedule = read_json(hitl_dir / SCHEDULE_NAME)
     sessions_plan = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
     control = read_control(hitl_dir / CONTROL_NAME) if (hitl_dir / CONTROL_NAME).exists() else None

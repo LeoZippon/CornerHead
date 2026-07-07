@@ -300,6 +300,12 @@ class ControlState:
     request: str | None = None
     approved_sessions: tuple[str, ...] = ()
     directives: dict[str, str] = field(default_factory=dict)
+    # Verbatim system-prompt overrides per session (fold sessions): when set,
+    # the assembled prompt is replaced wholesale (recorded in the run manifest).
+    prompt_overrides: dict[str, str] = field(default_factory=dict)
+    # session_key -> rerun_id: re-run an already-recorded fold. Idempotent: a
+    # fold whose latest ledger record carries the same rerun_id is NOT re-run.
+    rerun_sessions: dict[str, str] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -308,6 +314,8 @@ class ControlState:
             "request": self.request,
             "approved_sessions": sorted(self.approved_sessions),
             "directives": dict(self.directives),
+            "prompt_overrides": dict(self.prompt_overrides),
+            "rerun_sessions": dict(self.rerun_sessions),
             "updated_at": utc_now_iso(),
         }
 
@@ -321,11 +329,15 @@ def read_control(path: Path) -> ControlState:
     request = str(request) if request in ("pause", "stop") else None
     approved = payload.get("approved_sessions")
     directives = payload.get("directives")
+    overrides = payload.get("prompt_overrides")
+    reruns = payload.get("rerun_sessions")
     return ControlState(
         mode=mode,
         request=request,
         approved_sessions=tuple(str(key) for key in approved) if isinstance(approved, list) else (),
         directives={str(k): str(v) for k, v in directives.items()} if isinstance(directives, dict) else {},
+        prompt_overrides={str(k): str(v) for k, v in overrides.items()} if isinstance(overrides, dict) else {},
+        rerun_sessions={str(k): str(v) for k, v in reruns.items()} if isinstance(reruns, dict) else {},
     )
 
 
@@ -584,11 +596,19 @@ class InteractiveExperimentRunner:
             for fold in folds:
                 key = fold_session_key(epoch_id, fold.fold_id)
                 restored = fold_records.get((epoch_id, fold.fold_id))
-                if restored is not None:
+                rerun_id = read_control(self.control_path).rerun_sessions.get(key)
+                needs_rerun = (
+                    restored is not None
+                    and rerun_id is not None
+                    and str(restored.get("rerun_id") or "") != rerun_id
+                )
+                if restored is not None and not needs_rerun:
                     parent = self._artifact_from_fold_record(restored)
                 else:
-                    self._require_no_orphan_artifact(epoch_id, fold.fold_id)
+                    if restored is None:
+                        self._require_no_orphan_artifact(epoch_id, fold.fold_id)
                     directive = self._gate(key, phase="fold", epoch_id=epoch_id, fold_id=fold.fold_id)
+                    control = read_control(self.control_path)
                     self.status.set(
                         state="running_session", phase="fold", session_key=key,
                         epoch_id=epoch_id, fold_id=fold.fold_id, run_id=None, trace_path=None,
@@ -600,8 +620,14 @@ class InteractiveExperimentRunner:
                         parent=parent,
                         taste_prompt=taste_prompt,
                         fold_directive=directive,
+                        system_prompt_override=control.prompt_overrides.get(key, ""),
+                        rerun_id=rerun_id if needs_rerun else None,
                     )
                     parent = outcome.frozen
+                    if needs_rerun:
+                        # The re-run invalidates any earlier held-out results;
+                        # they are replayed below (registry shows latest-per-label).
+                        heldout_done = set()
                     self._run_post_fold_hook(epoch_id, fold.fold_id, outcome)
                 completed += 1
                 self.status.set(completed_sessions=completed)

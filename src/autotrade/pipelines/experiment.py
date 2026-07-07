@@ -270,6 +270,8 @@ class ExperimentPipeline:
         parent: FrozenArtifact | None,
         taste_prompt: str = "",
         fold_directive: str = "",
+        system_prompt_override: str = "",
+        rerun_id: str | None = None,
     ) -> FoldOutcome:
         run_id = new_id("run")
         sandbox, docker = self._start_sandbox(run_id)
@@ -362,6 +364,10 @@ class ExperimentPipeline:
                 # Researcher-injected per-fold direction (HITL). Prompt-level input
                 # like taste_prompt: recorded for audit, never hashed into artifacts.
                 "fold_directive": fold_directive.strip(),
+                # HITL: verbatim researcher-edited system prompt (replaces the
+                # assembled one, incl. the runtime facts block) and the re-run tag.
+                "system_prompt_override": system_prompt_override.strip(),
+                "rerun_id": rerun_id,
             },
         )
         trace = AgentTraceWriter(
@@ -436,6 +442,8 @@ class ExperimentPipeline:
                 **fold.to_record(),
                 "parent_strategy_artifact_id": parent.artifact_id if parent else None,
                 "fold_directive": fold_directive.strip() or None,
+                "system_prompt_overridden": bool(system_prompt_override.strip()),
+                "rerun_id": rerun_id,
                 "finish_reason": session_summary.get("finish_status"),
                 "fold_status": fold_status,
                 "accept_reasons": accept_reasons,
@@ -1088,11 +1096,15 @@ class ExperimentPipeline:
             _accepted, hard_reasons = self.config.acceptance.evaluate(selected)
             reasons.extend(hard_reasons)
         if not reasons:
+            # A HITL re-run freezes under a tagged id so it cannot collide with
+            # the original attempt's frozen directory (append-only artifacts).
+            rerun_tag = str(manifest.get("rerun_id") or "")
+            artifact_id = f"strategy_{epoch_id}_{fold.fold_id}" + (f"__r{rerun_tag[:8]}" if rerun_tag else "")
             frozen = self._freeze(
                 ctx.paths.agent_output,
                 ctx.paths.model_artifacts,
                 epoch_id=epoch_id,
-                artifact_id=f"strategy_{epoch_id}_{fold.fold_id}",
+                artifact_id=artifact_id,
                 parent=parent,
                 fold_id=fold.fold_id,
                 run_id=run_id,

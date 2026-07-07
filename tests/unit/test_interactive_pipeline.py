@@ -95,10 +95,13 @@ class FakePipeline:
         )
         return parent, taste
 
-    def run_fold(self, fold, *, epoch_id, parent, taste_prompt="", fold_directive=""):
-        self.calls.append(("fold", epoch_id, fold.fold_id, taste_prompt, fold_directive, parent.artifact_id if parent else None))
+    def run_fold(self, fold, *, epoch_id, parent, taste_prompt="", fold_directive="",
+                 system_prompt_override="", rerun_id=None):
+        self.calls.append(("fold", epoch_id, fold.fold_id, taste_prompt, fold_directive,
+                           parent.artifact_id if parent else None, system_prompt_override, rerun_id))
         self._counter += 1
-        frozen = self._freeze_fake(epoch_id, f"strategy_{epoch_id}_{fold.fold_id}", content=f"# v{self._counter}\n")
+        artifact_id = f"strategy_{epoch_id}_{fold.fold_id}" + (f"__r{rerun_id[:8]}" if rerun_id else "")
+        frozen = self._freeze_fake(epoch_id, artifact_id, content=f"# v{self._counter}\n")
         self.ledger.append(
             {
                 "record_type": "fold",
@@ -108,6 +111,7 @@ class FakePipeline:
                 "run_id": f"run_{self._counter:03d}",
                 "fold_status": "frozen",
                 "fold_directive": fold_directive or None,
+                "rerun_id": rerun_id,
                 "frozen_strategy_artifact_id": frozen.artifact_id,
                 "frozen_strategy_artifact_hash": frozen.artifact_hash,
                 "frozen_model_artifact_hash": frozen.model_artifact_hash,
@@ -296,6 +300,33 @@ class InteractiveRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "hash changed"):
             self._runner(FakePipeline(self.config)).run(TRADING_DAYS)
 
+    def test_rerun_latest_fold_with_prompt_override_and_heldout_replay(self) -> None:
+        pipeline = FakePipeline(self.config)
+        self._control(mode="auto")
+        self._runner(pipeline).run(TRADING_DAYS)  # full pass: meta + 2 folds + heldout
+        # Request a re-run of the latest fold with an edited system prompt.
+        self._control(
+            mode="auto",
+            rerun_sessions={fold_session_key("epoch_001", "fold_2022Q2"): "rerun123456"},
+            prompt_overrides={fold_session_key("epoch_001", "fold_2022Q2"): "OVERRIDDEN PROMPT"},
+        )
+        resumed = FakePipeline(self.config)
+        result = self._runner(resumed).run(TRADING_DAYS)
+        kinds = [call[0] for call in resumed.calls]
+        self.assertEqual(kinds, ["fold", "heldout"])  # fold 1 restored; fold 2 re-ran; heldout replayed
+        fold_call = resumed.calls[0]
+        self.assertEqual(fold_call[2], "fold_2022Q2")
+        self.assertEqual(fold_call[6], "OVERRIDDEN PROMPT")
+        self.assertEqual(fold_call[7], "rerun123456")
+        self.assertEqual(fold_call[5], "strategy_epoch_001_fold_2022Q1")  # same parent as original
+        self.assertEqual(result["final_strategy_artifact"], "strategy_epoch_001_fold_2022Q2__rrerun123")
+        # Heldout replayed with no skips despite existing records.
+        self.assertEqual(resumed.calls[1][2], frozenset())
+        # Idempotent: same rerun_id already recorded -> nothing re-runs.
+        third = FakePipeline(self.config)
+        self._runner(third).run(TRADING_DAYS)
+        self.assertEqual([call[0] for call in third.calls], [])
+
     def test_resume_skips_recorded_heldout_periods(self) -> None:
         pipeline = FakePipeline(self.config)
         self._control(mode="auto")
@@ -457,9 +488,13 @@ class ControlFileTest(unittest.TestCase):
     def test_control_round_trip_and_bad_values_degrade_safely(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "control.json"
-            write_control(path, ControlState(mode="auto", request="pause", approved_sessions=("a",), directives={"a": "d"}))
+            write_control(path, ControlState(
+                mode="auto", request="pause", approved_sessions=("a",), directives={"a": "d"},
+                prompt_overrides={"a": "P"}, rerun_sessions={"a": "r1"},
+            ))
             state = read_control(path)
             self.assertEqual((state.mode, state.request, state.approved_sessions, state.directives), ("auto", "pause", ("a",), {"a": "d"}))
+            self.assertEqual((state.prompt_overrides, state.rerun_sessions), ({"a": "P"}, {"a": "r1"}))
             path.write_text(json.dumps({"mode": "bogus", "request": "bogus"}), encoding="utf-8")
             state = read_control(path)
             self.assertEqual((state.mode, state.request), ("step", None))
