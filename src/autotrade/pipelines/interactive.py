@@ -155,8 +155,10 @@ def resolve_options(params: Mapping[str, object], repo_root: Path) -> SimpleName
     """Merge creation params over PARAM_DEFAULTS into an assembly-compatible namespace.
 
     Unknown keys fail fast (a typo must not silently fall back to a default);
-    relative paths resolve against the repo root.
+    underscore-prefixed keys are creator metadata (e.g. ``_created_at``) and are
+    ignored; relative paths resolve against the repo root.
     """
+    params = {key: value for key, value in params.items() if not str(key).startswith("_")}
     unknown = sorted(set(params) - set(PARAM_DEFAULTS))
     if unknown:
         raise ValueError(f"unknown experiment parameters: {unknown}")
@@ -357,6 +359,14 @@ def status_pid_alive(status: Mapping[str, object]) -> bool:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError, OSError):
         return False
+    # os.kill(pid, 0) succeeds on zombies (an exited worker whose spawning
+    # server has not reaped it yet); treat state Z as dead.
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii", errors="replace")
+        if stat.rpartition(")")[2].split()[:1] == ["Z"]:
+            return False
+    except OSError:
+        pass
     return True
 
 

@@ -348,6 +348,20 @@ class ResolveOptionsTest(unittest.TestCase):
         self.assertEqual(options.web_search_engines, ("tavily", "semantic_scholar"))
         self.assertTrue(options.analysis_enabled)
 
+    def test_metadata_keys_are_ignored(self) -> None:
+        options = resolve_options(
+            {
+                "experiment_id": "exp1",
+                "first_test_period": "2022Q1",
+                "last_test_period": "2022Q2",
+                "heldout_first_period": "2023Q1",
+                "heldout_last_period": "2023Q1",
+                "_created_at": "2026-07-06T00:00:00+00:00",
+            },
+            Path("/repo"),
+        )
+        self.assertFalse(hasattr(options, "_created_at"))
+
     def test_unknown_and_missing_params_fail_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown experiment parameters"):
             resolve_options({"experiment_id": "x", "no_such_knob": 1}, Path("/repo"))

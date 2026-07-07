@@ -291,8 +291,13 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
 
 def run(repo_root: Path, *, host: str = "127.0.0.1", port: int = 38888, experiments_root: Path | None = None) -> None:
+    import signal
+
     import uvicorn
 
+    # Auto-reap detached workers so exited experiments never linger as zombies
+    # (their liveness is judged via status.json pid checks).
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
     app = create_app(repo_root, experiments_root)
     uvicorn.run(app, host=host, port=port, log_level="info")
 
