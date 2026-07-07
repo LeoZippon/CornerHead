@@ -191,7 +191,9 @@ def _created_at(experiment_dir: Path) -> str | None:
     try:
         import datetime
 
-        return datetime.datetime.fromtimestamp(experiment_dir.stat().st_mtime).isoformat(timespec="seconds")
+        return datetime.datetime.fromtimestamp(
+            experiment_dir.stat().st_mtime, tz=datetime.timezone.utc
+        ).isoformat(timespec="seconds")
     except OSError:
         return None
 

@@ -89,6 +89,30 @@ function fmtDate(value) {
   return match ? `${match[1]}-${match[2]}-${match[3]}` : String(value || "—");
 }
 
+/* All backend timestamps are ISO-UTC; the console displays UTC+8 (Asia/Shanghai)
+   regardless of the browser's locale. */
+const TS_FMT = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai", hour12: false,
+  year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit",
+});
+const TS_TIME_FMT = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai", hour12: false,
+  month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+});
+
+function fmtTs(iso) {
+  const ms = Date.parse(iso || "");
+  if (Number.isNaN(ms)) return "—";
+  return TS_FMT.format(ms).replaceAll("/", "-");
+}
+
+function fmtTsTime(iso) {
+  const ms = Date.parse(iso || "");
+  if (Number.isNaN(ms)) return "";
+  return TS_TIME_FMT.format(ms).replaceAll("/", "-");
+}
+
 function fmtDuration(totalSeconds) {
   const seconds = Math.max(0, Math.floor(totalSeconds));
   const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), s = seconds % 60;
@@ -632,7 +656,7 @@ function experimentCard(item) {
       item.kind === "legacy" ? el("span", { class: "badge kind" }, "只读") : null,
     ),
     el("div", { class: "meta-line" },
-      `创建 ${item.created_at ? item.created_at.slice(0, 16).replace("T", " ") : "—"}`,
+      `创建 ${fmtTs(item.created_at)}`,
       item.current_session ? ` ｜ 当前 ${item.current_session}` : "",
       item.error ? ` ｜ ${item.error}` : "",
     ),
@@ -1532,7 +1556,7 @@ const TOOL_BRIEF_KEYS = [
 function traceEventNode(event) {
   const type = event.event_type || "event";
   const node = el("div", { class: "trace-event" });
-  const time = (event.ts || "").replace("T", " ").slice(5, 19);
+  const time = fmtTsTime(event.ts);
   const head = el("div", { class: "head" },
     el("span", { class: `type ${type}` }, type),
     el("span", {}, time),
@@ -1852,7 +1876,7 @@ function analysisPanel(experimentId, epochId, foldId) {
       const meta = payload.meta || {};
       if (meta.model) {
         body.append(el("div", { class: "hint", style: "margin-top:0" },
-          `模型 ${meta.model} ｜ 生成于 ${(meta.created_at || "").slice(0, 16).replace("T", " ")}${meta.retried_after_length_stop ? " ｜ 曾因长度截断重试" : ""}`));
+          `模型 ${meta.model} ｜ 生成于 ${fmtTs(meta.created_at)}${meta.retried_after_length_stop ? " ｜ 曾因长度截断重试" : ""}`));
       }
       body.append(renderMarkdown(payload.content));
     } else {
