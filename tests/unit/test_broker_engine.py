@@ -807,10 +807,16 @@ class ReplayIntegrationTest(unittest.TestCase):
         # Enter once pre-open; on a later-day rally the swing reduces. Orders fill
         # on the next bar, so the entry/exit land one bar after each decision.
         def swing(state):
-            bar = next((b for b in state["bars"] if str(b["ts_code"]) == "000001.SZ"), None)
-            if bar is None or bar.get("close") is None:
+            # state["bars"] is the columnar wire payload; the in-container driver
+            # wraps it into the dict-like ctx.bars for real strategies.
+            bars = state["bars"]
+            codes = list(bars.get("ts_code") or [])
+            if "000001.SZ" not in codes:
                 return []
-            price = float(bar["close"])
+            close = (bars.get("close") or [])[codes.index("000001.SZ")]
+            if close is None:
+                return []
+            price = float(close)
             pos = _held(state, "000001.SZ")
             if pos is None:
                 if state["cur_time"] == "09:25":

@@ -259,7 +259,18 @@ class MainPolicyRunner:
         request_id = uuid.uuid4().hex
         record = {"request_id": request_id, **payload}
         try:
-            proc.stdin.write(json.dumps(_jsonable(record), ensure_ascii=False, default=str) + "\n")
+            # The columnar bars arrays are JSON-safe by construction (str codes,
+            # _float_or_none values) and dominate the record size; deep-walking
+            # them through _jsonable every tick is pure overhead.
+            state = record.get("state")
+            bars = state.pop("bars", None) if isinstance(state, dict) else None
+            encoded = _jsonable(record)
+            if bars is not None:
+                state["bars"] = bars  # restore the caller's record
+                encoded_state = encoded.get("state")
+                if isinstance(encoded_state, dict):
+                    encoded_state["bars"] = bars
+            proc.stdin.write(json.dumps(encoded, ensure_ascii=False, default=str) + "\n")
             proc.stdin.flush()
         except BrokenPipeError as exc:
             raise BacktestError(f"main policy runner exited early: {self._drain_stderr()}") from exc
@@ -320,7 +331,8 @@ def run_main_ctx_replay(
     auction_decision_time: str = "09:25",
     auction_close_time: str | None = "14:57",
     execution_lag_bars: int = 2,
-    offsession_tick_minutes: int = 15,
+    offsession_tick_minutes: int = 30,
+    intraday_decision_minutes: int = 1,
     max_seconds_per_trading_day: float | None = None,
     enforce_substep_timeout: bool = True,
     enforce_substep_coverage: bool = True,
@@ -357,6 +369,13 @@ def run_main_ctx_replay(
     session; off-session orders do not fill. ``ctx.broker.pending(ts_code)`` exposes
     still-working orders so the Agent can avoid re-submitting before a fill (parity
     with the live order query).
+
+    ``intraday_decision_minutes`` (default 1 = every bar) coarsens only the
+    ``main(ctx)`` decision cadence on plain intraday bars: the Broker still
+    matches every minute bar (pending orders, execution lag, auction fills are
+    unchanged), auction and off-session ticks always decide, and the Timeview /
+    staged-state clocks advance every tick. Decisions land on wall-clock minutes
+    divisible by the grid.
 
     ``enforce_substep_timeout`` (default True) keeps the per-substep wall fail-fast
     that aborts the replay when a declared ``ctx.substep`` block runs over its budget
@@ -492,6 +511,11 @@ def run_main_ctx_replay(
                             actions=_jsonable(released_actions),
                             delayed_from_substep=True,
                         )
+                    # Coarser decision grid: skip main(ctx) (and its state assembly)
+                    # on non-decision bars; matching, timeview, staged-state merges,
+                    # transfers, and delayed-action release above all still ran.
+                    if not _is_decision_tick(tick, intraday_decision_minutes):
+                        continue
                     state = _market_state(
                         broker,
                         trade_date=trade_date,
@@ -666,6 +690,25 @@ class _Tick:
     is_offsession: bool = False
     # A close (15:00) call-auction tick: its order fills at the final bar's CLOSE.
     is_close_auction: bool = False
+
+
+def _is_decision_tick(tick: "_Tick", intraday_decision_minutes: int) -> bool:
+    """Whether ``main(ctx)`` runs on this tick under the configured decision grid.
+
+    Auction ticks (pre-open info, matched open, close auction) and off-session
+    research ticks always decide; plain intraday bars decide only on wall-clock
+    minutes divisible by the grid. 1 = every bar (the default, exact legacy
+    behavior)."""
+    if intraday_decision_minutes <= 1:
+        return True
+    if tick.is_offsession or tick.is_auction or tick.is_close_auction:
+        return True
+    hour_text, _, minute_text = str(tick.minute_key).partition(":")
+    try:
+        total_minutes = int(hour_text) * 60 + int(minute_text)
+    except ValueError:
+        return True
+    return total_minutes % int(intraday_decision_minutes) == 0
 
 
 def _offsession_keys(start_min: int, end_min: int, step_minutes: int) -> list[str]:
@@ -1280,25 +1323,28 @@ def _market_state(
     pending_orders: list[dict[str, object]] | None = None,
     cur_datetime: str = "",
 ) -> dict[str, object]:
-    bars = [
-        {
-            "ts_code": str(row.ts_code),
-            "open": _float_or_none(getattr(row, "open", None)),
-            "high": _float_or_none(getattr(row, "high", None)),
-            "low": _float_or_none(getattr(row, "low", None)),
-            "close": _float_or_none(getattr(row, "close", None)),
-            "vol": _float_or_none(getattr(row, "vol", None)),
-            "amount": _float_or_none(getattr(row, "amount", None)),
-        }
-        for row in minute_group.itertuples()
-    ]
+    # Columnar payload: full-universe list-of-dicts JSON dominated the per-tick
+    # RPC cost (~1MB/tick at ~5.4k codes). The driver's _LazyBars keeps the
+    # ctx.bars dict semantics while materializing only the codes a strategy
+    # actually touches.
+    if minute_group.empty:
+        bars: dict[str, list[object]] = {"ts_code": []}
+    else:
+        bars = {"ts_code": [str(code) for code in minute_group["ts_code"].tolist()]}
+        for column in ("open", "high", "low", "close", "vol", "amount"):
+            if column in minute_group.columns:
+                bars[column] = [_float_or_none(value) for value in minute_group[column].tolist()]
+            else:
+                bars[column] = [None] * len(bars["ts_code"])
     return {
         "cur_date": str(trade_date),
         "cur_time": str(minute_key or ""),
         "cur_datetime": str(cur_datetime or ""),
         "account": {
-            "stock": _jsonable(broker.account_record("stock", pending_orders=pending_orders or ())),
-            "credit": _jsonable(broker.account_record("credit", pending_orders=pending_orders or ())),
+            # Raw records: MainPolicyRunner._request already runs one _jsonable
+            # walk over the whole state, so walking them here would double the work.
+            "stock": broker.account_record("stock", pending_orders=pending_orders or ()),
+            "credit": broker.account_record("credit", pending_orders=pending_orders or ()),
             "total_assets": float(broker.equity()),
             "risk_limits": {
                 "max_total_holdings": broker.profile.max_total_holdings,
@@ -1307,11 +1353,11 @@ def _market_state(
                 "maintenance_withdraw_ratio": broker.profile.maintenance_withdraw_ratio,
             },
         },
-        "positions": _jsonable(
+        "positions": (
             broker.position_records("stock", pending_orders=pending_orders or ())
             + broker.position_records("credit", pending_orders=pending_orders or ())
         ),
-        "debt_contracts": _jsonable(broker.get_debt_contract()),
+        "debt_contracts": broker.get_debt_contract(),
         "bars": bars,
         "asof_dir": asof_dir,
         "asof_version": asof_version,

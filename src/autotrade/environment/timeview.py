@@ -62,6 +62,10 @@ class Timeview:
         shutil.rmtree(self.host_dir, ignore_errors=True)
         self.host_dir.mkdir(parents=True, exist_ok=True)
         self._version = 0
+        # The container mapping of host_dir is invariant for the whole replay;
+        # resolving it per tick costs several filesystem walks (map_path does
+        # multiple Path.resolve() calls), so it is computed once, lazily.
+        self._mapped_dir: str | None = None
         self._domains: dict[str, _DomainView] = {}
         for name, filename, cutoff_key in _DOMAINS:
             replay = replay_frames.get(name)
@@ -83,7 +87,9 @@ class Timeview:
         for view in self._domains.values():
             if view.roll(when):
                 self._version += 1
-        return self.executor.map_path(self.host_dir), str(self._version)
+        if self._mapped_dir is None:
+            self._mapped_dir = self.executor.map_path(self.host_dir)
+        return self._mapped_dir, str(self._version)
 
 
 class _DomainView:
@@ -115,6 +121,14 @@ class _DomainView:
             self._written = pd.Series(False, index=replay.index)
         self._part_seq = 0
         self._last_signature: object = object()  # sentinel: force the first roll
+        # Events-domain caches: the dataset labels are fixed for the replay, so
+        # the per-tick signature never re-scans the frame.
+        if cutoff_key is None and not self.replay.empty and "dataset" in self.replay.columns:
+            self._datasets_str = self.replay["dataset"].astype(str)
+            self._dataset_names: list[str] = sorted(self._datasets_str.unique())
+        else:
+            self._datasets_str = None
+            self._dataset_names = []
         self._columns = self._init_frozen_part(frozen_file)
 
     def _init_frozen_part(self, frozen_file: Path) -> list[str]:
@@ -162,19 +176,15 @@ class _DomainView:
         if self.cutoff_key is not None:
             cutoff = domain_visible_cutoff(self.cutoff_key, when)
             return pd.Series(pd.Timestamp(cutoff), index=self.replay.index) if cutoff is not None else None
-        datasets = self.replay.get("dataset")
-        if datasets is None:
+        if self._datasets_str is None:
             return None
-        datasets = datasets.astype(str)
-        cmap = {d: event_dataset_visible_cutoff(d, when) for d in datasets.unique()}
-        return datasets.map(lambda d: pd.Timestamp(cmap[d]) if cmap[d] is not None else pd.NaT)
+        cmap = {d: event_dataset_visible_cutoff(d, when) for d in self._dataset_names}
+        return self._datasets_str.map(lambda d: pd.Timestamp(cmap[d]) if cmap[d] is not None else pd.NaT)
 
     def _signature(self, when: pd.Timestamp) -> object:
         if self.cutoff_key is not None:
             return str(domain_visible_cutoff(self.cutoff_key, when))
-        datasets = self.replay.get("dataset")
-        names = sorted(datasets.astype(str).unique()) if datasets is not None else []
-        return tuple((d, str(event_dataset_visible_cutoff(d, when))) for d in names)
+        return tuple((d, str(event_dataset_visible_cutoff(d, when))) for d in self._dataset_names)
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:

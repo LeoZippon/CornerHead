@@ -804,15 +804,88 @@ def _chmod_dirs_for_host_cleanup(path, stop_at):
                 pass
 
 
+class _LazyBars(dict):
+    """dict-compatible view over columnar bar arrays.
+
+    The host ships one tick's bars as ``{"ts_code": [...], "open": [...], ...}``
+    (full-universe list-of-dicts JSON dominated the per-tick RPC cost); per-code
+    dicts materialize only on access, so strategies that touch a handful of
+    codes never pay for the whole universe. Subclassing ``dict`` keeps every
+    dict idiom working (``dict(ctx.bars)``, ``json.dumps``, ``.items()``);
+    materialized entries are stored in the underlying dict on first use.
+    """
+
+    def __init__(self, columns):
+        codes = [str(code) for code in (columns.get("ts_code") or [])]
+        super().__init__()
+        self._codes = codes
+        self._index = {code: i for i, code in enumerate(codes)}
+        self._cols = {str(k): v for k, v in columns.items() if k != "ts_code"}
+
+    def _materialize(self, key):
+        i = self._index[key]
+        bar = {"ts_code": key}
+        for name, values in self._cols.items():
+            bar[name] = values[i]
+        super().__setitem__(key, bar)
+        return bar
+
+    def __missing__(self, key):
+        key = str(key)
+        if dict.__contains__(self, key):
+            return dict.__getitem__(self, key)
+        return self._materialize(key)  # raises KeyError for unknown codes
+
+    def get(self, key, default=None):
+        try:
+            return self[str(key)]
+        except KeyError:
+            return default
+
+    def __contains__(self, key):
+        return str(key) in self._index
+
+    def __iter__(self):
+        return iter(self._codes)
+
+    def __len__(self):
+        return len(self._codes)
+
+    def _materialize_all(self):
+        for code in self._codes:
+            if not dict.__contains__(self, code):
+                self._materialize(code)
+
+    def keys(self):
+        self._materialize_all()
+        return dict.keys(self)
+
+    def values(self):
+        self._materialize_all()
+        return dict.values(self)
+
+    def items(self):
+        self._materialize_all()
+        return dict.items(self)
+
+    def copy(self):
+        self._materialize_all()
+        return {code: dict.__getitem__(self, code) for code in self._codes}
+
+
 def _build_ctx(state, snapshot_dir, model_dir, state_dir, staging_root):
-    bars = {str(b.get("ts_code", "")): dict(b) for b in (state.get("bars") or [])}
-    prices = {code: _bar_price(bar) for code, bar in bars.items()}
+    raw_bars = state.get("bars") or []
+    if isinstance(raw_bars, dict):
+        bars = _LazyBars(raw_bars)
+    else:  # legacy list-of-dicts payload
+        bars = {str(b.get("ts_code", "")): dict(b) for b in raw_bars}
     broker = _Broker(state)
     state_holder = {"active": None, "visible": state_dir}
     tick_key = _safe_name(state.get("cur_datetime") or state.get("cur_time") or "tick")
 
     def price(ts_code):
-        return prices.get(str(ts_code))
+        found = bars.get(str(ts_code))
+        return _bar_price(found) if found is not None else None
 
     def bar(ts_code):
         return bars.get(str(ts_code))

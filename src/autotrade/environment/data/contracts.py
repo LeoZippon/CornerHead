@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
@@ -65,6 +66,7 @@ def default_tushare_contracts() -> dict[str, DatasetContract]:
     }
 
 
+@lru_cache(maxsize=16384)
 def sim_datetime(trade_date: str, minute_key: str) -> datetime:
     """Beijing-time simulation clock for one replay tick.
 
@@ -74,6 +76,9 @@ def sim_datetime(trade_date: str, minute_key: str) -> datetime:
     mapping, ``available_at`` visibility in the Timeview, staged-write ``ready_at``,
     and the daily post-close refresh. The live loop reuses ``main(ctx)`` against the
     real Asia/Shanghai system clock, so the semantics carry over unchanged.
+
+    Cached: a replay calls this once per tick over a small (date, minute) grid,
+    and the returned datetime is immutable.
     """
     hour_text, _, minute_text = str(minute_key).partition(":")
     return datetime.strptime(str(trade_date), "%Y%m%d").replace(
