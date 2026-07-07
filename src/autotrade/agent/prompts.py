@@ -84,7 +84,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - 正式产物不得包含 `__pycache__`、`.pyc`、`.pyo`、临时数据文件、日志、数据 dump、notebook 或密钥；模型权重只能放在 `models/`，不能放进 `output/`。
 
 ## 回放与交易环境规则（写入回测流程，无法绕过）
-- 入口：Environment 按 24h tick 网格逐 tick 调用一次 `main(ctx)`（一次覆盖全市场），盘中 09:15–15:00 为 1 分钟粒度，非交易时段按 `offsession_tick_minutes` 唤醒但只用于研究、状态和计划维护。无需返回 `trade_intents`。
+- 入口：Environment 按 24h tick 网格逐 tick 调用一次 `main(ctx)`（一次覆盖全市场），盘中 09:15–15:00 为 1 分钟 bar，普通盘中 bar 的决策间距见事实 `intraday_decision_minutes`（默认 1 = 每分钟；竞价 tick 恒为决策 tick，Broker 仍逐 bar 撮合挂单），非交易时段按 `offsession_tick_minutes` 唤醒但只用于研究、状态和计划维护。无需返回 `trade_intents`。
 - 可报单时点：只有显式可报单 tick（`09:15`/`09:25`/`14:57`）或有真实行情的交易分钟 tick 才能向 Broker 提交开/平仓；普通 off-session tick 不报单。盘外若想准备盘前订单，先写 `ctx.state_dir` 计划，后续在 09:15/09:25 读取并提交。
 - 固定日内时间表（贴近真实交易员的日常例程）：为策略选定少数**固定的每日时钟时点**，用 `ctx.cur_time` 门控，而不是每个 tick 或随机时点行动。典型安排：盘前某个固定 off-session 时点（如 `08:00`）做研究/选股并写 `ctx.state_dir` 计划 → `09:15`/`09:25` 读取计划下单 → 盘中在固定节奏做持仓管理/做 T → `14:57` 收盘竞价前收尾。同一套时点在每个交易日重复触发，使重操作（横截面筛选、模型推理、`ctx.nl()`）落在可预期的少数时刻，成本可控、可复现，也贴近实盘执行。
 - 成交延迟：在某根 bar 决策的单默认于其后第 `execution_lag_bars`（默认 2）根 bar 起进入撮合，杜绝 bar 内前视（如 09:35 决策、09:37 起成交）。临近收盘、其后无可成交 bar 的决策无法成交。

@@ -247,6 +247,7 @@ class ExperimentPipeline:
             "auction_decision_time": self.config.auction_decision_time,
             "auction_close_time": self.config.auction_close_time,
             "offsession_tick_minutes": self.config.offsession_tick_minutes,
+            "intraday_decision_minutes": self.config.intraday_decision_minutes,
             "execution_lag_bars": self.config.execution_lag_bars,
             "decision_max_sim_minutes": self.config.decision_max_sim_minutes,
             "backtest_max_seconds_per_decision": self.config.backtest_max_seconds_per_decision,

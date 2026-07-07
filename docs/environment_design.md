@@ -453,7 +453,7 @@ Agent 主对话、Runner context compact 和 NL 工具调用都只能经宿主 `
 2. 校验 `/mnt/snapshot` 与 run manifest 中的决策输入一致。
 3. 创建唯一 `results/<phase>_<idx>/`。
 4. 固定 `AT_SNAPSHOT_DIR=/mnt/snapshot`、`AT_AGENT_OUTPUT_DIR=/mnt/agent/output`、`AT_MODEL_DIR=/mnt/agent/models`，并把宿主管理的 state 可见目录与 staging 目录作为 driver 私有路径传入，在 Sandbox 启动一个常驻 `main(ctx)` 进程。driver 在导入策略前移除 `AT_STATE_DIR` / `AT_STATE_STAGING_DIR`，并用 path guard 阻断策略硬编码访问托管 state 根；策略只能通过 `ctx.state_dir` 在 `ctx.substep` 内访问暂存视图。该进程是镜像内 `/opt/at_runtime/main_ctx_driver.py` 这一真实模块（按文件加载，非 `python -c` 字符串，Python 标准库实现，不依赖 `broker_core`）；随镜像构建烤入 `/opt/at_runtime`（见镜像合同）。
-5. 按回放 tick 逐 tick 构造市场级 `ctx` 并调用一次 `main(ctx)`（盘中 1 分钟 tick，盘外按 `offsession_tick_minutes`（默认 15 分钟）spacing）；`main` 在显式竞价/交易分钟 tick 的 `ctx.substep` 内通过 `ctx.broker` 的 `ts_code` 原语下单，普通盘外 tick 只做研究/状态/计划维护。
+5. 按回放 tick 逐 tick 构造市场级 `ctx` 并调用一次 `main(ctx)`（盘中 bar 为 1 分钟粒度，普通盘中 bar 的决策间距由 `intraday_decision_minutes` 控制（默认 1 = 每分钟，调大只降低 `main(ctx)` 频率、Broker 仍逐 bar 撮合且竞价 tick 恒为决策 tick）；盘外按 `offsession_tick_minutes`（默认 30 分钟）spacing）；`main` 在显式竞价/交易分钟 tick 的 `ctx.substep` 内通过 `ctx.broker` 的 `ts_code` 原语下单，普通盘外 tick 只做研究/状态/计划维护。
 6. 若 `main` 在决策时调用 `ctx.nl()`，通过宿主控制的 JSONL 文件 RPC 请求 NL 服务（宿主在等待 `main` 返回时同时服务 NL 请求）。
 7. 收集本 tick `main` 发出的 Broker 原语调用，宿主 Broker 按延迟进入订单簿，逐 bar 撮合并强制约束。
 8. 按 tick 推进直到回放区间末日强制清仓。
@@ -613,8 +613,8 @@ QMT 订单参数口径：
 
 执行节奏：
 
-- 交易时段内按真实 1 分钟 bar 逐 tick 推进。
-- 时段外按 `offsession_tick_minutes`（默认 15 分钟）继续调用 `main(ctx)`，只用于研究、状态和计划维护。
+- 交易时段内按真实 1 分钟 bar 逐 tick 推进；普通盘中 bar 上 `main(ctx)` 的决策间距由 `intraday_decision_minutes`（默认 1 = 每分钟）控制，Broker 撮合、执行滞后与竞价 tick 不受影响。
+- 时段外按 `offsession_tick_minutes`（默认 30 分钟）继续调用 `main(ctx)`，只用于研究、状态和计划维护。
 - 普通 off-session tick 不提交交易所订单；`transfer` 是盘前资金划转申请，不是交易所委托。
 - 只有显式可报单 tick（09:15/09:25/14:57）或有真实行情的交易分钟 tick，才应在 `ctx.substep` 内调用 `ctx.broker` 报单、平仓或撤单。
 - 若要盘前准备订单，应先在 off-session tick 的 substep 中写计划，再在 09:15/09:25 的 substep 中读取计划并调用 `ctx.broker`。

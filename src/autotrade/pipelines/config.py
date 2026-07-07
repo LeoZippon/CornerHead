@@ -181,7 +181,12 @@ class ExperimentConfig:
     # 24h tick grid: outside the 09:15-15:00 session the replay still calls main(ctx)
     # on this minute spacing (research/state only — off-session ticks place no fills),
     # so the same loop drives backtest and live. 0 disables off-session ticks.
-    offsession_tick_minutes: int = 15
+    offsession_tick_minutes: int = 30
+    # main(ctx) cadence on plain intraday bars (1 = every minute bar). The Broker
+    # still matches every bar (pending orders, execution lag, auction fills are
+    # unchanged); auction and off-session ticks always decide. Coarser grids trade
+    # intraday reaction granularity for replay wall-time.
+    intraday_decision_minutes: int = 1
     # Bars between an order's decision tick and its fill bar (market orders fill at
     # the fill bar's open), modelling the live submit latency: 1 = the immediate
     # next bar, 2 = one bar to compute/submit then fill on the following bar.

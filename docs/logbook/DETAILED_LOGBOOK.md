@@ -16518,3 +16518,32 @@ Validation: full suite 519 OK; `node --check` OK; server restarted (workers unaf
 
 - UI: fluid root font clamp lowered to clamp(14px, 12px+0.22vw, 17.5px) (16" MBP ≈15.8px) and the largest components trimmed (brand/buttons/badges/cards/tiles/metrics/panels/session rows) after the previous iteration overshot.
 - Grounded the IPC cost for the optimization proposal: the fold's replay slot carries 5,445 codes per minute; one tick's engine bars (7 fields/code) ≈ 1MB JSON each way, ~4-6GB total encode/pipe/decode per 20-day validation. Optimization options presented to the user for decision (A: zero-semantic caches; B: columnar bars + lazy driver mapping; C: tick-grid knobs; D: snapshot prewarm) — no implementation yet.
+
+## 2026-07-07 Replay engine speedup A/B/C (feat/hitl-webui)
+
+Task: user approved all four optimization packages with STRICT acceptance — full 20-trade-day before/after replays; A/B must be numerically identical.
+
+Benchmark harness: `scripts/dev/replay_benchmark.py` — drives `run_main_ctx_replay` in a real Docker sandbox against test2's frozen fold strategy (`strategy_epoch_001_fold_202512`) and its already-prepared snapshot views/replay slot (hardlinked; no LLM, no NL — the recorded backtests show nl_calls=0). Parity artifact = sha256 over the full STOCK+CREDIT order stream + `compute_return_stats`. Relaxed wall caps and disabled substep enforcement so load spikes cannot abort a measurement run (enforcement does not affect outputs).
+
+Results (fold_202512, 20 trade days, 5,985 ticks at baseline grid; RAM ~410Gi avail, CPU-only):
+| run | wall | timeview | strategy | orders digest |
+|---|---|---|---|---|
+| baseline (pre-change) | 984.4s | 355.3 | 327.3 | b90cb45e…bc2c |
+| A+B | 616.9s (−37%) | 262.5 | 124.6 | identical |
+| A+B + C (offsession 30 / decision grid 5) | 510.1s (−48%) | 262.3 | 44.0 | identical (this strategy; not a general guarantee) |
+
+Package A (zero-semantic caches):
+- `timeview.Timeview.refresh` caches the invariant container mapping of host_dir (was ~6 Path.resolve() walks/tick); `_DomainView` caches the events dataset-name list + astype(str) series (was a full-frame unique() per tick).
+- `contracts.sim_datetime` gains lru_cache(16384) (immutable return, small key grid).
+- `_market_state` no longer pre-walks account/positions/debt with `_jsonable` (the RPC layer walks once); `MainPolicyRunner._request` skips the `_jsonable` deep-walk over the bars arrays (JSON-safe by construction: str codes + `_float_or_none` values) — that walk over ~38k elements/tick had become the top Python cost after columnarization.
+
+Package B (columnar bars + lazy driver view):
+- Engine ships bars as `{"ts_code": [...], "open": [...], ...}` built from column `.tolist()` (~60% smaller JSON, no per-row dict building); driver's new `_LazyBars(dict)` preserves full ctx.bars dict semantics (`in`/`len`/iteration/`get`/`keys/values/items`/`copy`/`dict()`), materializing per-code dicts only on access; `ctx.price` computes lazily. Legacy list payloads still accepted. Sandbox image rebuilt (driver baked); `DockerizedFoldE2ETest` green against the new image.
+
+Package C (tick-grid knobs):
+- C1: `offsession_tick_minutes` default 15→30 (config, engine kwarg, PARAM_DEFAULTS, form, docs).
+- C2: new `intraday_decision_minutes` (default 1 = exact legacy cadence): `_is_decision_tick` gates only `main(ctx)` + market-state assembly on plain intraday bars; broker matching, execution lag, auction/off-session decision ticks, timeview refresh, staged-state merges and transfer/delayed-action bookkeeping run every tick unchanged. Plumbed through ExperimentConfig → `_replay_config_fields` → run manifest → BacktestTool → engine; agent-visible manifest whitelist + facts; HITL PARAM_DEFAULTS/build_config/form field; env_design §3 + parameters_reference §3 + fold prompt entry line updated; PROMPTS.md re-exported.
+
+Remaining hotspot (recorded, not implemented): timeview_build ~262s ≈ 44ms/tick is now dominated by per-tick visibility-cutoff computation across the five domains (refresh deliberately runs every tick to keep part-roll timing exact). Next candidate: cache each domain's cutoff until the next refresh-node boundary. The C-run's unattributed ~204s is per-tick engine bookkeeping + per-decision state assembly.
+
+Validation: full suite 522 OK (+DecisionGridTest, +LazyBarsTest ×2; one broker-engine test fake updated to the columnar wire shape); two independent full-window parity runs byte-identical; Docker e2e OK; `git diff --check` clean; bench workdirs cleaned (agent-uid files removed via sandbox-image container; docker.io unreachable for alpine — used local image).

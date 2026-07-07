@@ -88,7 +88,8 @@ PARAM_DEFAULTS: dict[str, object] = {
     "record_failed_attempts": True,
     "meta_sandbox_rebuild_timeout_seconds": 1800,
     "meta_sandbox_image_keep": 3,
-    "offsession_tick_minutes": 15,
+    "offsession_tick_minutes": 30,
+    "intraday_decision_minutes": 1,
     "execution_lag_bars": 2,
     "decision_max_sim_minutes": 60.0,
     "backtest_max_seconds_per_decision": 300.0,
@@ -254,6 +255,7 @@ def build_config_from_options(options: SimpleNamespace, *, repo_root: Path) -> E
         max_steps_per_fold=int(options.max_steps_per_fold),
         max_backtests_per_fold=int(options.max_backtests_per_fold),
         offsession_tick_minutes=int(options.offsession_tick_minutes),
+        intraday_decision_minutes=int(options.intraday_decision_minutes),
         execution_lag_bars=int(options.execution_lag_bars),
         decision_max_sim_minutes=(
             float(options.decision_max_sim_minutes) if options.decision_max_sim_minutes is not None else None

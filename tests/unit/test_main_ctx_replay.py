@@ -1462,3 +1462,62 @@ def main(ctx):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DecisionGridTest(unittest.TestCase):
+    def test_is_decision_tick_grid_and_always_on_ticks(self) -> None:
+        from types import SimpleNamespace
+
+        from autotrade.environment.main_ctx_engine import _is_decision_tick
+
+        def tick(minute_key, **flags):
+            base = {"is_offsession": False, "is_auction": False, "is_close_auction": False}
+            base.update(flags)
+            return SimpleNamespace(minute_key=minute_key, **base)
+
+        # Grid 1 = every bar (exact legacy behavior).
+        self.assertTrue(_is_decision_tick(tick("09:31"), 1))
+        # Coarser grid: only wall minutes divisible by N decide.
+        self.assertTrue(_is_decision_tick(tick("09:35"), 5))
+        self.assertFalse(_is_decision_tick(tick("09:36"), 5))
+        self.assertFalse(_is_decision_tick(tick("09:31"), 5))
+        # Auction and off-session ticks always decide regardless of the grid.
+        self.assertTrue(_is_decision_tick(tick("09:25", is_auction=True), 5))
+        self.assertTrue(_is_decision_tick(tick("14:57", is_close_auction=True), 5))
+        self.assertTrue(_is_decision_tick(tick("08:00", is_offsession=True), 5))
+
+
+class LazyBarsTest(unittest.TestCase):
+    def _bars(self):
+        import importlib.util
+        from pathlib import Path as _P
+
+        driver_path = _P(__file__).resolve().parents[2] / "src" / "autotrade" / "environment" / "main_ctx_driver.py"
+        spec = importlib.util.spec_from_file_location("_lazybars_driver", driver_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module._LazyBars(
+            {"ts_code": ["000001.SZ", "600000.SH"], "open": [10.0, 5.0], "close": [10.5, None]}
+        )
+
+    def test_dict_semantics_and_lazy_materialization(self) -> None:
+        bars = self._bars()
+        self.assertEqual(len(bars), 2)
+        self.assertIn("600000.SH", bars)
+        self.assertNotIn("999999.SZ", bars)
+        self.assertEqual(bars["000001.SZ"], {"ts_code": "000001.SZ", "open": 10.0, "close": 10.5})
+        self.assertIsNone(bars.get("999999.SZ"))
+        self.assertEqual(sorted(bars), ["000001.SZ", "600000.SH"])
+        # Full-dict idioms materialize everything.
+        materialized = dict(bars)
+        self.assertEqual(set(materialized), {"000001.SZ", "600000.SH"})
+        self.assertEqual(materialized["600000.SH"]["open"], 5.0)
+        self.assertEqual(len(list(bars.items())), 2)
+        copied = bars.copy()
+        self.assertEqual(copied["600000.SH"]["close"], None)
+        self.assertIsInstance(copied, dict)
+
+    def test_missing_code_raises_keyerror(self) -> None:
+        bars = self._bars()
+        with self.assertRaises(KeyError):
+            bars["999999.SZ"]
