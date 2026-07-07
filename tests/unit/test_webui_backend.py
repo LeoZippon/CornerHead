@@ -146,9 +146,44 @@ class WebuiBackendTest(unittest.TestCase):
         fields = {field["key"]: field for group in schema["groups"] for field in group["fields"]}
         self.assertEqual(fields["epochs"]["default"], PARAM_DEFAULTS["epochs"])
         self.assertEqual(fields["model"]["default"], PARAM_DEFAULTS["model"])
-        self.assertNotIn("experiments_root", fields)
-        self.assertNotIn("work_root", fields)
+        for hidden in (
+            "experiments_root", "work_root", "raw_dir", "fundamental_events_root",
+            "fundamental_events_status", "template_dir", "local_dev",
+            "tavily_api_key_env", "semantic_scholar_api_key_env",
+        ):
+            self.assertNotIn(hidden, fields, hidden)
+        for model_field in ("model", "nl_model", "compact_model", "analysis_model"):
+            self.assertNotIn("deepseek-chat", fields[model_field]["choices"])
+            self.assertNotIn("deepseek-reasoner", fields[model_field]["choices"])
+        # No trade calendar under the tmp repo root: period pickers degrade to text.
+        self.assertEqual(schema["period_options"], {})
+        self.assertEqual(fields["first_test_period"]["type"], "string")
         self.assertTrue(all(field.get("help") for field in fields.values()))
+
+    def test_period_options_and_defaults_from_calendar(self) -> None:
+        from autotrade.webui.params_schema import build_period_options, parameter_schema, suggest_period_defaults
+        import pandas as pd
+
+        trading_days = [day.strftime("%Y%m%d") for day in pd.date_range("2023-01-02", "2024-07-05", freq="B")]
+        options = build_period_options(trading_days)
+        self.assertEqual(options["year"], ["2023"])
+        self.assertEqual(options["quarter"][0], "2023Q1")
+        self.assertEqual(options["quarter"][-1], "2024Q2")  # ends 20240630 <= last trading day
+        self.assertIn("202401", options["month"])
+        self.assertNotIn("202407", options["month"])  # incomplete month excluded
+        self.assertTrue(all(len(label) == 8 for label in options["week"]))
+        defaults = suggest_period_defaults(options)
+        quarter = defaults["quarter"]
+        self.assertEqual(quarter["heldout_first_period"], "2024Q2")
+        self.assertEqual(quarter["last_test_period"], "2024Q1")
+        self.assertLess(quarter["first_test_period"], quarter["last_test_period"])
+        # first_test never takes the very first option (its validation period
+        # must also exist in the calendar).
+        self.assertNotEqual(quarter["first_test_period"], options["quarter"][0])
+        schema = parameter_schema(trading_days=trading_days)
+        fields = {field["key"]: field for group in schema["groups"] for field in group["fields"]}
+        self.assertEqual(fields["first_test_period"]["type"], "period")
+        self.assertEqual(fields["heldout_first_period"]["default"], "2024Q2")
 
     def test_list_experiments_marks_kind_state_and_metrics(self) -> None:
         payload = self.client.get("/api/experiments").json()

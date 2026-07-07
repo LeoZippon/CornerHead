@@ -6,6 +6,7 @@
 - Fold 分析（guarded test view，用户定）：`pipelines/fold_analysis.py` 预定义中文模板经 LLMProxy 生成策略分析——输入只含验证期证据（投影排除 test_result/test_period），测试期结果在 UI 单独折叠「事后审计」区并警示不得写入后续指令；分析失败仅记 status 不阻断，可在控制台重新生成。
 - 验证：full suite 511 OK（483→511：+15 interactive、+12 webui backend、+1 prompt）；`git diff --check` clean；PROMPTS.md 重导出（含 fold 指令示例节）；真实控制面 smoke（38888 端口）：列出 23 个历史实验只读、创建→step 门控 waiting_user→set_directive→stop 干净退出→resume 重启 worker→确认式删除全通；修 2 个 smoke 发现的缺陷（params 元数据键 `_created_at` 误拒；退出 worker 成僵尸致 pid 误判存活——status_pid_alive 识别 Z 态 + 服务 SIGCHLD=SIG_IGN）。
 - 文档：pipeline_design 新增第 5 章（门控/续跑/控制台/防泄漏）；agent_design 补研究者 Fold 指令术语；parameters_reference 新增 §9 HITL 参数。后续部署形态（远端轻量服务器只承载交互层）已记入 §5.3。真实 DeepSeek+Docker 的完整 HITL Fold 运行待用户显式触发（与 RA4 同口径）。
+- UI 二轮优化（用户 5 点）：①四个周期参数改为依赖 Fold 周期的下拉选择器——服务端从 SSE 交易日历枚举完整可回测周期（实测 quarter66/month198/week836/year16 与 daily 数据 2010–2026 覆盖一致）并给推荐默认（近 4 期 development + 最新完整期 held-out），无日历时退化文本输入；修 web_search_engines 多选交互缺陷（multi-select→复选框组）；②表单隐藏运维参数（路径 4 项、两个 key 环境变量名、local_dev，API 仍可设）；③模型选项删 deepseek-chat/reasoner；④响应式+字号放大（15px 基准、三档断点、笔记本可读）；⑤图表按 dataviz 规范重做——校验过的双系列色板（验证 #2a78d6 / 测试 #1baf7a，CVD ΔE 73.6、aqua 亚 3:1 由表格/悬浮提示补偿）、≤24px 圆端条形+2px 间隙、2px 累计收益折线+8px 白环标记、发丝网格、悬浮 tooltip、图例，详情页新增统计瓦片行+累计收益曲线。full suite 513 OK。
 
 2026-07-06 第四轮全面审计：文档 + 代码 + 实盘保真（feat/qmt-credit-broker）
 

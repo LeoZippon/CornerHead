@@ -254,5 +254,8 @@
 | status 心跳间隔（常量） | 3.0 s | worker 心跳 + 实时 run/trace 路径发现 |
 | `MAX_RUNNING_EXPERIMENTS`（常量） | 4 | 控制台并行运行实验数上限 |
 | 控制台默认绑定 | `127.0.0.1:38888` | `scripts/webui/run_webui.py --host/--port`；无鉴权，仅回环或可信反代 |
+| 控制台模型选项 | v4-pro / v4-flash | 创建表单仅暴露 v4 接口；chat/reasoner 走 API/params.json |
+| 控制台周期选择器 | 交易日历派生 | 四个周期参数按 Fold 周期从 SSE 日历枚举完整可回测周期并给推荐默认；无日历时退化为文本输入 |
+| 控制台隐藏参数 | 路径/凭据变量名/local_dev | `raw_dir`、模板/事件路径、`tavily/semantic_scholar_api_key_env`、`local_dev` 不进表单，仅 API/params.json 可设 |
 | 分析内容预算（常量） | 单文件 20k / 总 60k 字符 | `fold_analysis.read_strategy_files` 的策略代码内联预算 |
 | HITL work root | `.runtime/sandboxes/<experiment_id>` | 控制台创建实验的专属 sandbox 根（删除实验时一并清理） |

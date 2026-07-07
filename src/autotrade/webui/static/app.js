@@ -59,6 +59,11 @@ function numClass(value) {
   return value >= 0 ? "num pos" : "num neg";
 }
 
+function signCls(value) {
+  if (value === null || value === undefined) return "";
+  return value >= 0 ? "pos" : "neg";
+}
+
 function stateBadge(state) {
   return el("span", { class: `badge state-${state}` }, STATE_LABELS[state] || state);
 }
@@ -103,44 +108,181 @@ function renderMarkdown(text) {
   return div;
 }
 
-/* Simple SVG bar chart: per-fold returns (valid vs test). */
-function foldReturnsChart(rows, { width = 720, height = 200 } = {}) {
+/* ---------------- charts ----------------
+   Specs: thin marks (bars ≤24px, 2px surface gap, 4px rounded data-end,
+   square baseline; 2px lines; ≥8px markers with 2px surface ring), hairline
+   solid gridlines, muted-ink labels, legend for 2 series, hover tooltips.
+   Palette: categorical slots 1-2 (blue/aqua), CVD+contrast validated on white;
+   aqua's sub-3:1 relief is carried by the result tables and tooltips. */
+
+const SERIES = {
+  valid: { color: "#2a78d6", label: "验证" },
+  test: { color: "#1baf7a", label: "测试" },
+};
+const INK = { grid: "#e9ebf1", baseline: "#c2c7d2", muted: "#68717f", faint: "#a5abb8" };
+
+let $chartTip = null;
+function chartTipNode() {
+  if (!$chartTip) {
+    $chartTip = el("div", { class: "chart-tip", style: "display:none" });
+    document.body.append($chartTip);
+  }
+  return $chartTip;
+}
+
+function bindChartTips(wrap) {
+  const tip = chartTipNode();
+  wrap.addEventListener("mousemove", (event) => {
+    const target = event.target.closest("[data-tip]");
+    if (!target) { tip.style.display = "none"; return; }
+    tip.textContent = target.getAttribute("data-tip");
+    tip.style.display = "block";
+    const pad = 14;
+    const rect = tip.getBoundingClientRect();
+    let x = event.clientX + pad, y = event.clientY + pad;
+    if (x + rect.width > window.innerWidth - 8) x = event.clientX - rect.width - pad;
+    if (y + rect.height > window.innerHeight - 8) y = event.clientY - rect.height - pad;
+    tip.style.left = `${x}px`;
+    tip.style.top = `${y}px`;
+  });
+  wrap.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+  return wrap;
+}
+
+function chartLegend(seriesList) {
+  return el("div", { class: "chart-legend" },
+    ...seriesList.map((series) => el("span", { class: "legend-item" },
+      el("span", { class: "legend-swatch", style: `background:${series.color}` }), series.label)));
+}
+
+function niceCeil(value) {
+  const mag = Math.pow(10, Math.floor(Math.log10(value)));
+  for (const mult of [1, 2, 2.5, 5, 10]) {
+    if (mult * mag >= value) return mult * mag;
+  }
+  return 10 * mag;
+}
+
+/* Rounded data-end bar: square at the baseline, 4px radius at the value end. */
+function barPath(x, zeroY, valueY, w) {
+  const up = valueY < zeroY;
+  const h = Math.max(Math.abs(zeroY - valueY), 1);
+  const r = Math.min(4, w / 2, h);
+  if (up) {
+    const y = zeroY - h;
+    return `M${x},${zeroY} L${x},${y + r} Q${x},${y} ${x + r},${y} L${x + w - r},${y} Q${x + w},${y} ${x + w},${y + r} L${x + w},${zeroY} Z`;
+  }
+  const y = zeroY + h;
+  return `M${x},${zeroY} L${x + w},${zeroY} L${x + w},${y - r} Q${x + w},${y} ${x + w - r},${y} L${x + r},${y} Q${x},${y} ${x},${y - r} Z`;
+}
+
+/* Grouped bars: per-fold returns, valid vs test, zero baseline. */
+function foldReturnsChart(rows, { width = 640, height = 220, mini = false } = {}) {
   const values = rows.flatMap((row) => [row.valid_return, row.test_return]).filter((v) => v !== null && v !== undefined);
   if (!rows.length || !values.length) return el("div", { class: "hint" }, "暂无收益数据");
-  const maxAbs = Math.max(0.01, ...values.map(Math.abs));
-  const padL = 46, padB = 34, padT = 12;
-  const plotW = width - padL - 10, plotH = height - padT - padB;
-  const zeroY = padT + plotH * (maxAbs / (2 * maxAbs));
-  const groupW = plotW / rows.length;
-  const barW = Math.min(22, groupW / 2.6);
-  const svg = [];
+  const maxAbs = niceCeil(Math.max(0.005, ...values.map(Math.abs)));
+  const padL = mini ? 42 : 50, padR = 10, padB = mini ? 26 : 36, padT = 8;
+  const plotW = width - padL - padR, plotH = height - padT - padB;
+  const zeroY = padT + plotH / 2;
   const yOf = (v) => zeroY - (v / maxAbs) * (plotH / 2);
-  svg.push(`<line x1="${padL}" y1="${zeroY}" x2="${width - 8}" y2="${zeroY}" stroke="#c9cfda" stroke-width="1"/>`);
+  const groupW = plotW / rows.length;
+  const barW = Math.max(3, Math.min(24, (groupW - 8) / 2 - 1));
+  const svg = [];
   for (const frac of [-1, -0.5, 0.5, 1]) {
     const y = yOf(frac * maxAbs);
-    svg.push(`<line x1="${padL}" y1="${y}" x2="${width - 8}" y2="${y}" stroke="#eef1f5"/>`);
-    svg.push(`<text x="${padL - 6}" y="${y + 4}" text-anchor="end" font-size="10" fill="#68717f">${(frac * maxAbs * 100).toFixed(1)}%</text>`);
+    svg.push(`<line x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}" stroke="${INK.grid}" stroke-width="1"/>`);
+    svg.push(`<text x="${padL - 6}" y="${y + 3.5}" text-anchor="end" font-size="${mini ? 10 : 11}" fill="${INK.muted}">${(frac * maxAbs * 100).toFixed(1)}%</text>`);
   }
+  svg.push(`<line x1="${padL}" y1="${zeroY}" x2="${width - padR}" y2="${zeroY}" stroke="${INK.baseline}" stroke-width="1"/>`);
+  const labelEvery = Math.max(1, Math.ceil(rows.length / (mini ? 5 : 12)));
   rows.forEach((row, index) => {
     const cx = padL + groupW * index + groupW / 2;
     const bars = [
-      { v: row.valid_return, color: "#7f9be0", dx: -barW - 2 },
-      { v: row.test_return, color: "#2456c4", dx: 2 },
+      { v: row.valid_return, series: SERIES.valid, x: cx - barW - 1 }, // 2px surface gap between the pair
+      { v: row.test_return, series: SERIES.test, x: cx + 1 },
     ];
     for (const bar of bars) {
       if (bar.v === null || bar.v === undefined) continue;
-      const y = yOf(Math.max(bar.v, 0)), h = Math.abs(yOf(bar.v) - zeroY);
-      svg.push(`<rect x="${cx + bar.dx}" y="${bar.v >= 0 ? y : zeroY}" width="${barW}" height="${Math.max(h, 1)}" rx="2" fill="${bar.color}"><title>${escapeHtml(row.fold_id)} ${bar.color === "#2456c4" ? "test" : "valid"}: ${(bar.v * 100).toFixed(2)}%</title></rect>`);
+      const tip = `${String(row.fold_id || "")} ${bar.series.label} ${(bar.v * 100).toFixed(2)}%`;
+      svg.push(`<path d="${barPath(bar.x, zeroY, yOf(bar.v), barW)}" fill="${bar.series.color}" data-tip="${escapeHtml(tip)}"/>`);
     }
-    const label = String(row.fold_id || "").replace(/^fold_/, "");
-    svg.push(`<text x="${cx}" y="${height - 16}" text-anchor="middle" font-size="10" fill="#68717f">${escapeHtml(label)}</text>`);
-    if (row.epoch_label) svg.push(`<text x="${cx}" y="${height - 4}" text-anchor="middle" font-size="9" fill="#a5abb8">${escapeHtml(row.epoch_label)}</text>`);
+    if (index % labelEvery === 0) {
+      const label = String(row.fold_id || "").replace(/^fold_/, "");
+      svg.push(`<text x="${cx}" y="${height - (mini ? 8 : 18)}" text-anchor="middle" font-size="${mini ? 10 : 11}" fill="${INK.muted}">${escapeHtml(label)}</text>`);
+      if (!mini && row.epoch_label) {
+        svg.push(`<text x="${cx}" y="${height - 5}" text-anchor="middle" font-size="10" fill="${INK.faint}">${escapeHtml(String(row.epoch_label).replace("epoch_", "E"))}</text>`);
+      }
+    }
   });
-  svg.push(`<rect x="${padL}" y="0" width="10" height="10" fill="#7f9be0"/><text x="${padL + 14}" y="9" font-size="10" fill="#68717f">验证</text>`);
-  svg.push(`<rect x="${padL + 52}" y="0" width="10" height="10" fill="#2456c4"/><text x="${padL + 66}" y="9" font-size="10" fill="#68717f">测试</text>`);
-  const wrap = el("div", { class: "svg-chart" });
-  wrap.innerHTML = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${svg.join("")}</svg>`;
-  return wrap;
+  const wrap = el("div", { class: "svg-chart" },
+    chartLegend([SERIES.valid, SERIES.test]));
+  const svgHost = el("div", {});
+  svgHost.innerHTML = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${svg.join("")}</svg>`;
+  wrap.append(svgHost);
+  return bindChartTips(wrap);
+}
+
+/* Cumulative equity lines: ∏(1+r)−1 across folds, valid vs test. */
+function cumulativeReturnChart(rows, { width = 640, height = 220 } = {}) {
+  const build = (key) => {
+    let equity = 1;
+    const points = [];
+    rows.forEach((row, index) => {
+      const value = row[key];
+      if (value === null || value === undefined) return;
+      equity *= 1 + value;
+      points.push({ index, cum: equity - 1, fold: row.fold_id });
+    });
+    return points;
+  };
+  const seriesData = [
+    { ...SERIES.valid, points: build("valid_return") },
+    { ...SERIES.test, points: build("test_return") },
+  ].filter((series) => series.points.length);
+  const all = seriesData.flatMap((series) => series.points.map((p) => p.cum));
+  if (rows.length < 2 || !all.length) return el("div", { class: "hint" }, "累计曲线需要至少两个已完成 Fold");
+  const maxAbs = niceCeil(Math.max(0.005, ...all.map(Math.abs)));
+  const padL = 50, padR = 14, padB = 30, padT = 8;
+  const plotW = width - padL - padR, plotH = height - padT - padB;
+  const zeroY = padT + plotH / 2;
+  const yOf = (v) => zeroY - (v / maxAbs) * (plotH / 2);
+  const xOf = (index) => padL + (rows.length === 1 ? plotW / 2 : (index / (rows.length - 1)) * plotW);
+  const svg = [];
+  for (const frac of [-1, -0.5, 0.5, 1]) {
+    const y = yOf(frac * maxAbs);
+    svg.push(`<line x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}" stroke="${INK.grid}" stroke-width="1"/>`);
+    svg.push(`<text x="${padL - 6}" y="${y + 3.5}" text-anchor="end" font-size="11" fill="${INK.muted}">${(frac * maxAbs * 100).toFixed(1)}%</text>`);
+  }
+  svg.push(`<line x1="${padL}" y1="${zeroY}" x2="${width - padR}" y2="${zeroY}" stroke="${INK.baseline}" stroke-width="1"/>`);
+  const labelEvery = Math.max(1, Math.ceil(rows.length / 12));
+  rows.forEach((row, index) => {
+    if (index % labelEvery !== 0) return;
+    const label = String(row.fold_id || "").replace(/^fold_/, "");
+    svg.push(`<text x="${xOf(index)}" y="${height - 10}" text-anchor="middle" font-size="11" fill="${INK.muted}">${escapeHtml(label)}</text>`);
+  });
+  for (const series of seriesData) {
+    const path = series.points.map((p, i) => `${i ? "L" : "M"}${xOf(p.index).toFixed(1)},${yOf(p.cum).toFixed(1)}`).join(" ");
+    svg.push(`<path d="${path}" fill="none" stroke="${series.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`);
+    for (const p of series.points) {
+      const tip = `${String(p.fold || "")} 累计${series.label} ${(p.cum * 100).toFixed(2)}%`;
+      // ≥8px marker with a 2px surface ring so overlapping lines stay legible.
+      svg.push(`<circle cx="${xOf(p.index).toFixed(1)}" cy="${yOf(p.cum).toFixed(1)}" r="4.5" fill="${series.color}" stroke="#ffffff" stroke-width="2" data-tip="${escapeHtml(tip)}"/>`);
+    }
+  }
+  const wrap = el("div", { class: "svg-chart" }, chartLegend(seriesData));
+  const svgHost = el("div", {});
+  svgHost.innerHTML = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${svg.join("")}</svg>`;
+  wrap.append(svgHost);
+  return bindChartTips(wrap);
+}
+
+/* Stat tiles: label + semibold value (proportional figures). */
+function statTilesRow(tiles) {
+  return el("div", { class: "tiles" },
+    ...tiles.map((tile) => el("div", { class: "tile" },
+      el("div", { class: "tile-label" }, tile.label),
+      el("div", { class: `tile-value ${tile.cls || ""}` }, tile.value),
+    )));
 }
 
 /* ---------------- router ---------------- */
@@ -233,7 +375,7 @@ function experimentCard(item) {
     metricNode("Held-out", metrics.cum_heldout_return),
   ));
   if ((item.fold_returns || []).length) {
-    card.append(foldReturnsChart(item.fold_returns.map((row) => ({ ...row, epoch_label: row.epoch_id })), { width: 380, height: 120 }));
+    card.append(foldReturnsChart(item.fold_returns.map((row) => ({ ...row, epoch_label: row.epoch_id })), { width: 400, height: 130, mini: true }));
   }
   const actions = el("div", { class: "actions" },
     el("a", { class: "btn small", href: `#/exp/${encodeURIComponent(item.experiment_id)}` }, "打开"),
@@ -293,13 +435,19 @@ function confirmDeleteExperiment(experimentId) {
 
 /* ---------------- create modal ---------------- */
 
+let createSchema = null;
+
 async function openCreateModal() {
   let schema;
   try { schema = await api("/api/parameter-schema"); } catch (error) { toast(error.message, true); return; }
+  createSchema = schema;
+  const hasPeriodOptions = Object.keys(schema.period_options || {}).length > 0;
   const inputs = new Map();
   const body = el("div", {});
   body.append(el("p", { class: "hint" },
-    "所有参数均有默认值；仅实验名与周期标签必填。周期标签格式随 Fold 周期而定：quarter → 2024Q1，month → 202401，week → 周一日期 20240108，year → 2024。"));
+    hasPeriodOptions
+      ? "所有参数均有默认值。周期从交易日历自动生成，仅列出数据完整、可回测的周期；切换 Fold 周期后选项与推荐值随之更新。"
+      : "所有参数均有默认值；仅实验名与周期标签必填。周期标签格式随 Fold 周期而定：quarter → 2024Q1，month → 202401，week → 周一日期 20240108，year → 2024。"));
   for (const group of schema.groups) {
     const basic = group.fields.filter((field) => !field.advanced);
     const advanced = group.fields.filter((field) => field.advanced);
@@ -313,6 +461,13 @@ async function openCreateModal() {
       ));
     }
     body.append(section);
+  }
+  // Period selects depend on the fold cadence: repopulate options + suggested
+  // defaults whenever fold_period changes.
+  const cadenceEntry = inputs.get("fold_period");
+  if (cadenceEntry && hasPeriodOptions) {
+    repopulatePeriodSelects(inputs);
+    cadenceEntry.input.addEventListener("change", () => repopulatePeriodSelects(inputs));
   }
   const errorBox = el("div", {});
   body.append(errorBox);
@@ -362,13 +517,21 @@ function fieldNode(field, inputs) {
       if (choice === field.default) option.selected = true;
       return option;
     }));
+  } else if (field.type === "period") {
+    // Options are cadence-dependent; repopulatePeriodSelects fills them.
+    input = el("select", { class: "period-select" });
   } else if (field.type === "multi") {
-    input = el("select", { multiple: "multiple", size: String(Math.min(3, field.choices.length)) },
-      ...field.choices.map((choice) => {
-        const option = el("option", { value: choice }, choice);
-        if ((field.default || []).includes(choice)) option.selected = true;
-        return option;
-      }));
+    // Checkbox group: multi-selects require ctrl-click and mis-toggle easily.
+    const boxes = field.choices.map((choice) => {
+      const box = el("input", { type: "checkbox", value: choice });
+      box.checked = (field.default || []).includes(choice);
+      return box;
+    });
+    const groupNode = el("div", { class: "check-group" },
+      ...boxes.map((box, index) => el("label", { class: "check-item" }, box, field.choices[index])));
+    inputs.set(field.key, { field, getValue: () => boxes.filter((box) => box.checked).map((box) => box.value) });
+    wrap.append(groupNode, el("div", { class: "help" }, field.help || ""));
+    return wrap;
   } else if (field.type === "text") {
     input = el("textarea", { rows: "3" });
     input.value = field.default ?? "";
@@ -383,12 +546,33 @@ function fieldNode(field, inputs) {
   return wrap;
 }
 
+const PERIOD_FIELD_KEYS = ["first_test_period", "last_test_period", "heldout_first_period", "heldout_last_period"];
+
+function repopulatePeriodSelects(inputs) {
+  const cadence = inputs.get("fold_period").input.value;
+  const options = (createSchema.period_options || {})[cadence] || [];
+  const defaults = (createSchema.period_defaults || {})[cadence] || {};
+  for (const key of PERIOD_FIELD_KEYS) {
+    const entry = inputs.get(key);
+    if (!entry || entry.field.type !== "period" || !entry.input) continue;
+    const previous = entry.input.value;
+    entry.input.innerHTML = "";
+    for (const label of options) {
+      const option = el("option", { value: label }, label);
+      entry.input.append(option);
+    }
+    const wanted = options.includes(previous) ? previous : defaults[key];
+    if (wanted && options.includes(wanted)) entry.input.value = wanted;
+  }
+}
+
 function collectParams(inputs) {
   const params = {};
-  for (const [key, { field, input }] of inputs.entries()) {
+  for (const [key, entry] of inputs.entries()) {
+    const { field, input } = entry;
     let value;
-    if (field.type === "bool") value = input.checked;
-    else if (field.type === "multi") value = [...input.selectedOptions].map((option) => option.value);
+    if (entry.getValue) value = entry.getValue();
+    else if (field.type === "bool") value = input.checked;
     else value = input.value;
     if (field.type === "int" || field.type === "float") {
       if (value === "" || value === null) { if (field.optional) continue; value = field.default; }
@@ -460,9 +644,20 @@ async function renderDetailPage(experimentId, selectedKey) {
   if (detail.kind === "hitl") container.append(controlBar(detail));
   const chartRows = (detail.fold_returns || []).map((row) => ({ ...row, epoch_label: row.epoch_id }));
   if (chartRows.length) {
+    const metrics = detail.metrics || {};
+    const sharpe = metrics.mean_test_sharpe;
     container.append(el("div", { class: "panel section-gap" },
-      el("h4", {}, "逐 Fold 收益（验证 vs 测试）"),
-      foldReturnsChart(chartRows, { width: 1180, height: 190 }),
+      statTilesRow([
+        { label: "累计验证收益", value: fmtPct(metrics.cum_valid_return), cls: signCls(metrics.cum_valid_return) },
+        { label: "累计测试收益", value: fmtPct(metrics.cum_test_return), cls: signCls(metrics.cum_test_return) },
+        { label: "Held-out 收益", value: fmtPct(metrics.cum_heldout_return), cls: signCls(metrics.cum_heldout_return) },
+        { label: "平均测试 Sharpe", value: sharpe === null || sharpe === undefined ? "—" : Number(sharpe).toFixed(2), cls: signCls(sharpe) },
+        { label: "会话进度", value: `${detail.completed_sessions ?? 0} / ${detail.total_sessions ?? "?"}` },
+      ]),
+      el("div", { class: "charts-row section-gap" },
+        el("div", { class: "chart-cell" }, el("h4", {}, "逐 Fold 收益（验证 vs 测试）"), foldReturnsChart(chartRows)),
+        el("div", { class: "chart-cell" }, el("h4", {}, "累计收益曲线"), cumulativeReturnChart(chartRows)),
+      ),
     ));
   }
   const layout = el("div", { class: "detail section-gap" });

@@ -16444,3 +16444,15 @@ Validation:
 Deferred / follow-ups:
 - A real end-to-end HITL fold (DeepSeek + Docker + GPU) is user-triggered by policy (same stance as RA4); the console is ready for it.
 - Remote deployment (lightweight server hosting only the interaction layer + reverse proxy/auth) documented as the target shape in pipeline_design §5.3, not implemented in this item.
+
+## 2026-07-07 HITL console UI iteration (feat/hitl-webui)
+
+Task: five user-requested console optimizations — period pickers, hidden operator params, trimmed model choices, responsive layout with larger fonts, and chart upgrades.
+
+Changes:
+- `webui/params_schema.py`: four period params became `type: period` dropdowns whose options the server enumerates from the SSE trading calendar (`build_period_options`: complete periods only — end within coverage, >= MIN_REGION_TRADE_DAYS trading days; start not policed since new-year holidays legitimately precede the first trading day) with suggested defaults (`suggest_period_defaults`: last 4 complete periods as development, latest complete period as held-out; first_test never the earliest option so its validation period exists). Degrades to text inputs without a calendar. Hidden from the form (API/params.json still accept them): `raw_dir`, `fundamental_events_root`, `fundamental_events_status`, `template_dir`, `local_dev`, `tavily_api_key_env`, `semantic_scholar_api_key_env`. Model choices trimmed to `deepseek-v4-pro`/`deepseek-v4-flash` across model/nl/compact/analysis. Empty groups dropped (路径 group gone).
+- `webui/server.py`: schema endpoint feeds a per-process cached trading-day list; missing calendar degrades gracefully (schema always serves).
+- Frontend: web_search_engines multi-select replaced with a checkbox group (the reported interaction defect); period selects repopulate options+defaults on fold_period change, keeping a still-valid prior choice. Charts rebuilt per the dataviz method: palette = categorical slots 1–2 (验证 `#2a78d6` / 测试 `#1baf7a`) validated via the skill's `validate_palette.js` on the white panel surface (all checks pass; aqua 2.82:1 relief WARN covered by result tables/tooltips/legend); grouped bars <=24px with 2px surface gap and 4px rounded data-ends; new cumulative-return line chart (2px round-join lines, 4.5px markers with 2px white ring); hairline solid gridlines; muted-ink labels with thinning; shared hover tooltip layer; stat-tile row (proportional figures) on the detail page. Responsive CSS rewrite: 15px base font (16px >=1800px, 14.5px <=760px), fluid paddings, breakpoint collapses for detail grid/cards/form, focus rings, hover elevation.
+- Real-schema verification on port 38888: quarter 66 / month 198 / week 836 / year 16 options — consistent with actual daily raw coverage (`trade_date=20100104..20260706`); quarter defaults 2025Q2..2026Q1 dev + 2026Q2 held-out.
+
+Validation: full suite 513 OK (+1 period-options test, schema test extended for hidden/trimmed fields); `node --check` on app.js OK; `git diff --check` clean; temp palette-validator copy removed after use. Visual pass in a real browser remains with the user (server left running on 127.0.0.1:38888).

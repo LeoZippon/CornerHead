@@ -93,6 +93,19 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     manager = ExperimentManager(repo_root, experiments_root)
     analysis_service = AnalysisService(repo_root)
     app = FastAPI(title="MacroQuant HITL Console", docs_url=None, redoc_url=None)
+    trading_days_cache: dict[str, list[str] | None] = {}
+
+    def _trading_days() -> list[str]:
+        # Loaded once per process; without a calendar (dev/test roots) the
+        # period pickers degrade to text inputs instead of failing the schema.
+        if "days" not in trading_days_cache:
+            try:
+                from autotrade.pipelines.folds import load_sse_trading_days
+
+                trading_days_cache["days"] = load_sse_trading_days(repo_root / "data" / "raw")
+            except Exception:  # noqa: BLE001 - schema must stay served
+                trading_days_cache["days"] = None
+        return trading_days_cache["days"] or []
 
     def _experiment_dir(experiment_id: str) -> Path:
         try:
@@ -114,7 +127,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
     @app.get("/api/parameter-schema")
     def get_parameter_schema() -> dict[str, object]:
-        return parameter_schema()
+        return parameter_schema(trading_days=_trading_days())
 
     # ---- experiments -----------------------------------------------------------
     @app.get("/api/experiments")
