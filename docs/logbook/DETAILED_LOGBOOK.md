@@ -16576,3 +16576,7 @@ Validation: full suite 527 OK (+ control round-trip incl. new fields, worker rer
 ## 2026-07-07 Per-fold chart: inline long/short stacking (feat/hitl-webui)
 
 Per user direction, the long/short distinction now lives INSIDE the per-fold returns bars instead of a separate chart: each valid/test bar stacks 多头 (series hue, solid) and 空头 (lighter step of the same hue), positives up / negatives down with the 2px surface gap and the rounded data-end on the outermost segment; the y-scale uses stacked extents; the legend expands to four labeled swatches. Rows without recorded long/short (legacy) fall back to solid total bars, card minis stay totals, and the dedicated decomposition charts (hero + detail) are removed. Note: stack height is the long+short attribution sum; the equity-based total (incl. fees/unrealized) remains in the hover tooltip. Verified via node --check + webui/interactive suites; server restarted.
+
+## 2026-07-07 A-share P&L color convention (feat/hitl-webui)
+
+Gains/losses now follow the A-share convention (red = gains, green = losses) via dedicated --gain/--loss variables in both themes, applied to every sign-colored number class (.num, .tile-value, .metric). Status semantics are deliberately untouched (completed stays green, failed/danger stays red — separate variables), and chart series hues (identity encoding, sign shown by bar direction) are unchanged. CSS-only change; served live without restart.

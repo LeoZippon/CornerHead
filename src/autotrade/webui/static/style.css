@@ -18,6 +18,10 @@
   --warn-soft: #fdf3dc;
   --bad: #bd3131;
   --bad-soft: #fbe7e7;
+  /* P&L convention (A-share): red = gains, green = losses. Deliberately
+     separate from the status colors so completed/failed semantics stay put. */
+  --gain: #d03b3b;
+  --loss: #1a8a4a;
   --run: #2456c4;
   --input-bg: #fbfcfe;
   --hover-bg: #f2f5fa;
@@ -50,6 +54,8 @@
   --warn-soft: #33270e;
   --bad: #e06c6c;
   --bad-soft: #3a1c1c;
+  --gain: #e06c6c;
+  --loss: #3dbb77;
   --run: #3987e5;
   --input-bg: #161a22;
   --hover-bg: #222835;
@@ -143,16 +149,16 @@ main { max-width: 1380px; margin: 1.6rem auto; padding: 0 clamp(14px, 3vw, 34px)
 .metrics { display: flex; gap: 1.5rem; flex-wrap: wrap; }
 .metric { display: flex; flex-direction: column; }
 .metric .v { font-size: 1.12rem; font-weight: 700; }
-.metric .v.pos { color: var(--ok); }
-.metric .v.neg { color: var(--bad); }
+.metric .v.pos { color: var(--gain); }
+.metric .v.neg { color: var(--loss); }
 .metric .k { font-size: 0.845rem; color: var(--muted); }
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 0.8rem; }
 .tile { background: var(--panel-2); border: 1px solid var(--row-border); border-radius: 10px; padding: 0.6rem 0.85rem; }
 .tile-label { font-size: 0.81rem; color: var(--muted); }
 .tile-value { font-size: 1.3rem; font-weight: 650; margin-top: 2px; }
-.tile-value.pos { color: var(--ok); }
-.tile-value.neg { color: var(--bad); }
+.tile-value.pos { color: var(--gain); }
+.tile-value.neg { color: var(--loss); }
 .tile-value.hero-key { font-size: 1.7rem; }
 .orders-table-box { max-height: 24rem; overflow: auto; }
 
@@ -209,8 +215,8 @@ table.kv td:first-child { color: var(--muted); white-space: nowrap; width: 10.5r
 table.data th, table.data td { padding: 0.42rem 0.6rem; border-bottom: 1px solid var(--row-border); text-align: right; font-variant-numeric: tabular-nums; }
 table.data th { color: var(--muted); font-weight: 600; }
 table.data th:first-child, table.data td:first-child { text-align: left; }
-.num.pos { color: var(--ok); }
-.num.neg { color: var(--bad); }
+.num.pos { color: var(--gain); }
+.num.neg { color: var(--loss); }
 
 /* directive editor */
 textarea.directive {
