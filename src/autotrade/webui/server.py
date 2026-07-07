@@ -92,7 +92,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     repo_root = Path(repo_root).resolve()
     manager = ExperimentManager(repo_root, experiments_root)
     analysis_service = AnalysisService(repo_root)
-    app = FastAPI(title="MacroQuant HITL Console", docs_url=None, redoc_url=None)
+    app = FastAPI(title="CornerHead Console", docs_url=None, redoc_url=None)
     trading_days_cache: dict[str, list[str] | None] = {}
 
     def _trading_days() -> list[str]:

@@ -13,6 +13,46 @@ const STATE_LABELS = {
 const KIND_LABELS = { fold: "Fold", meta_learning: "元学习", heldout: "Held-out" };
 
 let pollTimer = null;
+let liveTimers = [];
+
+/* ---------------- theme ---------------- */
+
+function currentTheme() {
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem("ch_theme", theme); } catch { /* private mode */ }
+  const button = document.getElementById("theme-toggle");
+  if (button) button.textContent = theme === "dark" ? "☀️" : "🌙";
+}
+
+(function initTheme() {
+  let stored = null;
+  try { stored = localStorage.getItem("ch_theme"); } catch { /* private mode */ }
+  const preferred = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  applyTheme(stored === "dark" || stored === "light" ? stored : preferred);
+  const button = document.getElementById("theme-toggle");
+  if (button) button.addEventListener("click", () => { applyTheme(currentTheme() === "dark" ? "light" : "dark"); route(); });
+})();
+
+/* Session keys contain "/" (epoch_001/fold_2022Q1); in the hash they travel as
+   "~" so URLs stay readable (no %2F). Old encoded links still parse. */
+function sessionKeyToUrl(key) {
+  return encodeURIComponent(String(key).replaceAll("/", "~"));
+}
+
+function sessionKeyFromUrl(segment) {
+  return decodeURIComponent(segment).replaceAll("~", "/");
+}
+
+function fmtDuration(totalSeconds) {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), s = seconds % 60;
+  const mm = String(m).padStart(2, "0"), ss = String(s).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
+}
 
 /* ---------------- utilities ---------------- */
 
@@ -115,11 +155,25 @@ function renderMarkdown(text) {
    Palette: categorical slots 1-2 (blue/aqua), CVD+contrast validated on white;
    aqua's sub-3:1 relief is carried by the result tables and tooltips. */
 
-const SERIES = {
-  valid: { color: "#2a78d6", label: "验证" },
-  test: { color: "#1baf7a", label: "测试" },
-};
-const INK = { grid: "#e9ebf1", baseline: "#c2c7d2", muted: "#68717f", faint: "#a5abb8" };
+/* Both palettes validated (dataviz validator): light pair on white, dark pair
+   (#3987e5/#199e70, the palette's dark steps) on the dark panel — all checks pass. */
+function themeInk() {
+  if (currentTheme() === "dark") {
+    return {
+      validColor: "#3987e5", testColor: "#199e70",
+      grid: "#2b303c", baseline: "#4a5163", muted: "#98a0af", faint: "#6f7787", ring: "#1b1f28",
+    };
+  }
+  return {
+    validColor: "#2a78d6", testColor: "#1baf7a",
+    grid: "#e9ebf1", baseline: "#c2c7d2", muted: "#68717f", faint: "#a5abb8", ring: "#ffffff",
+  };
+}
+
+function seriesSpec() {
+  const ink = themeInk();
+  return { valid: { color: ink.validColor, label: "验证" }, test: { color: ink.testColor, label: "测试" } };
+}
 
 let $chartTip = null;
 function chartTipNode() {
@@ -178,6 +232,8 @@ function barPath(x, zeroY, valueY, w) {
 
 /* Grouped bars: per-fold returns, valid vs test, zero baseline. */
 function foldReturnsChart(rows, { width = 640, height = 220, mini = false } = {}) {
+  const INK = themeInk();
+  const SERIES = seriesSpec();
   const values = rows.flatMap((row) => [row.valid_return, row.test_return]).filter((v) => v !== null && v !== undefined);
   if (!rows.length || !values.length) return el("div", { class: "hint" }, "暂无收益数据");
   const maxAbs = niceCeil(Math.max(0.005, ...values.map(Math.abs)));
@@ -224,6 +280,8 @@ function foldReturnsChart(rows, { width = 640, height = 220, mini = false } = {}
 
 /* Cumulative equity lines: ∏(1+r)−1 across folds, valid vs test. */
 function cumulativeReturnChart(rows, { width = 640, height = 220 } = {}) {
+  const INK = themeInk();
+  const SERIES = seriesSpec();
   const build = (key) => {
     let equity = 1;
     const points = [];
@@ -266,7 +324,7 @@ function cumulativeReturnChart(rows, { width = 640, height = 220 } = {}) {
     for (const p of series.points) {
       const tip = `${String(p.fold || "")} 累计${series.label} ${(p.cum * 100).toFixed(2)}%`;
       // ≥8px marker with a 2px surface ring so overlapping lines stay legible.
-      svg.push(`<circle cx="${xOf(p.index).toFixed(1)}" cy="${yOf(p.cum).toFixed(1)}" r="4.5" fill="${series.color}" stroke="#ffffff" stroke-width="2" data-tip="${escapeHtml(tip)}"/>`);
+      svg.push(`<circle cx="${xOf(p.index).toFixed(1)}" cy="${yOf(p.cum).toFixed(1)}" r="4.5" fill="${series.color}" stroke="${INK.ring}" stroke-width="2" data-tip="${escapeHtml(tip)}"/>`);
     }
   }
   const wrap = el("div", { class: "svg-chart" }, chartLegend(seriesData));
@@ -292,10 +350,12 @@ window.addEventListener("DOMContentLoaded", route);
 
 function route() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  for (const timer of liveTimers) clearInterval(timer);
+  liveTimers = [];
   document.querySelectorAll(".modal-mask").forEach((node) => node.remove());
   const hash = location.hash || "#/";
   const expMatch = hash.match(/^#\/exp\/([^/]+)(?:\/(.*))?$/);
-  if (expMatch) renderDetailPage(decodeURIComponent(expMatch[1]), expMatch[2] ? decodeURIComponent(expMatch[2]) : null);
+  if (expMatch) renderDetailPage(decodeURIComponent(expMatch[1]), expMatch[2] ? sessionKeyFromUrl(expMatch[2]) : null);
   else renderHomePage();
 }
 
@@ -740,7 +800,7 @@ function sessionListPanel(detail, selectedKey) {
     const validReturn = session.record && session.record.validation_result ? session.record.validation_result.total_return : null;
     const item = el("div", {
       class: `session-item${session.key === selectedKey ? " selected" : ""}`,
-      onclick: () => { location.hash = `#/exp/${encodeURIComponent(detail.experiment_id)}/${encodeURIComponent(session.key)}`; },
+      onclick: () => { location.hash = `#/exp/${encodeURIComponent(detail.experiment_id)}/${sessionKeyToUrl(session.key)}`; },
     },
       el("span", { class: `dot ${dotClass}` }),
       el("span", { class: "label" },
@@ -790,15 +850,21 @@ function sessionDetailPanel(detail, selectedKey) {
 
 function directivePanel(detail, session, waiting) {
   const control = detail.control || { directives: {}, approved_sessions: [] };
-  const existing = (control.directives || {})[session.key] || "";
+  const isMeta = session.kind === "meta_learning";
+  // A meta session with no per-session override inherits the experiment-level
+  // directive from creation; prefill it so it never needs retyping.
+  const inherited = isMeta ? String((detail.params || {}).meta_learning_directive || "") : "";
+  const existing = (control.directives || {})[session.key] ?? "";
   const approved = (control.approved_sessions || []).includes(session.key);
   const textarea = el("textarea", { class: "directive", placeholder: "可选：为该会话注入研究方向 / 优化假设……" });
-  textarea.value = existing;
-  const isMeta = session.kind === "meta_learning";
+  textarea.value = existing || inherited;
   const panel = el("div", { class: "panel" },
     el("h4", {}, isMeta ? "元学习指令（本 Epoch）" : session.kind === "heldout" ? "Held-out 启动" : "本 Fold 研究者指令"),
   );
   if (session.kind !== "heldout") {
+    if (isMeta && inherited && !existing) {
+      panel.append(el("div", { class: "hint" }, "已预填创建实验时的元学习探索方向；不修改则按原方向执行，可直接编辑覆盖本 Epoch。"));
+    }
     panel.append(textarea, el("div", { class: "hint warn" },
       "指令会注入系统提示词并记入账本。请勿写入测试期/Held-out 结果或具体日历日期——那会破坏 walk-forward 的样本外有效性。"));
   }
@@ -831,6 +897,7 @@ function directivePanel(detail, session, waiting) {
 
 function liveTracePanel(detail, session) {
   const panel = el("div", { class: "panel" }, el("h4", {}, `实时 Agent Trace — ${session.key}`));
+  const status = detail.status || {};
   const tools = el("div", { class: "trace-tools" });
   const box = el("div", { class: "trace-box" });
   let autoScroll = true;
@@ -838,12 +905,20 @@ function liveTracePanel(detail, session) {
     type: "checkbox", checked: "checked",
     onchange: (event) => { autoScroll = event.target.checked; },
   }), " 自动滚动");
-  tools.append(el("span", { class: "badge state-running_session" }, "streaming"), scrollToggle);
-  panel.append(tools, box);
+  const countdown = el("span", { class: "badge state-running_session", style: "display:none", title: "Fold 推理截止倒计时；回测墙钟独立计时并回补，不占用该额度" });
+  tools.append(el("span", { class: "badge state-running_session" }, "streaming"), countdown, scrollToggle);
+  // Sandbox/snapshot preparation can take minutes before the first Agent
+  // event; show a live elapsed indicator so it never looks stuck.
+  const prepText = el("span", {}, "");
+  const prep = el("div", { class: "prep-indicator" }, el("span", { class: "spinner" }), prepText);
+  panel.append(tools, prep, box);
+  let sawEvent = false;
   const url = `/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stream`;
   traceSource = new EventSource(url);
   traceSource.onmessage = (event) => {
     try {
+      sawEvent = true;
+      prep.style.display = "none";
       box.append(traceEventNode(JSON.parse(event.data)));
       while (box.children.length > 400) box.firstChild.remove();
       if (autoScroll) box.scrollTop = box.scrollHeight;
@@ -854,6 +929,29 @@ function liveTracePanel(detail, session) {
     traceSource.close();
   });
   traceSource.onerror = () => { /* EventSource auto-reconnects */ };
+  let deadlineMs = status.fold_deadline_at ? Date.parse(status.fold_deadline_at) : null;
+  const startedMs = status.session_started_at ? Date.parse(status.session_started_at) : Date.now();
+  const tick = () => {
+    if (!sawEvent) {
+      const elapsed = (Date.now() - startedMs) / 1000;
+      prepText.textContent = `沙箱与数据快照准备中（已 ${fmtDuration(elapsed)}）… 首个 Agent 事件到达后开始流式显示`;
+    }
+    if (deadlineMs) {
+      const remain = (deadlineMs - Date.now()) / 1000;
+      countdown.style.display = "";
+      countdown.textContent = remain >= 0 ? `推理剩余 ${fmtDuration(remain)}` : `收尾中 +${fmtDuration(-remain)}`;
+    }
+  };
+  tick();
+  liveTimers.push(setInterval(tick, 1000));
+  // The deadline appears once the run manifest is written; poll status for it.
+  liveTimers.push(setInterval(async () => {
+    try {
+      const fresh = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/status`);
+      const raw = fresh.raw_status || {};
+      if (raw.fold_deadline_at) deadlineMs = Date.parse(raw.fold_deadline_at);
+    } catch { /* transient */ }
+  }, 6000));
   return panel;
 }
 

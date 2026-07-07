@@ -295,6 +295,8 @@ class StatusReporter:
             "fold_id": None,
             "run_id": None,
             "trace_path": None,
+            "session_started_at": None,
+            "fold_deadline_at": None,
             "completed_sessions": 0,
             "total_sessions": None,
             "error": None,
@@ -331,11 +333,26 @@ class StatusReporter:
         while not self._stop.wait(self.interval_seconds):
             with self._lock:
                 if self._data.get("state") == "running_session":
-                    live = self._latest_run_dir()
-                    if live is not None:
-                        self._data["run_id"] = live.name
-                        self._data["trace_path"] = str(live / "artifacts" / "agent_trace.jsonl")
+                    self._refresh_live_run_locked()
                 self._write_locked()
+
+    def _refresh_live_run_locked(self) -> None:
+        """Surface the live run dir, its trace path, and the session deadline
+        so the console can show a preparation indicator and a countdown."""
+        live = self._latest_run_dir()
+        if live is None:
+            return
+        self._data["run_id"] = live.name
+        self._data["trace_path"] = str(live / "artifacts" / "agent_trace.jsonl")
+        if not self._data.get("fold_deadline_at"):
+            manifest_path = live / "artifacts" / "run_manifest.json"
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                deadline = manifest.get("fold_deadline_at")
+                if deadline:
+                    self._data["fold_deadline_at"] = str(deadline)
+            except (OSError, json.JSONDecodeError, ValueError):
+                pass  # manifest not written yet or mid-write; retry next beat
 
     def _latest_run_dir(self) -> Path | None:
         try:
@@ -489,6 +506,7 @@ class InteractiveExperimentRunner:
                     self.status.set(
                         state="running_session", phase="meta_learning", session_key=key,
                         epoch_id=epoch_id, fold_id=None, run_id=None, trace_path=None,
+                        session_started_at=utc_now_iso(), fold_deadline_at=None,
                     )
                     parent, taste_prompt = self.pipeline.run_meta_learning(
                         epoch_id=epoch_id,
@@ -510,6 +528,7 @@ class InteractiveExperimentRunner:
                     self.status.set(
                         state="running_session", phase="fold", session_key=key,
                         epoch_id=epoch_id, fold_id=fold.fold_id, run_id=None, trace_path=None,
+                        session_started_at=utc_now_iso(), fold_deadline_at=None,
                     )
                     outcome = self.pipeline.run_fold(
                         fold,
@@ -531,6 +550,7 @@ class InteractiveExperimentRunner:
             self.status.set(
                 state="running_session", phase="heldout", session_key=HELDOUT_SESSION_KEY,
                 epoch_id=epoch_id, fold_id=None, run_id=None, trace_path=None,
+                session_started_at=utc_now_iso(), fold_deadline_at=None,
             )
             summaries = self.pipeline.run_heldout(
                 parent, trading_days, epoch_id=epoch_id, skip_labels=frozenset(heldout_done)

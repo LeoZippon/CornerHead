@@ -316,6 +316,23 @@ class InteractiveRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "orphan frozen artifact"):
             self._runner(pipeline).run(TRADING_DAYS)
 
+    def test_status_reporter_surfaces_live_run_and_deadline(self) -> None:
+        work_root = Path(self.config.work_root)
+        run_artifacts = work_root / "run_live" / "artifacts"
+        run_artifacts.mkdir(parents=True)
+        (run_artifacts / "run_manifest.json").write_text(
+            json.dumps({"fold_deadline_at": "2026-07-07T12:00:00+00:00"}), encoding="utf-8"
+        )
+        status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=work_root, interval_seconds=60.0)
+        status.set(state="running_session")
+        with status._lock:
+            status._refresh_live_run_locked()
+            status._write_locked()
+        data = read_status(self.hitl_dir / STATUS_NAME)
+        self.assertEqual(data["run_id"], "run_live")
+        self.assertEqual(data["fold_deadline_at"], "2026-07-07T12:00:00+00:00")
+        self.assertTrue(str(data["trace_path"]).endswith("agent_trace.jsonl"))
+
     def test_post_fold_hook_failure_is_advisory(self) -> None:
         pipeline = FakePipeline(self.config, meta_enabled=False)
         self._control(mode="auto")

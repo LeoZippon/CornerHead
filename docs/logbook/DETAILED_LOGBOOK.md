@@ -16456,3 +16456,17 @@ Changes:
 - Real-schema verification on port 38888: quarter 66 / month 198 / week 836 / year 16 options — consistent with actual daily raw coverage (`trade_date=20100104..20260706`); quarter defaults 2025Q2..2026Q1 dev + 2026Q2 held-out.
 
 Validation: full suite 513 OK (+1 period-options test, schema test extended for hidden/trimmed fields); `node --check` on app.js OK; `git diff --check` clean; temp palette-validator copy removed after use. Visual pass in a real browser remains with the user (server left running on 127.0.0.1:38888).
+
+## 2026-07-07 CornerHead rename + console UX round 3 (feat/hitl-webui)
+
+Task: six user fixes — brand rename, larger UI, meta-directive prefill, sandbox-prep indicator + fold countdown, URL %2F check, light/dark theming.
+
+Changes:
+- Brand: "CornerHead" in index.html title/topbar and the FastAPI app title.
+- Type scale: base 16px (17px >= 1800px, 15px <= 760px); buttons 15px/9x18px, badges 14px, tables 15px, session rows 15.5px, tiles 24px values, trace 14.5px.
+- Meta directive: the detail-page directive editor prefills the creation-time `meta_learning_directive` when no per-session override exists (functionally an empty override already fell back to the config default at the gate — `directive_override=None`; this is a pure UX fix with an explanatory hint).
+- Prep indicator + countdown: `StatusReporter._refresh_live_run_locked` now also reads `fold_deadline_at` from the live run's `artifacts/run_manifest.json` (tolerant of mid-write) and the runner stamps `session_started_at`/clears the deadline per session; the live trace panel shows a spinner with elapsed time until the first SSE trace event arrives, plus a “推理剩余 mm:ss” badge (tooltip notes backtest wall-time is credited back). New unit test covers the live-run refresh.
+- URL check: `%2F` in the hash fragment was functionally fine (fragment-only routing, decodeURIComponent round-trips), but session keys now travel as `epoch_001~fold_2022Q1` (`~` is an unreserved character); old `%2F` links still parse.
+- Theming: full CSS-variable refactor with a `[data-theme=dark]` palette; toggle button persists to localStorage and defaults to `prefers-color-scheme`; charts read theme at render (dark series = palette dark steps `#3987e5`/`#199e70`, validated with the dataviz validator against the dark panel `#1b1f28`: band/chroma/CVD dE 69.8/contrast all PASS; temp validator copy removed after use); marker rings use the panel surface color.
+
+Validation: full suite 514 OK; `node --check` app.js OK; server restarted on 127.0.0.1:38888 (`<title>CornerHead</title>` served, themed CSS live); `git diff --check` clean.
