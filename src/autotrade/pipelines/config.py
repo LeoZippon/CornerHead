@@ -218,10 +218,10 @@ class ExperimentConfig:
     # never binds a legitimate run, so acceptance stays effectively deterministic.
     backtest_final_eval_max_seconds_per_decision: float = 900.0
     backtest_final_eval_max_seconds_per_trading_day: float = 3000.0
-    # Per-tick Timeview: ctx.asof_dir exposes every data domain (daily, events,
-    # macro, fundamentals, intraday minute history) rolled in on its real refresh
-    # node (REFRESH_NODES), so a tick sees only data the landing cron job has
-    # already written. Off by replacing with the frozen snapshot view.
+    # Per-tick Timeview: ctx.asof_dir exposes the parquet domains plus text_index
+    # and visible text_library shards, rolled in on their real refresh nodes
+    # (REFRESH_NODES), so a tick sees only data the landing cron job has already
+    # written. Off by replacing with the frozen snapshot view.
     timeview_enabled: bool = True
     # System NL call quota, default-on. The effective per-backtest cap is
     # nl_max_calls_per_decision_day * decision_days (a daily-average budget). An

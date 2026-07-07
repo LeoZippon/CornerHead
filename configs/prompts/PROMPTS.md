@@ -98,7 +98,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - NL 与做空：`ctx.nl(ts_code, prompt=...)` 用于单股文本分析，`ctx.nl(prompt=...)` 用于事件/主题/行业/宏观文本检索；文本按数据节点 PIT 滚动且受配额限制，证据必须降权使用。默认做空券源由成交当日 `margin_secs` 校验，缺失当日集合时回退决策日冻结集合，不可融券会拒单。
 
 ## 数据可见性（逐 tick 时序视图）
-`ctx.asof_dir` 是逐 tick 滚动的时点视图：某行数据只有在“把它写入本地库的定时任务在仿真时钟下已完成”后才可见，严格复刻实盘本地库的刷新节奏。五个 parquet 域各按其落库节点滚动，文本语料经 `ctx.nl()` 按同一时钟门控：
+`ctx.asof_dir` 是逐 tick 滚动的时点视图：某行数据只有在“把它写入本地库的定时任务在仿真时钟下已完成”后才可见，严格复刻实盘本地库的刷新节奏。parquet 域与文本视图各按其落库节点滚动；`ctx.nl()` 复用同一时钟门控文本证据：
 
 | 数据域 | 落库节点（北京时间，含刷新耗时） | 对回测的可见性 |
 |---|---|---|
@@ -108,7 +108,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 | 上一交易日两融 `margin`/`margin_detail` | 盘前 `cn_preopen_margin_*` 约 09:07/09:17 | 次日盘前可见 |
 | 短讯/新闻联播（cctv_news/news） | 盘前 `cn_preopen_text_backfill` 约 09:00 | 当日盘前可见 |
 
-`ctx.asof_dir` 只包含 parquet parts 目录，用 `pd.read_parquet(ctx.asof_dir / "daily")` 读取（域名 `daily`/`events`/`macro`/`fundamentals`/`intraday_1min`）。盘中无刷新节点跨越，视图冻结、`ctx.asof_version` 不变——按它缓存读取、变化时再重算。`ctx.nl()` 文本语料不在 `ctx.asof_dir` 下，通过宿主检索服务按上表节点滚动（冻结研究语料始终可见）。`ctx.snapshot_dir` 是 Fold 决策时点（区间前一交易日收盘）冻结的研究基准快照。
+`ctx.asof_dir` 用 `pd.read_parquet(ctx.asof_dir / "daily")` 读取 parquet parts 域（域名 `daily`/`events`/`macro`/`fundamentals`/`intraday_1min`/`text_index`）；文本正文在 `ctx.asof_dir / "text_library"`，只包含已可见 `text_index` 行引用的 body shard。盘中无刷新节点跨越，视图冻结、`ctx.asof_version` 不变——按它缓存读取、变化时再重算。`ctx.snapshot_dir` 是 Fold 决策时点（区间前一交易日收盘）冻结的研究基准快照。
 
 
 
@@ -425,7 +425,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 
 信用账户经济学（与交易所实施细则一致）：融资/融券利息按自然日 /360 计入合约、还款/还券时以现金支付（先息后本、最老合约优先）；融资买入股份卖出时必须用 `sell_repay` 先还融资负债；维保比例 = (信用账户现金+证券市值)/(融资负债+融券市值+利息)——**只计信用账户资产，普通账户不作担保**——低于平仓线（见 facts `maintenance_closeout_ratio`）强制平掉信用账户持仓（普通账户不受影响）；融券卖出所得现金被冻结、只能用于买券还券、不可划转；新的融资/融券操作受保证金可用余额（信用现金+担保品市值×折算率−占用−浮亏）约束。两账户初始资金见 facts `stock_initial_cash` / `credit_initial_cash`，可用盘前 `transfer` 重新配置（信用划出受提取线约束）。
 
-`ctx` 其他字段：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`、`ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`、`ctx.substep(name, budget_minutes=B)`、`ctx.asof_dir`、`ctx.asof_version`、`ctx.snapshot_dir`、`ctx.model_dir`、`ctx.state_dir`、`ctx.params`、`ctx.nl(ts_code?, prompt=...)`。
+`ctx` 其他字段：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`、`ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`、`ctx.substep(name, budget_minutes=B)`、`ctx.asof_dir`、`ctx.asof_version`、`ctx.snapshot_dir`、`ctx.model_dir`、`ctx.state_dir`、`ctx.nl(ts_code?, prompt=...)`。
 
 轻量委托管理例子（每个 tick 可运行，用小预算子步骤统一统计耗时和撤单提交时点）：
 
@@ -566,7 +566,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - NL 与做空：`ctx.nl(ts_code, prompt=...)` 用于单股文本分析，`ctx.nl(prompt=...)` 用于事件/主题/行业/宏观文本检索；文本按数据节点 PIT 滚动且受配额限制，证据必须降权使用。默认做空券源由成交当日 `margin_secs` 校验，缺失当日集合时回退决策日冻结集合，不可融券会拒单。
 
 ## 数据可见性（逐 tick 时序视图）
-`ctx.asof_dir` 是逐 tick 滚动的时点视图：某行数据只有在“把它写入本地库的定时任务在仿真时钟下已完成”后才可见，严格复刻实盘本地库的刷新节奏。五个 parquet 域各按其落库节点滚动，文本语料经 `ctx.nl()` 按同一时钟门控：
+`ctx.asof_dir` 是逐 tick 滚动的时点视图：某行数据只有在“把它写入本地库的定时任务在仿真时钟下已完成”后才可见，严格复刻实盘本地库的刷新节奏。parquet 域与文本视图各按其落库节点滚动；`ctx.nl()` 复用同一时钟门控文本证据：
 
 | 数据域 | 落库节点（北京时间，含刷新耗时） | 对回测的可见性 |
 |---|---|---|
@@ -576,7 +576,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 | 上一交易日两融 `margin`/`margin_detail` | 盘前 `cn_preopen_margin_*` 约 09:07/09:17 | 次日盘前可见 |
 | 短讯/新闻联播（cctv_news/news） | 盘前 `cn_preopen_text_backfill` 约 09:00 | 当日盘前可见 |
 
-`ctx.asof_dir` 只包含 parquet parts 目录，用 `pd.read_parquet(ctx.asof_dir / "daily")` 读取（域名 `daily`/`events`/`macro`/`fundamentals`/`intraday_1min`）。盘中无刷新节点跨越，视图冻结、`ctx.asof_version` 不变——按它缓存读取、变化时再重算。`ctx.nl()` 文本语料不在 `ctx.asof_dir` 下，通过宿主检索服务按上表节点滚动（冻结研究语料始终可见）。`ctx.snapshot_dir` 是 Fold 决策时点（区间前一交易日收盘）冻结的研究基准快照。
+`ctx.asof_dir` 用 `pd.read_parquet(ctx.asof_dir / "daily")` 读取 parquet parts 域（域名 `daily`/`events`/`macro`/`fundamentals`/`intraday_1min`/`text_index`）；文本正文在 `ctx.asof_dir / "text_library"`，只包含已可见 `text_index` 行引用的 body shard。盘中无刷新节点跨越，视图冻结、`ctx.asof_version` 不变——按它缓存读取、变化时再重算。`ctx.snapshot_dir` 是 Fold 决策时点（区间前一交易日收盘）冻结的研究基准快照。
 
 
 
@@ -624,7 +624,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 
 信用账户经济学（与交易所实施细则一致）：融资/融券利息按自然日 /360 计入合约、还款/还券时以现金支付（先息后本、最老合约优先）；融资买入股份卖出时必须用 `sell_repay` 先还融资负债；维保比例 = (信用账户现金+证券市值)/(融资负债+融券市值+利息)——**只计信用账户资产，普通账户不作担保**——低于平仓线（见 facts `maintenance_closeout_ratio`）强制平掉信用账户持仓（普通账户不受影响）；融券卖出所得现金被冻结、只能用于买券还券、不可划转；新的融资/融券操作受保证金可用余额（信用现金+担保品市值×折算率−占用−浮亏）约束。两账户初始资金见 facts `stock_initial_cash` / `credit_initial_cash`，可用盘前 `transfer` 重新配置（信用划出受提取线约束）。
 
-`ctx` 其他字段：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`、`ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`、`ctx.substep(name, budget_minutes=B)`、`ctx.asof_dir`、`ctx.asof_version`、`ctx.snapshot_dir`、`ctx.model_dir`、`ctx.state_dir`、`ctx.params`、`ctx.nl(ts_code?, prompt=...)`。
+`ctx` 其他字段：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`、`ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`、`ctx.substep(name, budget_minutes=B)`、`ctx.asof_dir`、`ctx.asof_version`、`ctx.snapshot_dir`、`ctx.model_dir`、`ctx.state_dir`、`ctx.nl(ts_code?, prompt=...)`。
 
 轻量委托管理例子（每个 tick 可运行，用小预算子步骤统一统计耗时和撤单提交时点）：
 

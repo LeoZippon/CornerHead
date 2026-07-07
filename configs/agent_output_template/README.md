@@ -140,12 +140,14 @@ without `limit=` is rejected; cross-minute substep actions are not orders until
 | `ctx.broker` | Broker queries, order/cancel verbs, and margin primitives; order/cancel calls must be inside `ctx.substep`; see the broker quick reference above |
 | `ctx.substep(name, budget_minutes=B)` | Strategy-step budget context; declares compute time, state `ready_at`, and broker action submit timing |
 | `ctx.nl(ts_code?, prompt="...")` | Point-in-time NL Sub Agent for single-stock or event/theme/sector/macro text analysis; must run inside `ctx.substep` and follows sim-clock text visibility |
-| `ctx.asof_dir` | Per-tick rolling, refresh-node-gated parquet PIT view: `daily`, `events`, `macro`, `fundamentals`, `intraday_1min` |
+| `ctx.asof_dir` | Per-tick rolling, refresh-node-gated PIT view: `daily`, `events`, `macro`, `fundamentals`, `intraday_1min`, `text_index`, and `text_library` |
 | `ctx.asof_version` | Changes only when Timeview actually rolls; cache as-of reads by this value |
 | `ctx.snapshot_dir` | Frozen research baseline snapshot; does not roll during replay |
 | `ctx.state_dir` | Managed cross-tick state directory; only available inside `ctx.substep`, with writes staged until `ready_at` |
 | `ctx.model_dir` | Read-only persisted model artifact directory; data that must persist across backtests belongs in `models/` before replay |
-| `ctx.params` | Read-only run parameters |
+
+For direct text processing, read `pd.read_parquet(Path(str(ctx.asof_dir)) / "text_index")`
+and join rows to `ctx.asof_dir / "text_library"` via each row's `library_file` and `text_id`.
 
 `amount` is a share count (lot-aligned to 100). The Broker enforces cash and
 保证金可用余额, T+1 sellable balance, lot size, price limits, suspension,

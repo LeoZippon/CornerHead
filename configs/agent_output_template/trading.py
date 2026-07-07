@@ -50,8 +50,7 @@ def example_swing_t(ctx, ts_code: str) -> None:
     """Intraday swing (做T) around the entry price for one holding.
 
     Buys ``100`` shares on a dip and sells ``100`` of the *sellable* (T+1
-    eligible) balance on a rally, both before the close. ``ctx.params`` may carry
-    a ``percent`` band.
+    eligible) balance on a rally, both before the close.
     """
     price = ctx.price(ts_code)
     if price is None or ctx.cur_time >= "14:57":
@@ -61,7 +60,7 @@ def example_swing_t(ctx, ts_code: str) -> None:
     pos = next((p for p in ctx.positions if str(p.get("ts_code")) == ts_code), None)
     if pos is None:
         return
-    band = float(ctx.params.get("percent", 0.05))
+    band = 0.05
     entry = float(pos.get("entry_price") or price)
     sellable = int(pos.get("sellable_quantity", 0) or 0)
     if price <= entry * (1 - band) and float(ctx.broker.stock["available_cash"]) >= price * 100:

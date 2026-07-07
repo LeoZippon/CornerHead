@@ -403,6 +403,7 @@ def run_main_ctx_replay(
             executor=main_policy.executor,
             snapshot_dir=snapshot_dir,
             replay_frames=_timeview_replay_frames(replay_dir, replay_daily, replay_intraday_1min),
+            replay_text_library_dir=(Path(replay_dir) / "text_library") if replay_dir is not None else None,
         )
         if timeview_enabled and snapshot_dir is not None and getattr(main_policy, "paths", None) is not None
         else None
@@ -1304,8 +1305,13 @@ def _timeview_replay_frames(
     if replay_intraday_1min is not None:
         frames["intraday_1min"] = replay_intraday_1min
     if replay_dir is not None:
-        for name in ("events", "macro", "fundamentals"):
-            path = Path(replay_dir) / f"{name}.parquet"
+        for name, filename in (
+            ("events", "events.parquet"),
+            ("macro", "macro.parquet"),
+            ("fundamentals", "fundamentals.parquet"),
+            ("text_index", "text_index.parquet"),
+        ):
+            path = Path(replay_dir) / filename
             if path.exists():
                 frames[name] = pd.read_parquet(path)
     return frames
@@ -1362,7 +1368,6 @@ def _market_state(
         "asof_dir": asof_dir,
         "asof_version": asof_version,
         "pending": pending or {},
-        "params": {},
     }
 
 

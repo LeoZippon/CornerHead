@@ -997,7 +997,6 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir, staging_root):
         cur_date=str(state.get("cur_date", "") or ""),
         cur_time=str(state.get("cur_time", "") or ""),
         cur_datetime=str(state.get("cur_datetime", "") or ""),
-        params=dict(state.get("params") or {}),
         nl=_nl,
         snapshot_dir=snapshot_dir,
         asof_dir=(state.get("asof_dir") or snapshot_dir),

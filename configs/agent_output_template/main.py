@@ -22,7 +22,8 @@ Key ``ctx`` surface (advanced helpers in ``candidate.py`` / ``trading.py`` + ``R
   ``ctx.nl(code?, prompt=...)``                        optional PIT text analysis
 
 ``ctx.asof_dir`` holds one directory per data domain (``daily``, ``events``, ``macro``,
-``fundamentals``, ``intraday_1min``), each read with ``pd.read_parquet(ctx.asof_dir / "daily")``.
+``fundamentals``, ``intraday_1min``, ``text_index``) plus ``text_library`` body shards.
+Read parquet domains with ``pd.read_parquet(ctx.asof_dir / "daily")``.
 The view rolls forward as each dataset's real refresh job completes, so during a
 trading session it is frozen and ``ctx.asof_version`` is stable — cache a read by
 that version and recompute only when it changes (the daily cross-section is only

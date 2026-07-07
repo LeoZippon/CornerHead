@@ -32,6 +32,23 @@ def _frozen_snapshot(root: Path) -> Path:
     snap.mkdir(parents=True, exist_ok=True)
     _write(snap / "daily.parquet", pd.DataFrame([{"trade_date": "20211231", "ts_code": TS, "open": 9.0, "close": 9.5}]))
     _write(snap / "universe.parquet", pd.DataFrame([{"ts_code": TS, "name": "x"}]))
+    _write(
+        snap / "text_index.parquet",
+        pd.DataFrame(
+            [
+                {
+                    "text_id": "frozen_news",
+                    "dataset": "news",
+                    "ts_codes": TS,
+                    "title": "frozen",
+                    "available_at": "2021-12-31T08:55:00+08:00",
+                    "source_hash": "frozen_hash",
+                    "library_file": "news.parquet",
+                }
+            ]
+        ),
+    )
+    _write(snap / "text_library" / "news.parquet", pd.DataFrame([{"text_id": "frozen_news", "body": "frozen body"}]))
     for name in ("events", "macro", "fundamentals", "intraday_1min"):
         _write(snap / f"{name}.parquet", pd.DataFrame(columns=["dataset", "ts_code", "available_at"]))
     return snap
@@ -53,16 +70,49 @@ def _replay_frames() -> dict[str, pd.DataFrame]:
     fundamentals = pd.DataFrame(
         [{"dataset": "income_vip", "ts_code": TS, "business_key": "k", "available_at": "2022-01-04T18:00:00+08:00"}]
     )
-    return {"daily": daily, "events": events, "fundamentals": fundamentals}
+    text_index = pd.DataFrame(
+        [
+            {
+                "text_id": "news_early",
+                "dataset": "news",
+                "ts_codes": TS,
+                "title": "early",
+                "available_at": "2022-01-04T08:55:00+08:00",
+                "source_hash": "early_hash",
+                "library_file": "news.parquet",
+            },
+            {
+                "text_id": "news_late",
+                "dataset": "news",
+                "ts_codes": TS,
+                "title": "late",
+                "available_at": "2022-01-04T09:05:00+08:00",
+                "source_hash": "late_hash",
+                "library_file": "news.parquet",
+            },
+        ]
+    )
+    return {"daily": daily, "events": events, "fundamentals": fundamentals, "text_index": text_index}
 
 
 class TimeviewTest(unittest.TestCase):
     def _build(self, root: Path) -> Timeview:
+        replay_library = root / "replay" / "text_library"
+        _write(
+            replay_library / "news.parquet",
+            pd.DataFrame(
+                [
+                    {"text_id": "news_early", "body": "early body"},
+                    {"text_id": "news_late", "body": "late body"},
+                ]
+            ),
+        )
         return Timeview(
             host_dir=root / "asof",
             executor=FakeExecutor(),
             snapshot_dir=_frozen_snapshot(root),
             replay_frames=_replay_frames(),
+            replay_text_library_dir=replay_library,
         )
 
     def _dates(self, asof_dir: str, domain: str) -> set[str]:
@@ -106,6 +156,22 @@ class TimeviewTest(unittest.TestCase):
             self.assertEqual(len(pd.read_parquet(Path(asof) / "fundamentals")), 0)  # before the PIT build
             asof2, _ = tv.refresh(_when("2022-01-05 04:00:00"))  # after 03:50 PIT build
             self.assertEqual(len(pd.read_parquet(Path(asof2) / "fundamentals")), 1)
+
+    def test_text_index_and_library_roll_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tv = self._build(Path(tmp))
+            asof, _ = tv.refresh(_when("2022-01-04 08:59:00"))
+            index = pd.read_parquet(Path(asof) / "text_index")
+            bodies = pd.concat(pd.read_parquet(path) for path in sorted((Path(asof) / "text_library").glob("*.parquet")))
+            self.assertEqual(set(index["text_id"].astype(str)), {"frozen_news"})
+            self.assertEqual(set(bodies["text_id"].astype(str)), {"frozen_news"})
+
+            asof2, _ = tv.refresh(_when("2022-01-04 09:01:00"))
+            index2 = pd.read_parquet(Path(asof2) / "text_index")
+            bodies2 = pd.concat(pd.read_parquet(path) for path in sorted((Path(asof2) / "text_library").glob("*.parquet")))
+            self.assertEqual(set(index2["text_id"].astype(str)), {"frozen_news", "news_early"})
+            self.assertEqual(set(bodies2["text_id"].astype(str)), {"frozen_news", "news_early"})
+            self.assertNotIn("news_late", set(bodies2["text_id"].astype(str)))
 
     def test_version_bumps_on_roll_and_is_stable_in_session(self):
         with tempfile.TemporaryDirectory() as tmp:
