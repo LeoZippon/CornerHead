@@ -135,6 +135,13 @@ def summarize_experiment(experiment_dir: Path) -> dict[str, object]:
                         "fold_status": record.get("fold_status"),
                         "valid_return": _first_metric(record, "validation_result", "total_return"),
                         "test_return": _first_metric(record, "test_result", "total_return"),
+                        # Trade-type decomposition (long vs short P&L returns) as
+                        # recorded by the replay summary; finer splits (融资 vs
+                        # 担保品) are not attributed by the broker yet.
+                        "valid_long": _first_metric(record, "validation_result", "long_return"),
+                        "valid_short": _first_metric(record, "validation_result", "short_return"),
+                        "test_long": _first_metric(record, "test_result", "long_return"),
+                        "test_short": _first_metric(record, "test_result", "short_return"),
                     }
                     for record in folds
                 ],

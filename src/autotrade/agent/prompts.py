@@ -140,7 +140,7 @@ FOLD_ACTION_SECTION = """\
 | `ctx.broker.buy` / `sell` | ts_code, amount, limit?, valid_bars?, reason? | **普通账户**现金买入/卖出（long-only）；`valid_bars` 为限价单最多挂单 bar 数（默认 1）；返回可用于撤单的 `order_id` |
 | `ctx.broker.credit_buy` / `credit_sell` | ts_code, amount, limit?, valid_bars?, reason? | **信用账户**担保品买入/卖出（现金口径，构成信用账户担保资产）；当前由 `margin_secs` 近似标的池门控 |
 | `ctx.broker.fin_buy` | ts_code, amount, limit?, valid_bars?, reason? | 融资买入（信用账户）：不动用现金，本金+费用计入融资负债合约、按自然日 /360 计息；受保证金可用余额、`margin_secs` 近似标的池与授信额度约束 |
-| `ctx.broker.short` / `cover` | ts_code, amount, limit?, valid_bars?, reason? | 融券卖出/买券还券（信用账户）；**融券卖出必须给 `limit=`，且申报价不得低于参考最新价（uptick 规则），市价 short 会被拒；开空当日不可还券** |
+| `ctx.broker.short` / `cover` | ts_code, amount, limit?, valid_bars?, reason? | 融券卖出/买券还券（信用账户）；**融券卖出必须给 `limit=`，uptick 规则对照的是激活 bar（提交后滞后 `execution_lag_bars`）的参考最新价——限价须留足上行缓冲，市价 short 会被拒；融券/融资开仓额度以 `credit["enable_bail_balance"]`（保证金可用余额）为准而非 available_cash；开空当日不可还券** |
 | `ctx.broker.sell_repay` | ts_code, amount?, limit?, valid_bars?, reason? | 卖券还款（信用账户）：卖出净所得先还息后还本（最老合约优先），余额留作信用账户现金；无融资负债时拒单 |
 | `ctx.broker.direct_repay` | amount(元), reason? | 直接还款（信用账户）：从信用账户现金偿还融资负债（先息后本）；金额必须不超过信用账户可用现金和待还融资负债，否则拒单；在提交 tick 即时结算 |
 | `ctx.broker.transfer` | amount(元), from_account, to_account, reason? | 两账户间现金划转申请；仅接受每日 09:14 前提交的当日盘前申请，09:14 统一确认；融券冻结所得不可划出，信用账户有负债时划出须保持维保比例 ≥ 提取线（见 facts `maintenance_withdraw_ratio`） |

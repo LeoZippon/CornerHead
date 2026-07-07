@@ -104,8 +104,10 @@ class WebuiBackendTest(unittest.TestCase):
                     "frozen_strategy_artifact_hash": artifact_hash(strategy_dir),
                     "frozen_strategy_artifact_path": str(strategy_dir),
                     "frozen_model_artifact_path": None,
-                    "validation_result": {"total_return": 0.10, "sharpe": 1.0, "max_drawdown": 0.05},
-                    "test_result": {"total_return": 0.20, "sharpe": 1.5, "max_drawdown": 0.04},
+                    "validation_result": {"total_return": 0.10, "sharpe": 1.0, "max_drawdown": 0.05,
+                                          "long_return": 0.08, "short_return": 0.02},
+                    "test_result": {"total_return": 0.20, "sharpe": 1.5, "max_drawdown": 0.04,
+                                    "long_return": 0.15, "short_return": 0.05},
                 },
                 {
                     "record_type": "heldout",
@@ -409,6 +411,10 @@ class WebuiBackendTest(unittest.TestCase):
         hitl = next(e for e in payload["experiments"] if e["experiment_id"] == "exp_hitl")
         self.assertEqual(hitl["heldout_returns"], [{"label": "2023Q1", "return": -0.03}])
         self.assertAlmostEqual(hitl["metrics"]["cum_heldout_return"], -0.03)
+        # Long/short trade-type decomposition rides on the fold rows.
+        row = hitl["fold_returns"][0]
+        self.assertAlmostEqual(row["valid_long"], 0.08)
+        self.assertAlmostEqual(row["test_short"], 0.05)
 
     def test_fold_orders_stats_rows_and_csv_export(self) -> None:
         data = self.client.get("/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/orders").json()

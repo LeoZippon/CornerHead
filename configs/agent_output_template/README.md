@@ -129,9 +129,14 @@ without `limit=` is rejected; cross-minute substep actions are not orders until
 
 | ctx surface | Environment contract |
 |---|---|
-| `ctx.cur_date` / `ctx.cur_time` / `ctx.cur_datetime` | Current sim date, minute, and Asia/Shanghai ISO timestamp; this clock drives Timeview, substep `ready_at`, delayed submission, and matching |
-| `ctx.account` / `ctx.positions` | Read-only dual-account snapshot and per-symbol position rows; position rows include `account` |
-| `ctx.price(ts_code)` / `ctx.bar(ts_code)` / `ctx.bars` | Current tick-visible bars only; future bars are never visible, and 09:15 plus ordinary off-session ticks usually have no realtime price |
+| `ctx.cur_datetime` | Authoritative sim timestamp in Asia/Shanghai ISO format; drives Timeview, substep `ready_at`, delayed submission, and matching |
+| `ctx.cur_date` | Current trade date derived from `cur_datetime`, `YYYYMMDD`; use for daily logic, cache keys, and state filenames |
+| `ctx.cur_time` | Current intraday minute derived from `cur_datetime`, `HH:MM`; use for scheduled actions such as 09:25 and 14:57 |
+| `ctx.account` | Read-only dual-account snapshot: `stock`, `credit`, `total_assets`, `risk_limits` |
+| `ctx.positions` | Read-only per-symbol position rows; each row includes `account` to distinguish stock and credit holdings |
+| `ctx.price(ts_code)` | Current tick-visible price for one symbol; future prices are never visible, and 09:15 plus ordinary off-session ticks usually return `None` |
+| `ctx.bar(ts_code)` | Current tick-visible bar for one symbol; returns `None` when no bar is visible |
+| `ctx.bars` | Current tick-visible market bar list; contains only this tick, never future bars |
 | `ctx.broker` | Broker queries, order/cancel verbs, and margin primitives; order/cancel calls must be inside `ctx.substep`; see the broker quick reference above |
 | `ctx.substep(name, budget_minutes=B)` | Strategy-step budget context; declares compute time, state `ready_at`, and broker action submit timing |
 | `ctx.nl(ts_code?, prompt="...")` | Point-in-time NL Sub Agent for single-stock or event/theme/sector/macro text analysis; must run inside `ctx.substep` and follows sim-clock text visibility |
@@ -139,7 +144,8 @@ without `limit=` is rejected; cross-minute substep actions are not orders until
 | `ctx.asof_version` | Changes only when Timeview actually rolls; cache as-of reads by this value |
 | `ctx.snapshot_dir` | Frozen research baseline snapshot; does not roll during replay |
 | `ctx.state_dir` | Managed cross-tick state directory; only available inside `ctx.substep`, with writes staged until `ready_at` |
-| `ctx.model_dir` / `ctx.params` | Read-only persisted model artifacts and run params; data that must persist across backtests belongs in `models/` before replay |
+| `ctx.model_dir` | Read-only persisted model artifact directory; data that must persist across backtests belongs in `models/` before replay |
+| `ctx.params` | Read-only run parameters |
 
 `amount` is a share count (lot-aligned to 100). The Broker enforces cash and
 保证金可用余额, T+1 sellable balance, lot size, price limits, suspension,

@@ -158,6 +158,7 @@ def analyze_fold(
     model_dir: Path | None,
     out_dir: Path,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> Path:
     """Run the analysis template against one completed fold and persist it.
 
@@ -185,10 +186,11 @@ def analyze_fold(
         "created_at": utc_now_iso(),
         "guarded_view": "validation_only",
     }
+    base_tokens = int(max_tokens) if max_tokens else DEFAULT_MAX_TOKENS
     try:
         try:
             response = proxy.complete(
-                messages, json_mode=False, timeout_seconds=timeout_seconds, max_tokens=DEFAULT_MAX_TOKENS
+                messages, json_mode=False, timeout_seconds=timeout_seconds, max_tokens=base_tokens
             )
         except Exception as exc:
             # Reasoning tokens count against the output budget on some models;
@@ -197,7 +199,8 @@ def analyze_fold(
                 raise
             meta["retried_after_length_stop"] = True
             response = proxy.complete(
-                messages, json_mode=False, timeout_seconds=timeout_seconds, max_tokens=RETRY_MAX_TOKENS
+                messages, json_mode=False, timeout_seconds=timeout_seconds,
+                max_tokens=max(RETRY_MAX_TOKENS, base_tokens * 2),
             )
     except Exception as exc:
         meta.update(status="error", error=f"{type(exc).__name__}: {exc}")

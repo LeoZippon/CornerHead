@@ -259,11 +259,17 @@ function barPath(x, zeroY, valueY, w) {
   return `M${x},${zeroY} L${x + w},${zeroY} L${x + w},${y - r} Q${x + w},${y} ${x + w - r},${y} L${x + r},${y} Q${x},${y} ${x},${y - r} Z`;
 }
 
-/* Grouped bars: per-fold returns, valid vs test, zero baseline. */
-function foldReturnsChart(rows, { width = 640, height = 220, mini = false } = {}) {
+/* Grouped bars: per-fold two-series returns (default valid vs test). */
+function foldReturnsChart(rows, { width = 640, height = 220, mini = false, series = null } = {}) {
   const INK = themeInk();
-  const SERIES = seriesSpec();
-  const values = rows.flatMap((row) => [row.valid_return, row.test_return]).filter((v) => v !== null && v !== undefined);
+  const SPEC = seriesSpec();
+  const SERIES = {
+    valid: series ? { ...series[0], color: series[0].color || SPEC.valid.color } : SPEC.valid,
+    test: series ? { ...series[1], color: series[1].color || SPEC.test.color } : SPEC.test,
+  };
+  const validKey = series ? series[0].key : "valid_return";
+  const testKey = series ? series[1].key : "test_return";
+  const values = rows.flatMap((row) => [row[validKey], row[testKey]]).filter((v) => v !== null && v !== undefined);
   if (!rows.length || !values.length) return el("div", { class: "hint" }, "暂无收益数据");
   const maxAbs = niceCeil(Math.max(0.005, ...values.map(Math.abs)));
   const padL = mini ? 42 : 50, padR = 10, padB = mini ? 26 : 36, padT = 8;
@@ -283,8 +289,8 @@ function foldReturnsChart(rows, { width = 640, height = 220, mini = false } = {}
   rows.forEach((row, index) => {
     const cx = padL + groupW * index + groupW / 2;
     const bars = [
-      { v: row.valid_return, series: SERIES.valid, x: cx - barW - 1 }, // 2px surface gap between the pair
-      { v: row.test_return, series: SERIES.test, x: cx + 1 },
+      { v: row[validKey], series: SERIES.valid, x: cx - barW - 1 }, // 2px surface gap between the pair
+      { v: row[testKey], series: SERIES.test, x: cx + 1 },
     ];
     for (const bar of bars) {
       if (bar.v === null || bar.v === undefined) continue;
@@ -304,7 +310,7 @@ function foldReturnsChart(rows, { width = 640, height = 220, mini = false } = {}
   const svgHost = el("div", {});
   svgHost.innerHTML = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${svg.join("")}</svg>`;
   wrap.append(svgHost);
-  wrap.__rerender = () => foldReturnsChart(rows, { width, height, mini });
+  wrap.__rerender = () => foldReturnsChart(rows, { width, height, mini, series });
   return bindChartTips(wrap);
 }
 
@@ -877,18 +883,29 @@ async function renderDetailPage(experimentId, selectedKey) {
   if (chartRows.length) {
     const metrics = detail.metrics || {};
     const sharpe = metrics.mean_test_sharpe;
+    const charts = el("div", { class: "charts-row section-gap" },
+      el("div", { class: "chart-cell" }, el("h4", {}, "逐 Fold 收益（验证 vs 测试）"), foldReturnsChart(chartRows)),
+      el("div", { class: "chart-cell" }, el("h4", {}, "累计收益曲线"), cumulativeReturnChart(chartRows)),
+    );
+    // Trade-type decomposition (long vs short, test period) when recorded.
+    if (chartRows.some((row) => row.test_long !== null && row.test_long !== undefined)) {
+      charts.append(el("div", { class: "chart-cell" },
+        el("h4", {}, "多 / 空收益拆解（测试期）"),
+        foldReturnsChart(chartRows, { series: [
+          { key: "test_long", label: "多头" },
+          { key: "test_short", label: "空头（含融券）" },
+        ] })));
+    }
+    // Tile order standardized with the homepage hero: Held-out → test → valid.
     container.append(el("div", { class: "panel section-gap" },
       statTilesRow([
-        { label: "累计验证收益", value: fmtPct(metrics.cum_valid_return), cls: signCls(metrics.cum_valid_return) },
+        { label: "Held-out 收益（最终样本外）", value: fmtPct(metrics.cum_heldout_return), cls: signCls(metrics.cum_heldout_return) },
         { label: "累计测试收益", value: fmtPct(metrics.cum_test_return), cls: signCls(metrics.cum_test_return) },
-        { label: "Held-out 收益", value: fmtPct(metrics.cum_heldout_return), cls: signCls(metrics.cum_heldout_return) },
+        { label: "累计验证收益", value: fmtPct(metrics.cum_valid_return), cls: signCls(metrics.cum_valid_return) },
         { label: "平均测试 Sharpe", value: sharpe === null || sharpe === undefined ? "—" : Number(sharpe).toFixed(2), cls: signCls(sharpe) },
         { label: "会话进度", value: `${detail.completed_sessions ?? 0} / ${detail.total_sessions ?? "?"}` },
       ]),
-      el("div", { class: "charts-row section-gap" },
-        el("div", { class: "chart-cell" }, el("h4", {}, "逐 Fold 收益（验证 vs 测试）"), foldReturnsChart(chartRows)),
-        el("div", { class: "chart-cell" }, el("h4", {}, "累计收益曲线"), cumulativeReturnChart(chartRows)),
-      ),
+      charts,
     ));
   }
   const layout = el("div", { class: "detail section-gap" });
@@ -1344,17 +1361,34 @@ function traceEventNode(event) {
 function foldResultPanel(detail, session) {
   const record = session.record || {};
   const validation = record.validation_result || {};
-  const panel = el("div", { class: "panel" }, el("h4", {}, `Fold 结果 — ${session.fold_id || record.fold_id}`));
-  panel.append(el("table", { class: "kv" },
-    kvRow("状态", `${record.fold_status || "—"}${record.finish_reason ? `（${record.finish_reason}）` : ""}`),
+  const statusLabels = { frozen: "已冻结新产物", no_update: "沿用父产物（有验证未获接受）", no_valid_backtest: "沿用父产物（无完整验证）" };
+  const panel = el("div", { class: "panel" },
+    el("div", { class: "control-bar" },
+      el("h4", { style: "margin:0" }, `Fold 结果 — ${session.fold_id || record.fold_id}`),
+      el("span", { class: `badge state-${record.fold_status === "frozen" ? "completed" : "stopped"}` },
+        statusLabels[record.fold_status] || record.fold_status || "—"),
+      record.finish_reason ? el("span", { class: "mode-note" }, `结束原因 ${record.finish_reason}`) : null,
+    ),
+  );
+  // Headline validation metrics as tiles, metadata as a compact kv block.
+  panel.append(el("div", { class: "section-gap" }, statTilesRow([
+    { label: "验证收益", value: fmtPct(validation.total_return), cls: signCls(validation.total_return) },
+    { label: "验证 Sharpe", value: validation.sharpe === undefined || validation.sharpe === null ? "—" : Number(validation.sharpe).toFixed(2), cls: signCls(validation.sharpe) },
+    { label: "验证回撤", value: fmtPct(validation.max_drawdown) },
+    { label: "多 / 空拆解", value: `${fmtPct(validation.long_return)} / ${fmtPct(validation.short_return)}` },
+  ])));
+  const meta = el("table", { class: "kv section-gap" },
     kvRow("验证区间", record.validation_period || session.validation_period || "—"),
-    kvRow("验证收益", el("span", { class: numClass(validation.total_return) }, fmtPct(validation.total_return))),
-    kvRow("验证 Sharpe", validation.sharpe !== undefined && validation.sharpe !== null ? Number(validation.sharpe).toFixed(2) : "—"),
-    kvRow("验证回撤", fmtPct(validation.max_drawdown)),
     kvRow("冻结产物", record.frozen_strategy_artifact_id || "—"),
-    record.fold_directive ? kvRow("研究者指令", record.fold_directive) : null,
-    (record.accept_reasons || []).length ? kvRow("拒绝原因", (record.accept_reasons || []).join("；")) : null,
-  ));
+    (record.accept_reasons || []).length ? kvRow("未接受原因", (record.accept_reasons || []).join("；")) : null,
+  );
+  panel.append(meta);
+  if (record.fold_directive) {
+    panel.append(el("details", { class: "section-gap" },
+      el("summary", { class: "mode-note", style: "cursor:pointer" }, "研究者本 Fold 指令"),
+      el("div", { class: "markdown", style: "white-space:pre-wrap" }, record.fold_directive),
+    ));
+  }
   if ((record.steps || []).length) {
     const table = el("table", { class: "data section-gap" },
       el("tr", {}, el("th", {}, "Step"), el("th", {}, "状态"), el("th", {}, "收益"), el("th", {}, "Sharpe"), el("th", {}, "回撤")),
@@ -1462,18 +1496,26 @@ function ordersNode(experimentId, epochId, foldId) {
   const body = el("div", {});
   const wrap = el("div", { class: "section-gap" },
     el("h4", { style: "margin-bottom:0.4rem" }, "交易明细（验证回测）"), body);
+  let loading = false;
   async function load(result) {
-    body.innerHTML = "";
-    body.append(el("div", { class: "loading" }, "加载交易明细…"));
+    // No flash: keep the current content (dimmed) until the new data arrives.
+    if (loading) return;
+    loading = true;
+    body.style.opacity = body.children.length ? "0.55" : "";
+    if (!body.children.length) body.append(el("div", { class: "loading" }, "加载交易明细…"));
     let data;
     try {
       data = await api(`${base}/orders${result ? `?result=${encodeURIComponent(result)}` : ""}`);
     } catch (error) {
       body.innerHTML = "";
+      body.style.opacity = "";
+      loading = false;
       body.append(el("div", { class: "hint" }, `无交易明细：${error.message}`));
       return;
     }
     body.innerHTML = "";
+    body.style.opacity = "";
+    loading = false;
     const bar = el("div", { class: "control-bar" });
     if ((data.available || []).length > 1) {
       for (const name of data.available) {

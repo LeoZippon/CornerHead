@@ -136,6 +136,7 @@ PARAM_DEFAULTS: dict[str, object] = {
     "initial_control_mode": "step",
     "analysis_enabled": True,
     "analysis_model": "deepseek-v4-pro",
+    "analysis_max_tokens": 6000,
 }
 _REQUIRED_PARAMS = (
     "experiment_id",
@@ -824,6 +825,7 @@ def run_interactive_worker(experiment_dir: Path, *, repo_root: Path, poll_second
                 strategy_dir=Path(outcome.frozen.path),
                 model_dir=Path(outcome.frozen.model_path) if outcome.frozen.model_path else None,
                 out_dir=hitl_dir / ANALYSIS_DIR_NAME,
+                max_tokens=int(options.analysis_max_tokens),
             )
 
     status = StatusReporter(hitl_dir / STATUS_NAME, work_root=Path(config.work_root))

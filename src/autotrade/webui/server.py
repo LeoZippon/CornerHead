@@ -74,6 +74,7 @@ class AnalysisService:
                 raise ManagerError("fold has no frozen strategy artifact on disk")
             params = read_json(experiment_dir / HITL_DIR_NAME / PARAMS_NAME)
             model = str(params.get("analysis_model") or "deepseek-v4-pro")
+            max_tokens = int(params.get("analysis_max_tokens") or 6000)
             record = dict(detail["record"])
             model_dir = record.get("frozen_model_artifact_path")
         except Exception:
@@ -97,6 +98,7 @@ class AnalysisService:
                     strategy_dir=Path(str(strategy_dir)),
                     model_dir=Path(str(model_dir)) if model_dir else None,
                     out_dir=experiment_dir / HITL_DIR_NAME / ANALYSIS_DIR_NAME,
+                    max_tokens=max_tokens,
                 )
             except Exception:  # noqa: BLE001 - failure lands in the sidecar json
                 pass

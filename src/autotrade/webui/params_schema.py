@@ -72,6 +72,8 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "analysis_model", "group": "运行控制", "label": "策略分析模型", "type": "choice",
      "choices": list(MODEL_CHOICES),
      "help": "生成 Fold 策略分析所用的 DeepSeek 模型。"},
+    {"key": "analysis_max_tokens", "group": "运行控制", "label": "策略分析输出 token 上限", "type": "int",
+     "help": "单次分析调用的输出 token 基础配额（思考 token 计入）；遇 finish_reason=length 自动以 2 倍重试一次。"},
     # meta_learning_directive 有意不进创建表单：进入实验详情页后在元学习会话
     # 的指令面板填写（逐 Epoch 可覆盖），避免创建时与详情页两处重复输入。
     # 预算与验收
