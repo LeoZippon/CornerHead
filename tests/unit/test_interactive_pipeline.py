@@ -369,6 +369,31 @@ class ResolveOptionsTest(unittest.TestCase):
             resolve_options({"experiment_id": "x"}, Path("/repo"))
 
 
+class StatusPidTest(unittest.TestCase):
+    def test_zombie_worker_counts_as_dead(self) -> None:
+        import subprocess
+
+        from autotrade.pipelines.interactive import status_pid_alive
+
+        # An exited-but-unreaped child (state Z) must not read as alive: the
+        # console judges worker liveness purely from the recorded pid.
+        child = subprocess.Popen(["true"])
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                stat = Path(f"/proc/{child.pid}/stat").read_text(encoding="ascii")
+                if stat.rpartition(")")[2].split()[:1] == ["Z"]:
+                    break
+                time.sleep(0.02)
+            else:
+                self.skipTest("child never reached zombie state")
+            self.assertFalse(status_pid_alive({"pid": child.pid}))
+        finally:
+            child.wait(timeout=5)
+        self.assertFalse(status_pid_alive({"pid": None}))
+        self.assertFalse(status_pid_alive({"pid": -1}))
+
+
 class ControlFileTest(unittest.TestCase):
     def test_control_round_trip_and_bad_values_degrade_safely(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
