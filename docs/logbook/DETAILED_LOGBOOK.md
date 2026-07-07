@@ -16409,3 +16409,38 @@ Result:
 Validation:
 - `~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_main_ctx_replay tests.unit.test_broker_engine` -> 115 OK.
 - `git diff --check` clean.
+
+## 2026-07-07 HITL interactive pipeline + web console (feat/hitl-webui)
+
+Task: build the human-in-the-loop layer requested by the user — per-session researcher gating and directive injection over the existing Step/Fold/Epoch pipeline, plus a local web console (homepage + experiment detail with live Agent Trace, post-fold LLM strategy analysis, strategy zip download, create/delete/pause/resume/stop controls, max 4 parallel experiments).
+
+Branch/commits:
+- Base: `feat/qmt-credit-broker` @ 633458f (user committed the broker realism remediation first, and removed legacy fold experiments with incompatible formats).
+- Branch `feat/hitl-webui`; commits: `a84e792` (move wiring to `pipelines/assembly.py`), `2f1558d` (HITL seams: fold_directive / meta directive_override / heldout skip_labels), `c66399a` (interactive orchestrator + fold analysis + worker entry + 14 tests), `5ecdc31` (FastAPI backend + 12 tests), plus the frontend/docs/fix commit(s) following this entry.
+
+Key design decisions (user-approved):
+- Frontend: no-build vanilla ES-module SPA (Chinese UI, hand-rolled SVG charts), served by FastAPI from `src/autotrade/webui/static/`; no node toolchain dependency.
+- Guarded test view: the fold-analysis LLM template receives validation-period evidence only (`fold_analysis.guarded_record_view` strips `test_result`/`test_period`); the UI shows test results in a collapsed, warning-labelled audit block; directive inputs warn against encoding test-period info.
+- Orchestration approach: a separate `InteractiveExperimentRunner` drives the existing `run_meta_learning`/`run_fold`/`run_heldout` primitives with gates between sessions (option recommended by the code survey); `ExperimentPipeline.run()` and both CLI entrypoints keep their exact behavior.
+
+Implementation map:
+- `src/autotrade/pipelines/assembly.py`: provider bundle / session builders / sandbox+managed-proxy specs / dotenv loader moved verbatim from `scripts/experiments/_cli.py` (which now re-exports); `agent_factory` additionally threads `manifest["fold_directive"]`.
+- `src/autotrade/agent/prompts.py`: `build_fold_directive_section` + `build_system_prompt(fold_directive=)` — “研究者本 Fold 指令（用户注入）” env section, hypothesis-framed.
+- `src/autotrade/pipelines/experiment.py`: `run_fold(fold_directive=)` (manifest + ledger record; NOT whitelisted into `_agent_visible_ledger_record`), `run_meta_learning(directive_override=)`, `run_heldout(skip_labels=)`.
+- `src/autotrade/pipelines/interactive.py`: PARAM_DEFAULTS (mirrors run_experiment CLI dests + HITL knobs), control/status/schedule file contracts (atomic single-writer JSON), `StatusReporter` (heartbeat thread + live run-dir/trace discovery under the per-experiment work root), `InteractiveExperimentRunner` (gated loop; ledger resume with hash-verified parent-chain reconstruction; orphan frozen-dir fail-fast), `run_interactive_worker` (rebuilds config/providers from params.json; singleton via status pid+heartbeat; SIGTERM → clean stopped state).
+- `src/autotrade/pipelines/fold_analysis.py`: validation-only analysis template (Chinese), strategy-file inlining budgets 20k/60k chars, markdown + provenance sidecar output under `experiments/<id>/hitl/analysis/`; provider conversation log written by the existing DeepSeek client layer.
+- `src/autotrade/webui/`: `params_schema` (form schema derived from PARAM_DEFAULTS with Chinese help), `registry` (legacy-tolerant read models; guarded fold views), `manager` (create/spawn detached workers, control actions, terminate via SIGTERM, confirm-gated delete incl. per-experiment work root, cap 4), `traces` (byte-offset paging + SSE tail with eof detection), `server` (FastAPI routes, zip/file endpoints with traversal guards, background analysis service), `static/` (index.html/app.js/style.css SPA).
+- Entrypoints: `scripts/experiments/run_interactive_experiment.py` (worker), `scripts/webui/run_webui.py` (server; default 127.0.0.1:38888).
+
+Resource checks:
+- Server/worker smoke is CPU-only; RAM before full suite: 503Gi total / ~414Gi available; GPUs untouched (no fold session was run).
+
+Validation:
+- Full suite: `PYTHONDONTWRITEBYTECODE=1 ~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests` -> 511 OK (483 -> 511; +15 interactive, +12 webui, +1 prompt section test).
+- `node --check src/autotrade/webui/static/app.js` OK; `git diff --check` clean; PROMPTS.md re-exported (fold-directive sample rendered into section 1).
+- Live control-plane smoke on B, port 38888: `/api/health`, homepage list of 23 legacy experiments (read-only), legacy detail assembly from ledger; created `webui_smoke_hitl` (2024Q1 dev, 2026Q1 heldout, step mode) via API -> worker spawned, wrote schedule.json (meta/fold_2024Q1/heldout), status `waiting_user` at `epoch_001/meta_learning`; `set_directive` + `stop` -> worker exited cleanly (`stop requested before session ...`); `resume` respawned; confirm-gated DELETE removed the experiment. No LLM tokens or Docker containers consumed.
+- Two defects found by the smoke and fixed: (1) `resolve_options` rejected the creator metadata key `_created_at` — underscore-prefixed keys are now ignored (test added); (2) an exited worker lingered as a zombie under the live server so `os.kill(pid, 0)` misreported it alive — `status_pid_alive` now treats `/proc/<pid>/stat` state `Z` as dead and the server sets `SIGCHLD=SIG_IGN` to auto-reap.
+
+Deferred / follow-ups:
+- A real end-to-end HITL fold (DeepSeek + Docker + GPU) is user-triggered by policy (same stance as RA4); the console is ready for it.
+- Remote deployment (lightweight server hosting only the interaction layer + reverse proxy/auth) documented as the target shape in pipeline_design §5.3, not implemented in this item.

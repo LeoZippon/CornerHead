@@ -20,6 +20,7 @@
 | `available_at` | 某条数据最早可以被 Agent 使用的时间 |
 | Step | 一个 Fold 内的一次策略修改和验证尝试 |
 | Taste | Epoch 开始前元学习会话生成的探索偏好，会注入本 Epoch 的 Fold Agent Prompt |
+| 研究者 Fold 指令 | HITL 运行中研究者在单个 Fold 启动前注入的可选探索方向，按待检验假设措辞，不放宽任何硬约束（`pipeline_design.md` §5.1） |
 | 策略产物 | 跨 Fold 共享的 `output/` 正式策略产物目录，根目录固定入口为 `main.py` |
 | 模型参数产物 | 跨 Fold 共享的 `models/` 可继承模型产物目录，用于保存可复现模型参数和权重 |
 | NL Sub Agent 工具 | 决策代码可显式调用的 `at_tools.nl(ts_code?, prompt=...)` PIT 文本分析服务；`ts_code` 可选 |
@@ -35,7 +36,7 @@
 - 可在 `/mnt/agent/models/` 保存正式模型参数产物。
 - 调用 `modification_check`，确认正式产物满足修改约束。
 - 调用 `backtest`，读取验证回测结果，并决定是否继续修改。
-- 参考 Pipeline 注入的 Taste、阶段指引和提交验收规则。
+- 参考 Pipeline 注入的 Taste、可选的研究者 Fold 指令（HITL）、阶段指引和提交验收规则。
 - 在收益、风险、修改量、策略复杂度和剩余时间之间做取舍。
 - 在当前 Fold 准备结束时调用 `finish_fold`。
 

@@ -1,3 +1,12 @@
+2026-07-07 HITL 交互式运行 + Web 控制台（feat/hitl-webui）
+
+- 新增 human-in-the-loop 层：`pipelines/interactive.py` 的 `InteractiveExperimentRunner` 按 run() 同序驱动 run_meta_learning/run_fold/run_heldout，会话边界门控（auto/step 模式、pause/stop、逐会话批准+指令）；控制面 = `experiments/<id>/hitl/` 单写者原子 JSON（params/control/status/schedule）；账本级续跑（跳过已记录会话、父产物链按冻结路径重建+hash 核验、Taste 从 taste.md 恢复、held-out 按 `skip_labels` 只补缺失周期、孤儿冻结目录显式拒绝）。
+- Pipeline 缝：`build_system_prompt` 新增「研究者本 Fold 指令（用户注入）」节（假设化措辞、不放宽硬约束），经 runner→run_fold(fold_directive=) 进 manifest+fold 账本（不进 agent 可见投影、不参与 hash）；`run_meta_learning(directive_override=)` 支持按 Epoch 覆盖实验级方向；`run_heldout(skip_labels=)`；审计 CLI 增 `--fold-directive-file`；provider/session 装配从 `scripts/experiments/_cli.py` 移至 `pipelines/assembly.py`（_cli 保留 argparse+re-export）。
+- Web 控制台：FastAPI（`webui/`，默认 127.0.0.1:38888，无鉴权仅回环）+ 无构建 vanilla SPA（中文 UI，SVG 图表）；首页=实验卡片（进度/累计收益/逐 Fold 收益图/新建模态含全部参数中文说明/确认式删除）；详情页=会话导航、控制条、逐会话指令编辑与批准、SSE 实时尾随 agent_trace.jsonl、Step 历史、策略代码浏览+zip 下载；并行运行上限 4；worker 独立进程（start_new_session）与服务解耦。
+- Fold 分析（guarded test view，用户定）：`pipelines/fold_analysis.py` 预定义中文模板经 LLMProxy 生成策略分析——输入只含验证期证据（投影排除 test_result/test_period），测试期结果在 UI 单独折叠「事后审计」区并警示不得写入后续指令；分析失败仅记 status 不阻断，可在控制台重新生成。
+- 验证：full suite 511 OK（483→511：+15 interactive、+12 webui backend、+1 prompt）；`git diff --check` clean；PROMPTS.md 重导出（含 fold 指令示例节）；真实控制面 smoke（38888 端口）：列出 23 个历史实验只读、创建→step 门控 waiting_user→set_directive→stop 干净退出→resume 重启 worker→确认式删除全通；修 2 个 smoke 发现的缺陷（params 元数据键 `_created_at` 误拒；退出 worker 成僵尸致 pid 误判存活——status_pid_alive 识别 Z 态 + 服务 SIGCHLD=SIG_IGN）。
+- 文档：pipeline_design 新增第 5 章（门控/续跑/控制台/防泄漏）；agent_design 补研究者 Fold 指令术语；parameters_reference 新增 §9 HITL 参数。后续部署形态（远端轻量服务器只承载交互层）已记入 §5.3。真实 DeepSeek+Docker 的完整 HITL Fold 运行待用户显式触发（与 RA4 同口径）。
+
 2026-07-06 第四轮全面审计：文档 + 代码 + 实盘保真（feat/qmt-credit-broker）
 
 - 六个并行只读子代理审计（文档交叉逻辑/去重/可读性、broker/引擎、Agent 运行时与工具、数据层、pipeline、两融/行业保真——细则与官方 QMT 文档原文核验）；High 与关键 Medium 项全部人工在源码复核后采信。env_design §1–§2 按用户指示视为已审计跳过。

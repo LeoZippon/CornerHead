@@ -20,6 +20,7 @@
 - [6. Sandbox 资源与工具预算](#6-sandbox-资源与工具预算)
 - [7. 数据层任务参数](#7-数据层任务参数)
 - [8. 报告与其他常量](#8-报告与其他常量)
+- [9. HITL 交互式运行与控制台](#9-hitl-交互式运行与控制台)
 
 ## 1. 快照窗口（SnapshotConfig）
 
@@ -53,7 +54,8 @@
 | `folds.RESEARCH_ANCHOR_TIME`（常量） | `23:59:59` | 每个区间决策快照锚点 = 区间前最后一交易日收盘（北京时间） |
 | `convergence_start_epoch` | 3 | 从该 Epoch 起 Fold 进入收敛阶段提示词 |
 | `meta_memory_max_epochs` | 3 | 元学习原始记忆拼接的最近 Epoch 数（`0` 关闭） |
-| `meta_learning_directive` | 空 | 实验级元学习研究方向（CLI `--meta-learning-directive[-file]`） |
+| `meta_learning_directive` | 空 | 实验级元学习研究方向（CLI `--meta-learning-directive[-file]`；HITL 可按 Epoch 经 `directive_override` 覆盖） |
+| `fold_directive`（run_fold 参数） | 空 | 研究者本 Fold 指令，注入 Fold 系统提示词并记录于 manifest/账本（HITL 控制台或审计 CLI `--fold-directive-file`） |
 | `step_tree_enabled` | True | 跨 Fold Step 产物树 |
 | `record_failed_attempts` | True | Step 树记录 `[failed]` 轻量节点 |
 | `use_docker` | True | 正式实验固定 Docker Sandbox（`--local-dev` 仅开发） |
@@ -238,3 +240,19 @@
 | 元学习 `web_search` 引擎 | Tavily + Semantic Scholar | run manifest `web_search_engines`；三视角非空检索后才可 `done`（`pipeline_design.md` §3.1） |
 | QMT 执行器轮询间隔（草案） | `3nSecond` | `QMT_documentation.md` §2.2；实盘上线前随执行器实现冻结 |
 | QMT 本金上限（草案） | `CQ_MAX_PRINCIPAL` 环境变量 | 未设置时用账户总资产口径（`QMT_documentation.md` §6.4） |
+
+## 9. HITL 交互式运行与控制台
+
+定义：`src/autotrade/pipelines/interactive.py`（`PARAM_DEFAULTS`）、`src/autotrade/pipelines/fold_analysis.py`、`src/autotrade/webui/`；权威文档 `pipeline_design.md` §5。创建参数与 `run_experiment` CLI dest 一一对应，下表只列 HITL 专有旋钮与常量。
+
+| 参数 | 默认 | 作用 |
+|---|---:|---|
+| `initial_control_mode` | `step` | 新实验初始运行模式：`step` 逐会话批准 / `auto` 连续执行 |
+| `analysis_enabled` | True | Fold 完成后自动生成 LLM 策略分析（仅验证期证据） |
+| `analysis_model` | `deepseek-v4-pro` | 策略分析模型（`reasoning_effort` 固定 `high`，超时 900 s） |
+| worker `--poll-seconds` | 2.0 | 门控等待时 control.json 轮询间隔 |
+| status 心跳间隔（常量） | 3.0 s | worker 心跳 + 实时 run/trace 路径发现 |
+| `MAX_RUNNING_EXPERIMENTS`（常量） | 4 | 控制台并行运行实验数上限 |
+| 控制台默认绑定 | `127.0.0.1:38888` | `scripts/webui/run_webui.py --host/--port`；无鉴权，仅回环或可信反代 |
+| 分析内容预算（常量） | 单文件 20k / 总 60k 字符 | `fold_analysis.read_strategy_files` 的策略代码内联预算 |
+| HITL work root | `.runtime/sandboxes/<experiment_id>` | 控制台创建实验的专属 sandbox 根（删除实验时一并清理） |

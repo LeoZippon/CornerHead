@@ -45,6 +45,10 @@ Pipeline 负责按时间顺序调度 Data、Environment 和 Agent，冻结每个
 - [4. 账本、路径、报告与失败处理](#4-账本路径报告与失败处理)
   - [4.1 实验目录、路径角色与主账本](#41-实验目录路径角色与主账本)
   - [4.2 报告、失败条件与验收清单](#42-报告失败条件与验收清单)
+- [5. 交互式运行与 HITL 控制台](#5-交互式运行与-hitl-控制台)
+  - [5.1 交互式 Worker 与会话门控](#51-交互式-worker-与会话门控)
+  - [5.2 续跑与状态恢复](#52-续跑与状态恢复)
+  - [5.3 Web 控制台与防泄漏](#53-web-控制台与防泄漏)
 
 ## 1. 实验循环与时间排程
 
@@ -74,7 +78,7 @@ flowchart TD
     FINAL --> HO["Held-out 按配置周期冻结测试"]
 ```
 
-Pipeline 不实现投资逻辑，也不改写 Agent 代码；它只做调度、冻结、校验和记录。完整流程是：每个 Epoch 先运行一次元学习会话，基于 development 历史、父产物、可见数据和联网检索生成非空 Taste，并可选产出小幅正则化后的父产物；随后 Pipeline 按配置周期依次启动普通 Fold Agent，把同一份 Taste 注入本 Epoch 所有 Fold Prompt，让它作为策略实现、NL 使用、交易取舍和正则化偏好的关键指导；策略产物和模型参数则按 Fold 链式继承，第一个 Fold 继承初始模板或元学习正则化后的父产物，之后每个 Fold 继承上一个 Fold 在测试前冻结的策略和模型产物，若没有可接受更新则继承 fallback 父产物；所有 development Fold 完成后固定最终策略产物，再执行 held-out 冻结测试。Taste 在同一 Epoch 内保持一致，下一 Epoch 可基于 development 结果生成新的 Taste。完整实验运行不可原地续跑：`ExperimentPipeline.run()` 在目标 experiment 已存在冻结产物或 Fold 账本记录时直接 fail-fast，要求换用新的 experiment id，避免冻结写入落到已填充的实验目录。
+Pipeline 不实现投资逻辑，也不改写 Agent 代码；它只做调度、冻结、校验和记录。完整流程是：每个 Epoch 先运行一次元学习会话，基于 development 历史、父产物、可见数据和联网检索生成非空 Taste，并可选产出小幅正则化后的父产物；随后 Pipeline 按配置周期依次启动普通 Fold Agent，把同一份 Taste 注入本 Epoch 所有 Fold Prompt，让它作为策略实现、NL 使用、交易取舍和正则化偏好的关键指导；策略产物和模型参数则按 Fold 链式继承，第一个 Fold 继承初始模板或元学习正则化后的父产物，之后每个 Fold 继承上一个 Fold 在测试前冻结的策略和模型产物，若没有可接受更新则继承 fallback 父产物；所有 development Fold 完成后固定最终策略产物，再执行 held-out 冻结测试。Taste 在同一 Epoch 内保持一致，下一 Epoch 可基于 development 结果生成新的 Taste。完整实验运行不可原地续跑：`ExperimentPipeline.run()` 在目标 experiment 已存在冻结产物或 Fold 账本记录时直接 fail-fast，要求换用新的 experiment id，避免冻结写入落到已填充的实验目录。需要人工介入（逐 Fold 批准、注入指令、暂停/停止）或会话级续跑时使用交互式入口，见第 5 章。
 
 ### 1.2 Fold 时间、泄漏边界与运行约束
 
@@ -399,6 +403,7 @@ experiments/<experiment_id>/
     <run_id>/
   snapshot_cache/
   reports/
+  hitl/
 ```
 
 **路径角色**
@@ -411,6 +416,7 @@ experiments/<experiment_id>/
 | `artifacts/<run_id>/` | Environment | Sandbox run manifest、trace、results、logs |
 | `snapshot_cache/` | Pipeline | 实验内决策快照/回放槽构建缓存（见下） |
 | `reports/` | reporting 脚本 | 实验图表和汇总 |
+| `hitl/` | 交互式 worker / Web 后端 | HITL 控制面文件与 Fold 分析（见第 5 章） |
 
 `CachingSnapshotProvider` 用 `snapshot_cache/` 复用同一实验内字节相同的快照构建：相邻 Fold 共享昂贵的决策快照（Fold N+1 的验证锚点就是 Fold N 的测试锚点），多 Epoch 重跑的全部视图与 Epoch 无关。缓存条目按内容键（锚点/区间 + label + provider 配置）构建一次，再硬链接进每个 run 的 Sandbox；回放槽的 label 写进视图 manifest，因此同区间的 valid/test 回放槽按 label 各构建一次、不跨 label 复用。快照 parquet 视图 write-once，共享 inode 安全（与 Step 树的 `link_copytree` 同一模式）。
 
@@ -541,3 +547,36 @@ experiments/<experiment_id>/
 - development 和 held-out 汇总生成。
 - benchmark 缺失时显式 warning。
 - active return 和相对权益口径一致。
+
+## 5. 交互式运行与 HITL 控制台
+
+### 5.1 交互式 Worker 与会话门控
+
+`scripts/experiments/run_interactive_experiment.py` 是交互式（human-in-the-loop）实验入口：`InteractiveExperimentRunner`（`src/autotrade/pipelines/interactive.py`）按与 `ExperimentPipeline.run()` 相同的顺序驱动 `run_meta_learning` / `run_fold` / `run_heldout`，但在每个会话（元学习、单个 Fold、held-out）开始前经过一次研究者门控。控制面是 `experiments/<id>/hitl/` 下的单写者原子 JSON 文件：
+
+| 文件 | 写入方 | 内容 |
+|---|---|---|
+| `params.json` | 创建方（控制台或手工） | 创建参数（与 `run_experiment` CLI dest 一一对应，另加 HITL 专有旋钮），每次启动经 `resolve_options` 确定性重建 ExperimentConfig 与 provider 装配 |
+| `control.json` | 控制方（Web 后端/研究者） | `mode`（`auto`/`step`）、`request`（`pause`/`stop`）、逐会话批准列表与指令文本 |
+| `status.json` | 仅 worker | pid、心跳、当前会话、run_id 与实时 trace 路径、进度、错误 |
+| `schedule.json` | 仅 worker | 启动时写出的会话计划（元学习/Fold/held-out） |
+| `analysis/` | worker / Web 后端 | Fold 完成后的 LLM 策略分析（markdown + provenance sidecar） |
+
+门控语义：`request=stop` 在下一个会话边界干净退出；`request=pause` 让 worker 在当前会话结束后阻塞等待；`mode=step` 要求每个会话被显式批准后才启动（批准时可附带指令）；`mode=auto` 连续执行、可随时暂停。暂停/停止永远落在会话边界，不打断执行中的 Fold；`terminate`（SIGTERM）是唯一的中途强制手段，被中断的 Fold 无账本记录，恢复时整体重跑。
+
+**研究者指令**：每个会话可注入一段可选指令文本。普通 Fold 的指令经 `run_fold(fold_directive=...)` 以「研究者本 Fold 指令（用户注入）」节注入系统提示词，并记录在 run manifest 与 fold 账本记录中（不进入 agent 可见账本投影，不参与产物 hash）；元学习会话的指令经 `run_meta_learning(directive_override=...)` 覆盖实验级 `meta_learning_directive`。指令按待检验假设措辞注入，不放宽提交合同、修改约束与 PIT 边界；研究者不得在指令中写入测试期/held-out 结果或具体日历日期（见 5.3 防泄漏）。单会话审计入口对应支持 `--fold-directive-file`。
+
+### 5.2 续跑与状态恢复
+
+`run()` 的不可原地续跑约束不变；交互式 worker 以账本为唯一事实源实现会话级续跑。启动时读取 `experiment_ledger.jsonl`：已有记录的元学习/Fold 会话被跳过，父产物链按账本记录的冻结路径重建并重算 hash 核验（不一致即 fail-fast）；Taste 从 `meta_learning/<epoch>/taste.md` 恢复；held-out 只补跑缺失周期（`run_heldout(skip_labels=...)`）。`_freeze` 与账本 append 之间被硬杀留下的孤儿冻结目录会被显式拒绝并要求人工处理。派生沙箱镜像经既有的 `_restore_active_sandbox_image` 恢复。worker 启动时经 status.json 的 pid/心跳做单实例互斥。
+
+### 5.3 Web 控制台与防泄漏
+
+`scripts/webui/run_webui.py` 启动 FastAPI 控制台（`src/autotrade/webui/`，默认 `127.0.0.1:38888`；无鉴权，非回环绑定必须置于可信反向代理之后）。后端是纯控制面：实验在独立 worker 进程执行（`start_new_session`，与服务进程生死解耦，服务重启不影响运行中的实验），并行运行实验数上限 4（`MAX_RUNNING_EXPERIMENTS`）。
+
+- 首页：列出全部实验（HITL 与历史只读实验），含状态、Fold 进度、累计验证/测试/held-out 收益与逐 Fold 收益图；新建实验模态（表单 schema 由 `PARAM_DEFAULTS` 派生，覆盖全部可配参数并附中文说明）；删除实验（需输入实验名确认，worker 存活时拒绝，同时清理该实验专属 sandbox work root）。
+- 详情页：会话导航（逐 Epoch 的元学习/Fold 与 held-out）、控制条（模式切换/暂停/停止/强制终止/恢复运行）、逐会话指令编辑与批准；运行中的会话经 SSE 按字节偏移实时尾随 `agent_trace.jsonl`（每事件独立 flush，见 `environment_design.md` 的 trace 契约）；已完成 Fold 展示验证结果、Step 历史、冻结策略代码浏览与 zip 下载（output + models）。
+- Fold 分析：Fold 完成后 worker 用预定义模板经 LLMProxy 生成中文策略分析（`src/autotrade/pipelines/fold_analysis.py`；provider conversation log 照常落盘），失败仅记入 status、不阻断实验；控制台可按需重新生成。
+- 防泄漏（guarded test view）：分析模板只接收验证期证据（账本记录投影排除 `test_result`/`test_period`）；控制台把测试期结果放在默认折叠、明确警示的「事后审计」区，并在指令输入处提醒研究者不得把测试期信息编码进后续 Fold 指令——这是 walk-forward 样本外有效性在 HITL 流程中唯一无法机器强制的环节。
+
+后续部署形态：控制台可整体迁至轻量远端服务器，仅承载交互层（静态资产 + JSON API 反代），实验管线与数据仍留在本机执行。
