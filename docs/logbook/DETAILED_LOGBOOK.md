@@ -16513,3 +16513,8 @@ Backtest runtime profiling (item 5) — measured phase_seconds from test2/run_ac
   2/3 need design care (ctx contract semantics).
 
 Validation: full suite 519 OK; `node --check` OK; server restarted (workers unaffected — test2 had meanwhile frozen its fold and moved to held-out) and token split verified against the collected fold run; `git diff --check` clean.
+
+## 2026-07-07 Console type-scale trim + backtest optimization proposal (feat/hitl-webui)
+
+- UI: fluid root font clamp lowered to clamp(14px, 12px+0.22vw, 17.5px) (16" MBP ≈15.8px) and the largest components trimmed (brand/buttons/badges/cards/tiles/metrics/panels/session rows) after the previous iteration overshot.
+- Grounded the IPC cost for the optimization proposal: the fold's replay slot carries 5,445 codes per minute; one tick's engine bars (7 fields/code) ≈ 1MB JSON each way, ~4-6GB total encode/pipe/decode per 20-day validation. Optimization options presented to the user for decision (A: zero-semantic caches; B: columnar bars + lazy driver mapping; C: tick-grid knobs; D: snapshot prewarm) — no implementation yet.
