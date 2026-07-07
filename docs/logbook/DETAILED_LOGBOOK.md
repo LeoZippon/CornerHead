@@ -16580,3 +16580,10 @@ Per user direction, the long/short distinction now lives INSIDE the per-fold ret
 ## 2026-07-07 A-share P&L color convention (feat/hitl-webui)
 
 Gains/losses now follow the A-share convention (red = gains, green = losses) via dedicated --gain/--loss variables in both themes, applied to every sign-colored number class (.num, .tile-value, .metric). Status semantics are deliberately untouched (completed stays green, failed/danger stays red — separate variables), and chart series hues (identity encoding, sign shown by bar direction) are unchanged. CSS-only change; served live without restart.
+
+## 2026-07-07 Console: standalone analysis card + enriched held-out panel (feat/hitl-webui)
+
+1. The LLM strategy review moved out of the fold-result card into its own panel (peer level): self-fetching via the analysis endpoint, auto-polls while pending, shows model/created-at/length-retry provenance, and refreshes itself after regeneration.
+2. Held-out panel enriched: stat tiles (cumulative return, mean Sharpe, worst per-period drawdown, positive-period count, cumulative long/short contribution), per-period returns bar + cumulative return line (>=2 periods, relabeled series), and the table gains start-end dates, long/short columns, and order counts — all fields verified present in real heldout ledger records (long_return/short_return/order_count).
+
+Validation: node --check OK; webui suite OK; live heldout record field check on test2.

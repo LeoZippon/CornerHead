@@ -393,9 +393,13 @@ function foldReturnsChart(rows, { width = 640, height = 220, mini = false, serie
 }
 
 /* Cumulative equity lines: ∏(1+r)−1 across folds, valid vs test. */
-function cumulativeReturnChart(rows, { width = 640, height = 220 } = {}) {
+function cumulativeReturnChart(rows, { width = 640, height = 220, labels = null } = {}) {
   const INK = themeInk();
-  const SERIES = seriesSpec();
+  const SPEC = seriesSpec();
+  const SERIES = {
+    valid: { ...SPEC.valid, label: labels?.valid || SPEC.valid.label },
+    test: { ...SPEC.test, label: labels?.test || SPEC.test.label },
+  };
   const build = (key) => {
     let equity = 1;
     const points = [];
@@ -445,7 +449,7 @@ function cumulativeReturnChart(rows, { width = 640, height = 220 } = {}) {
   const svgHost = el("div", {});
   svgHost.innerHTML = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${svg.join("")}</svg>`;
   wrap.append(svgHost);
-  wrap.__rerender = () => cumulativeReturnChart(rows, { width, height });
+  wrap.__rerender = () => cumulativeReturnChart(rows, { width, height, labels });
   return bindChartTips(wrap);
 }
 
@@ -1122,6 +1126,8 @@ function sessionDetailPanel(detail, selectedKey) {
   if (running) panel.append(liveTracePanel(detail, session));
   if (session.kind === "fold" && done) {
     panel.append(foldResultPanel(detail, session));
+    // The LLM strategy review gets its own card, peer to the fold result.
+    panel.append(analysisPanel(detail.experiment_id, session.epoch_id, session.fold_id || (session.record || {}).fold_id));
     const recordedFolds = (detail.sessions || []).filter((s) => s.kind === "fold" && s.record);
     if (detail.kind === "hitl" && recordedFolds.length && recordedFolds[recordedFolds.length - 1].key === session.key) {
       panel.append(rerunPanel(detail, session));
@@ -1671,8 +1677,6 @@ function loadFoldExtras(experimentId, epochId, foldId) {
     wrap.append(filesPanel);
     // Validation-backtest order stream: stats, charts, table, CSV export.
     wrap.append(ordersNode(experimentId, epochId, foldId));
-    // Analysis.
-    wrap.append(analysisNode(experimentId, epochId, foldId, fold.analysis || {}));
     // Test audit, collapsed with warning.
     const audit = fold.test_audit || {};
     if (audit.test_result) {
@@ -1783,35 +1787,52 @@ function ordersNode(experimentId, epochId, foldId) {
   return wrap;
 }
 
-function analysisNode(experimentId, epochId, foldId, analysisInfo) {
-  const wrap = el("div", { class: "section-gap" });
+/* Standalone LLM strategy-review card (peer of the fold-result panel). */
+function analysisPanel(experimentId, epochId, foldId) {
+  const base = `/api/experiments/${encodeURIComponent(experimentId)}/analysis/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}`;
+  const panel = el("div", { class: "panel section-gap" });
+  const regenButton = el("button", { class: "btn small" }, "生成分析");
   const head = el("div", { class: "control-bar" },
     el("h4", { class: "subsection-title" }, "策略分析（LLM，仅验证期证据）"),
     el("span", { class: "spacer" }),
+    regenButton,
   );
-  const body = el("div", {});
-  const regenButton = el("button", {
-    class: "btn small",
-    onclick: async () => {
-      try {
-        await api(`/api/experiments/${encodeURIComponent(experimentId)}/analysis/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}`, { method: "POST" });
-        toast("分析已开始生成，稍后刷新查看");
-        regenButton.disabled = true;
-      } catch (error) { toast(error.message, true); }
-    },
-  }, analysisInfo.available ? "重新生成" : "生成分析");
-  head.append(regenButton);
-  wrap.append(head, body);
-  if (analysisInfo.pending) body.append(el("div", { class: "hint" }, "分析生成中…"));
-  else if (analysisInfo.available) {
-    (async () => {
-      try {
-        const payload = await api(`/api/experiments/${encodeURIComponent(experimentId)}/analysis/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}`);
-        if (payload.content) body.append(renderMarkdown(payload.content));
-      } catch (error) { body.append(el("div", { class: "hint" }, `分析加载失败：${error.message}`)); }
-    })();
-  } else body.append(el("div", { class: "hint" }, "尚未生成分析。"));
-  return wrap;
+  const body = el("div", { class: "section-gap" }, el("div", { class: "loading" }, "加载分析…"));
+  panel.append(head, body);
+  regenButton.addEventListener("click", async () => {
+    try {
+      await api(base, { method: "POST" });
+      toast("分析已开始生成，稍后自动刷新");
+      regenButton.disabled = true;
+      setTimeout(load, 20_000);
+    } catch (error) { toast(error.message, true); }
+  });
+  async function load() {
+    let payload;
+    try { payload = await api(base); } catch (error) {
+      body.innerHTML = "";
+      body.append(el("div", { class: "hint" }, `分析加载失败：${error.message}`));
+      return;
+    }
+    body.innerHTML = "";
+    regenButton.disabled = Boolean(payload.pending);
+    regenButton.textContent = payload.available ? "重新生成" : "生成分析";
+    if (payload.pending) {
+      body.append(el("div", { class: "prep-indicator" }, el("span", { class: "spinner" }), el("span", {}, "分析生成中…")));
+      setTimeout(load, 8000);
+    } else if (payload.content) {
+      const meta = payload.meta || {};
+      if (meta.model) {
+        body.append(el("div", { class: "hint", style: "margin-top:0" },
+          `模型 ${meta.model} ｜ 生成于 ${(meta.created_at || "").slice(0, 16).replace("T", " ")}${meta.retried_after_length_stop ? " ｜ 曾因长度截断重试" : ""}`));
+      }
+      body.append(renderMarkdown(payload.content));
+    } else {
+      body.append(el("div", { class: "hint" }, "尚未生成分析——点击右上角「生成分析」。"));
+    }
+  }
+  load();
+  return panel;
 }
 
 function metaResultPanel(session) {
@@ -1830,23 +1851,60 @@ function metaResultPanel(session) {
 
 function heldoutPanel(session) {
   const records = session.records || [];
-  const panel = el("div", { class: "panel section-gap" }, el("h4", {}, "Held-out 冻结测试"));
-  const chartRows = records
+  const results = records.map((record) => record.test_result || {});
+  const returns = results.map((r) => r.total_return).filter((v) => v !== null && v !== undefined);
+  const sharpes = results.map((r) => r.sharpe).filter((v) => v !== null && v !== undefined);
+  const drawdowns = results.map((r) => r.max_drawdown).filter((v) => v !== null && v !== undefined);
+  const longs = results.map((r) => r.long_return).filter((v) => v !== null && v !== undefined);
+  const shorts = results.map((r) => r.short_return).filter((v) => v !== null && v !== undefined);
+  const cum = returns.length ? returns.reduce((acc, r) => acc * (1 + r), 1) - 1 : null;
+  const wins = returns.filter((r) => r > 0).length;
+  const panel = el("div", { class: "panel section-gap" },
+    el("h4", { class: "subsection-title" }, "Held-out 冻结测试（最终样本外）"));
+  panel.append(el("div", { class: "section-gap" }, statTilesRow([
+    { label: "累计收益", value: fmtPct(cum), cls: signCls(cum) },
+    { label: "平均 Sharpe", value: sharpes.length ? (sharpes.reduce((a, b) => a + b, 0) / sharpes.length).toFixed(2) : "—" },
+    { label: "最差单期回撤", value: drawdowns.length ? fmtPct(Math.max(...drawdowns)) : "—" },
+    { label: "正收益期数", value: returns.length ? `${wins} / ${returns.length}` : "—" },
+    { label: "多 / 空贡献（累计）", value: longs.length
+        ? `${fmtPct(longs.reduce((a, b) => a + b, 0))} / ${fmtPct(shorts.reduce((a, b) => a + b, 0))}` : "—" },
+  ])));
+  const barRows = records
     .map((record) => ({
       label: String(record.fold_id || "").replace("heldout_", ""),
       value: (record.test_result || {}).total_return,
     }))
     .filter((row) => row.value !== null && row.value !== undefined);
-  if (chartRows.length) panel.append(singleSeriesBarChart(chartRows, { fmt: fmtPct }), el("div", { class: "section-gap" }));
-  panel.append(el("table", { class: "data" },
-    el("tr", {}, el("th", {}, "区间"), el("th", {}, "收益"), el("th", {}, "Sharpe"), el("th", {}, "回撤")),
+  const cumRows = records.map((record) => ({
+    fold_id: String(record.fold_id || "").replace("heldout_", ""),
+    test_return: (record.test_result || {}).total_return,
+    valid_return: null,
+  }));
+  if (barRows.length) {
+    const charts = el("div", { class: "charts-row section-gap" },
+      el("div", { class: "chart-cell" }, el("h4", {}, "各期收益"),
+        singleSeriesBarChart(barRows, { fmt: fmtPct, height: 190 })));
+    if (barRows.length >= 2) {
+      charts.append(el("div", { class: "chart-cell" }, el("h4", {}, "累计收益曲线"),
+        cumulativeReturnChart(cumRows, { height: 190, labels: { test: "Held-out" } })));
+    }
+    panel.append(charts);
+  }
+  panel.append(el("table", { class: "data section-gap" },
+    el("tr", {}, el("th", {}, "区间"), el("th", {}, "起止"), el("th", {}, "收益"),
+      el("th", {}, "多头"), el("th", {}, "空头"), el("th", {}, "Sharpe"), el("th", {}, "回撤"), el("th", {}, "订单")),
     ...records.map((record) => {
       const result = record.test_result || {};
+      const period = record.period || {};
       return el("tr", {},
         el("td", {}, String(record.fold_id || "").replace("heldout_", "")),
+        el("td", {}, period.start && period.end ? `${period.start}–${period.end}` : "—"),
         el("td", { class: numClass(result.total_return) }, fmtPct(result.total_return)),
+        el("td", { class: numClass(result.long_return) }, fmtPct(result.long_return)),
+        el("td", { class: numClass(result.short_return) }, fmtPct(result.short_return)),
         el("td", {}, result.sharpe !== undefined && result.sharpe !== null ? Number(result.sharpe).toFixed(2) : "—"),
         el("td", {}, fmtPct(result.max_drawdown)),
+        el("td", {}, result.order_count ?? "—"),
       );
     }),
   ));
