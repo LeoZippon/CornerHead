@@ -89,6 +89,9 @@ a:hover { text-decoration: underline; }
   display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap;
   background: var(--panel); border-bottom: 1px solid var(--border);
   padding: 0.8rem clamp(16px, 3vw, 34px); position: sticky; top: 0; z-index: 20;
+  /* Constant height across pages: the homepage's primary button is the tallest
+     occupant; without this the bar shrinks on detail pages and layout jumps. */
+  min-height: 4rem;
 }
 .brand { font-size: 1.12rem; font-weight: 750; color: var(--text); display: flex; align-items: center; gap: 0.55rem; letter-spacing: .01em; }
 .brand .logo { display: block; width: 1.7rem; height: 1.7rem; }
