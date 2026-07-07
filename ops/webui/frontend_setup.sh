@@ -29,7 +29,14 @@ chmod 600 /home/cornerhead/.ssh/authorized_keys
 install -d -m 755 /opt/cornerhead/static
 rm -f /etc/nginx/sites-enabled/default
 systemctl enable --now nginx >/dev/null 2>&1 || true
-echo "frontend user + dirs ready"
+# Reap dead SSH connections within ~90s; otherwise an uncleanly dropped reverse
+# tunnel keeps 127.0.0.1:38889 bound for hours and blocks autossh from rebinding.
+cat > /etc/ssh/sshd_config.d/98-cornerhead-tunnel.conf <<'SSHD'
+ClientAliveInterval 30
+ClientAliveCountMax 3
+SSHD
+systemctl reload ssh 2>/dev/null || systemctl reload sshd
+echo "frontend user + dirs + sshd keepalive ready"
 REMOTE
 
 scp -q "$HERE/nginx-cornerhead.conf" "$FRONTEND:/etc/nginx/sites-available/cornerhead"

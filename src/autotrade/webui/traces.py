@@ -8,10 +8,10 @@ after collection the canonical copy lives in experiments/<id>/artifacts/<run>/.
 
 from __future__ import annotations
 
+import asyncio
 import json
-import time
 from pathlib import Path
-from typing import Iterator
+from typing import AsyncIterator
 
 from autotrade.pipelines.interactive import HITL_DIR_NAME, STATUS_NAME, read_status, status_pid_alive
 
@@ -116,12 +116,17 @@ def trace_stats(path: Path) -> dict[str, object]:
     }
 
 
-def stream_trace(experiment_dir: Path, run_id: str | None, *, offset: int = 0) -> Iterator[str]:
+async def stream_trace(experiment_dir: Path, run_id: str | None, *, offset: int = 0) -> AsyncIterator[str]:
     """SSE generator: replay from ``offset``, then live-tail until the run ends.
 
     Emits ``event: trace`` per JSONL line, ``event: waiting`` while the trace
     file does not exist yet, and a final ``event: eof`` when the trace can no
     longer grow (worker gone or a newer run started).
+
+    Async so an idle stream costs no worker thread: a sync generator would hold
+    one of anyio's ~40 threadpool tokens through every poll sleep, and a few
+    lingering tabs could starve every other endpoint. The file reads here are
+    small local-disk operations, safe to run on the event loop.
     """
     experiment_dir = Path(experiment_dir)
     position = int(offset)
@@ -134,7 +139,7 @@ def stream_trace(experiment_dir: Path, run_id: str | None, *, offset: int = 0) -
                 yield "event: eof\ndata: {}\n\n"
                 return
             yield 'event: waiting\ndata: {"reason": "trace not started"}\n\n'
-            time.sleep(STREAM_POLL_SECONDS)
+            await asyncio.sleep(STREAM_POLL_SECONDS)
             continue
         page = read_trace_page(path, offset=position)
         if page["events"]:
@@ -152,4 +157,4 @@ def stream_trace(experiment_dir: Path, run_id: str | None, *, offset: int = 0) -
         idle_rounds += 1
         if idle_rounds % STREAM_IDLE_HEARTBEAT_EVERY == 0:
             yield ": keep-alive\n\n"
-        time.sleep(STREAM_POLL_SECONDS)
+        await asyncio.sleep(STREAM_POLL_SECONDS)

@@ -483,6 +483,22 @@ class StatusPidTest(unittest.TestCase):
         self.assertFalse(status_pid_alive({"pid": None}))
         self.assertFalse(status_pid_alive({"pid": -1}))
 
+    def test_recycled_pid_counts_as_dead(self) -> None:
+        import os
+
+        from autotrade.pipelines.interactive import proc_start_ticks, status_pid_alive
+
+        # A recorded start time that does not match the live process means the
+        # pid number was recycled (e.g. after a reboot): the dead worker must
+        # not impersonate a live one, or resume stays blocked forever.
+        pid = os.getpid()
+        ticks = proc_start_ticks(pid)
+        self.assertIsInstance(ticks, int)
+        self.assertTrue(status_pid_alive({"pid": pid, "pid_start_ticks": ticks}))
+        self.assertFalse(status_pid_alive({"pid": pid, "pid_start_ticks": ticks - 1}))
+        # Statuses written before the field existed keep the old behavior.
+        self.assertTrue(status_pid_alive({"pid": pid}))
+
 
 class ControlFileTest(unittest.TestCase):
     def test_control_round_trip_and_bad_values_degrade_safely(self) -> None:

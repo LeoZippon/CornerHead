@@ -28,6 +28,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -161,9 +162,14 @@ class ExperimentStopped(Exception):
 
 def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
-    os.replace(tmp, path)
+    # Unique temp name: concurrent writers (server pool threads vs worker) must
+    # never share a temp file, or interleaved chunks get os.replace'd into place.
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def read_json(path: Path) -> dict[str, object]:
@@ -364,6 +370,7 @@ class StatusReporter:
         self._data: dict[str, object] = {
             "schema_version": 1,
             "pid": os.getpid(),
+            "pid_start_ticks": proc_start_ticks(os.getpid()),
             "state": "starting",
             "phase": None,
             "session_key": None,
@@ -444,6 +451,19 @@ def read_status(path: Path) -> dict[str, object]:
     return read_json(path)
 
 
+def proc_start_ticks(pid: int) -> int | None:
+    """Kernel start time (clock ticks since boot) of ``pid``; None if unreadable.
+
+    ``(pid, start_ticks)`` uniquely identifies a process incarnation, so a pid
+    number recycled after a crash/reboot never impersonates a dead worker.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii", errors="replace")
+        return int(stat.rpartition(")")[2].split()[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def status_pid_alive(status: Mapping[str, object]) -> bool:
     pid = status.get("pid")
     if not isinstance(pid, int) or pid <= 0:
@@ -460,6 +480,9 @@ def status_pid_alive(status: Mapping[str, object]) -> bool:
             return False
     except OSError:
         pass
+    recorded_ticks = status.get("pid_start_ticks")
+    if isinstance(recorded_ticks, int) and proc_start_ticks(pid) != recorded_ticks:
+        return False
     return True
 
 

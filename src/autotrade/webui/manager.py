@@ -14,6 +14,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
+import uuid
 from pathlib import Path
 
 from autotrade.environment.runtime import utc_now_iso
@@ -49,6 +51,13 @@ class ExperimentManager:
         self.experiments_root = Path(experiments_root or self.repo_root / "experiments").resolve()
         self.worker_script = self.repo_root / "scripts" / "experiments" / "run_interactive_experiment.py"
         self.log_dir = self.repo_root / "logs" / "webui"
+        # Serializes all lifecycle mutations across the server's request threads.
+        # Without it, concurrent requests race on control.json read-modify-write
+        # (lost approvals/directives), on the check-then-spawn in start_worker
+        # (double workers on one experiment, cap breach), and on delete-vs-resume.
+        # RLock: create/control re-enter start_worker. Mutations are rare and
+        # fast (JSON writes + Popen), so one process-wide lock is proportionate.
+        self._mutate = threading.RLock()
 
     # ---- queries -----------------------------------------------------------
     def running_experiments(self) -> list[str]:
@@ -65,6 +74,10 @@ class ExperimentManager:
 
     # ---- creation ----------------------------------------------------------
     def create_experiment(self, params: dict[str, object]) -> dict[str, object]:
+        with self._mutate:
+            return self._create_experiment(params)
+
+    def _create_experiment(self, params: dict[str, object]) -> dict[str, object]:
         experiment_id = str(params.get("experiment_id") or "").strip()
         if not _ID_PATTERN.match(experiment_id):
             raise ManagerError(
@@ -91,6 +104,10 @@ class ExperimentManager:
 
     # ---- worker lifecycle ---------------------------------------------------
     def start_worker(self, experiment_id: str) -> dict[str, object]:
+        with self._mutate:
+            return self._start_worker(experiment_id)
+
+    def _start_worker(self, experiment_id: str) -> dict[str, object]:
         experiment_dir = resolve_experiment_dir(self.experiments_root, experiment_id)
         state = experiment_state(experiment_dir)
         if state.get("kind") != "hitl":
@@ -131,6 +148,10 @@ class ExperimentManager:
         return {"spawned_pid": process.pid, "log_path": str(log_path)}
 
     def control(self, experiment_id: str, action: str, *, session_key: str | None = None, directive: str | None = None, mode: str | None = None) -> dict[str, object]:
+        with self._mutate:
+            return self._control(experiment_id, action, session_key=session_key, directive=directive, mode=mode)
+
+    def _control(self, experiment_id: str, action: str, *, session_key: str | None = None, directive: str | None = None, mode: str | None = None) -> dict[str, object]:
         experiment_dir = resolve_experiment_dir(self.experiments_root, experiment_id)
         hitl_dir = experiment_dir / HITL_DIR_NAME
         if not hitl_dir.is_dir():
@@ -180,8 +201,6 @@ class ExperimentManager:
             state = experiment_state(experiment_dir)
             if state.get("worker_alive"):
                 raise ManagerError("先停止运行中的 worker（停止/强制终止）再重跑该 Fold")
-            import uuid
-
             control.rerun_sessions[session_key] = uuid.uuid4().hex[:12]
             # Step-mode gating: the re-run must be re-approved (prompt edits land first).
             control.approved_sessions = tuple(k for k in control.approved_sessions if k != session_key)
@@ -219,6 +238,10 @@ class ExperimentManager:
 
     # ---- deletion ------------------------------------------------------------
     def delete_experiment(self, experiment_id: str) -> dict[str, object]:
+        with self._mutate:
+            return self._delete_experiment(experiment_id)
+
+    def _delete_experiment(self, experiment_id: str) -> dict[str, object]:
         experiment_dir = resolve_experiment_dir(self.experiments_root, experiment_id)
         state = experiment_state(experiment_dir)
         if state.get("worker_alive"):

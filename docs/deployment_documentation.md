@@ -397,9 +397,13 @@ MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
 | `start` / `stop` / `status` | 启停控制台 API（uvicorn，回环 38888）与 autossh 反向隧道；status 含前端端到端健康检查 |
 | `ensure` | 缺什么补什么（keepalive 目标，幂等） |
 | `sync` | 推送静态 SPA 到前端 |
-| `install-cron` | 安装托管 crontab 块：`*/2` 分钟 `ensure`（flock 防重入）+ `@reboot` |
+| `install-cron` | 安装托管 crontab 块：`*/2` 分钟 `ensure` + `@reboot` |
 
-保活分层：autossh（`-M 0` + `ServerAliveInterval=30` + `ExitOnForwardFailure`）自愈网络级断连；cron `ensure` 拉起崩溃的 console/autossh 进程本体；前端 nginx/sshd 由 systemd 管理。实验 worker 是 `start_new_session` 的分离进程——console 或隧道重启不影响运行中的实验。日志：`logs/webui/console.log`、`logs/webui/keepalive.log`。
+保活分层：autossh（`-M 0` + `ServerAliveInterval=30` + `ExitOnForwardFailure`）自愈网络级断连；cron `ensure` 拉起崩溃的 console/autossh 进程本体；前端 nginx/sshd 由 systemd 管理，且前端 sshd 配置 `ClientAliveInterval 30 / ClientAliveCountMax 3`（`frontend_setup.sh` 写入），确保隧道非正常断开后 38889 的旧监听 ≤90 秒被回收，autossh 重连不会撞"address in use"。实验 worker 是 `start_new_session` 的分离进程——console 或隧道重启不影响运行中的实验。
+
+稳定性细节（脚本内建，无需运维）：`start/stop/ensure` 共用 `.runtime/webui/ensure.lock` 文件锁（手动操作与 cron 不会双拉进程）；pidfile 存活判定要求 `/proc/<pid>/cmdline` 与预期进程匹配（重启后 pid 号被复用不会误判存活）；`ensure` 平时静默，仅记录实际拉起/轮转/失败；`logs/webui/console.log`、`keepalive.log` 超过 10MB 自动 copy-truncate 轮转（保留一代 `.1`）。
+
+时间显示约定：后端一律存 UTC ISO 时间戳；WebUI 前端统一按 UTC+8（Asia/Shanghai）渲染显示。
 
 **MacBook 侧**（一次性把下面片段加入 `~/.ssh/config`，之后 `ssh -N cornerhead` 即接通，浏览器打开 <http://localhost:8888>）：
 

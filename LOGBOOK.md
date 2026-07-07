@@ -1,3 +1,11 @@
+2026-07-08 控制台稳定性审计 + WebUI UTC+8 显示（feat/hitl-webui）
+
+- 时区：前端所有显示时间戳统一按 UTC+8（Asia/Shanghai）渲染（app.js 新增 fmtTs/fmtTsTime，基于 Intl，与浏览器本地时区无关）；后端存储保持 UTC ISO 不变；registry 的 mtime 回退时间戳由 naive 本地时间改为 aware-UTC（否则会被前端按浏览器时区误读）。
+- 稳定性审计（子代理深审代码 + 实机核查部署栈），修复 5 项真实缺陷：①SSE trace 流由同步生成器改 async——原实现空转睡眠也占用 anyio 线程池 token（仅 40 个），少量残留标签页即可饿死全部 API 含 pause/stop（最可能的无人值守宕机路径）；②ExperimentManager 加互斥锁序列化 create/start/control/delete——原 control.json 读改写并发丢更新（批准/指令静默丢失）、start_worker 检查-再-spawn 可双开 worker 撕裂账本；③write_json_atomic 临时文件名唯一化（原固定名并发写可把交错的坏 JSON os.replace 上位 → worker 直接 failed）；④pid 复用防护：status.json 记 `pid_start_ticks`（/proc stat 第 22 字段）且 status_pid_alive 校验、stack 脚本 alive() 校验 /proc/<pid>/cmdline——重启后 pid 号被复用不再误判"实验仍在跑"（死实验永远无法续跑）或"console 已在跑"（静默全站不启动）；⑤前端 sshd 配 ClientAliveInterval 30/CountMax 3（frontend_setup.sh 写入并已生效）——原 0 表示不探测，隧道非正常断开后 38889 旧监听可占用数小时使 autossh 重连一直撞墙。
+- 运维强化：webui_stack.sh start/stop/ensure 共用 ensure.lock 文件锁（手动操作不再与 cron 竞态）、ensure 平时静默、console/keepalive 日志 >10MB copy-truncate 轮转、spawn 后确认进程存活否则报 FAILED；cron 块去掉外层 flock（脚本自锁）并已重装。
+- 仅记录未实施的优化机会（详见审计报告）：trace/stats 每 5s 全量重读 JSONL、SSE 重连无退避、实验列表 O(实验数) 轮询无缓存、策略 zip 临时文件可能残留、run_* 沙箱目录随重跑累积（test2 沙箱已 9.3G）、analysis 重生成状态不落盘、沙箱 agent-uid 文件使删除实验后 work root 静默残留、/Data 已用 94%。
+- 验证：full suite 555 OK（+1 pid 复用回归测试）；栈完整重启、cron 重装、前端端到端（nginx→隧道→API）SSE 流实测通过；deployment_documentation §12 同步（锁/轮转/ClientAlive/时区约定）。
+
 2026-07-07 Broker 成交模型保真批次（fix/broker-fill-realism，叠在 afterhours 上）
 
 - 部分成交评估（实证定案：**暂不实现**）：test2 全部 272 笔真实成交对照成交日真实分钟 bar——中位订单 ¥3.3 万、占日成交量中位 0.007%（p99 0.08%）、占中位分钟 bar 中位 2.8%（p99 42%），**无一超过整根 bar**；25% 参与率上限只会触及 ~5% 成交。¥100 万规模下全量成交假设的误差属二阶（低于固定滑点假设本身）；已记录重启条件（资金 ~千万级/单票集中/微盘策略 → 届时只做参与率上限档，不做队列/冲击伪精度）。

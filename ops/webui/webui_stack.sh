@@ -28,18 +28,37 @@ CRON_BEGIN="# BEGIN CornerHead webui stack"
 CRON_END="# END CornerHead webui stack"
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 
-alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+# alive PIDFILE PATTERN — the pid must exist AND its cmdline must match PATTERN,
+# so a stale pidfile whose pid number was recycled after a reboot reads as DOWN.
+alive() {
+    local pid
+    [ -f "$1" ] && pid="$(cat "$1")" && [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null && grep -qa "$2" "/proc/$pid/cmdline" 2>/dev/null
+}
+
+QUIET=0
+say() { [ "$QUIET" = 1 ] || echo "$@"; }
+
+# Copy-truncate rotation, one generation; keeps the cron/uvicorn append fds valid.
+rotate_log() {
+    local f="$1" max=$((10 * 1024 * 1024))
+    [ -f "$f" ] && [ "$(stat -c %s "$f")" -gt "$max" ] || return 0
+    cp "$f" "$f.1" && : > "$f"
+    echo "rotated $(basename "$f") (>10MB, one generation kept)"
+}
 
 start_console() {
-    if alive "$CONSOLE_PID"; then echo "console: already running (pid $(cat "$CONSOLE_PID"))"; return; fi
+    if alive "$CONSOLE_PID" run_webui; then say "console: already running (pid $(cat "$CONSOLE_PID"))"; return; fi
     nohup "$PY" "$REPO/scripts/webui/run_webui.py" --port "$PORT" \
         >> "$LOG_DIR/console.log" 2>&1 &
     echo $! > "$CONSOLE_PID"
-    echo "console: started (pid $!, 127.0.0.1:$PORT)"
+    sleep 1
+    if alive "$CONSOLE_PID" run_webui; then echo "console: started (pid $(cat "$CONSOLE_PID"), 127.0.0.1:$PORT)"
+    else rm -f "$CONSOLE_PID"; echo "console: FAILED to start (died immediately — see $LOG_DIR/console.log)"; return 1; fi
 }
 
 start_tunnel() {
-    if alive "$TUNNEL_PID"; then echo "tunnel: already running (pid $(cat "$TUNNEL_PID"))"; return; fi
+    if alive "$TUNNEL_PID" autossh; then say "tunnel: already running (pid $(cat "$TUNNEL_PID"))"; return; fi
     AUTOSSH_PIDFILE="$TUNNEL_PID" AUTOSSH_GATETIME=0 autossh -M 0 -f -N \
         -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
         -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
@@ -47,18 +66,18 @@ start_tunnel() {
         -R "127.0.0.1:${REMOTE_PORT}:127.0.0.1:${PORT}" \
         "${TUNNEL_USER}@${FRONTEND_HOST}"
     sleep 1
-    if alive "$TUNNEL_PID"; then echo "tunnel: started (pid $(cat "$TUNNEL_PID"), R:${REMOTE_PORT} -> :${PORT})"
+    if alive "$TUNNEL_PID" autossh; then echo "tunnel: started (pid $(cat "$TUNNEL_PID"), R:${REMOTE_PORT} -> :${PORT})"
     else echo "tunnel: FAILED to start (see ssh output above)"; return 1; fi
 }
 
-stop_one() { # name pidfile
-    if alive "$2"; then kill "$(cat "$2")" 2>/dev/null || true; echo "$1: stopped"; else echo "$1: not running"; fi
+stop_one() { # name pidfile pattern
+    if alive "$2" "$3"; then kill "$(cat "$2")" 2>/dev/null || true; echo "$1: stopped"; else echo "$1: not running"; fi
     rm -f "$2"
 }
 
 status() {
-    alive "$CONSOLE_PID" && echo "console: running (pid $(cat "$CONSOLE_PID"))" || echo "console: DOWN"
-    alive "$TUNNEL_PID" && echo "tunnel:  running (pid $(cat "$TUNNEL_PID"))" || echo "tunnel:  DOWN"
+    alive "$CONSOLE_PID" run_webui && echo "console: running (pid $(cat "$CONSOLE_PID"))" || echo "console: DOWN"
+    alive "$TUNNEL_PID" autossh && echo "tunnel:  running (pid $(cat "$TUNNEL_PID"))" || echo "tunnel:  DOWN"
     curl -sf -m 5 "http://127.0.0.1:${PORT}/api/health" > /dev/null \
         && echo "local API: ok" || echo "local API: unreachable"
     ssh -o ConnectTimeout=8 "root@${FRONTEND_HOST}" \
@@ -79,7 +98,7 @@ install_cron() {
     local self="$REPO/ops/webui/webui_stack.sh"
     local block
     block="$CRON_BEGIN
-*/2 * * * * flock -n $RUN_DIR/ensure.lock $self ensure >> $LOG_DIR/keepalive.log 2>&1
+*/2 * * * * $self ensure >> $LOG_DIR/keepalive.log 2>&1
 @reboot sleep 30 && $self ensure >> $LOG_DIR/keepalive.log 2>&1
 $CRON_END"
     ( crontab -l 2>/dev/null | sed "/^${CRON_BEGIN}\$/,/^${CRON_END}\$/d"; echo "$block" ) | crontab -
@@ -87,11 +106,19 @@ $CRON_END"
     crontab -l | sed -n "/^${CRON_BEGIN}\$/,/^${CRON_END}\$/p"
 }
 
+# Mutating subcommands share one lock with the cron ensure (flock -n there),
+# so a manual start/stop can never race the keepalive into double spawns.
+grab_lock() { exec 9>"$RUN_DIR/ensure.lock"; flock -w 30 9 || { echo "another stack operation holds the lock"; exit 1; }; }
+
 case "${1:-}" in
-    start)  start_console; start_tunnel ;;
-    stop)   stop_one tunnel "$TUNNEL_PID"; stop_one console "$CONSOLE_PID" ;;
+    start)  grab_lock; start_console; start_tunnel ;;
+    stop)   grab_lock; stop_one tunnel "$TUNNEL_PID" autossh; stop_one console "$CONSOLE_PID" run_webui ;;
     status) status ;;
-    ensure) start_console; start_tunnel ;;
+    # Cron target: silent when everything is already up, so keepalive.log only
+    # records actual starts, rotations, and failures.
+    ensure) grab_lock; QUIET=1
+            rotate_log "$LOG_DIR/console.log"; rotate_log "$LOG_DIR/keepalive.log"
+            start_console; start_tunnel ;;
     sync)   sync_static ;;
     install-cron) install_cron ;;
     *) echo "usage: $0 {start|stop|status|ensure|sync|install-cron}"; exit 2 ;;
