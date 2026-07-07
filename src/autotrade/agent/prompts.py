@@ -85,7 +85,8 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 
 ## 回放与交易环境规则（写入回测流程，无法绕过）
 - 入口：Environment 按 24h tick 网格逐 tick 调用一次 `main(ctx)`（一次覆盖全市场），盘中 09:15–15:00 为 1 分钟 bar，普通盘中 bar 的决策间距见事实 `intraday_decision_minutes`（默认 1 = 每分钟；竞价 tick 恒为决策 tick，Broker 仍逐 bar 撮合挂单），非交易时段按 `offsession_tick_minutes` 唤醒但只用于研究、状态和计划维护。无需返回 `trade_intents`。
-- 可报单时点：只有显式可报单 tick（`09:15`/`09:25`/`14:57`）或有真实行情的交易分钟 tick 才能向 Broker 提交开/平仓；普通 off-session tick 不报单。盘外若想准备盘前订单，先写 `ctx.state_dir` 计划，后续在 09:15/09:25 读取并提交。
+- 可报单时点：只有显式可报单 tick（`09:15`/`09:25`/`14:57`，及盘后定价 tick，见事实 `afterhours_decision_time`）或有真实行情的交易分钟 tick 才能向 Broker 提交开/平仓；普通 off-session tick 不报单。盘外若想准备盘前订单，先写 `ctx.state_dir` 计划，后续在 09:15/09:25 读取并提交。
+- 盘后固定价格 tick（如启用，默认 15:05）：可见当日已确认收盘价（`ctx.bars` 为收盘 bar），订单**立即按当日收盘价成交**（无滑点、无成交延迟，`limit` 劣于收盘价视为无效申报拒单）；仅限该日已开通盘后定价的板块（科创板 2019-07 起、创业板 2020-08 起、其余 A 股 2026-07-06 起，之前的日期拒 `afterhours_not_available`）；`short`/`fin_buy` 开新杠杆仓不支持；涨跌停/停牌/T+1/资金约束照常执行。
 - 固定日内时间表（贴近真实交易员的日常例程）：为策略选定少数**固定的每日时钟时点**，用 `ctx.cur_time` 门控，而不是每个 tick 或随机时点行动。典型安排：盘前某个固定 off-session 时点（如 `08:00`）做研究/选股并写 `ctx.state_dir` 计划 → `09:15`/`09:25` 读取计划下单 → 盘中在固定节奏做持仓管理/做 T → `14:57` 收盘竞价前收尾。同一套时点在每个交易日重复触发，使重操作（横截面筛选、模型推理、`ctx.nl()`）落在可预期的少数时刻，成本可控、可复现，也贴近实盘执行。
 - 成交延迟：在某根 bar 决策的单默认于其后第 `execution_lag_bars`（默认 2）根 bar 起进入撮合，杜绝 bar 内前视（如 09:35 决策、09:37 起成交）。临近收盘、其后无可成交 bar 的决策无法成交。
 - 竞价：`09:15` 信息 tick 无价格，盲下单成交于 09:30 开盘竞价；`09:25` 暴露撮合开盘价，下单成交于首根连续 bar（09:31，按 taker 滑点）；`14:57` 下单成交于 15:00 收盘价。真正开/收盘集合竞价成交不计滑点。
@@ -744,6 +745,7 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             "dividend_tax_rate": profile.get("dividend_tax_rate"),
             "execution_lag_bars": manifest.get("execution_lag_bars"),
             "auction_close_time": manifest.get("auction_close_time"),
+            "afterhours_decision_time": manifest.get("afterhours_decision_time"),
             "offsession_tick_minutes": manifest.get("offsession_tick_minutes"),
             "decision_max_sim_minutes": manifest.get("decision_max_sim_minutes"),
             "backtest_max_seconds_per_decision": manifest.get("backtest_max_seconds_per_decision"),

@@ -351,6 +351,7 @@ def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
             "auction_preopen_time",
             "auction_decision_time",
             "auction_close_time",
+            "afterhours_decision_time",
             "offsession_tick_minutes",
             "intraday_decision_minutes",
             "timeview_enabled",

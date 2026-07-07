@@ -953,6 +953,129 @@ class CorporateActionTest(unittest.TestCase):
         self.assertGreater(stats["long_return"], -0.0001)  # ≈ round-trip costs only
 
 
+# After-hours-eligible replay: main-board dates on/after the 2026-07-06 rule
+# revision that extended 盘后固定价格交易 to all A-shares.
+AH_REPLAY = make_daily(
+    [
+        ("20260706", "000001.SZ", 10.0, 10.5, 11.0, 9.0, False),
+        ("20260707", "000001.SZ", 10.6, 11.0, 11.6, 9.5, False),
+        ("20260708", "000001.SZ", 11.1, 11.5, 12.1, 10.0, False),
+    ]
+)
+
+
+class AfterhoursFixedPriceTest(unittest.TestCase):
+    def _replay(self, fn, daily=AH_REPLAY, **kwargs):
+        kwargs.setdefault("afterhours_decision_time", "15:05")
+        return run_main_ctx_replay(
+            daily,
+            BrokerProfile(),
+            shortable_codes=frozenset({"000001.SZ", "000002.SZ"}),
+            main_policy=FakeMainPolicy(fn),
+            **kwargs,
+        )
+
+    def test_availability_by_board_and_date(self):
+        from autotrade.environment.broker_core import afterhours_available
+
+        self.assertTrue(afterhours_available("688001.SH", "20200103"))  # STAR since 2019-07
+        self.assertFalse(afterhours_available("688001.SH", "20190701"))
+        self.assertTrue(afterhours_available("300750.SZ", "20210104"))  # ChiNext since 2020-08
+        self.assertFalse(afterhours_available("300750.SZ", "20200103"))
+        self.assertTrue(afterhours_available("000001.SZ", "20260706"))  # all A-shares since the revision
+        self.assertFalse(afterhours_available("000001.SZ", "20260703"))
+        self.assertFalse(afterhours_available("600000.SH", "20251231"))
+        self.assertTrue(afterhours_available("830799.BJ", "20260706"))
+
+    def test_fills_at_the_official_close_without_slippage(self):
+        def at_afterhours(state):
+            if state["cur_time"] == "15:05" and state["cur_date"] == "20260706" and not _held(state, "000001.SZ"):
+                return [{"action": "buy", "ts_code": "000001.SZ", "amount": 1000}]
+            return []
+
+        replay = self._replay(at_afterhours)
+        fill = next(e for e in replay.broker.events if e["event_type"] == "order_filled")
+        self.assertEqual(fill["price_label"], "afterhours_fixed")
+        self.assertEqual(fill["price"], 10.5)  # the exact close — no slippage, no lag
+        self.assertEqual(fill["quantity"], 1000)
+        # Settled immediately at the tick: exactly one filled order, nothing pending.
+        self.assertEqual([o.status for o in replay.broker.orders], ["filled"])
+
+    def test_tick_absent_when_disabled_and_unique_when_enabled(self):
+        seen: list[str] = []
+
+        def record(state):
+            seen.append(f"{state['cur_date']} {state['cur_time']}")
+            return []
+
+        self._replay(record, afterhours_decision_time=None)
+        self.assertFalse(any(t.endswith("15:05") for t in seen))
+        seen.clear()
+        # A 5-minute off-session grid would land on 15:05 itself: the plan starts
+        # the evening grid after the after-hours tick, so the minute stays unique.
+        self._replay(record, offsession_tick_minutes=5)
+        counts = [t for t in seen if t == "20260706 15:05"]
+        self.assertEqual(len(counts), 1)
+        self.assertIn("20260706 15:10", seen)
+
+    def test_rejects_board_dates_without_afterhours_session(self):
+        def at_afterhours(state):
+            if state["cur_time"] == "15:05" and state["cur_date"] == "20220104":
+                return [{"action": "buy", "ts_code": "000001.SZ", "amount": 1000}]
+            return []
+
+        replay = self._replay(at_afterhours, daily=REPLAY)  # 2022 main-board dates
+        self.assertEqual(replay.broker.reject_counts.get("afterhours_not_available"), 1)
+        self.assertEqual(replay.broker.position_quantity("000001.SZ"), 0)
+
+    def test_limit_worse_than_close_is_invalid_else_fills_at_close(self):
+        def at_afterhours(state):
+            if state["cur_time"] == "15:05" and state["cur_date"] == "20260706":
+                return [
+                    {"action": "buy", "ts_code": "000001.SZ", "amount": 500, "limit": 10.4},
+                    {"action": "buy", "ts_code": "000001.SZ", "amount": 500, "limit": 10.6},
+                ]
+            return []
+
+        replay = self._replay(at_afterhours)
+        self.assertEqual(replay.broker.reject_counts.get("afterhours_price_invalid"), 1)
+        fill = next(e for e in replay.broker.events if e["event_type"] == "order_filled")
+        self.assertEqual(fill["price"], 10.5)  # fixed price: the close, not the limit
+
+    def test_new_leveraged_opens_are_unsupported(self):
+        def at_afterhours(state):
+            if state["cur_time"] == "15:05" and state["cur_date"] == "20260706":
+                return [
+                    {"action": "short", "ts_code": "000001.SZ", "amount": 500, "limit": 10.5},
+                    {"action": "fin_buy", "ts_code": "000001.SZ", "amount": 500},
+                ]
+            return []
+
+        replay = self._replay(at_afterhours)
+        self.assertEqual(replay.broker.reject_counts.get("afterhours_op_unsupported"), 2)
+
+    def test_t_plus_one_still_binds_then_close_works_next_day(self):
+        def strategy(state):
+            if state["cur_date"] == "20260706" and state["cur_time"] == "09:25":
+                return [{"action": "buy", "ts_code": "000001.SZ", "amount": 1000}]
+            if state["cur_time"] == "15:05" and _held(state, "000001.SZ"):
+                return [{"action": "close", "ts_code": "000001.SZ"}]
+            return []
+
+        replay = self._replay(strategy)
+        # Day 1: bought at the 15:00 close bar, so the 15:05 close attempt hits T+1.
+        self.assertEqual(replay.broker.reject_counts.get("t_plus_one_no_sellable"), 1)
+        # Day 2: the same 15:05 close resolves the holding and exits at that close.
+        exit_fill = next(
+            e for e in replay.broker.events
+            if e["event_type"] == "order_filled" and e["action"] == "sell"
+        )
+        self.assertEqual(exit_fill["price_label"], "afterhours_fixed")
+        self.assertEqual(exit_fill["price"], 11.0)
+        closed = next(e for e in replay.broker.events if e["event_type"] == "position_closed")
+        self.assertEqual(closed["trade_date"], "20260707")
+
+
 class ReplayIntegrationTest(unittest.TestCase):
     def test_main_runs_each_bar_and_liquidates_at_exit(self):
         # Decide once at the 09:25 pre-open tick; next-bar execution fills it, and

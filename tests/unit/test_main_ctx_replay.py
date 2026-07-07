@@ -1471,7 +1471,7 @@ class DecisionGridTest(unittest.TestCase):
         from autotrade.environment.main_ctx_engine import _is_decision_tick
 
         def tick(minute_key, **flags):
-            base = {"is_offsession": False, "is_auction": False, "is_close_auction": False}
+            base = {"is_offsession": False, "is_auction": False, "is_close_auction": False, "is_afterhours": False}
             base.update(flags)
             return SimpleNamespace(minute_key=minute_key, **base)
 
@@ -1481,10 +1481,11 @@ class DecisionGridTest(unittest.TestCase):
         self.assertTrue(_is_decision_tick(tick("09:35"), 5))
         self.assertFalse(_is_decision_tick(tick("09:36"), 5))
         self.assertFalse(_is_decision_tick(tick("09:31"), 5))
-        # Auction and off-session ticks always decide regardless of the grid.
+        # Auction, off-session and after-hours ticks always decide regardless of the grid.
         self.assertTrue(_is_decision_tick(tick("09:25", is_auction=True), 5))
         self.assertTrue(_is_decision_tick(tick("14:57", is_close_auction=True), 5))
         self.assertTrue(_is_decision_tick(tick("08:00", is_offsession=True), 5))
+        self.assertTrue(_is_decision_tick(tick("15:06", is_afterhours=True), 5))
 
 
 class LazyBarsTest(unittest.TestCase):

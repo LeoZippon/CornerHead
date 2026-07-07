@@ -101,6 +101,7 @@
 | `auction_preopen_time` | `09:15` | 盲信息 tick（成交于 09:30 开盘竞价）；`None` 关闭 |
 | `auction_decision_time` | `09:25` | 撮合开盘 tick（成交于首根连续 bar） |
 | `auction_close_time` | `14:57` | 收盘竞价决策 tick（成交于 15:00 bar 收盘）；`None` 关闭 |
+| `afterhours_decision_time` | `15:05` | 盘后固定价格 tick：可见已确认收盘价，订单立即按收盘价结算（板块/日期资格见 `broker_core.afterhours_available`；`short`/`fin_buy` 不支持）；`None` 关闭；旧 manifest 无该键按关闭回放 |
 | `offsession_tick_minutes` | 30 min | 盘外研究 tick 间距（`0` 关闭；盘外不下单） |
 | `intraday_decision_minutes` | 1 | 普通盘中 bar 上 `main(ctx)` 决策间距（分钟）；Broker 仍逐 bar 撮合，竞价/盘外 tick 恒为决策 tick |
 | `execution_lag_bars` | 2 | 决策 bar 到撮合 bar 的固定滞后（按当日 bar 数收敛 `max(1, min(lag, n-1))`） |

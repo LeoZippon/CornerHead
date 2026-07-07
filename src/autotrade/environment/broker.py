@@ -60,6 +60,7 @@ from autotrade.environment.broker_core import (
     accrue_debt_interest,
     credit_maintenance_ratio,
     enable_bail_balance,
+    is_star_market,
     project_open,
     project_reduce,
     release_fin_shares,
@@ -1635,7 +1636,7 @@ class SimBroker:
         if abs(value - rounded) > 1e-9:
             return 0, "invalid_amount"
         shares = int(rounded)
-        if _is_star_market(ts_code):
+        if is_star_market(ts_code):
             if shares < STAR_MIN_LOT_SIZE:
                 return 0, "amount_below_lot_size"
             return shares, None
@@ -2040,11 +2041,6 @@ def _date_gap(start_date: str, end_date: str) -> int:
     except ValueError:
         return 0
     return max(0, (end - start).days)
-
-
-def _is_star_market(ts_code: str) -> bool:
-    code = str(ts_code).upper()
-    return code.endswith(".SH") and code[:3] in {"688", "689"}
 
 
 def _open_price(bar: pd.Series) -> float | None:

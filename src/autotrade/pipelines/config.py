@@ -178,6 +178,13 @@ class ExperimentConfig:
     # Close call-auction decision tick: a decision at this time fills at the day's
     # final bar (15:00 close auction). Set None to drop it.
     auction_close_time: str | None = "14:57"
+    # After-hours fixed-price tick (盘后固定价格交易, 15:05-15:30 at the closing
+    # price): the strategy sees the confirmed close and its orders settle
+    # immediately at that price for board-eligible codes (STAR since 2019-07,
+    # ChiNext since 2020-08, all remaining A-shares since 2026-07-06 per the 2026
+    # exchange rule revision). Set None to drop the tick. Old manifests without
+    # this key replay with it disabled, preserving frozen-eval reproducibility.
+    afterhours_decision_time: str | None = "15:05"
     # 24h tick grid: outside the 09:15-15:00 session the replay still calls main(ctx)
     # on this minute spacing (research/state only — off-session ticks place no fills),
     # so the same loop drives backtest and live. 0 disables off-session ticks.

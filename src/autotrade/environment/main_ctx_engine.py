@@ -42,6 +42,7 @@ from autotrade.environment.backtest_engine import (
     hide_snapshot_slots_from_agent,
 )
 from autotrade.environment.broker import SimBroker, optype, prtype
+from autotrade.environment.broker_core import afterhours_available
 from autotrade.environment.data.contracts import sim_datetime
 from autotrade.environment.runtime import sanitize_for_log
 from autotrade.environment.state_staging import StateStager
@@ -331,6 +332,7 @@ def run_main_ctx_replay(
     auction_preopen_time: str | None = "09:15",
     auction_decision_time: str = "09:25",
     auction_close_time: str | None = "14:57",
+    afterhours_decision_time: str | None = None,
     execution_lag_bars: int = 2,
     offsession_tick_minutes: int = 30,
     intraday_decision_minutes: int = 1,
@@ -366,6 +368,10 @@ def run_main_ctx_replay(
     matched open, fills at the first continuous bar); ``auction_close_time`` (e.g.
     14:57) makes that bar's decision fill at the day's final bar (the 15:00 close
     auction). These batch-auction fills are labelled ``price_label="auction"``.
+    ``afterhours_decision_time`` (None = off) appends the after-hours fixed-price
+    tick (盘后固定价格交易, e.g. 15:05): the strategy sees the day's close prints
+    and its orders settle immediately at the official close for board-eligible
+    codes, labelled ``price_label="afterhours_fixed"`` with no slippage.
     ``offsession_tick_minutes`` (0 = off) adds a research-only tick grid outside the
     session; off-session orders do not fill. ``ctx.broker.pending(ts_code)`` exposes
     still-working orders so the Agent can avoid re-submitting before a fill (parity
@@ -462,6 +468,7 @@ def run_main_ctx_replay(
                     minute_rows, auction_enabled, auction_preopen_time, auction_decision_time,
                     execution_lag_bars, offsession_tick_minutes=offsession_tick_minutes,
                     close_auction_time=auction_close_time,
+                    afterhours_time=afterhours_decision_time,
                 )
                 real_index = {tick.minute_key: i for i, tick in enumerate(t for t in plan if t.is_real)}
                 n_real = len(real_index)
@@ -698,6 +705,9 @@ class _Tick:
     is_offsession: bool = False
     # A close (15:00) call-auction tick: its order fills at the final bar's CLOSE.
     is_close_auction: bool = False
+    # An after-hours fixed-price tick (盘后固定价格交易): its orders settle
+    # immediately at the day's official close for board-eligible codes.
+    is_afterhours: bool = False
 
 
 def _is_decision_tick(tick: "_Tick", intraday_decision_minutes: int) -> bool:
@@ -709,7 +719,7 @@ def _is_decision_tick(tick: "_Tick", intraday_decision_minutes: int) -> bool:
     behavior)."""
     if intraday_decision_minutes <= 1:
         return True
-    if tick.is_offsession or tick.is_auction or tick.is_close_auction:
+    if tick.is_offsession or tick.is_auction or tick.is_close_auction or tick.is_afterhours:
         return True
     hour_text, _, minute_text = str(tick.minute_key).partition(":")
     try:
@@ -741,6 +751,7 @@ def _day_tick_plan(
     *,
     offsession_tick_minutes: int = 15,
     close_auction_time: str | None = "14:57",
+    afterhours_time: str | None = None,
 ) -> list[_Tick]:
     """Ordered decision ticks for one day, each tagged with the real-bar index its
     orders reach the book at (``activate_index``).
@@ -755,7 +766,10 @@ def _day_tick_plan(
     auction) instead of the default lag. ``offsession_tick_minutes`` (0 = off) adds a
     research-only grid outside the session: off-session ticks never fill orders. The
     explicit pre-open auction ticks and close-auction tick have fixed activations
-    independent of ``execution_lag_bars``.
+    independent of ``execution_lag_bars``. ``afterhours_time`` (e.g. 15:05) appends
+    the after-hours fixed-price tick after the last real bar: it sees the day's
+    close prints and its orders settle immediately at the official close for
+    board-eligible codes (no activation bar; see ``_execute_afterhours_action``).
     """
     real_keys = sorted({str(key) for key in minute_rows["minute_key"]}, key=_minute_sort)
     if not real_keys:
@@ -797,8 +811,14 @@ def _day_tick_plan(
         else:
             activate_index = index + lag
             plan.append(_Tick(key, groups[key], activate_index if activate_index < n else None, True, False))
+    session_end = close_min
+    if afterhours_time and _minute_sort(str(afterhours_time)) > close_min:
+        # After-hours fixed-price tick: the close prints are visible (ctx.bars =
+        # the final bar group) and orders settle at the close, immediately.
+        plan.append(_Tick(str(afterhours_time), groups[real_keys[-1]], None, False, False, is_afterhours=True))
+        session_end = _minute_sort(str(afterhours_time))
     # Post-close off-session ticks: research/state only, orders never fill.
-    after_start = ((close_min // offsession_tick_minutes) + 1) * offsession_tick_minutes if offsession_tick_minutes > 0 else 0
+    after_start = ((session_end // offsession_tick_minutes) + 1) * offsession_tick_minutes if offsession_tick_minutes > 0 else 0
     for key in _offsession_keys(after_start, 24 * 60, offsession_tick_minutes):
         plan.append(_Tick(key, _empty_minute_rows(), None, False, False, True))
     return plan
@@ -881,6 +901,8 @@ def _release_delayed_actions(
 
 
 def _is_orderable_tick(tick: "_Tick") -> bool:
+    if tick.is_afterhours:
+        return True
     return not tick.is_offsession and (tick.is_real or tick.activate_index is not None)
 
 
@@ -934,6 +956,16 @@ def _place_actions_at_tick(
                 when=when,
             ):
                 placed_actions.append(dict(action))
+            continue
+        if tick.is_afterhours:
+            # After-hours fixed-price: no activation bar — settle at the close now.
+            if _execute_afterhours_action(broker, action, trade_date=trade_date, minute_key=tick.minute_key):
+                placed_actions.append(dict(action))
+            else:
+                broker.record_event(
+                    "main_action_ignored", trade_date=trade_date, minute_key=tick.minute_key,
+                    action=_jsonable(action), reason="unsupported_or_missing_ts_code",
+                )
             continue
         fill_index = tick.activate_index
         if fill_index is None or fill_index >= n_real:
@@ -1095,27 +1127,12 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
         )
         return True
     if name == "close":
-        account = str(action.get("account") or "").strip().lower()
-        if not account:
-            holders = [
-                acct for acct in ("stock", "credit")
-                if broker.position_quantity(ts_code, account=acct) != 0
-            ]
-            if len(holders) != 1:
-                return False  # no holder, or ambiguous (both accounts hold the code)
-            account = holders[0]
-        if account == "stock":
-            name = "sell"
-        else:
-            credit_qty = broker.position_quantity(ts_code, account="credit")
-            if credit_qty < 0:
-                name = "cover"
-            elif broker.financed_shares_outstanding(ts_code) > 0:
-                name = "sell_repay"
-            else:
-                name = "credit_sell"
+        resolved = _resolve_close(broker, action, ts_code)
+        if resolved is None:
+            return False  # no holder, or ambiguous (both accounts hold the code)
+        name, amount = resolved
         action = dict(action)
-        action["amount"] = broker.sellable_quantity(account, ts_code)
+        action["amount"] = amount
     try:
         _, op_type = broker.account_op_for_action(name)
     except ValueError:
@@ -1143,6 +1160,101 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
         is_auction=is_auction,
         auction_close=is_close_auction,
         **order_kwargs,
+    )
+    return True
+
+
+def _resolve_close(broker: SimBroker, action: dict[str, object], ts_code: str) -> tuple[str, int] | None:
+    """Resolve a ``close`` verb to the holding account's exit op and full sellable
+    amount: an explicit ``account`` wins, else the unique holder; None when no
+    account holds the code or both do (the driver already rejects ambiguity)."""
+    account = str(action.get("account") or "").strip().lower()
+    if not account:
+        holders = [
+            acct for acct in ("stock", "credit")
+            if broker.position_quantity(ts_code, account=acct) != 0
+        ]
+        if len(holders) != 1:
+            return None
+        account = holders[0]
+    if account == "stock":
+        name = "sell"
+    elif broker.position_quantity(ts_code, account="credit") < 0:
+        name = "cover"
+    elif broker.financed_shares_outstanding(ts_code) > 0:
+        name = "sell_repay"
+    else:
+        name = "credit_sell"
+    return name, broker.sellable_quantity(account, ts_code)
+
+
+# Buy-side vs sell-side order verbs for the after-hours price-validity rule
+# (收盘价高于申报买价或低于申报卖价的申报无效).
+_AFTERHOURS_BUY_ACTIONS = {"buy", "credit_buy", "cover"}
+
+
+def _execute_afterhours_action(broker: SimBroker, action: dict[str, object], *, trade_date: str, minute_key: str) -> bool:
+    """Settle one after-hours fixed-price action immediately at the day's close.
+
+    盘后固定价格交易 (15:05-15:30) matches at the official closing price only, so
+    there is no order book passage: eligible orders settle at once via
+    ``broker.execute`` under the full constraint set (suspension — a stock still
+    suspended at 15:00 has no after-hours session, price limits as a conservative
+    counterparty assumption at a limit-locked close, T+1, cash/margin, lots). A
+    limit worse than the close is an invalid submission per the rule. Board/date
+    eligibility follows ``afterhours_available``; opening new leveraged positions
+    (``short``/``fin_buy``) is conservatively unsupported — real availability of
+    融资/融券开仓 through the after-hours session is unverified. Returns False for
+    unsupported/malformed actions (caller records ``main_action_ignored``)."""
+    name = _action_name(action)
+    if name == "direct_repay":
+        return _submit_order(broker, action, False)  # cash op, settles immediately
+    ts_code = str(action.get("ts_code", "")).strip()
+    if name not in _ORDER_ACTIONS or not ts_code:
+        return False
+    reject_kwargs = {
+        "ts_code": ts_code,
+        "amount": action.get("amount"),
+        "submitted_at": str(action.get("submitted_at") or ""),
+        "order_id": str(action.get("order_id") or "") or None,
+    }
+    limit = _float_or_none(action.get("limit")) if name != "close" else None
+    if limit is not None and limit <= 0:
+        broker.reject_submission(action=name, reason="invalid_limit_price", **reject_kwargs)
+        return True
+    amount = action.get("amount")
+    if name == "close":
+        resolved = _resolve_close(broker, action, ts_code)
+        if resolved is None:
+            return False
+        name, amount = resolved
+        reject_kwargs["amount"] = amount
+    if not afterhours_available(ts_code, trade_date):
+        broker.reject_submission(action=name, reason="afterhours_not_available", **reject_kwargs)
+        return True
+    if name in {"short", "fin_buy"}:
+        broker.reject_submission(action=name, reason="afterhours_op_unsupported", **reject_kwargs)
+        return True
+    bar = broker.market.bar(trade_date, ts_code)
+    close = None
+    if bar is not None and pd.notna(bar.get("close")):
+        close = float(bar["close"])
+    if limit is not None and close is not None and (
+        close > limit if name in _AFTERHOURS_BUY_ACTIONS else close < limit
+    ):
+        broker.reject_submission(action=name, reason="afterhours_price_invalid", **reject_kwargs)
+        return True
+    broker.execute(
+        ts_code,
+        name,
+        trade_date=trade_date,
+        raw_price=close,  # None -> missing_price reject inside execute
+        amount=amount,
+        time=minute_key,
+        reason=str(action.get("reason") or name),
+        price_label="afterhours_fixed",
+        apply_slippage=False,
+        order_id=str(action.get("order_id") or "") or None,
     )
     return True
 

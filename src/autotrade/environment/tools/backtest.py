@@ -266,6 +266,9 @@ class BacktestTool:
                         auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
                         auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
                         auction_close_time=(manifest.get("auction_close_time", "14:57") or None),
+                        # No fallback default: manifests predating the knob replay
+                        # without the after-hours tick (frozen-eval reproducibility).
+                        afterhours_decision_time=(manifest.get("afterhours_decision_time") or None),
                         execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
                         offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 30)),
                         intraday_decision_minutes=int(manifest.get("intraday_decision_minutes", 1)),

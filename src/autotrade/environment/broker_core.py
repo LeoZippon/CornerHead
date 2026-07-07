@@ -42,6 +42,30 @@ STAR_MIN_LOT_SIZE = 200
 STAMP_DUTY_CUTOVER = "20230828"  # sell-side stamp duty halved to 0.05% from this date
 INTEREST_DAY_COUNT = 360.0
 
+# After-hours fixed-price trading (盘后固定价格交易, 15:05-15:30 at the closing
+# price) effective dates by board: STAR at the board's launch, ChiNext with the
+# 2020 registration reform, every remaining A-share (incl. BSE) with the
+# 沪深北交易所《交易规则（2026年修订）》 effective 2026-07-06.
+AFTERHOURS_START_STAR = "20190722"
+AFTERHOURS_START_CHINEXT = "20200824"
+AFTERHOURS_START_ALL = "20260706"
+
+
+def is_star_market(ts_code: str) -> bool:
+    code = str(ts_code).upper()
+    return code.endswith(".SH") and code[:3] in {"688", "689"}
+
+
+def afterhours_available(ts_code: str, trade_date: str) -> bool:
+    """Whether the code's board offers after-hours fixed-price trading on this date."""
+    date = str(trade_date)
+    if is_star_market(ts_code):
+        return date >= AFTERHOURS_START_STAR
+    code = str(ts_code).upper()
+    if code.endswith(".SZ") and code.startswith("30"):
+        return date >= AFTERHOURS_START_CHINEXT
+    return date >= AFTERHOURS_START_ALL
+
 
 @dataclass(frozen=True)
 class CostModel:

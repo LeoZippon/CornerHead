@@ -131,6 +131,7 @@ def main() -> int:
                 auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
                 auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
                 auction_close_time=(manifest.get("auction_close_time", "14:57") or None),
+                afterhours_decision_time=(manifest.get("afterhours_decision_time") or None),
                 execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
                 offsession_tick_minutes=offsession,
                 max_seconds_per_trading_day=None,  # benchmark: no load-dependent aborts

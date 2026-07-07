@@ -27,8 +27,9 @@ once per tick, with a **market-level** `ctx`. `main` owns all timing: it reconci
 positions/orders and maintains plans every tick, then screens/opens new positions
 on the ticks it chooses. It drives the Broker primitives by `ts_code` through
 `ctx.broker`; there is no `trade_intents` mapping. Submit broker orders only on
-explicit orderable ticks (09:15/09:25/14:57) or ticks with live bars; ordinary
-off-session ticks are for research, state updates, and plan handoff.
+explicit orderable ticks (09:15/09:25/14:57, plus the after-hours fixed-price
+tick when enabled — see the `afterhours_decision_time` fact) or ticks with live
+bars; ordinary off-session ticks are for research, state updates, and plan handoff.
 
 Orders map to live QMT `order_stock` types (no broker-side stop/conditional
 order). An order reaches the book a **later bar**, `execution_lag_bars` ahead
@@ -49,7 +50,13 @@ only), so the same loop also drives live trading. Do not submit new broker order
 from ordinary off-session ticks. To prepare a pre-open order, write the plan to
 `ctx.state_dir` inside an off-session `ctx.substep`, then submit from the 09:15 info tick, the 09:25
 matched-open tick, or a later live-bar tick. A 14:57 close-auction tick fills at the
-15:00 close.
+15:00 close. The after-hours fixed-price tick (default 15:05, when enabled) shows the
+confirmed close in `ctx.bars` and settles orders **immediately at that close** (no
+slippage, no lag; a limit worse than the close is an invalid submission) — only for
+codes whose board has after-hours trading on that date (STAR from 2019-07, ChiNext
+from 2020-08, all remaining A-shares from 2026-07-06; earlier dates reject
+`afterhours_not_available`), with `short`/`fin_buy` unsupported there and all the
+usual limit/suspension/T+1/cash constraints still enforced.
 
 The default `main.py` is a deliberately minimal **working** baseline — while flat,
 buy an equal-weight basket and hold to the final-day liquidation:

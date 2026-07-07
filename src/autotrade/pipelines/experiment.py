@@ -246,6 +246,7 @@ class ExperimentPipeline:
             "auction_preopen_time": self.config.auction_preopen_time,
             "auction_decision_time": self.config.auction_decision_time,
             "auction_close_time": self.config.auction_close_time,
+            "afterhours_decision_time": self.config.afterhours_decision_time,
             "offsession_tick_minutes": self.config.offsession_tick_minutes,
             "intraday_decision_minutes": self.config.intraday_decision_minutes,
             "execution_lag_bars": self.config.execution_lag_bars,
