@@ -7,7 +7,7 @@
 - 数据下载、单位和 raw 审计见 `docs/data_documentation.md`。
 - PIT 窗口、Sandbox、Agent 工具、回测和 NL 服务见 `docs/environment_design.md`。
 - Step / Fold / Epoch 编排、策略产物冻结和实验账本见 `docs/pipeline_design.md`。
-- 实盘部署和 QMT 流程见 `docs/QMT_documentation.md`。
+- 部署（控制台与 QMT 实盘）见 `docs/deployment_documentation.md`。
 - 全部参数/超参数默认值速查见 `docs/parameters_reference.md`。
 
 **术语说明**

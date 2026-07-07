@@ -8,7 +8,7 @@
 - Fold/Epoch 排程、验收与冻结语义见 `docs/pipeline_design.md`。
 - Agent 合同中各预算的使用方式见 `docs/agent_design.md`。
 - 数据层任务与限频的权威定义见 `docs/data_documentation.md`。
-- QMT 实盘草案参数见 `docs/QMT_documentation.md`。
+- 部署与 QMT 实盘草案参数见 `docs/deployment_documentation.md`。
 
 **导航**
 
@@ -241,8 +241,8 @@
 | 深圳开盘竞价校正倍率 | `00*.SZ` ×0.76、`30*.SZ` ×0.58 | `environment/features/`（auction 校正）；仅开盘竞价近似输入（`environment_design.md` §1.4） |
 | 财务事件可见时点 | 公告日 18:00 | `features/fundamental_events.py`；公告日优先 `f_ann_date` 再 `ann_date`（`environment_design.md` §1.3） |
 | 元学习 `web_search` 引擎 | Tavily + Semantic Scholar | run manifest `web_search_engines`；三视角非空检索后才可 `done`（`pipeline_design.md` §3.1） |
-| QMT 执行器轮询间隔（草案） | `3nSecond` | `QMT_documentation.md` §2.2；实盘上线前随执行器实现冻结 |
-| QMT 本金上限（草案） | `CQ_MAX_PRINCIPAL` 环境变量 | 未设置时用账户总资产口径（`QMT_documentation.md` §6.4） |
+| QMT 执行器轮询间隔（草案） | `3nSecond` | `deployment_documentation.md` §2.2；实盘上线前随执行器实现冻结 |
+| QMT 本金上限（草案） | `CQ_MAX_PRINCIPAL` 环境变量 | 未设置时用账户总资产口径（`deployment_documentation.md` §6.4） |
 
 ## 9. HITL 交互式运行与控制台
 

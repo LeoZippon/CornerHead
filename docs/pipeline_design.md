@@ -7,7 +7,7 @@
 - Agent 自身工作合同、可见数据、可写产物和输出格式见 `docs/agent_design.md`。
 - PIT 窗口、Sandbox、Agent 工具和回测入口见 `docs/environment_design.md`。
 - raw 数据下载和审计见 `docs/data_documentation.md`。
-- QMT 实盘流程见 `docs/QMT_documentation.md`。
+- 部署（控制台与 QMT 实盘）见 `docs/deployment_documentation.md`。
 - 全部参数/超参数默认值速查见 `docs/parameters_reference.md`。
 
 **术语说明**

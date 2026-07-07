@@ -7,7 +7,7 @@
 - PIT snapshot、决策输入、回放和泄漏检查见 `docs/environment_design.md`。
 - Agent 的证据包和大模型输入见 `docs/agent_design.md`。
 - 完整实验编排见 `docs/pipeline_design.md`。
-- QMT 实盘流程见 `docs/QMT_documentation.md`。
+- 部署（控制台与 QMT 实盘）见 `docs/deployment_documentation.md`。
 - 全部参数/超参数默认值速查见 `docs/parameters_reference.md`。
 
 **术语说明**

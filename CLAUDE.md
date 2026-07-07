@@ -56,7 +56,7 @@
   - `@docs/agent_design.md`: Agent-visible inputs, writable strategy artifacts, prompt protocol, tool usage semantics, and forbidden behavior.
   - `@docs/environment_design.md`: PIT snapshots, Sandbox/runtime paths, trusted tools, Broker/backtest/NL scoring, LLM API boundary, and run logs.
   - `@docs/pipeline_design.md`: Fold/Epoch/Held-out orchestration, artifact handoff, freeze/fallback rules, ledgers, and reporting.
-  - `@docs/QMT_documentation.md`: QMT in-client Python API, file-bridge architecture, deployment, and live-operation workflow.
+  - `@docs/deployment_documentation.md`: deployment surfaces — the CornerHead console's three-machine network architecture, frontend service, tunnels/keepalive/startup workflow, plus the QMT in-client Python API, file-bridge architecture, and live-operation workflow.
 - Keep `@docs/parameters_reference.md` as a derived quick reference, not a sixth authoritative design doc. When defaults, CLI/config knobs, Broker profile fields, replay budgets, sandbox/tool limits, data-task limits, or QMT constants change, update the relevant authoritative doc and this parameter reference in the same work item. Code and run/snapshot manifests remain the source of truth for actually effective values.
 - When a change materially affects one of these areas, update the relevant document in the same work item. Do not rely on code or logs alone to communicate a changed design, data contract, operating procedure, or parameter default.
 - Keep these documents concise and current. They should describe the latest accepted state, not a chronology of earlier attempts, old names, or superseded workflows.

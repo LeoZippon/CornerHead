@@ -1,6 +1,6 @@
-# QMT 文档
+# 部署文档
 
-本文档记录 AutoTrade 项目接入阿里云 Windows + 国金全功能 QMT 客户端的部署状态、迁移架构、当前日常流程和未来实盘上线门槛。**已定决策：实盘执行使用 QMT 客户端内置 Python 策略 API（`ContextInfo`/`passorder`/`get_trade_detail_data` 等），不采用 xtquant/miniQMT 外接方案。** 当前阶段模型尚未训练完成，仓库也没有活动的 live 下单脚本，因此 QMT 侧只能作为已部署的执行环境保持 standby、只读检查和 dry-run 准备；不得启动自动实盘交易。
+本文档是 MacroQuant 全部部署面的权威文档，分两大部分：**研究控制台（CornerHead WebUI）的三机网络架构与前端部署**（§10–§12：计算主机、前端服务器、研究者终端之间的通信设计、访问控制、保活与启动流程），以及 **QMT 实盘执行环境**（§1–§9：阿里云 Windows + 国金全功能 QMT 客户端的部署状态、迁移架构、当前日常流程和未来实盘上线门槛）。**已定决策：实盘执行使用 QMT 客户端内置 Python 策略 API（`ContextInfo`/`passorder`/`get_trade_detail_data` 等），不采用 xtquant/miniQMT 外接方案。** 当前阶段模型尚未训练完成，仓库也没有活动的 live 下单脚本，因此 QMT 侧只能作为已部署的执行环境保持 standby、只读检查和 dry-run 准备；不得启动自动实盘交易。
 
 **相关边界**
 
@@ -42,6 +42,14 @@
 | 禁止 | 网络访问、阻塞循环、线程、研究语义判断（rebalance 拆单在本机完成） |
 
 **导航**
+
+研究控制台部署：
+
+- [10. 三机网络架构与通信设计](#10-三机网络架构与通信设计)
+- [11. 前端部署与访问控制](#11-前端部署与访问控制)
+- [12. 保活、启动流程与故障排查](#12-保活启动流程与故障排查)
+
+QMT 实盘执行：
 
 - [1. 当前状态](#1-当前状态)
 - [2. 目标架构](#2-目标架构)
@@ -333,3 +341,83 @@ scp order.json Administrator@<server_ip>:C:/xquant/inbox/order.json
 - pending 未清：运行 `reconcile`，确认当日成交和委托状态。
 - inbox 有旧文件：移动到 `C:\xquant\archive\...`，不要直接手工执行。
 - 本机模型或数据状态不确定：停止生成 live payload，只保留研究 ledger 和 dry-run。
+
+
+## 10. 三机网络架构与通信设计
+
+**设备与角色**
+
+| 设备 | 角色 | 网络位置 | 对外暴露 |
+|---|---|---|---|
+| 计算主机（本机 Linux） | 计算枢纽：实验管线、数据、Docker、控制台 API | 教育网（CERNET），无公网入站，只能主动出站 | 无 |
+| 前端服务器 `121.41.5.179` | 前端控制节点：静态 SPA + API 反代（Debian 12，1.6G 内存） | 公网 | 仅 sshd（22） |
+| 研究者 MacBook | 客户端接入终端 | 任意 | — |
+
+**通信链路**
+
+```text
+MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
+                                             │ nginx 127.0.0.1:8080（仅回环）
+                                             │   ├─ /            静态 SPA（/opt/cornerhead/static）
+                                             │   └─ /api/  ─▶ 127.0.0.1:38889（仅回环）
+                                             ▲
+计算主机 ──autossh -N -R 127.0.0.1:38889:127.0.0.1:38888──┘（主动出站，教育网约束下唯一可行方向）
+          console API：uvicorn 127.0.0.1:38888（仅回环）；实验 worker 为独立分离进程
+```
+
+**设计原则**
+
+- 公网面只有前端 sshd；nginx、控制台 API、反向隧道监听端口全部绑定回环。
+- 教育网只能出站 → 计算主机主动向前端建立反向隧道，前端永不入站连接计算主机。
+- 访问控制即 SSH 密钥（“指定终端”）：没有 Web 层账号体系，不在指定 key 列表内的终端无法到达 8080。
+- 静态资产部署在前端（页面秒开、计算主机重启期间页面仍可加载并显示“计算主机离线”）；隧道中只走 JSON API 与 SSE。
+
+## 11. 前端部署与访问控制
+
+**专用隧道用户 `cornerhead`**（`/usr/sbin/nologin`，无 shell/exec 能力），`authorized_keys` 按 key 精确限权：
+
+| 终端 | key 选项 | 能力 |
+|---|---|---|
+| 计算主机（`~/.ssh/id_ed25519.pub`） | `restrict,port-forwarding,permitlisten="127.0.0.1:38889"` | 只能反向监听 38889（暴露控制台 API） |
+| 研究者 MacBook | `restrict,port-forwarding,permitopen="127.0.0.1:8080"` | 只能本地转发到 8080（访问控制台） |
+
+**nginx**（`ops/webui/nginx-cornerhead.conf` → `/etc/nginx/sites-available/cornerhead`）：`listen 127.0.0.1:8080`；`/` 服务 `/opt/cornerhead/static` 下的 SPA（hash 路由，`try_files` 回退 index.html），`/static/` alias 同目录；`/api/` 反代 `127.0.0.1:38889`，SSE 关闭缓冲、读超时 3600s；计算主机离线（502/504）时返回 503 中文 JSON 提示而非 nginx 错误页；发行版默认站点已移除，80/443 无监听。
+
+**部署命令**（均在计算主机上执行）：
+
+- 首次/幂等 provisioning：`bash ops/webui/frontend_setup.sh`（创建用户、写 authorized_keys、装 nginx 配置）。
+- UI 资产更新后同步：`ops/webui/webui_stack.sh sync`（tar-over-ssh，归一化属主与权限）。
+
+## 12. 保活、启动流程与故障排查
+
+**计算主机侧**（唯一入口 `ops/webui/webui_stack.sh`）：
+
+| 命令 | 作用 |
+|---|---|
+| `start` / `stop` / `status` | 启停控制台 API（uvicorn，回环 38888）与 autossh 反向隧道；status 含前端端到端健康检查 |
+| `ensure` | 缺什么补什么（keepalive 目标，幂等） |
+| `sync` | 推送静态 SPA 到前端 |
+| `install-cron` | 安装托管 crontab 块：`*/2` 分钟 `ensure`（flock 防重入）+ `@reboot` |
+
+保活分层：autossh（`-M 0` + `ServerAliveInterval=30` + `ExitOnForwardFailure`）自愈网络级断连；cron `ensure` 拉起崩溃的 console/autossh 进程本体；前端 nginx/sshd 由 systemd 管理。实验 worker 是 `start_new_session` 的分离进程——console 或隧道重启不影响运行中的实验。日志：`logs/webui/console.log`、`logs/webui/keepalive.log`。
+
+**MacBook 侧**（一次性把下面片段加入 `~/.ssh/config`，之后 `ssh -N cornerhead` 即接通，浏览器打开 <http://localhost:8888>）：
+
+```text
+Host cornerhead
+    HostName 121.41.5.179
+    User cornerhead
+    IdentityFile ~/.ssh/id_ed25519   # 私钥须对应已授权的 lzp2002@icloud.com 公钥
+    LocalForward 8888 127.0.0.1:8080
+    ServerAliveInterval 30
+    ExitOnForwardFailure yes
+```
+
+**故障排查**
+
+| 症状 | 排查 |
+|---|---|
+| 浏览器打不开 localhost:8888 | Mac 侧隧道未建立：重跑 `ssh -N cornerhead`；确认私钥对应已授权公钥 |
+| 页面能开、API 返回 503“计算主机离线” | 计算主机→前端隧道断：在计算主机 `ops/webui/webui_stack.sh status`，通常等 2 分钟 keepalive 自愈 |
+| status 显示 console DOWN | 看 `logs/webui/console.log`；`webui_stack.sh ensure` 拉起 |
+| UI 是旧版本 | 忘记同步静态资产：`webui_stack.sh sync` 后强刷浏览器 |

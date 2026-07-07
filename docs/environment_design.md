@@ -7,7 +7,7 @@
 - Agent 行为、可写产物和输出格式见 `docs/agent_design.md`。
 - Step / Fold / Epoch 编排见 `docs/pipeline_design.md`。
 - 原始数据下载、单位和审计见 `docs/data_documentation.md`。
-- QMT 实盘流程见 `docs/QMT_documentation.md`。
+- 部署（控制台与 QMT 实盘）见 `docs/deployment_documentation.md`。
 
 **术语说明**
 
