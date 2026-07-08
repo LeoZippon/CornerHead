@@ -39,6 +39,7 @@ from autotrade.environment.identity import agent_visible_ref
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.snapshot import load_snapshot_manifest
 from autotrade.environment.step_tree import StepTree
+from autotrade.environment.style_analysis import replay_style_analysis
 
 from .base import ActionField, ActionSpec, PHASE_FROZEN, PHASE_TRAIN_VALID, ToolContext, ToolError
 from .modification_check import ModificationCheckTool
@@ -313,15 +314,28 @@ class BacktestTool:
                 shutil.rmtree(tmp_nl_dir, ignore_errors=True)
             _cleanup_nl_rpc_files(requests_host, responses_host)
 
-        orders_path = self._write_orders(
-            result_dir,
-            replay.broker.get_trade_detail_data(account_type="STOCK", data_type="ORDER")
-            + replay.broker.get_trade_detail_data(account_type="CREDIT", data_type="ORDER"),
-        )
+        order_records = replay.broker.get_trade_detail_data(
+            account_type="STOCK", data_type="ORDER"
+        ) + replay.broker.get_trade_detail_data(account_type="CREDIT", data_type="ORDER")
+        orders_path = self._write_orders(result_dir, order_records)
         (result_dir / "detailed_return.json").write_text(
             json.dumps(sanitize_for_log(stats), ensure_ascii=False, indent=2, sort_keys=True, default=str),
             encoding="utf-8",
         )
+        # Barra-lite attribution for validation replays: style exposure from the
+        # replay slot's own cross-section (Agent-visible data) + CSI300 series
+        # from the raw lake (window dates only). Descriptive diagnostics — the
+        # compact block rides in the tool result; the full payload is written
+        # next to detailed_return.json for the Agent to read on demand.
+        style_payload: dict[str, object] | None = None
+        if mode == "valid":
+            style_payload = replay_style_analysis(
+                replay_daily, order_records, stats, manifest.get("raw_dir")
+            )
+            (result_dir / "style_analysis.json").write_text(
+                json.dumps(sanitize_for_log(style_payload), ensure_ascii=False, indent=2, sort_keys=True, default=str),
+                encoding="utf-8",
+            )
         staging_audit = replay.state_staging_audit or []
         unmerged = sum(1 for record in staging_audit if not record.get("merged"))
         if staging_audit:
@@ -359,6 +373,9 @@ class BacktestTool:
             "max_drawdown": stats["max_drawdown"],
             "margin_secs_reject_count": stats["margin_secs_reject_count"],
             "max_holdings_reject_count": stats["max_holdings_reject_count"],
+            # Descriptive attribution vs 沪深300 (see style_analysis.json) —
+            # interpretation aid, NOT an optimization target.
+            "benchmark": style_payload.get("compact") if style_payload else None,
             "orders_path": self.ctx.executor.map_path(orders_path) if orders_path else None,
             "host_orders_path": str(orders_path) if orders_path else None,
             "nl_tool_dir": self.ctx.executor.map_path(nl_tool_dir),
@@ -391,7 +408,10 @@ class BacktestTool:
                 model_artifact_root=self.ctx.paths.model_artifacts,
                 metrics={k: stats[k] for k in ("total_return", "long_return", "short_return", "sharpe", "max_drawdown")},
                 complete_validation=True,
-                attachments={"detailed_return.json": result_dir / "detailed_return.json"},
+                attachments={
+                    "detailed_return.json": result_dir / "detailed_return.json",
+                    **({"style_analysis.json": result_dir / "style_analysis.json"} if style_payload else {}),
+                },
             )
         return summary
 

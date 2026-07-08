@@ -1,3 +1,10 @@
+2026-07-09 逐 Step Barra-lite 归因进回测闭环（feat/hitl-webui 线）
+
+- 动机（经评估采纳）：Step 结果原本只有绝对指标，Agent 无基准语境（大盘 +5% 月份的 +3% 会被当成功证据）；宿主侧预计算一次 ~2s（回放槽 daily.parquet 本就含全市场 circ_mv/pb/turnover_rate 横截面，风格暴露完全来自 Agent 可见数据），相对回放墙钟开销 1–3%。
+- 落地：模块迁至 `environment/style_analysis.py`（webui 版删除，控制台事后端点与 equity 基准复用同一实现）；backtest 工具在 valid 模式回放后计算——完整载荷写 `results/valid_*/style_analysis.json`（Agent 可读、step_tree 附件），紧凑 `benchmark` 块（同窗沪深300收益、超额、β、n_days、市值倾斜；刻意不含年化 α/R²——20 日年化只放大噪声）进回测 summary/trace/账本 Step 摘要；run manifest 新增 `raw_dir`（经 snapshot provider 链解析）供宿主读基准与行业表；输入缺失一律降级 None 不失败（frozen_eval/held-out 不生成 Agent 可见归因）。
+- 提示词加一条：归因是描述性诊断、非优化目标（防"追 β/风格数值"过拟合）；PROMPTS.md 重导出。控制台 Step 历史表增列 超额(vs 300)/β。
+- 验证：full suite 568 OK（+4 style 单测：横截面倾斜边界、基准复利/超额、缺列降级、回归数学）；真实 test2 valid 窗口实测（β 0.44、基准 −2.46%、超额 +3.17%、20/20 日、~2s）；tools-flow 79 测试过（真实工具路径含新钩子）；控制台重启+事后端点+前端同步端到端 OK。文档：environment_design §3.7、parameters_reference。
+
 2026-07-09 控制台七项功能批次：基准曲线/风格验证/流程控制（feat/hitl-webui 线）
 
 - ①收益可视化重构：所有柱状收益图替换为**日度累计收益折线 + 回撤子图**，策略（验证/测试/held-out）对照沪深300（`data/raw/index_daily` 000300.SH，参考 external_references/example_reports.png 版式）。新增 `webui/equity.py`（复用每窗口 `detailed_return.json.equity_curve`，验证子窗口按日链接；端点 `equity` + `folds/<e>/<f>/equity` 只传日收益，前端复利+回撤）；新组件 equityChart（十字光标列命中、终值图例、Held-out 用第 3 分类色 #eda100/#c98500，validator 双模式 PASS）。首页卡片迷你曲线、hero/详情页全曲线、Fold 详情验证曲线（测试曲线留在折叠审计区）、held-out 曲线全部落地。

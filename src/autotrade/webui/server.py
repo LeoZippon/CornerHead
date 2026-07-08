@@ -21,9 +21,10 @@ from starlette.background import BackgroundTask
 from autotrade.pipelines.fold_analysis import analysis_paths, analyze_fold
 from autotrade.pipelines.interactive import ANALYSIS_DIR_NAME, HITL_DIR_NAME, PARAMS_NAME, STATUS_NAME, read_json, read_status
 
+from autotrade.environment.style_analysis import style_analysis
+
 from . import equity, registry
 from .manager import ExperimentManager, ManagerError, MAX_RUNNING_EXPERIMENTS
-from .style_analysis import style_analysis
 from .params_schema import parameter_schema
 from .traces import read_trace_page, resolve_trace_path, stream_trace, trace_stats
 
@@ -306,7 +307,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         if not (experiment_dir / "artifacts" / run_id).is_dir() or "/" in run_id or run_id.startswith("."):
             raise HTTPException(status_code=404, detail=f"run {run_id!r} not found in this experiment")
         try:
-            return style_analysis(experiment_dir, run_id, prefix, repo_root)
+            return style_analysis(experiment_dir, run_id, prefix, repo_root / "data" / "raw")
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

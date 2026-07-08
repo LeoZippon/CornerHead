@@ -1723,13 +1723,17 @@ function foldResultPanel(detail, session) {
   }
   if ((record.steps || []).length) {
     const table = el("table", { class: "data section-gap" },
-      el("tr", {}, el("th", {}, "Step"), el("th", {}, "状态"), el("th", {}, "收益"), el("th", {}, "Sharpe"), el("th", {}, "回撤")),
+      el("tr", {}, el("th", {}, "Step"), el("th", {}, "状态"), el("th", {}, "收益"),
+        el("th", {}, "超额(vs 300)"), el("th", {}, "β"), el("th", {}, "Sharpe"), el("th", {}, "回撤")),
       ...record.steps.map((step) => {
         const summary = step.summary || {};
+        const bench = summary.benchmark || {};
         return el("tr", {},
           el("td", {}, step.step_id || "—"),
           el("td", {}, step.status || "—"),
           el("td", { class: numClass(summary.total_return) }, fmtPct(summary.total_return)),
+          el("td", { class: numClass(bench.excess_return) }, fmtPct(bench.excess_return)),
+          el("td", {}, bench.beta !== undefined && bench.beta !== null ? Number(bench.beta).toFixed(2) : "—"),
           el("td", {}, summary.sharpe !== undefined && summary.sharpe !== null ? Number(summary.sharpe).toFixed(2) : "—"),
           el("td", {}, fmtPct(summary.max_drawdown)),
         );

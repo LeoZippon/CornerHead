@@ -779,6 +779,8 @@ substep 的声明预算 `B` 同时定义三件事：
 
 `detailed_return.json` 至少包含总收益、long/short 收益、年化收益、Sharpe、最大回撤、胜率、turnover、订单状态、拒单统计、费用、信用利息（`credit_interest_accrued` / `credit_interest_paid`）、权益曲线、逐笔平仓/减仓和 Broker 事件。回测 summary 另含 `started_at`、`replay_wall_seconds`、`replayed_trade_days`、`state_staged_writes` / `state_unmerged_writes`、逐 substep 的 `substep_runtime`（count/total_real_wall_s/max_real_wall_s）、按阶段拆分的 `phase_seconds`（`strategy_compute` / `nl_service` / `timeview_build` / `state_merge` / `broker_match`）以及 `total_ticks` / `intraday_ticks` / `offsession_ticks` 计数。
 
+**逐 Step 归因（Barra-lite，仅 valid 模式）**：每次验证回测结束后宿主计算基准/风格归因（`autotrade/environment/style_analysis.py`）——风格暴露取自回放槽自身 `daily.parquet` 的全市场横截面（Agent 本就可见的数据，市值/PB/换手带符号持仓加权分位偏离 + 申万一级行业净权重，持仓由成交逐日结转重构），沪深300 序列与行业表由宿主按窗口日期从 run manifest 记录的 `raw_dir` 读取。完整载荷写入 `results/valid_*/style_analysis.json`（Agent 可读）；紧凑块（同窗基准收益、超额、β、n_days、市值倾斜——刻意不含年化 α/R²，短窗年化只放大噪声）以 `benchmark` 字段进回测 summary/trace/账本 Step 摘要与 step_tree 附件。定位是描述性诊断（提示词明示不得作为优化目标）；输入缺失时各块降级为 None，绝不使回测失败。frozen_eval/held-out 不生成 Agent 可见归因。
+
 ## 4. 运行日志、审计与验收
 
 ### 4.1 可信日志与核心文件

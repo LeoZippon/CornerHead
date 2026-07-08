@@ -15,41 +15,15 @@ series (the chart shows a hint), they never raise.
 from __future__ import annotations
 
 import json
-import math
 from functools import lru_cache
 from pathlib import Path
 
-BENCHMARK_TS_CODE = "000300.SH"
-BENCHMARK_LABEL = "沪深300"
-
-
-# ---------------------------------------------------------------------------
-# benchmark (CSI 300 daily returns)
-# ---------------------------------------------------------------------------
-@lru_cache(maxsize=32)
-def _benchmark_year(repo_root: str, year: str) -> tuple[tuple[str, float], ...]:
-    path = Path(repo_root) / "data" / "raw" / "index_daily" / f"ts_code={BENCHMARK_TS_CODE}" / f"year={year}.parquet"
-    if not path.exists():
-        return ()
-    import pandas as pd
-
-    df = pd.read_parquet(path, columns=["trade_date", "pct_chg"])
-    rows = []
-    for date, pct in zip(df["trade_date"], df["pct_chg"]):
-        value = float(pct)
-        if math.isfinite(value):
-            rows.append((str(date), value / 100.0))
-    return tuple(rows)
+from autotrade.environment.style_analysis import BENCHMARK_LABEL, benchmark_returns as _benchmark_returns
 
 
 def benchmark_returns(repo_root: Path, dates: list[str]) -> list[list[object]]:
     """CSI 300 daily returns restricted to ``dates`` (as [date, r] pairs)."""
-    if not dates:
-        return []
-    table: dict[str, float] = {}
-    for year in sorted({date[:4] for date in dates}):
-        table.update(dict(_benchmark_year(str(repo_root), year)))
-    return [[date, table[date]] for date in dates if date in table]
+    return _benchmark_returns(Path(repo_root) / "data" / "raw", dates)
 
 
 # ---------------------------------------------------------------------------

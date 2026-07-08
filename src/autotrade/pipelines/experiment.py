@@ -156,6 +156,13 @@ class ExperimentPipeline:
             tree.position_for_hash(parent.artifact_hash, parent.model_artifact_hash) if parent else None
         )
 
+    def _snapshot_raw_dir(self) -> str | None:
+        """Raw-lake path as known by the snapshot provider chain (None for
+        fully synthetic providers, e.g. unit-test fakes)."""
+        provider = getattr(self.snapshots, "_provider", self.snapshots)
+        raw_dir = getattr(getattr(provider, "builder", None), "raw_dir", None)
+        return str(raw_dir) if raw_dir else None
+
     def _start_sandbox(
         self, run_id: str, *, kind: str = "fold", gpu_count: int | None = None
     ) -> tuple[LocalSandbox, DockerSandbox | None]:
@@ -335,6 +342,9 @@ class ExperimentPipeline:
                 "data_summary_ref": "/mnt/artifacts/data_summary.json",
                 "fold_period": self.config.fold_period,
                 "snapshot_config": self.config.snapshot_config.to_record(),
+                # Host-side raw lake for the backtest tool's benchmark/style
+                # attribution (CSI300 + SW industries; window dates only).
+                "raw_dir": self._snapshot_raw_dir(),
                 "valid_decision_time": fold.valid_decision_time.isoformat(),
                 "test_decision_time": fold.test_decision_time.isoformat(),
                 "snapshots": {
@@ -1261,6 +1271,9 @@ def _metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
         "max_drawdown",
         "margin_secs_reject_count",
         "order_count",
+        # Compact Barra-lite block (benchmark/excess return, beta, size tilt)
+        # from the backtest tool — descriptive attribution per step.
+        "benchmark",
     )
     return {key: summary.get(key) for key in keys if key in summary}
 
