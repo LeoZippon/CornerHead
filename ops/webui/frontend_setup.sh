@@ -51,7 +51,30 @@ ClientAliveInterval 30
 ClientAliveCountMax 3
 SSHD
 systemctl reload ssh 2>/dev/null || systemctl reload sshd
-echo "frontend user + designated-keys sshd + keepalive ready"
+# WebUI local-user isolation: loopback TCP is otherwise reachable by every
+# local account; owner-match rules confine the console to designated users.
+CH_UID=\$(id -u cornerhead) ADMIN_UID=\$(id -u admin) WWW_UID=\$(id -u www-data)
+cat > /etc/nftables.conf <<NFT
+#!/usr/sbin/nft -f
+# WebUI local-user isolation (managed by ops/webui/frontend_setup.sh):
+# only designated local users may reach the console on loopback.
+#   :8080  (nginx entry)  <- root (vendor console/health), admin (researcher),
+#                            cornerhead (sshd forwards for the MacBook)
+#   :38889 (raw API hop)  <- root, www-data (nginx proxy)
+# Numeric uids: name resolution failing at boot would fail the whole load
+# and leave the ports open (policy accept = fail-open).
+flush ruleset
+table inet cornerhead {
+    chain local_out {
+        type filter hook output priority filter; policy accept;
+        oifname "lo" tcp dport 38889 meta skuid != { 0, \$WWW_UID } reject with tcp reset
+        oifname "lo" tcp dport 8080 meta skuid != { 0, \$ADMIN_UID, \$CH_UID } reject with tcp reset
+    }
+}
+NFT
+nft -c -f /etc/nftables.conf && nft -f /etc/nftables.conf
+systemctl enable --now nftables >/dev/null 2>&1
+echo "frontend user + designated-keys sshd + keepalive + local-user isolation ready"
 REMOTE
 
 scp -q "$HERE/nginx-cornerhead.conf" "$FRONTEND:/etc/nginx/sites-available/cornerhead"

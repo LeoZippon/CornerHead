@@ -16695,6 +16695,14 @@ Lockout-proof application: since each Bash call is a discrete SSH connection (no
 
 frontend_setup.sh now provisions the central store idempotently: rewrites `authorized_keys.d/cornerhead`, bootstraps root/admin files only if missing (never clobbers), writes the drop-in, `sshd -t` before the final reload. Docs: deployment_documentation §11 new 指定 key 白名单 paragraph.
 
+## 2026-07-08 Frontend WebUI local-user isolation (feat/hitl-webui line)
+
+Task (user): on the frontend server, only the researcher's own account and the vendor console may log in and control the WebUI; all other frontend-local users denied. Login side was already closed by the designated-keys work (AllowUsers root/admin/cornerhead + central key store; vendor VNC rescue uses local tty, unaffected). Control side was the previously deferred gap: any local account could curl loopback 8080 (nginx → full console) or 38889 (raw API) — the console has no auth by design.
+
+Implementation: nftables owner-match on loopback output (`/etc/nftables.conf`, table inet cornerhead, policy accept + targeted rejects; `systemctl enable --now nftables`): dport 8080 allowed only for skuid {root, admin(1000), cornerhead(1001)} — root covers the vendor console shell and stack health checks, cornerhead covers sshd's forwarded connections for the MacBook; dport 38889 allowed only for skuid {root, www-data(33)} — the nginx proxy hop (admin controls via 8080, not the raw API). Everything else gets `reject with tcp reset`. Numeric uids on purpose: a name-resolution failure at boot would abort the whole ruleset load and fail open (policy accept). Managed idempotently by frontend_setup.sh (uids resolved at provisioning time via id -u).
+
+Verification (all live): root→8080 ok, www-data→38889 ok, cornerhead→8080 ok (runuser -u works for the nologin account since it execs without the shell), admin→8080 ok; sync→8080 refused, admin→38889 refused; provisioning re-run reproduces the same 2-reject ruleset and the refusal persists; hub-side end-to-end (nginx→tunnel→unix socket) healthy throughout. Docs: deployment_documentation §11 前端侧本地访问控制 paragraph.
+
 ## 2026-07-07 Broker API alignment: remove `valid_bars`
 
 Task: align the Agent-facing broker order API with real QMT semantics. QMT `passorder` does not expose a `valid_bars` / bar-count time-in-force parameter, so stale-order handling should be expressed by strategy logic through `pending()` and `cancel()`, not by a synthetic broker argument.

@@ -1,3 +1,9 @@
+2026-07-08 前端 WebUI 本地用户隔离（feat/hitl-webui 线）
+
+- 需求：前端服务器上仅本人账户（admin）与厂商控制台可登录并控制 WebUI，其余前端本地用户一律拒绝。登录面上一条目（指定 key 白名单 + AllowUsers）已覆盖；本条补齐控制面——原先前端任意本地账户都能 curl 回环 8080/38889 直达无鉴权控制台。
+- 方案：nftables owner-match（`/etc/nftables.conf`，服务已 enable 持久化）：回环 8080 仅 root/admin/cornerhead（sshd 替 Mac 的转发连接）可连、回环 38889 仅 root/www-data（nginx 反代）可连，其余 uid 一律 TCP reset；规则用数字 uid 防启动期 fail-open。`frontend_setup.sh` 幂等管理。
+- 验证：六路实测——root→8080、www-data→38889、cornerhead→8080、admin→8080 全通；sync→8080、admin→38889 被拒；provisioning 重跑幂等；端到端健康（nginx→隧道→socket）不受影响。
+
 2026-07-08 前端 sshd 指定 key 白名单（feat/hitl-webui 线）
 
 - 核查：前端虽已 key-only，但 `AuthorizedKeysFile` 是各用户自有 dotfile（被入侵账户可自我加 key 持久化）、无 AllowUsers；指定 key 全集 8 条（root 4：hub、windows-jump×2、Mac；admin 2；cornerhead 2 受限 key）。发现 windows-jump 两把无限制 root key 实为 QMT 中继隧道（现持 127.0.0.1:2222）、Mac key 有 root shell——收紧项已提议，用户选择只做核心三层。

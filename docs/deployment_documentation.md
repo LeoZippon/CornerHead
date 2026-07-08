@@ -385,6 +385,8 @@ MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
 
 **计算主机侧本地访问控制**：控制台 API 不监听任何 TCP 端口，只绑定 `.runtime/webui/console.sock`（目录 0700，属主 lzp）——共享机上的其他本地用户被内核文件权限直接隔断（回环 TCP 做不到这一点）。隧道以 lzp 身份连该 socket 后在前端回环暴露为 38889。本地诊断用 `curl --unix-socket .runtime/webui/console.sock http://console/api/health`；不要用 socat 等把 socket 桥回 TCP，否则等于重新开放给全部本地用户。
 
+**前端侧本地访问控制**（nftables owner-match，`/etc/nftables.conf`，`frontend_setup.sh` 管理、服务已 enable）：回环 8080（nginx 入口）仅 root（厂商控制台/健康检查）、admin（研究者本人账户）、cornerhead（sshd 替 Mac 建立的转发连接）可连；回环 38889（裸 API）仅 root、www-data（nginx 反代）可连；其余本地账户一律 TCP reset。规则用数字 uid（避免启动期名字解析失败导致整体加载失败而 fail-open）。
+
 **nginx**（`ops/webui/nginx-cornerhead.conf` → `/etc/nginx/sites-available/cornerhead`）：`listen 127.0.0.1:8080`；`/` 服务 `/opt/cornerhead/static` 下的 SPA（hash 路由，`try_files` 回退 index.html），`/static/` alias 同目录；`/api/` 反代 `127.0.0.1:38889`，SSE 关闭缓冲、读超时 3600s；计算主机离线（502/504）时返回 503 中文 JSON 提示而非 nginx 错误页；发行版默认站点已移除，80/443 无监听。
 
 **部署命令**（均在计算主机上执行）：
