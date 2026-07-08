@@ -117,7 +117,7 @@ class BrokerPrimitiveTest(unittest.TestCase):
         cash_before = _asset(broker, "stock")["available_cash"]
         broker.passorder(
             optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 10.0, 1000,
-            user_order_id="reserve_buy", valid_bars=5,
+            user_order_id="reserve_buy",
         )
         self.assertLess(_asset(broker, "stock")["available_cash"], cash_before - 10_000)
         broker.cancel("reserve_buy")
@@ -129,7 +129,7 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual(_positions(broker, "stock")[0]["sellable_quantity"], 1000)
         broker.passorder(
             optype.STOCK_SELL, 1101, "", "000001.SZ", prtype.FIX, 12.0, 600,
-            user_order_id="reserve_sell", valid_bars=5,
+            user_order_id="reserve_sell",
         )
         self.assertEqual(_positions(broker, "stock")[0]["sellable_quantity"], 400)
         broker.cancel("reserve_sell")
@@ -555,14 +555,14 @@ class BrokerPrimitiveTest(unittest.TestCase):
     def test_passorder_lifecycle_matches_qmt_verbs(self):
         broker = self.make_broker(shortable=("000001.SZ",))
         group = pd.DataFrame([{"ts_code": "000001.SZ", "open": 10.0, "high": 10.1, "low": 9.8, "close": 9.9}])
-        # 指定价 limit below the bar -> rests, then auto-cancels (valid_bars=1).
+        # 指定价 limit below the bar -> rests as a day order until cancel/day end.
         miss = broker.passorder(optype.CREDIT_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.5, 1000)
         working = broker.working_orders()
         self.assertEqual([o["order_id"] for o in working], [miss])
         self.assertEqual(working[0]["op_type"], optype.CREDIT_BUY)
         self.assertEqual(working[0]["account"], "credit")
         broker.match_bar("20220104", "09:31", group)
-        self.assertEqual(broker.working_orders(), [])  # expired_unfilled
+        self.assertEqual([o["order_id"] for o in broker.working_orders()], [miss])
         self.assertEqual(_positions(broker), [])
         # cancel removes a working order by id.
         cancel_me = broker.passorder(optype.CREDIT_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.0, 1000)
@@ -967,7 +967,7 @@ class FillRealismTest(unittest.TestCase):
 
     def test_limit_buy_needs_strict_trade_through(self):
         broker = self.make_broker()
-        broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.8, 1000, valid_bars=3)
+        broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.8, 1000)
         # A bare touch (low == limit) leaves the order resting in the queue.
         broker.match_bar("20220104", "09:31", self.bar_group(10.0, 10.1, 9.8, 9.9))
         self.assertEqual(len(broker.working_orders()), 1)
@@ -982,7 +982,7 @@ class FillRealismTest(unittest.TestCase):
         broker = self.make_broker()
         broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
         broker.roll_to_date("20220105")
-        broker.passorder(optype.STOCK_SELL, 1101, "", "000001.SZ", prtype.FIX, 10.6, 1000, valid_bars=3)
+        broker.passorder(optype.STOCK_SELL, 1101, "", "000001.SZ", prtype.FIX, 10.6, 1000)
         broker.match_bar("20220105", "09:31", self.bar_group(10.5, 10.6, 10.4, 10.5))  # touch only
         self.assertEqual(len(broker.working_orders()), 1)
         broker.match_bar("20220105", "09:32", self.bar_group(10.5, 10.61, 10.4, 10.5))  # through
@@ -1017,15 +1017,13 @@ class FillRealismTest(unittest.TestCase):
         self.assertEqual(fill["price_label"], "minute:09:31")
         self.assertAlmostEqual(fill["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
 
-    def test_limit_order_time_in_force_still_counts_printless_minutes(self):
+    def test_limit_order_rests_across_printless_minutes(self):
         broker = self.make_broker()
-        broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.5, 1000, valid_bars=2)
+        order_id = broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.5, 1000)
         empty = pd.DataFrame(columns=["ts_code", "open", "high", "low", "close"])
         broker.match_bar("20220104", "09:31", empty)
         broker.match_bar("20220104", "09:32", empty)
-        self.assertEqual(broker.working_orders(), [])
-        cancel = next(e for e in broker.events if e["event_type"] == "order_cancelled")
-        self.assertEqual(cancel["reason"], "expired_unfilled")
+        self.assertEqual([o["order_id"] for o in broker.working_orders()], [order_id])
 
     def test_forced_close_proceeds_repay_fin_debt(self):
         crash = make_daily(

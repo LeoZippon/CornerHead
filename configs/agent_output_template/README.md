@@ -40,7 +40,7 @@ bar, else the day-end sweep cancels it); `limit=P` is a **limit order**
 (FIX_PRICE) that fills without slippage: at a favorable open if the bar opens
 through P, otherwise at P only when the bar trades STRICTLY through it — a bare
 touch (low == P on a buy, high == P on a sell) counts as queued, unfilled. It
-auto-cancels after `valid_bars` bars.
+rests until filled, explicitly cancelled, or swept at day end.
 Query `ctx.broker.pending(code)` to skip codes with an order still in flight, or
 `ctx.broker.pending()` to scan all pending orders and `ctx.broker.cancel(order_id)`
 to cancel stale unfilled orders. Cross-minute `ctx.substep` actions are not broker
@@ -114,14 +114,14 @@ then 1-share increments, and size is never inferred from `weight`.
 
 | Interface | Use |
 |---|---|
-| `buy(ts_code, amount, limit=None, valid_bars=1, reason=None)` | Stock account cash buy |
-| `sell(ts_code, amount, limit=None, valid_bars=1, reason=None)` | Stock account sell of T+1 sellable long shares |
-| `credit_buy(ts_code, amount, limit=None, valid_bars=1, reason=None)` | Credit account collateral buy |
-| `credit_sell(ts_code, amount, limit=None, valid_bars=1, reason=None)` | Credit account collateral sell; financed shares must use `sell_repay` |
-| `fin_buy(ts_code, amount, limit=None, valid_bars=1, reason=None)` | Margin buy; creates /360 daily interest-accruing financing debt |
-| `short(ts_code, amount, limit, valid_bars=1, reason=None)` | Short sale; `limit` is required and must satisfy the uptick rule |
-| `cover(ts_code, amount, limit=None, valid_bars=1, reason=None)` | Buy to cover short debt, oldest contract first; same-day short cover is T+1-blocked |
-| `sell_repay(ts_code, amount, limit=None, valid_bars=1, reason=None)` | Sell credit-account shares and repay financing debt interest-first |
+| `buy(ts_code, amount, limit=None, reason=None)` | Stock account cash buy |
+| `sell(ts_code, amount, limit=None, reason=None)` | Stock account sell of T+1 sellable long shares |
+| `credit_buy(ts_code, amount, limit=None, reason=None)` | Credit account collateral buy |
+| `credit_sell(ts_code, amount, limit=None, reason=None)` | Credit account collateral sell; financed shares must use `sell_repay` |
+| `fin_buy(ts_code, amount, limit=None, reason=None)` | Margin buy; creates /360 daily interest-accruing financing debt |
+| `short(ts_code, amount, *, limit, reason=None)` | Short sale; pass a finite positive `limit=` and satisfy the uptick rule |
+| `cover(ts_code, amount, limit=None, reason=None)` | Buy to cover short debt, oldest contract first; same-day short cover is T+1-blocked |
+| `sell_repay(ts_code, amount, limit=None, reason=None)` | Sell credit-account shares and repay financing debt interest-first |
 | `direct_repay(amount, reason=None)` | Repay financing debt from credit-account cash; strict reject if cash/debt is insufficient |
 | `transfer(amount, from_account, to_account, reason=None)` | Pre-09:14 cash transfer request between `stock` and `credit` accounts |
 | `close(ts_code, account=None, reason=None)` | Market exit; pass `account=` if both accounts hold the code |
@@ -133,7 +133,8 @@ then 1-share increments, and size is never inferred from `weight`.
 
 Common mistakes: broker actions outside `ctx.substep` are rejected; `short`
 without `limit=` is rejected; cross-minute substep actions are not orders until
-`ready_at` and therefore do not appear in `pending()` before submission.
+`ready_at`, must still be ready inside an exchange order-submission window, and
+therefore do not appear in `pending()` before submission.
 
 `ctx` exposes (rebuilt each tick):
 
@@ -188,7 +189,8 @@ the start of that sub-step; writes are STAGED and become visible only after `B`
 minutes (`ready_at = tick + B`), so write a plan in one tick and read it in a later
 one. Broker actions issued inside `0 < B < 1` light sub-steps are submitted in the
 current decision minute; actions inside `B>=1` sub-steps are delayed to `ready_at`
-before submission. It resets per backtest — durable parameters belong in
+and are submitted only if they have not crossed out of the exchange's accepted
+order-submission windows. It resets per backtest — durable parameters belong in
 `models/`, written before `backtest`; `ctx.model_dir` is read-only during
 formal replay.
 

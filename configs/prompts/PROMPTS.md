@@ -91,9 +91,9 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - 固定日内时间表（贴近真实交易员的日常例程）：为策略选定少数**固定的每日时钟时点**，用 `ctx.cur_time` 门控，而不是每个 tick 或随机时点行动。典型安排：盘前某个固定 off-session 时点（如 `08:00`）做研究/选股并写 `ctx.state_dir` 计划 → `09:15`/`09:25` 读取计划下单 → 盘中在固定节奏做持仓管理/做 T → `14:57` 收盘竞价前收尾。同一套时点在每个交易日重复触发，使重操作（横截面筛选、模型推理、`ctx.nl()`）落在可预期的少数时刻，成本可控、可复现，也贴近实盘执行。
 - 成交延迟：在某根 bar 决策的单默认于其后第 `execution_lag_bars`（默认 2）根 bar 起进入撮合，杜绝 bar 内前视（如 09:35 决策、09:37 起成交）。临近收盘、其后无可成交 bar 的决策无法成交。
 - 竞价：`09:15` 信息 tick 无价格，盲下单成交于 09:30 开盘竞价；`09:25` 暴露撮合开盘价，下单成交于首根连续 bar（09:31，按 taker 滑点）；`14:57` 下单成交于 15:00 收盘价。真正开/收盘集合竞价成交不计滑点。
-- 订单类型：市价单按进入 bar 的 open + 滑点成交；该分钟该票无成交时继续挂单、在当日下一个有成交的 bar 成交（当日收盘仍未成交自动撤销）。限价单（FIX_PRICE）挂单，若 open 已优于限价则按 open 成交，否则须 bar **严格击穿**限价（买单 low 低于限价 / 卖单 high 高于限价）才按限价成交——仅触及视为排队未成交；`valid_bars` 内未击穿自动撤单。策略也可主动撤销 `pending()` 返回的未成交委托。
+- 订单类型：市价单按进入 bar 的 open + 滑点成交；该分钟该票无成交时继续挂单、在当日下一个有成交的 bar 成交（当日收盘仍未成交自动撤销）。限价单（FIX_PRICE）挂单，若 open 已优于限价则按 open 成交，否则须 bar **严格击穿**限价（买单 low 低于限价 / 卖单 high 高于限价）才按限价成交——仅触及视为排队未成交；限价单默认当日有效，直到成交、策略主动撤销或日终清扫。需要“N 分钟后撤单”时，用 `pending()` 的 `age_minutes` 加 `cancel()` 自行管理。
 - Broker 约束：策略只表达意图。每次实验同时运行普通+信用两个独立账户（现金、持仓、T+1 各自独立、互不担保），Broker 强制各账户现金与保证金可用余额、T+1 可卖余额、手数、涨跌停、停牌、融资融券标的与授信额度、融券限价规则、维保比例强平（只清信用账户）、账户间划转提取线和回放末日强制清仓。最大持仓数、单票权重和集中度默认由你控制。
-- 子步骤预算：所有会访问 `ctx.state_dir`、调用 `ctx.broker`、调用 `ctx.nl()`、读写策略状态或做实质筛选/推理的策略步骤，都必须放进 `ctx.substep(name, budget_minutes=B)`；`B>0`、tick 内 name 唯一、低报会 fail-fast。`ctx.broker` 原语和 `ctx.state_dir` 在子步骤外会被拒绝；宿主还会用 `main(ctx)` 总耗时减去 substep 耗时，拒绝实质未包裹计算。`B<1` 的轻量块在回测中视为本决策分钟内完成（仍统计/限时并带 `ready_at` 元数据）；`B>=1` 的块内 `ctx.state_dir` 写入和 `ctx.broker` 动作延迟到 `ready_at = tick + B` 后才可见/提交。未 ready 的跨分钟 broker 动作还不是委托，不会出现在 `pending()`；`pending()` 只展示已提交但未成交/可撤的在途单。
+- 子步骤预算：所有会访问 `ctx.state_dir`、调用 `ctx.broker`、调用 `ctx.nl()`、读写策略状态或做实质筛选/推理的策略步骤，都必须放进 `ctx.substep(name, budget_minutes=B)`；`B>0`、tick 内 name 唯一、低报会 fail-fast。`ctx.broker` 原语和 `ctx.state_dir` 在子步骤外会被拒绝；宿主还会用 `main(ctx)` 总耗时减去 substep 耗时，拒绝实质未包裹计算。`B<1` 的轻量块在回测中视为本决策分钟内完成（仍统计/限时并带 `ready_at` 元数据）；`B>=1` 的 broker action 只有在生成 tick、`ready_at` 和释放 tick 都处于交易所接受申报窗口内才提交，否则记录未提交/未成交，不会自动排到下一交易时段。未 ready 的跨分钟 broker 动作还不是委托，不会出现在 `pending()`；`pending()` 只展示已提交但未成交/可撤的在途单。
 - 回测成本：`backtest` 独立计时，不计入 Fold 推理 deadline，但单 Fold 次数受 `max_backtests_per_fold` 限制；单 tick 与单交易日真实墙钟硬上限由 run manifest 给出。先用小 `replay_window` 试探，再外推完整耗时。
 - 跨 tick 状态：`ctx.state_dir` 只存你的规则、计划和轻量状态，不是持仓/委托账本；Broker 才是真相源。`ctx.state_dir` 只能在 `ctx.substep` 内访问，块内读到进入该块前的可见状态，写入按 `ready_at` 延迟合并；每次回测重置，需继承的参数在回测前写入 `models/`。
 - NL 与做空：`ctx.nl(ts_code, prompt=...)` 用于单股文本分析，`ctx.nl(prompt=...)` 用于事件/主题/行业/宏观文本检索；文本按数据节点 PIT 滚动且受配额限制，证据必须降权使用。默认做空券源由成交当日 `margin_secs` 校验，缺失当日集合时回退决策日冻结集合，不可融券会拒单。
@@ -409,11 +409,11 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 
 | 接口 | 主要参数 | 用途 |
 |---|---|---|
-| `ctx.broker.buy` / `sell` | ts_code, amount, limit?, valid_bars?, reason? | **普通账户**现金买入/卖出（long-only）；`valid_bars` 为限价单最多挂单 bar 数（默认 1）；返回可用于撤单的 `order_id` |
-| `ctx.broker.credit_buy` / `credit_sell` | ts_code, amount, limit?, valid_bars?, reason? | **信用账户**担保品买入/卖出（现金口径，构成信用账户担保资产）；当前由 `margin_secs` 近似标的池门控 |
-| `ctx.broker.fin_buy` | ts_code, amount, limit?, valid_bars?, reason? | 融资买入（信用账户）：不动用现金，本金+费用计入融资负债合约、按自然日 /360 计息；受保证金可用余额、`margin_secs` 近似标的池与授信额度约束 |
-| `ctx.broker.short` / `cover` | ts_code, amount, limit?, valid_bars?, reason? | 融券卖出/买券还券（信用账户）；**融券卖出必须给 `limit=`，uptick 规则对照的是激活 bar（提交后滞后 `execution_lag_bars`）的参考最新价——限价须留足上行缓冲，市价 short 会被拒；融券/融资开仓额度以 `credit["enable_bail_balance"]`（保证金可用余额）为准而非 available_cash；开空当日不可还券** |
-| `ctx.broker.sell_repay` | ts_code, amount?, limit?, valid_bars?, reason? | 卖券还款（信用账户）：卖出净所得先还息后还本（最老合约优先），余额留作信用账户现金；无融资负债时拒单 |
+| `ctx.broker.buy` / `sell` | ts_code, amount, limit?, reason? | **普通账户**现金买入/卖出（long-only）；返回可用于撤单的 `order_id` |
+| `ctx.broker.credit_buy` / `credit_sell` | ts_code, amount, limit?, reason? | **信用账户**担保品买入/卖出（现金口径，构成信用账户担保资产）；当前由 `margin_secs` 近似标的池门控 |
+| `ctx.broker.fin_buy` | ts_code, amount, limit?, reason? | 融资买入（信用账户）：不动用现金，本金+费用计入融资负债合约、按自然日 /360 计息；受保证金可用余额、`margin_secs` 近似标的池与授信额度约束 |
+| `ctx.broker.short` / `cover` | short: ts_code, amount, *, limit, reason?；cover: ts_code, amount, limit?, reason? | 融券卖出/买券还券（信用账户）；**融券卖出必须显式给有限正数 `limit=`，uptick 规则对照的是激活 bar（提交后滞后 `execution_lag_bars`）的参考最新价——限价须留足上行缓冲，缺失或非法 `limit` 会被策略接口拒绝；融券/融资开仓额度以 `credit["enable_bail_balance"]`（保证金可用余额）为准而非 available_cash；开空当日不可还券** |
+| `ctx.broker.sell_repay` | ts_code, amount?, limit?, reason? | 卖券还款（信用账户）：卖出净所得先还息后还本（最老合约优先），余额留作信用账户现金；无融资负债时拒单 |
 | `ctx.broker.direct_repay` | amount(元), reason? | 直接还款（信用账户）：从信用账户现金偿还融资负债（先息后本）；金额必须不超过信用账户可用现金和待还融资负债，否则拒单；在提交 tick 即时结算 |
 | `ctx.broker.transfer` | amount(元), from_account, to_account, reason? | 两账户间现金划转申请；仅接受每日 09:14 前提交的当日盘前申请，09:14 统一确认；融券冻结所得不可划出，信用账户有负债时划出须保持维保比例 ≥ 提取线（见 facts `maintenance_withdraw_ratio`） |
 | `ctx.broker.close` | ts_code, account?, reason? | 市价平掉该票全部持仓（按持仓账户与方向自动转换）；两个账户同时持有该票时必须显式给 `account=`，否则抛错 |
@@ -424,7 +424,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 | `ctx.broker.credit` | （无） | 信用账户视图 dict（`cash`/`available_cash`、维保比例、保证金可用余额、融资/融券负债、已计未付利息、额度、利率）；可用现金/保证金扣融券冻结所得和已提交未成交订单占用 |
 | `ctx.broker.debt_contracts` | ts_code? | 未了结融资/融券负债合约明细（未还金额/量、开仓日、年利率、已计利息） |
 
-每次实验同时运行两个独立账户（普通 + 信用），现金、持仓与 T+1 各自独立、互不担保：普通账户 long-only；融资/融券只在信用账户。同一票允许普通账户做多 + 信用账户融券做空（对冲）。`amount` 是股数，必须是正整数；沪深主板/创业板 100 股整数倍，科创板 200 股起、之后 1 股递增，北交所 100 股起、之后 1 股递增。Broker 不做向下取整、超可卖量截断或单票 cap 自动压量，超约束直接拒单。仓位 sizing 由策略显式读取现金/价格/可卖量后自行计算，Broker 不接受 `weight` 下单参数。`limit=P` 为限价单，缺省为市价单；非正 `limit` 拒单。只在显式可报单/交易分钟 tick 提交新订单；普通 off-session tick 不提交交易所订单，`transfer` 只用于每日 09:14 前的盘前资金划转申请。`ctx.broker` 下单/撤单/划转原语必须在 `ctx.substep` 内调用：`0 < B < 1` 的轻量块按当前决策分钟提交并统计耗时，`B>=1` 的动作等到 `ready_at` 后第一个可报单 tick 才提交，再按常规成交延迟撮合。
+每次实验同时运行两个独立账户（普通 + 信用），现金、持仓与 T+1 各自独立、互不担保：普通账户 long-only；融资/融券只在信用账户。同一票允许普通账户做多 + 信用账户融券做空（对冲）。`amount` 是股数，必须是正整数；沪深主板/创业板 100 股整数倍，科创板 200 股起、之后 1 股递增，北交所 100 股起、之后 1 股递增。Broker 不做向下取整、超可卖量截断或单票 cap 自动压量，超约束直接拒单。仓位 sizing 由策略显式读取现金/价格/可卖量后自行计算，Broker 不接受 `weight` 下单参数。`limit=P` 为限价单，缺省为市价单；非正 `limit` 拒单。只在显式可报单/交易分钟 tick 提交新订单；普通 off-session tick 不提交交易所订单，`transfer` 只用于每日 09:14 前的盘前资金划转申请。`ctx.broker` 下单/撤单/划转原语必须在 `ctx.substep` 内调用：`0 < B < 1` 的轻量块按当前决策分钟提交并统计耗时；`B>=1` 若跨出交易所接受申报窗口会记录未提交/未成交，不会自动排到下一交易时段。
 
 信用账户经济学（与交易所实施细则一致）：融资/融券利息按自然日 /360 计入合约、还款/还券时以现金支付（先息后本、最老合约优先）；融资买入股份卖出时必须用 `sell_repay` 先还融资负债；维保比例 = (信用账户现金+证券市值)/(融资负债+融券市值+利息)——**只计信用账户资产，普通账户不作担保**——低于平仓线（见 facts `maintenance_closeout_ratio`）强制平掉信用账户持仓（普通账户不受影响）；融券卖出所得现金被冻结、只能用于买券还券、不可划转；新的融资/融券操作受保证金可用余额（信用现金+担保品市值×折算率−占用−浮亏）约束。两账户初始资金见 facts `stock_initial_cash` / `credit_initial_cash`，可用盘前 `transfer` 重新配置（信用划出受提取线约束）。
 
@@ -564,9 +564,9 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - 固定日内时间表（贴近真实交易员的日常例程）：为策略选定少数**固定的每日时钟时点**，用 `ctx.cur_time` 门控，而不是每个 tick 或随机时点行动。典型安排：盘前某个固定 off-session 时点（如 `08:00`）做研究/选股并写 `ctx.state_dir` 计划 → `09:15`/`09:25` 读取计划下单 → 盘中在固定节奏做持仓管理/做 T → `14:57` 收盘竞价前收尾。同一套时点在每个交易日重复触发，使重操作（横截面筛选、模型推理、`ctx.nl()`）落在可预期的少数时刻，成本可控、可复现，也贴近实盘执行。
 - 成交延迟：在某根 bar 决策的单默认于其后第 `execution_lag_bars`（默认 2）根 bar 起进入撮合，杜绝 bar 内前视（如 09:35 决策、09:37 起成交）。临近收盘、其后无可成交 bar 的决策无法成交。
 - 竞价：`09:15` 信息 tick 无价格，盲下单成交于 09:30 开盘竞价；`09:25` 暴露撮合开盘价，下单成交于首根连续 bar（09:31，按 taker 滑点）；`14:57` 下单成交于 15:00 收盘价。真正开/收盘集合竞价成交不计滑点。
-- 订单类型：市价单按进入 bar 的 open + 滑点成交；该分钟该票无成交时继续挂单、在当日下一个有成交的 bar 成交（当日收盘仍未成交自动撤销）。限价单（FIX_PRICE）挂单，若 open 已优于限价则按 open 成交，否则须 bar **严格击穿**限价（买单 low 低于限价 / 卖单 high 高于限价）才按限价成交——仅触及视为排队未成交；`valid_bars` 内未击穿自动撤单。策略也可主动撤销 `pending()` 返回的未成交委托。
+- 订单类型：市价单按进入 bar 的 open + 滑点成交；该分钟该票无成交时继续挂单、在当日下一个有成交的 bar 成交（当日收盘仍未成交自动撤销）。限价单（FIX_PRICE）挂单，若 open 已优于限价则按 open 成交，否则须 bar **严格击穿**限价（买单 low 低于限价 / 卖单 high 高于限价）才按限价成交——仅触及视为排队未成交；限价单默认当日有效，直到成交、策略主动撤销或日终清扫。需要“N 分钟后撤单”时，用 `pending()` 的 `age_minutes` 加 `cancel()` 自行管理。
 - Broker 约束：策略只表达意图。每次实验同时运行普通+信用两个独立账户（现金、持仓、T+1 各自独立、互不担保），Broker 强制各账户现金与保证金可用余额、T+1 可卖余额、手数、涨跌停、停牌、融资融券标的与授信额度、融券限价规则、维保比例强平（只清信用账户）、账户间划转提取线和回放末日强制清仓。最大持仓数、单票权重和集中度默认由你控制。
-- 子步骤预算：所有会访问 `ctx.state_dir`、调用 `ctx.broker`、调用 `ctx.nl()`、读写策略状态或做实质筛选/推理的策略步骤，都必须放进 `ctx.substep(name, budget_minutes=B)`；`B>0`、tick 内 name 唯一、低报会 fail-fast。`ctx.broker` 原语和 `ctx.state_dir` 在子步骤外会被拒绝；宿主还会用 `main(ctx)` 总耗时减去 substep 耗时，拒绝实质未包裹计算。`B<1` 的轻量块在回测中视为本决策分钟内完成（仍统计/限时并带 `ready_at` 元数据）；`B>=1` 的块内 `ctx.state_dir` 写入和 `ctx.broker` 动作延迟到 `ready_at = tick + B` 后才可见/提交。未 ready 的跨分钟 broker 动作还不是委托，不会出现在 `pending()`；`pending()` 只展示已提交但未成交/可撤的在途单。
+- 子步骤预算：所有会访问 `ctx.state_dir`、调用 `ctx.broker`、调用 `ctx.nl()`、读写策略状态或做实质筛选/推理的策略步骤，都必须放进 `ctx.substep(name, budget_minutes=B)`；`B>0`、tick 内 name 唯一、低报会 fail-fast。`ctx.broker` 原语和 `ctx.state_dir` 在子步骤外会被拒绝；宿主还会用 `main(ctx)` 总耗时减去 substep 耗时，拒绝实质未包裹计算。`B<1` 的轻量块在回测中视为本决策分钟内完成（仍统计/限时并带 `ready_at` 元数据）；`B>=1` 的 broker action 只有在生成 tick、`ready_at` 和释放 tick 都处于交易所接受申报窗口内才提交，否则记录未提交/未成交，不会自动排到下一交易时段。未 ready 的跨分钟 broker 动作还不是委托，不会出现在 `pending()`；`pending()` 只展示已提交但未成交/可撤的在途单。
 - 回测成本：`backtest` 独立计时，不计入 Fold 推理 deadline，但单 Fold 次数受 `max_backtests_per_fold` 限制；单 tick 与单交易日真实墙钟硬上限由 run manifest 给出。先用小 `replay_window` 试探，再外推完整耗时。
 - 跨 tick 状态：`ctx.state_dir` 只存你的规则、计划和轻量状态，不是持仓/委托账本；Broker 才是真相源。`ctx.state_dir` 只能在 `ctx.substep` 内访问，块内读到进入该块前的可见状态，写入按 `ready_at` 延迟合并；每次回测重置，需继承的参数在回测前写入 `models/`。
 - NL 与做空：`ctx.nl(ts_code, prompt=...)` 用于单股文本分析，`ctx.nl(prompt=...)` 用于事件/主题/行业/宏观文本检索；文本按数据节点 PIT 滚动且受配额限制，证据必须降权使用。默认做空券源由成交当日 `margin_secs` 校验，缺失当日集合时回退决策日冻结集合，不可融券会拒单。
@@ -611,11 +611,11 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 
 | 接口 | 主要参数 | 用途 |
 |---|---|---|
-| `ctx.broker.buy` / `sell` | ts_code, amount, limit?, valid_bars?, reason? | **普通账户**现金买入/卖出（long-only）；`valid_bars` 为限价单最多挂单 bar 数（默认 1）；返回可用于撤单的 `order_id` |
-| `ctx.broker.credit_buy` / `credit_sell` | ts_code, amount, limit?, valid_bars?, reason? | **信用账户**担保品买入/卖出（现金口径，构成信用账户担保资产）；当前由 `margin_secs` 近似标的池门控 |
-| `ctx.broker.fin_buy` | ts_code, amount, limit?, valid_bars?, reason? | 融资买入（信用账户）：不动用现金，本金+费用计入融资负债合约、按自然日 /360 计息；受保证金可用余额、`margin_secs` 近似标的池与授信额度约束 |
-| `ctx.broker.short` / `cover` | ts_code, amount, limit?, valid_bars?, reason? | 融券卖出/买券还券（信用账户）；**融券卖出必须给 `limit=`，uptick 规则对照的是激活 bar（提交后滞后 `execution_lag_bars`）的参考最新价——限价须留足上行缓冲，市价 short 会被拒；融券/融资开仓额度以 `credit["enable_bail_balance"]`（保证金可用余额）为准而非 available_cash；开空当日不可还券** |
-| `ctx.broker.sell_repay` | ts_code, amount?, limit?, valid_bars?, reason? | 卖券还款（信用账户）：卖出净所得先还息后还本（最老合约优先），余额留作信用账户现金；无融资负债时拒单 |
+| `ctx.broker.buy` / `sell` | ts_code, amount, limit?, reason? | **普通账户**现金买入/卖出（long-only）；返回可用于撤单的 `order_id` |
+| `ctx.broker.credit_buy` / `credit_sell` | ts_code, amount, limit?, reason? | **信用账户**担保品买入/卖出（现金口径，构成信用账户担保资产）；当前由 `margin_secs` 近似标的池门控 |
+| `ctx.broker.fin_buy` | ts_code, amount, limit?, reason? | 融资买入（信用账户）：不动用现金，本金+费用计入融资负债合约、按自然日 /360 计息；受保证金可用余额、`margin_secs` 近似标的池与授信额度约束 |
+| `ctx.broker.short` / `cover` | short: ts_code, amount, *, limit, reason?；cover: ts_code, amount, limit?, reason? | 融券卖出/买券还券（信用账户）；**融券卖出必须显式给有限正数 `limit=`，uptick 规则对照的是激活 bar（提交后滞后 `execution_lag_bars`）的参考最新价——限价须留足上行缓冲，缺失或非法 `limit` 会被策略接口拒绝；融券/融资开仓额度以 `credit["enable_bail_balance"]`（保证金可用余额）为准而非 available_cash；开空当日不可还券** |
+| `ctx.broker.sell_repay` | ts_code, amount?, limit?, reason? | 卖券还款（信用账户）：卖出净所得先还息后还本（最老合约优先），余额留作信用账户现金；无融资负债时拒单 |
 | `ctx.broker.direct_repay` | amount(元), reason? | 直接还款（信用账户）：从信用账户现金偿还融资负债（先息后本）；金额必须不超过信用账户可用现金和待还融资负债，否则拒单；在提交 tick 即时结算 |
 | `ctx.broker.transfer` | amount(元), from_account, to_account, reason? | 两账户间现金划转申请；仅接受每日 09:14 前提交的当日盘前申请，09:14 统一确认；融券冻结所得不可划出，信用账户有负债时划出须保持维保比例 ≥ 提取线（见 facts `maintenance_withdraw_ratio`） |
 | `ctx.broker.close` | ts_code, account?, reason? | 市价平掉该票全部持仓（按持仓账户与方向自动转换）；两个账户同时持有该票时必须显式给 `account=`，否则抛错 |
@@ -626,7 +626,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 | `ctx.broker.credit` | （无） | 信用账户视图 dict（`cash`/`available_cash`、维保比例、保证金可用余额、融资/融券负债、已计未付利息、额度、利率）；可用现金/保证金扣融券冻结所得和已提交未成交订单占用 |
 | `ctx.broker.debt_contracts` | ts_code? | 未了结融资/融券负债合约明细（未还金额/量、开仓日、年利率、已计利息） |
 
-每次实验同时运行两个独立账户（普通 + 信用），现金、持仓与 T+1 各自独立、互不担保：普通账户 long-only；融资/融券只在信用账户。同一票允许普通账户做多 + 信用账户融券做空（对冲）。`amount` 是股数，必须是正整数；沪深主板/创业板 100 股整数倍，科创板 200 股起、之后 1 股递增，北交所 100 股起、之后 1 股递增。Broker 不做向下取整、超可卖量截断或单票 cap 自动压量，超约束直接拒单。仓位 sizing 由策略显式读取现金/价格/可卖量后自行计算，Broker 不接受 `weight` 下单参数。`limit=P` 为限价单，缺省为市价单；非正 `limit` 拒单。只在显式可报单/交易分钟 tick 提交新订单；普通 off-session tick 不提交交易所订单，`transfer` 只用于每日 09:14 前的盘前资金划转申请。`ctx.broker` 下单/撤单/划转原语必须在 `ctx.substep` 内调用：`0 < B < 1` 的轻量块按当前决策分钟提交并统计耗时，`B>=1` 的动作等到 `ready_at` 后第一个可报单 tick 才提交，再按常规成交延迟撮合。
+每次实验同时运行两个独立账户（普通 + 信用），现金、持仓与 T+1 各自独立、互不担保：普通账户 long-only；融资/融券只在信用账户。同一票允许普通账户做多 + 信用账户融券做空（对冲）。`amount` 是股数，必须是正整数；沪深主板/创业板 100 股整数倍，科创板 200 股起、之后 1 股递增，北交所 100 股起、之后 1 股递增。Broker 不做向下取整、超可卖量截断或单票 cap 自动压量，超约束直接拒单。仓位 sizing 由策略显式读取现金/价格/可卖量后自行计算，Broker 不接受 `weight` 下单参数。`limit=P` 为限价单，缺省为市价单；非正 `limit` 拒单。只在显式可报单/交易分钟 tick 提交新订单；普通 off-session tick 不提交交易所订单，`transfer` 只用于每日 09:14 前的盘前资金划转申请。`ctx.broker` 下单/撤单/划转原语必须在 `ctx.substep` 内调用：`0 < B < 1` 的轻量块按当前决策分钟提交并统计耗时；`B>=1` 若跨出交易所接受申报窗口会记录未提交/未成交，不会自动排到下一交易时段。
 
 信用账户经济学（与交易所实施细则一致）：融资/融券利息按自然日 /360 计入合约、还款/还券时以现金支付（先息后本、最老合约优先）；融资买入股份卖出时必须用 `sell_repay` 先还融资负债；维保比例 = (信用账户现金+证券市值)/(融资负债+融券市值+利息)——**只计信用账户资产，普通账户不作担保**——低于平仓线（见 facts `maintenance_closeout_ratio`）强制平掉信用账户持仓（普通账户不受影响）；融券卖出所得现金被冻结、只能用于买券还券、不可划转；新的融资/融券操作受保证金可用余额（信用现金+担保品市值×折算率−占用−浮亏）约束。两账户初始资金见 facts `stock_initial_cash` / `credit_initial_cash`，可用盘前 `transfer` 重新配置（信用划出受提取线约束）。
 

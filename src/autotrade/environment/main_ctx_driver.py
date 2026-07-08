@@ -12,7 +12,7 @@ This module imports only the Python standard library (no ``autotrade``, ``pandas
 ``broker_core`` import), so it runs unchanged in the dependency-light sandbox image.
 """
 
-import builtins, contextlib, filecmp, importlib.util, json, os, re, shutil, sys, time, types, uuid
+import builtins, contextlib, filecmp, importlib.util, json, math, os, re, shutil, sys, time, types, uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -562,49 +562,52 @@ class _Broker:
             if code is None or str(record.get("ts_code")) == code
         ]
 
-    def buy(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
+    def buy(self, ts_code, amount=None, limit=None, reason=None):
         """普通账户买入 (现金, long-only). ``amount`` is a share count."""
         self._require_substep("buy")
-        return self._order("buy", ts_code, amount, limit, valid_bars, reason)
+        return self._order("buy", ts_code, amount, limit, reason)
 
-    def sell(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
+    def sell(self, ts_code, amount=None, limit=None, reason=None):
         """普通账户卖出 (T+1 可卖份额)."""
         self._require_substep("sell")
-        return self._order("sell", ts_code, amount, limit, valid_bars, reason)
+        return self._order("sell", ts_code, amount, limit, reason)
 
-    def credit_buy(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
+    def credit_buy(self, ts_code, amount=None, limit=None, reason=None):
         """信用账户担保品买入."""
         self._require_substep("credit_buy")
-        return self._order("credit_buy", ts_code, amount, limit, valid_bars, reason)
+        return self._order("credit_buy", ts_code, amount, limit, reason)
 
-    def credit_sell(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
+    def credit_sell(self, ts_code, amount=None, limit=None, reason=None):
         """信用账户担保品卖出 (T+1 可卖份额; proceeds stay in the credit account)."""
         self._require_substep("credit_sell")
-        return self._order("credit_sell", ts_code, amount, limit, valid_bars, reason)
+        return self._order("credit_sell", ts_code, amount, limit, reason)
 
-    def fin_buy(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
+    def fin_buy(self, ts_code, amount=None, limit=None, reason=None):
         """融资买入 (信用账户): opens a fin debt contract (notional+fee financed,
         daily interest); gated by 保证金可用余额, the margin_secs target set, and
         the fin quota."""
         self._require_substep("fin_buy")
-        return self._order("fin_buy", ts_code, amount, limit, valid_bars, reason)
+        return self._order("fin_buy", ts_code, amount, limit, reason)
 
-    def short(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
-        """融券卖出 (信用账户); must be a limit order at/above the reference price."""
+    def short(self, ts_code, amount, *, limit, reason=None):
+        """融券卖出 (信用账户); ``limit=`` is required by the exchange rule."""
         self._require_substep("short")
-        return self._order("short", ts_code, amount, limit, valid_bars, reason)
+        price = float(limit)
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError("short limit must be a finite positive price")
+        return self._order("short", ts_code, amount, price, reason)
 
-    def cover(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
+    def cover(self, ts_code, amount=None, limit=None, reason=None):
         """买券还券 (信用账户): reduces the short and repays 融券 contracts FIFO."""
         self._require_substep("cover")
-        return self._order("cover", ts_code, amount, limit, valid_bars, reason)
+        return self._order("cover", ts_code, amount, limit, reason)
 
-    def sell_repay(self, ts_code, amount=None, limit=None, valid_bars=None, reason=None):
+    def sell_repay(self, ts_code, amount=None, limit=None, reason=None):
         """卖券还款 (信用账户): sells held shares and applies the net proceeds to
         融资 debt (interest first, oldest contract first); any surplus stays as
         credit-account cash."""
         self._require_substep("sell_repay")
-        return self._order("sell_repay", ts_code, amount, limit, valid_bars, reason)
+        return self._order("sell_repay", ts_code, amount, limit, reason)
 
     def direct_repay(self, amount, reason=None, **kwargs):
         """直接还款 (信用账户): repays 融资 debt from credit-account cash (interest
@@ -724,7 +727,7 @@ class _Broker:
         self._client_seq += 1
         return "C%s_%03d" % (self._tick_key, self._client_seq)
 
-    def _order(self, action, ts_code, amount, limit, valid_bars, reason):
+    def _order(self, action, ts_code, amount, limit, reason):
         code = str(ts_code)
         order_id = self._new_order_id()
         record = {
@@ -742,8 +745,6 @@ class _Broker:
             record["amount"] = amount
         if limit is not None:
             record["limit"] = limit
-        if valid_bars is not None:
-            record["valid_bars"] = valid_bars
         if reason is not None:
             record["reason"] = reason
         record["_substep"] = self._cur_substep

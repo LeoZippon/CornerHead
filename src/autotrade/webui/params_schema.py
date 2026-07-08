@@ -129,9 +129,9 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "decision_max_sim_minutes", "group": "回放执行", "label": "substep 预算上限（分钟）", "type": "float", "optional": True, "advanced": True,
      "help": "ctx.substep 可声明预算 B 的上限；留空不限制。"},
     {"key": "backtest_max_seconds_per_decision", "group": "回放执行", "label": "单决策墙钟上限（秒）", "type": "float", "advanced": True,
-     "help": "验证回测中单个 main(ctx) tick（含 NL）的真实墙钟硬上限，超限杀驱动。"},
+     "help": "验证回测中单个 main(ctx) tick（含 NL）的真实墙钟硬上限，超限杀驱动；最终评估默认使用该值的 3 倍作为防挂死兜底。"},
     {"key": "backtest_max_seconds_per_trading_day", "group": "回放执行", "label": "单交易日墙钟上限（秒）", "type": "float", "advanced": True,
-     "help": "验证回测中单交易日累计计算墙钟上限，超限中止回放。"},
+     "help": "验证回测中单交易日累计计算墙钟上限，超限中止回放；最终评估默认使用该值的 3 倍作为防挂死兜底。"},
     {"key": "nl_max_calls_per_backtest", "group": "回放执行", "label": "单回测 NL 上限（可选）", "type": "int", "optional": True, "advanced": True,
      "help": "在日均配额之外进一步收紧单次回测的 NL 总次数；留空不启用。"},
     # Broker 账户

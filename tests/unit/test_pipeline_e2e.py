@@ -102,6 +102,28 @@ class FoldScheduleTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not overlap"):
             make_config(Path("/tmp"), heldout_first_period="2022Q1", heldout_last_period="2022Q1")
 
+    def test_final_eval_wall_caps_derive_from_validation_caps_unless_overridden(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            derived = make_config(
+                tmp_path,
+                backtest_max_seconds_per_decision=99.0,
+                backtest_max_seconds_per_trading_day=123.0,
+            )
+            self.assertEqual(derived.final_eval_max_seconds_per_decision(), 297.0)
+            self.assertEqual(derived.final_eval_max_seconds_per_trading_day(), 369.0)
+
+            explicit = make_config(
+                tmp_path,
+                experiment_id="exp_e2e_explicit",
+                backtest_max_seconds_per_decision=99.0,
+                backtest_max_seconds_per_trading_day=123.0,
+                backtest_final_eval_max_seconds_per_decision=111.0,
+                backtest_final_eval_max_seconds_per_trading_day=222.0,
+            )
+            self.assertEqual(explicit.final_eval_max_seconds_per_decision(), 111.0)
+            self.assertEqual(explicit.final_eval_max_seconds_per_trading_day(), 222.0)
+
     def test_quarter_bounds(self):
         self.assertEqual(quarter_bounds("2022Q1"), ("20220101", "20220331"))
         self.assertEqual(quarter_bounds("2021Q4"), ("20211001", "20211231"))
@@ -584,11 +606,11 @@ class PipelineEndToEndTest(unittest.TestCase):
             # Final evals (held-out is one) carry their own generous anti-hang caps.
             self.assertEqual(
                 captured["backtest_final_eval_max_seconds_per_decision"],
-                config.backtest_final_eval_max_seconds_per_decision,
+                config.final_eval_max_seconds_per_decision(),
             )
             self.assertEqual(
                 captured["backtest_final_eval_max_seconds_per_trading_day"],
-                config.backtest_final_eval_max_seconds_per_trading_day,
+                config.final_eval_max_seconds_per_trading_day(),
             )
             self.assertIs(captured["timeview_enabled"], False)
             self.assertIs(captured["rolling_asof_enabled"], False)  # back-compat alias

@@ -382,9 +382,9 @@ class WorkingOrder:
     using a better open when the bar already crosses the limit; a market order
     (``prtype.LATEST``/``PEER``) fills at the bar open with taker slippage, except
     an auction order (``is_auction``), which clears at the single auction price
-    with no slippage. ``remaining_bars`` is the time-in-force countdown; at expiry
-    the order auto-cancels. A 融券卖出 order is checked against the 申报价 rule at
-    its first match attempt (``uptick_checked``).
+    with no slippage. Orders are day orders: they remain cancelable until filled,
+    explicitly cancelled, or swept at day end. A 融券卖出 order is checked against
+    the 申报价 rule at its first match attempt (``uptick_checked``).
     """
 
     order_id: str
@@ -395,7 +395,6 @@ class WorkingOrder:
     volume: int | None
     price_type: int
     price: float | None
-    remaining_bars: int
     is_auction: bool
     reason: str
     submitted_at: str = ""
@@ -425,7 +424,6 @@ class WorkingOrder:
             "reserve_price": self.reserve_price,
             "status": "working",
             "submitted_at": self.submitted_at,
-            "remaining_bars": self.remaining_bars,
             "reason": self.reason,
         }
 
@@ -674,7 +672,6 @@ class SimBroker:
         volume: int | float | None,
         *,
         user_order_id: str = "",
-        valid_bars: int = 1,
         is_auction: bool = False,
         auction_close: bool = False,
         reserve_price: float | None = None,
@@ -687,8 +684,8 @@ class SimBroker:
         the official flow recovers via ``get_last_order_id`` right after the call
         (``user_order_id`` doubles as the id/投资备注 when given, so the agent's
         client id is the correlation key, as live remarks are). The opType alone
-        selects the account (23/24 普通, 27–34 信用). ``valid_bars``, the auction
-        flags, ``reason`` and ``submitted_at`` are backtest conveniences a live
+        selects the account (23/24 普通, 27–34 信用). The auction flags, ``reason``
+        and ``submitted_at`` are backtest conveniences a live
         adapter resolves before its own passorder. Only
         ``order_type`` 1101 (单股/股) is supported — except 直接还款, which
         follows the official 1102 (金额元) convention and settles immediately."""
@@ -745,7 +742,6 @@ class SimBroker:
                 volume=shares,
                 price_type=pr_type,
                 price=float(price) if is_limit else None,
-                remaining_bars=max(1, int(valid_bars or 1)),
                 is_auction=bool(is_auction),
                 auction_close=bool(auction_close),
                 reserve_price=(None if is_limit else reserve_price),
@@ -843,8 +839,8 @@ class SimBroker:
         """Match working orders against this bar (the simulated exchange).
 
         Fillable orders settle via :meth:`execute` (still subject to cash, T+1, lot,
-        price-limit, suspension and short-inventory rejects); a limit order the bar
-        did not reach decrements its time-in-force and rests, then auto-cancels."""
+        price-limit, suspension and short-inventory rejects); unfilled orders rest
+        until filled, explicitly cancelled, or swept at day end."""
         survivors: list[WorkingOrder] = []
         for order in self._book:
             bar = _bar_for_code(minute_group, order.ts_code)
@@ -853,20 +849,11 @@ class SimBroker:
                 # until the day's next bar with trades (an auction order that missed
                 # its single-price bar rolls into continuous matching and loses the
                 # slippage-free auction treatment, as an unmatched 集合竞价 order
-                # does); the day-end sweep is its backstop. A limit order's
-                # time-in-force still counts down on the market bar grid.
+                # does); the day-end sweep is its backstop.
                 if not order.is_limit:
                     order.is_auction = False
                     order.auction_close = False
-                    survivors.append(order)
-                elif order.remaining_bars <= 1:
-                    self._event(
-                        "order_cancelled", trade_date=trade_date, minute_key=minute_key,
-                        ts_code=order.ts_code, order_id=order.order_id, reason="expired_unfilled",
-                    )
-                else:
-                    order.remaining_bars -= 1
-                    survivors.append(order)
+                survivors.append(order)
                 continue
             if order.action == "short" and not order.uptick_checked:
                 # 融券卖出申报价不得低于最新成交价: checked once, when the order first
@@ -901,13 +888,7 @@ class SimBroker:
                     apply_slippage=not order.is_limit and not order.is_auction,
                     order_id=order.order_id,
                 )
-            elif order.remaining_bars <= 1:
-                self._event(
-                    "order_cancelled", trade_date=trade_date, minute_key=minute_key,
-                    ts_code=order.ts_code, order_id=order.order_id, reason="expired_unfilled",
-                )
             else:
-                order.remaining_bars -= 1
                 survivors.append(order)
         self._book = survivors
 

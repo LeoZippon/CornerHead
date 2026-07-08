@@ -355,7 +355,8 @@ def run_main_ctx_replay(
     within-bar look-ahead. Broker actions issued inside ``ctx.substep`` with a
     sub-minute budget are treated as submitted in the current decision minute while
     retaining ``ready_at`` metadata for audit; actions with ``B>=1`` are first held
-    until the block's ``ready_at`` and submitted on the first later orderable tick.
+    until the block's ``ready_at`` and submitted only if the generating tick,
+    ``ready_at``, and release tick are in an exchange order-submission window.
     From that submit tick they use the same ``execution_lag_bars`` mapping. A
     decision with no bar ``execution_lag_bars`` ahead (near the close) cannot fill
     and is recorded ``main_actions_unfilled``. The final trade date is reserved for
@@ -474,8 +475,9 @@ def run_main_ctx_replay(
                 n_real = len(real_index)
                 # Decisions wait out the submit lag, then enter the Broker's order book
                 # (passorder) at their activation bar. Substep-wrapped broker actions
-                # are first delayed until ready_at, then treated as submitted at the
-                # ready/orderable tick and mapped through this same activation logic.
+                # are first delayed until ready_at; if ready_at is not an exchange
+                # order-submission time, the action is recorded unfilled instead of
+                # being auto-scheduled into a later session.
                 incoming: dict[int, list[tuple[dict[str, object], bool, bool]]] = {}
                 for tick in plan:
                     tick_counts["total"] += 1
@@ -860,21 +862,51 @@ def _release_delayed_actions(
 ) -> list[dict[str, object]]:
     """Submit substep-produced broker actions once their declared compute is ready.
 
-    A substep action is not a broker order until this release point. If ready_at
-    falls between replay ticks, it is submitted on the first later orderable tick.
-    Off-session ticks are research/state only, so they keep ready actions queued.
-    Real market ticks are orderable even when no fill bar remains; those submissions
-    follow the normal no-fill path instead of silently rolling forward.
+    A substep action is not a broker order until this release point. If its
+    generating tick or ready_at is outside the exchange's accepted order-submission
+    windows, the action is recorded unfilled instead of being auto-scheduled into
+    a later session. Real market ticks are orderable even when no fill bar remains;
+    those submissions follow the normal no-fill path instead of silently rolling
+    forward.
     """
-    if not _is_orderable_tick(tick):
-        return []
     ready = sorted((item for item in delayed_actions if item.ready_at <= when), key=lambda item: item.seq)
     if not ready:
         return []
-    ready_ids = {item.seq for item in ready}
-    delayed_actions[:] = [item for item in delayed_actions if item.seq not in ready_ids]
-    actions: list[dict[str, object]] = []
+    current_window = _orderable_window_id(when) if _is_orderable_tick(tick) else None
+    ready_ids: set[int] = set()
+    releasable: list[_DelayedAction] = []
     for item in ready:
+        generated_at = _parse_datetime(item.generated_at)
+        generated_window = _orderable_window_id(generated_at) if generated_at is not None else None
+        ready_window = _orderable_window_id(item.ready_at)
+        reason = ""
+        if generated_window is None:
+            reason = "substep_generated_at_not_orderable"
+        elif ready_window is None:
+            reason = "substep_ready_at_not_orderable"
+        elif _orderable_window_has_passed(item.ready_at, when):
+            reason = "substep_order_window_missed"
+        elif current_window == ready_window:
+            releasable.append(item)
+            ready_ids.add(item.seq)
+            continue
+        if reason:
+            ready_ids.add(item.seq)
+            broker.record_event(
+                "main_actions_unfilled",
+                trade_date=trade_date,
+                minute_key=tick.minute_key,
+                action=_jsonable(item.action),
+                reason=reason,
+                substep=item.substep,
+                generated_at=item.generated_at,
+                ready_at=item.ready_at.isoformat(),
+            )
+    delayed_actions[:] = [item for item in delayed_actions if item.seq not in ready_ids]
+    if not releasable:
+        return []
+    actions: list[dict[str, object]] = []
+    for item in releasable:
         action = dict(item.action)
         original_submitted_at = str(action.get("submitted_at") or "")
         original_submitted_time = str(action.get("submitted_time") or "")
@@ -904,6 +936,52 @@ def _is_orderable_tick(tick: "_Tick") -> bool:
     if tick.is_afterhours:
         return True
     return not tick.is_offsession and (tick.is_real or tick.activate_index is not None)
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _seconds_since_midnight(when: datetime) -> float:
+    return (
+        when.hour * 3600
+        + when.minute * 60
+        + when.second
+        + when.microsecond / 1_000_000.0
+    )
+
+
+def _orderable_window_id(when: datetime) -> str | None:
+    seconds = _seconds_since_midnight(when)
+    windows = (
+        ("open_auction", 9 * 3600 + 15 * 60, 9 * 3600 + 25 * 60),
+        ("morning", 9 * 3600 + 30 * 60, 11 * 3600 + 30 * 60),
+        ("afternoon", 13 * 3600, 15 * 3600),
+    )
+    for name, start, end in windows:
+        if start <= seconds <= end:
+            return name
+    return None
+
+
+def _orderable_window_has_passed(ready_at: datetime, now: datetime) -> bool:
+    if now.date() > ready_at.date():
+        return True
+    if now.date() < ready_at.date():
+        return False
+    window = _orderable_window_id(ready_at)
+    if window == "open_auction":
+        end = 9 * 3600 + 25 * 60
+    elif window == "morning":
+        end = 11 * 3600 + 30 * 60
+    elif window == "afternoon":
+        end = 15 * 3600
+    else:
+        return False
+    return _seconds_since_midnight(now) > end
 
 
 def _place_actions_at_tick(
@@ -966,6 +1044,12 @@ def _place_actions_at_tick(
                     "main_action_ignored", trade_date=trade_date, minute_key=tick.minute_key,
                     action=_jsonable(action), reason="unsupported_or_missing_ts_code",
                 )
+            continue
+        if not _is_orderable_tick(tick):
+            broker.record_event(
+                "main_actions_unfilled", trade_date=trade_date, minute_key=tick.minute_key,
+                action=_jsonable(action), reason="not_orderable_tick",
+            )
             continue
         fill_index = tick.activate_index
         if fill_index is None or fill_index >= n_real:
@@ -1089,9 +1173,8 @@ def _reject_unconfirmed_transfers(
 def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool, is_close_auction: bool = False) -> bool:
     """Translate a ``main()`` action into a Broker ``passorder`` submission.
 
-    ``limit`` (a fixed price) routes to a 指定价 order resting ``valid_bars`` bars
-    (default 1); otherwise a 对手价 market order valid that bar. ``close`` has no
-    official op: it resolves to the holding account's market exit at submission
+    ``limit`` (a fixed price) routes to a 指定价 day order; otherwise a 对手价 market
+    order. ``close`` has no official op: it resolves to the holding account's market exit at submission
     (the activation tick is also the match tick, so there is no drift window) —
     an explicit ``account`` wins, else the unique holder; ambiguous closes are
     ignored (the driver already rejects them at call time). ``direct_repay``
@@ -1156,7 +1239,6 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
         prtype.FIX if limit is not None else prtype.PEER,
         limit or 0,
         shares,
-        valid_bars=max(1, _int_or_none(action.get("valid_bars")) or 1) if limit is not None else 1,
         is_auction=is_auction,
         auction_close=is_close_auction,
         # A market order may now rest across printless bars: keep it reserving

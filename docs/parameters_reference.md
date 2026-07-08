@@ -109,8 +109,8 @@
 | substep `budget_minutes`（Agent 声明） | `B>0`，tick 内唯一 | 实测墙钟 fail-fast + `state_dir` 写可见性 + broker action 提交时点（`B<1` 当分钟、`B>=1` 到 `ready_at`） |
 | `backtest_max_seconds_per_decision` | 300 s | 单 `main(ctx)` tick（含 NL）真实墙钟硬上限，超限杀驱动（仅 `mode="valid"`） |
 | `backtest_max_seconds_per_trading_day` | 900 s | 单交易日累计 `main(ctx)` 计算硬上限（仅 `mode="valid"`） |
-| `backtest_final_eval_max_seconds_per_decision` | 900 s | 最终评估（frozen_eval）单决策防挂死兜底，非接受门槛 |
-| `backtest_final_eval_max_seconds_per_trading_day` | 3000 s | 最终评估单交易日防挂死兜底 |
+| `backtest_final_eval_max_seconds_per_decision` | `3 × backtest_max_seconds_per_decision`（默认 900 s） | 最终评估（frozen_eval）单决策防挂死兜底，非接受门槛；显式配置时覆盖派生值 |
+| `backtest_final_eval_max_seconds_per_trading_day` | `3 × backtest_max_seconds_per_trading_day`（默认 2700 s） | 最终评估单交易日防挂死兜底；显式配置时覆盖派生值 |
 | `timeview_enabled` | True | 逐 tick 滚动 `ctx.asof_dir` 视图开关 |
 | `nl_max_calls_per_decision_day` | 10 | 每回测 NL 配额 = 该值 × 决策天数 |
 | `nl_max_calls_per_backtest` | None | 可选进一步收紧（取 min） |

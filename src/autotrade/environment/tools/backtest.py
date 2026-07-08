@@ -43,6 +43,8 @@ from autotrade.environment.step_tree import StepTree
 from .base import ActionField, ActionSpec, PHASE_FROZEN, PHASE_TRAIN_VALID, ToolContext, ToolError
 from .modification_check import ModificationCheckTool
 
+_FINAL_EVAL_WALL_CAP_MULTIPLIER = 3.0
+
 MODES = ("valid", "frozen_eval")
 
 
@@ -213,12 +215,21 @@ class BacktestTool:
         # aggregates the substep runtime). This tracks the same valid/final split as
         # the coarse caps below.
         enforce_substep_timeout = mode == "valid"
+        valid_decision_cap = float(manifest.get("backtest_max_seconds_per_decision", 300))
+        valid_per_day_cap = _optional_float(manifest.get("backtest_max_seconds_per_trading_day", 900))
         if mode == "valid":
-            decision_cap = float(manifest.get("backtest_max_seconds_per_decision", 300))
-            per_day_cap = _optional_float(manifest.get("backtest_max_seconds_per_trading_day", 900))
+            decision_cap = valid_decision_cap
+            per_day_cap = valid_per_day_cap
         else:
-            decision_cap = float(manifest.get("backtest_final_eval_max_seconds_per_decision", 900))
-            per_day_cap = _optional_float(manifest.get("backtest_final_eval_max_seconds_per_trading_day", 3000))
+            decision_cap = float(
+                manifest.get(
+                    "backtest_final_eval_max_seconds_per_decision",
+                    valid_decision_cap * _FINAL_EVAL_WALL_CAP_MULTIPLIER,
+                )
+            )
+            per_day_cap = _optional_float(manifest.get("backtest_final_eval_max_seconds_per_trading_day"))
+            if per_day_cap is None and valid_per_day_cap is not None:
+                per_day_cap = valid_per_day_cap * _FINAL_EVAL_WALL_CAP_MULTIPLIER
         tmp_nl_dir = self.ctx.paths.workspace / f".{new_id('nl_tool')}"
         requests_host, responses_host = _prepare_nl_rpc_files(self.ctx.paths.agent)
 

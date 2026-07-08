@@ -65,16 +65,16 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
-            ctx.broker.buy(code, amount=1000, limit=9.80, valid_bars=5, reason="limit_entry")
+            ctx.broker.buy(code, amount=1000, limit=9.80, reason="limit_entry")
 '''
 
-# Limit price the market never reaches inside its validity window -> auto-cancelled.
+# Limit price the market never reaches -> day-end auto-cancelled.
 LIMIT_CANCEL_MAIN = '''
 def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
-            ctx.broker.buy(code, amount=1000, limit=9.50, valid_bars=2, reason="limit_miss")
+            ctx.broker.buy(code, amount=1000, limit=7.00, reason="limit_miss")
 '''
 
 # Two buys in one tick; records the agent-visible cash/buying-power before and after
@@ -179,7 +179,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:30" and ctx.broker.position(code) == 0 and not ctx.broker.pending(code):
-            ctx.broker.buy(code, amount=1000, limit=7.00, valid_bars=99, reason="limit_day_end_miss")
+            ctx.broker.buy(code, amount=1000, limit=7.00, reason="limit_day_end_miss")
 '''
 
 # Re-evaluates every continuous tick but skips codes with a working order, so the
@@ -213,7 +213,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:30" and ctx.price(code) is not None and not ctx.broker.pending(code):
-            ctx.broker.buy(code, amount=1000, limit=9.50, valid_bars=5, reason="working_cancel_target")
+            ctx.broker.buy(code, amount=1000, limit=9.50, reason="working_cancel_target")
         for order in ctx.broker.pending():
             if order.get("status") == "working":
                 ctx.broker.cancel(order["order_id"], reason="working_cancel")
@@ -253,6 +253,14 @@ def main(ctx):
             ctx.broker.buy(code, amount=1000, limit=0, reason="bad_limit")
 '''
 
+SHORT_MISSING_LIMIT_MAIN = '''
+def main(ctx):
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        code = "000002.SZ"
+        if ctx.cur_time == "09:25" and ctx.broker.position(code) == 0:
+            ctx.broker.short(code, amount=1000, reason="missing_limit")
+'''
+
 # Submits and immediately cancels; no net main_actions order should remain for audit.
 BUY_THEN_CANCEL_SAME_TICK_MAIN = '''
 def main(ctx):
@@ -270,7 +278,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
         if ctx.cur_time == "09:30" and ctx.price(code) is not None and not ctx.broker.pending(code):
-            ctx.broker.buy(code, amount=1000, limit=7.00, valid_bars=99, reason="postclose_target")
+            ctx.broker.buy(code, amount=1000, limit=7.00, reason="postclose_target")
         if ctx.cur_time > "09:34":
             for order in ctx.broker.pending():
                 if order.get("order_id"):
@@ -407,8 +415,8 @@ def main(ctx):
     return
 '''
 
-# A positive substep budget on a 09:25 auction decision misses the 09:25 submission
-# point; it is submitted on the next orderable tick once ready_at has elapsed.
+# A positive substep budget on a 09:25 auction decision misses the accepted
+# open-auction submission window; it is not auto-scheduled into 09:30.
 SUBSTEP_AUCTION_SMALL_MAIN = '''
 def main(ctx):
     code = "000001.SZ"
@@ -932,14 +940,14 @@ def main(ctx):
         # Maker fill at exactly the limit price — no taker slippage.
         self.assertAlmostEqual(buys[0]["price"], 9.80)
 
-    def test_limit_order_auto_cancels_when_unfilled(self) -> None:
+    def test_limit_order_day_end_cancels_when_unfilled(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(LIMIT_CANCEL_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _limit_minutes())
         buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
-        self.assertEqual(len(buys), 0)  # 9.50 never reached
+        self.assertEqual(len(buys), 0)  # 7.00 never reached
         cancels = [
             e for e in result.broker.events
-            if e["event_type"] == "order_cancelled" and e.get("reason") == "expired_unfilled"
+            if e["event_type"] == "order_cancelled" and e.get("reason") == "day_end_unfilled"
         ]
         self.assertTrue(cancels)
 
@@ -956,6 +964,11 @@ def main(ctx):
         rejects = [o for o in _all_orders(result.broker) if o["reject_reason"] == "invalid_limit_price"]
         self.assertEqual(len(rejects), 1)
         self.assertEqual(result.broker.position_quantity("000001.SZ"), 0)
+
+    def test_short_requires_explicit_limit_at_strategy_interface(self) -> None:
+        (self.sandbox.paths.agent_output / "main.py").write_text(SHORT_MISSING_LIMIT_MAIN, encoding="utf-8")
+        with self.assertRaisesRegex(BacktestError, "required keyword-only argument: 'limit'"):
+            self._run_with(_ohlc_replay(), _limit_minutes())
 
     def test_day_end_limit_cancel_records_current_trade_date(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(LIMIT_DAY_END_CANCEL_MAIN, encoding="utf-8")
@@ -1142,27 +1155,35 @@ def main(ctx):
         events = [e for e in result.broker.events if e.get("event_type") == "main_actions" and e.get("delayed_from_substep")]
         self.assertTrue(str(events[0]["actions"][0].get("submitted_at") or "").endswith("09:31:00+08:00"))
 
-    def test_substep_small_budget_delays_auction_submission(self) -> None:
-        # A positive 09:25 substep is not ready at the 09:25 submit point. It is
-        # released at 09:30 and then fills two bars later.
+    def test_substep_small_budget_missing_auction_window_is_unfilled(self) -> None:
+        # A 09:25 budget_minutes=1 decision is ready at 09:26, outside the accepted
+        # open-auction submission window; the host must not auto-send it at 09:30.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_AUCTION_SMALL_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _substep_delay_minutes())
         buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
-        self.assertEqual(len(buys), 1)
-        self.assertEqual(buys[0]["price_label"], "minute:09:32")
-        events = [e for e in result.broker.events if e.get("event_type") == "main_actions" and e.get("delayed_from_substep")]
-        self.assertTrue(str(events[0]["actions"][0].get("submitted_at") or "").endswith("09:30:00+08:00"))
+        self.assertEqual(buys, [])
+        unfilled = [
+            e for e in result.broker.events
+            if e["event_type"] == "main_actions_unfilled"
+            and e.get("reason") == "substep_ready_at_not_orderable"
+            and str(e.get("ready_at") or "").endswith("09:26:00+08:00")
+        ]
+        self.assertEqual(len(unfilled), 1)
 
-    def test_substep_large_budget_delays_auction_submission(self) -> None:
-        # A 09:25 budget_minutes=4 decision is ready at 09:29, so the next orderable
-        # tick is still 09:30; fill follows the regular lag from that submit tick.
+    def test_substep_large_budget_missing_auction_window_is_unfilled(self) -> None:
+        # A 09:25 budget_minutes=4 decision is ready at 09:29, still outside the
+        # exchange's accepted submission windows; it must not roll into 09:30.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_AUCTION_LARGE_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _substep_delay_minutes())
         buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
-        self.assertEqual(len(buys), 1)
-        self.assertEqual(buys[0]["price_label"], "minute:09:32")
-        events = [e for e in result.broker.events if e.get("event_type") == "main_actions" and e.get("delayed_from_substep")]
-        self.assertTrue(str(events[0]["actions"][0].get("submitted_at") or "").endswith("09:30:00+08:00"))
+        self.assertEqual(buys, [])
+        unfilled = [
+            e for e in result.broker.events
+            if e["event_type"] == "main_actions_unfilled"
+            and e.get("reason") == "substep_ready_at_not_orderable"
+            and str(e.get("ready_at") or "").endswith("09:29:00+08:00")
+        ]
+        self.assertEqual(len(unfilled), 1)
 
     def test_substep_delayed_action_is_hidden_from_pending_until_release(self) -> None:
         # While waiting for ready_at, a cross-minute substep broker action is not a
@@ -1405,6 +1426,36 @@ def main(ctx):
             any(
                 e["event_type"] == "main_actions_unfilled"
                 and e.get("minute_key") == "06:00"
+                for e in result.broker.events
+            )
+        )
+
+    def test_cross_minute_offsession_broker_action_is_not_scheduled_to_open(self) -> None:
+        # A broker action generated in ordinary off-session is not a live broker order
+        # and is not a host-side scheduler request for 09:15.
+        main = (
+            "def main(ctx):\n"
+            "    if ctx.cur_time == '06:00' and ctx.broker.position('000001.SZ') == 0:\n"
+            "        with ctx.substep('research', budget_minutes=20):\n"
+            "            ctx.broker.buy('000001.SZ', amount=1000, reason='delayed_offsession')\n"
+        )
+        (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+        with MainPolicyRunner(
+            self.executor, self.sandbox.paths, timeout_seconds=30.0,
+            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
+        ) as policy:
+            policy.validate_main()
+            result = run_main_ctx_replay(
+                _ohlc_replay(), BrokerProfile(),
+                shortable_codes=frozenset(), main_policy=policy,
+                replay_intraday_1min=_dense_minutes(), offsession_tick_minutes=180,
+            )
+        buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(buys, [])
+        self.assertTrue(
+            any(
+                e["event_type"] == "main_actions_unfilled"
+                and e.get("reason") == "substep_generated_at_not_orderable"
                 for e in result.broker.events
             )
         )

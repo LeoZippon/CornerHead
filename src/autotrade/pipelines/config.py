@@ -20,6 +20,8 @@ from autotrade.environment.tools import ToolContext
 
 from .folds import FoldSpec, assert_no_overlap
 
+FINAL_EVAL_WALL_CAP_MULTIPLIER = 3.0
+
 
 class SnapshotProvider(Protocol):
     """Builds decision-input snapshots and replay slots for one Fold."""
@@ -201,10 +203,10 @@ class ExperimentConfig:
     # Latency budgets. A ctx.substep(name, budget_minutes=B) is the block's real-wall
     # ceiling (the backtest aborts if real wall-time exceeds B) and the ctx.state_dir
     # write-visibility gate (ready_at = tick + B). Broker actions inside a sub-minute
-    # block are submitted in the current decision minute; B>=1 waits until the first
-    # orderable tick at/after ready_at, then uses the normal execution_lag_bars fill
-    # mapping. A declared B over decision_max_sim_minutes is rejected at ctx.substep()
-    # init (BacktestError).
+    # block are submitted in the current decision minute; B>=1 must still be ready
+    # inside the exchange's accepted order-submission window before using the normal
+    # execution_lag_bars fill mapping. A declared B over decision_max_sim_minutes is
+    # rejected at ctx.substep() init (BacktestError).
     # The two real-wall caps below are SYSTEM fail-fasts that scale with the replay
     # length instead of a fixed total: any single decision (one main(ctx) tick) over
     # backtest_max_seconds_per_decision is killed immediately, and a trade day whose
@@ -221,10 +223,10 @@ class ExperimentConfig:
     # during validation must be allowed to finish its final eval — so they are not
     # subject to the tight caps. They keep a GENEROUS wall-clock backstop whose only
     # job is to kill a true hang (a sim-time budget cannot: an infinite loop in one
-    # tick burns zero sim minutes but unbounded wall-clock). Set high enough that it
-    # never binds a legitimate run, so acceptance stays effectively deterministic.
-    backtest_final_eval_max_seconds_per_decision: float = 900.0
-    backtest_final_eval_max_seconds_per_trading_day: float = 3000.0
+    # tick burns zero sim minutes but unbounded wall-clock). None derives from the
+    # validation cap by FINAL_EVAL_WALL_CAP_MULTIPLIER; explicit values override.
+    backtest_final_eval_max_seconds_per_decision: float | None = None
+    backtest_final_eval_max_seconds_per_trading_day: float | None = None
     # Per-tick Timeview: ctx.asof_dir exposes the parquet domains plus text_index
     # and visible text_library shards, rolled in on their real refresh nodes
     # (REFRESH_NODES), so a tick sees only data the landing cron job has already
@@ -323,6 +325,16 @@ class ExperimentConfig:
             object.__setattr__(self, "snapshot_config", SnapshotConfig(window_months=self.window_months))
         # Held-out boundaries are frozen in config before the experiment starts.
         assert_no_overlap(str(last_test_period), str(heldout_first_period), period=self.fold_period)
+
+    def final_eval_max_seconds_per_decision(self) -> float:
+        if self.backtest_final_eval_max_seconds_per_decision is not None:
+            return float(self.backtest_final_eval_max_seconds_per_decision)
+        return float(self.backtest_max_seconds_per_decision) * FINAL_EVAL_WALL_CAP_MULTIPLIER
+
+    def final_eval_max_seconds_per_trading_day(self) -> float:
+        if self.backtest_final_eval_max_seconds_per_trading_day is not None:
+            return float(self.backtest_final_eval_max_seconds_per_trading_day)
+        return float(self.backtest_max_seconds_per_trading_day) * FINAL_EVAL_WALL_CAP_MULTIPLIER
 
     @property
     def experiment_dir(self) -> Path:

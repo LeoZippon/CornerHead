@@ -791,8 +791,6 @@ class ToolFlowTest(unittest.TestCase):
             ctx.manifest.update(
                 backtest_max_seconds_per_decision=300.0,
                 backtest_max_seconds_per_trading_day=900.0,
-                backtest_final_eval_max_seconds_per_decision=900.0,
-                backtest_final_eval_max_seconds_per_trading_day=3000.0,
             )
             captured: dict[str, object] = {}
 
@@ -818,7 +816,7 @@ class ToolFlowTest(unittest.TestCase):
                 sandbox.bind_snapshot_view(ctx.paths.snapshot_views / "test_decision_input")
                 BacktestTool(ctx).run(mode="frozen_eval", result_name="test_000")
                 self.assertEqual(captured["decision_cap"], 900.0)
-                self.assertEqual(captured["per_day_cap"], 3000.0)
+                self.assertEqual(captured["per_day_cap"], 2700.0)
 
     def test_backtest_rejects_wrong_snapshot_binding(self):
         with tempfile.TemporaryDirectory() as tmp:
