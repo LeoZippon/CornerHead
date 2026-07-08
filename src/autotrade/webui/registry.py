@@ -278,12 +278,6 @@ def fold_detail(experiments_root: Path, experiment_id: str, epoch_id: str, fold_
         raise KeyError(f"no fold record for {epoch_id}/{fold_id}")
     hitl_dir = experiment_dir / HITL_DIR_NAME
     strategy_dir = record.get("frozen_strategy_artifact_path")
-    files: list[dict[str, object]] = []
-    if strategy_dir and Path(str(strategy_dir)).is_dir():
-        root = Path(str(strategy_dir))
-        for path in sorted(root.rglob("*")):
-            if path.is_file():
-                files.append({"path": str(path.relative_to(root)), "bytes": path.stat().st_size})
     md_path, meta_path = analysis_paths(hitl_dir / ANALYSIS_DIR_NAME, epoch_id, fold_id)
     return {
         "experiment_id": experiment_id,
@@ -293,7 +287,8 @@ def fold_detail(experiments_root: Path, experiment_id: str, epoch_id: str, fold_
         # Guarded test view: test-period evidence rides in a separate, clearly
         # labelled block the UI keeps collapsed with a leakage warning.
         "test_audit": {field: record.get(field) for field in TEST_FIELDS},
-        "strategy_files": files,
+        # Frozen artifacts are downloaded as ONE zip package (strategy.zip);
+        # the console deliberately offers no per-file listing/download.
         "strategy_dir": str(strategy_dir) if strategy_dir else None,
         "analysis": {
             "available": md_path.exists(),

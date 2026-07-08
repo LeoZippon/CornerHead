@@ -256,12 +256,18 @@
 | worker `--poll-seconds` | 2.0 | 门控等待时 control.json 轮询间隔 |
 | status 心跳间隔（常量） | 3.0 s | worker 心跳 + 实时 run/trace 路径发现 |
 | `MAX_RUNNING_EXPERIMENTS`（常量） | 4 | 控制台并行运行实验数上限 |
-| 控制台默认绑定 | `127.0.0.1:38888` | `scripts/webui/run_webui.py --host/--port`；无鉴权，仅回环或可信反代 |
+| 控制台绑定 | Unix socket（生产） | `scripts/webui/run_webui.py --uds .runtime/webui/console.sock`（0700 目录限 lzp）；`--host/--port`（默认 38888）仅显式本地调试 |
 | 控制台模型选项 | v4-pro / v4-flash | 创建表单仅暴露 v4 接口；chat/reasoner 走 API/params.json |
 | 控制台周期选择器 | 交易日历∩数据覆盖 | 四个周期参数按 Fold 周期从 SSE 日历枚举完整可回测周期（再按 daily/分钟线分区覆盖裁剪）并给推荐默认；无日历时退化为文本输入 |
 | 控制台可调参数扩展 | 见 §2/§3/§4 各默认 | 表单另暴露 Step/回测/NL 预算、回放执行旋钮、Broker 资金/费用/持仓上限、元学习记忆与派生镜像旋钮（多数收在「高级参数」折叠区），经 `PARAM_DEFAULTS`→`build_config_from_options` 单源生效 |
 | 系统提示词预览 | `prompt-preview` 端点 | 批准前装配 Fold/元学习系统提示词（含 Taste/指令；不含运行时事实块与测试排程）供人工审阅 |
 | 系统提示词覆盖 / Fold 重跑 | `set_prompt_override` / `rerun_fold` | Fold 级整体覆盖（运行时原样使用、manifest 记录）；重跑仅限最新已记录 Fold，产物带 `__r<id>` 标签、held-out 自动重放 |
+| 提前收官 / 回滚 | `skip_to_heldout`（可 `cancel_`） / `rollback_fold` | 跳过剩余 Fold 直接进 held-out（需 ≥1 冻结 Fold）；回滚到任一已记录 Fold（其后记录移除、账本备份 `experiment_ledger.rollback_*.jsonl`、冻结产物归档 `_archive/`，worker 需已停止） |
+| `inherit_from` | `""` | 创建时继承另一实验最新冻结 Fold 的 Agent Output（拷贝+哈希校验到 `strategy_artifacts/_inherited/`，源删除不影响） |
+| 逐 Fold GPU 分配 | `set_gpu_count`（1..16）+ `GET /api/gpus` | Fold 门控处按 nvidia-smi 实况设定该 Fold 沙箱 GPU 数，运行时覆盖 `SandboxSpec.gpu_count` |
+| 收益曲线端点 | `equity` / `folds/<e>/<f>/equity` | 日度收益序列（验证/测试/held-out 链 + 沪深300 基准，000300.SH `index_daily`），前端复利+回撤渲染 |
+| 风格验证端点 | `style?run_id&prefix` | Barra-lite：CSI300 回归 β/年化α/R² + 持仓法风格暴露（市值/PB/换手分位偏离）与申万一级行业净权重；sidecar 落 `hitl/analysis/style/` |
+| 策略产物下载 | 仅单一 ZIP（`strategy.zip`） | output+models 打包；不提供逐文件浏览/下载端点 |
 | `analysis_max_tokens` | 6000 | 单次策略分析输出 token 基础配额（length 停止时按 2 倍重试一次） |
 | trace 统计/下载 | `trace/stats` / `trace/download` | 按事件类型聚合的实时运行统计（含回测累计墙钟，用于倒计时回补显示）与原始 JSONL 下载 |
 | 界面缩放 | 90%–150%（默认 100%） | 顶栏缩放选择器，按浏览器 localStorage 记忆（跨设备渲染差异的本地补偿） |

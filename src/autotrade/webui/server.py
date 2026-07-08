@@ -21,8 +21,9 @@ from starlette.background import BackgroundTask
 from autotrade.pipelines.fold_analysis import analysis_paths, analyze_fold
 from autotrade.pipelines.interactive import ANALYSIS_DIR_NAME, HITL_DIR_NAME, PARAMS_NAME, STATUS_NAME, read_json, read_status
 
-from . import registry
+from . import equity, registry
 from .manager import ExperimentManager, ManagerError, MAX_RUNNING_EXPERIMENTS
+from .style_analysis import style_analysis
 from .params_schema import parameter_schema
 from .traces import read_trace_page, resolve_trace_path, stream_trace, trace_stats
 
@@ -155,9 +156,32 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             "running": manager.running_experiments(),
         }
 
+    def _inherit_sources() -> list[str]:
+        """Experiments with at least one recorded fold (inherit_from choices)."""
+        root = manager.experiments_root
+        if not root.is_dir():
+            return []
+        return sorted(
+            entry.name
+            for entry in root.iterdir()
+            if entry.is_dir()
+            and not entry.name.startswith(".")
+            and registry.latest_fold_records(registry._read_ledger_records(entry))
+        )
+
     @app.get("/api/parameter-schema")
     def get_parameter_schema() -> dict[str, object]:
-        return parameter_schema(trading_days=_trading_days())
+        return parameter_schema(trading_days=_trading_days(), inherit_sources=_inherit_sources())
+
+    @app.get("/api/gpus")
+    def get_gpus() -> dict[str, object]:
+        """Live GPU inventory (nvidia-smi) for the pre-fold allocation picker."""
+        try:
+            from autotrade.environment.gpu import list_gpus
+
+            return {"gpus": list_gpus()}
+        except Exception as exc:  # noqa: BLE001 - a CPU-only host still gets a UI
+            return {"gpus": [], "error": f"{type(exc).__name__}: {exc}"}
 
     # ---- experiments -----------------------------------------------------------
     @app.get("/api/experiments")
@@ -224,24 +248,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         detail["analysis"]["pending"] = analysis_service.pending(experiment_id, epoch_id, fold_id)
         return detail
 
-    @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/strategy-file")
-    def get_strategy_file(experiment_id: str, epoch_id: str, fold_id: str, path: str = Query(...)) -> PlainTextResponse:
-        _experiment_dir(experiment_id)
-        try:
-            detail = registry.fold_detail(manager.experiments_root, experiment_id, epoch_id, fold_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        strategy_dir = detail.get("strategy_dir")
-        if not strategy_dir:
-            raise HTTPException(status_code=404, detail="fold has no frozen strategy artifact")
-        root = Path(str(strategy_dir)).resolve()
-        target = (root / path).resolve()
-        if not target.is_relative_to(root) or not target.is_file():
-            raise HTTPException(status_code=404, detail="file not found in strategy artifact")
-        if target.stat().st_size > 2_000_000:
-            raise HTTPException(status_code=413, detail="file too large to inline; download the zip instead")
-        return PlainTextResponse(target.read_text(encoding="utf-8", errors="replace"))
-
     @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/strategy.zip")
     def get_strategy_zip(experiment_id: str, epoch_id: str, fold_id: str) -> FileResponse:
         _experiment_dir(experiment_id)
@@ -274,6 +280,35 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             filename=filename,
             background=BackgroundTask(zip_path.unlink, missing_ok=True),
         )
+
+    # ---- equity series ---------------------------------------------------------------
+    @app.get("/api/experiments/{experiment_id}/equity")
+    def get_experiment_equity(experiment_id: str) -> dict[str, object]:
+        _experiment_dir(experiment_id)
+        return equity.experiment_equity_payload(manager.experiments_root, experiment_id, repo_root)
+
+    @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/equity")
+    def get_fold_equity(experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
+        _experiment_dir(experiment_id)
+        try:
+            return equity.fold_equity_payload(manager.experiments_root, experiment_id, epoch_id, fold_id, repo_root)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # ---- style analysis (Barra-lite) --------------------------------------------------
+    @app.get("/api/experiments/{experiment_id}/style")
+    def get_style_analysis(
+        experiment_id: str, run_id: str = Query(...), prefix: str = Query(...)
+    ) -> dict[str, object]:
+        experiment_dir = _experiment_dir(experiment_id)
+        if prefix not in ("valid", "test", "heldout"):
+            raise HTTPException(status_code=400, detail="prefix must be valid|test|heldout")
+        if not (experiment_dir / "artifacts" / run_id).is_dir() or "/" in run_id or run_id.startswith("."):
+            raise HTTPException(status_code=404, detail=f"run {run_id!r} not found in this experiment")
+        try:
+            return style_analysis(experiment_dir, run_id, prefix, repo_root)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     # ---- fold orders ----------------------------------------------------------------
     @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/orders")

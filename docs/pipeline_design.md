@@ -557,7 +557,7 @@ experiments/<experiment_id>/
 | 文件 | 写入方 | 内容 |
 |---|---|---|
 | `params.json` | 创建方（控制台或手工） | 创建参数（与 `run_experiment` CLI dest 一一对应，另加 HITL 专有旋钮），每次启动经 `resolve_options` 确定性重建 ExperimentConfig 与 provider 装配 |
-| `control.json` | 控制方（Web 后端/研究者） | `mode`（`auto`/`step`）、`request`（`pause`/`stop`）、逐会话批准列表与指令文本 |
+| `control.json` | 控制方（Web 后端/研究者） | `mode`（`auto`/`step`）、`request`（`pause`/`stop`）、逐会话批准列表与指令文本、系统提示词覆盖、重跑/回滚/提前收官/逐 Fold GPU 分配 |
 | `status.json` | 仅 worker | pid、心跳、当前会话、run_id 与实时 trace 路径、进度、错误 |
 | `schedule.json` | 仅 worker | 启动时写出的会话计划（元学习/Fold/held-out） |
 | `analysis/` | worker / Web 后端 | Fold 完成后的 LLM 策略分析（markdown + provenance sidecar） |
@@ -565,6 +565,8 @@ experiments/<experiment_id>/
 门控语义：`request=stop` 在下一个会话边界干净退出；`request=pause` 让 worker 在当前会话结束后阻塞等待；`mode=step` 要求每个会话被显式批准后才启动（批准时可附带指令）；`mode=auto` 连续执行、可随时暂停。暂停/停止永远落在会话边界，不打断执行中的 Fold；`terminate`（SIGTERM）是唯一的中途强制手段，被中断的 Fold 无账本记录，恢复时整体重跑。
 
 **研究者指令**：每个会话可注入一段可选指令文本。普通 Fold 的指令经 `run_fold(fold_directive=...)` 以「研究者本 Fold 指令（用户注入）」节注入系统提示词，并记录在 run manifest 与 fold 账本记录中（不进入 agent 可见账本投影，不参与产物 hash）；元学习会话的指令经 `run_meta_learning(directive_override=...)` 覆盖实验级 `meta_learning_directive`。指令按待检验假设措辞注入，不放宽提交合同、修改约束与 PIT 边界；研究者不得在指令中写入测试期/held-out 结果或具体日历日期（见 5.3 防泄漏）。单会话审计入口对应支持 `--fold-directive-file`。Fold 会话另支持**系统提示词整体覆盖**（`control.json.prompt_overrides`）：批准前研究者可基于预览文本编辑并保存完整系统提示词，运行时原样替代自动装配（含运行时事实块，不再注入），覆盖标记记入 run manifest 与账本（`system_prompt_overridden`）。**重跑最新 Fold**（`rerun_sessions[key]=rerun_id`，控制台 `rerun_fold` 动作）：仅允许重跑最新已记录的 Fold（更早 Fold 已被后续继承）、要求 worker 已停止；重跑追加新账本记录（旧记录保留审计）、冻结产物带 `__r<id>` 标签避免冲突、完成后自动重放 held-out；读取侧（控制台/registry）对 fold 与 held-out 均取每键最新记录。
+
+**提前收官（`skip_to_heldout`）**：至少一个 Fold 冻结后可请求跳过其余全部 Fold（含后续 Epoch 元学习），以最新冻结产物直接进入 held-out。已记录会话照常恢复以维持父产物链；step 模式下 held-out 会话仍需批准；可在 held-out 启动前取消（`cancel_skip_to_heldout`）。**回滚到任一已记录 Fold（`rollback_fold`）**：把实验回退到目标 Fold 刚完成的时点——其后所有 Fold、后续 Epoch 元学习与全部 held-out 账本记录被移除（原账本先整体备份为 `ledgers/experiment_ledger.rollback_*.jsonl`，被丢弃记录的冻结产物目录移入 `strategy_artifacts/_archive/`，既避开孤儿产物检查、也避免重跑时 `_freeze` 命名冲突），相关批准/重跑/GPU 控制项同步清理，worker 自动重启并在下一个 Fold 门控等待；回滚后目标 Fold 即最新记录，可再组合 `rerun_fold` 重跑它本身。要求 worker 已停止。**逐 Fold GPU 分配（`gpu_counts`）**：Fold 批准门控前控制台展示 nvidia-smi 实况（`GET /api/gpus`），可为该 Fold 设定沙箱 GPU 数（`set_gpu_count`，1..16）；运行时经 `run_fold(sandbox_gpu_count=...)` 以 `dataclasses.replace` 覆盖 SandboxSpec.gpu_count，`"auto"` 选择器仍按空闲显存挑选具体卡。**继承创建（`inherit_from`）**：新建实验可选择继承另一实验最新冻结 Fold 的 Agent Output——创建时把冻结策略+模型目录拷入新实验 `strategy_artifacts/_inherited/` 并按账本 hash 校验（此后源实验删除不影响新实验），worker 每次启动经同一 hash 门（`_load_inherited_parent`）重建为首个 Fold 的父产物；参数落在 params 的 `_inherited_artifact` 块，首个 Fold 账本记录的 `parent_strategy_artifact_id` 保留继承来源可溯。
 
 ### 5.2 续跑与状态恢复
 
@@ -574,8 +576,9 @@ experiments/<experiment_id>/
 
 `scripts/webui/run_webui.py` 启动 FastAPI 控制台（`src/autotrade/webui/`；无鉴权。生产部署经 `webui_stack.sh` 绑定 `--uds .runtime/webui/console.sock`（0700 目录，内核级限定 lzp——计算主机是多用户共享机，回环 TCP 对所有本地用户开放）；`--port` 仅供显式本地调试，非回环绑定必须置于可信反向代理之后）。后端是纯控制面：实验在独立 worker 进程执行（`start_new_session`，与服务进程生死解耦，服务重启不影响运行中的实验），并行运行实验数上限 4（`MAX_RUNNING_EXPERIMENTS`）。
 
-- 首页：列出全部实验（HITL 与历史只读实验），含状态、Fold 进度、累计验证/测试/held-out 收益与逐 Fold 收益图；新建实验模态（表单 schema 由 `PARAM_DEFAULTS` 派生，覆盖全部可配参数并附中文说明）；删除实验（需输入实验名确认，worker 存活时拒绝，同时清理该实验专属 sandbox work root）。
-- 详情页：会话导航（逐 Epoch 的元学习/Fold 与 held-out）、控制条（模式切换/暂停/停止/强制终止/恢复运行）、逐会话指令编辑与批准；批准前可经 `prompt-preview` 端点审阅完整装配后的系统提示词（含 Taste 与指令；运行时「当前实验事实」块以 Fold 信息+验收规则原文代替，且与运行时一致地不含测试排程）；运行中的会话经 SSE 按字节偏移实时尾随 `agent_trace.jsonl`（每事件独立 flush），并显示沙箱/快照准备指示器、按事件类型聚合的实时统计（`trace/stats`：LLM/搜索/回测/Shell 次数、回测累计墙钟、token 总量）与计入回测回补的推理倒计时；已完成 Fold 展示验证结果、Step 历史、冻结策略代码浏览与 zip 下载（output + models），trace 支持分批加载与原始 `.jsonl` 下载（`trace/download`）。
+- 首页：列出全部实验（HITL 与历史只读实验），含状态、Fold 进度、累计验证/测试/held-out 收益与日度累计收益迷你曲线（vs 沪深300）；新建实验模态（表单 schema 由 `PARAM_DEFAULTS` 派生，覆盖全部可配参数并附中文说明，含 `inherit_from` 继承下拉）；删除实验（需输入实验名确认，worker 存活时拒绝，同时清理该实验专属 sandbox work root）。
+- 详情页：会话导航（逐 Epoch 的元学习/Fold 与 held-out）、控制条（模式切换/暂停/停止/强制终止/恢复运行/提前收官）、逐会话指令编辑与批准（Fold 门控处附 GPU 实况与分配选择）；批准前可经 `prompt-preview` 端点审阅完整装配后的系统提示词（含 Taste 与指令；运行时「当前实验事实」块以 Fold 信息+验收规则原文代替，且与运行时一致地不含测试排程）；运行中的会话经 SSE 按字节偏移实时尾随 `agent_trace.jsonl`（每事件独立 flush），并显示沙箱/快照准备指示器、按事件类型聚合的实时统计（`trace/stats`：LLM/搜索/回测/Shell 次数、回测累计墙钟、token 总量）与计入回测回补的推理倒计时；已完成 Fold 展示验证结果、Step 历史与冻结策略产物**单一 ZIP 包**下载（output + models，不提供逐文件浏览/下载），trace 支持分批加载与原始 `.jsonl` 下载（`trace/download`）。
+- 结果可视化：所有收益图为**日度累计收益折线 + 回撤子图**，策略（验证/测试/held-out）对照沪深300 基准（`data/raw/index_daily` 000300.SH；`GET .../equity` 与 `.../folds/<epoch>/<fold>/equity` 只传日收益序列，前端复利成曲线并计算回撤；Fold 详情页的测试期曲线仍留在折叠的事后审计区）。每个 Fold（验证/测试各一）与 held-out 附 **Barra-lite 风格验证卡**（`GET .../style?run_id&prefix`）：CSI300 单因子回归（β / 年化 α / R²，短窗口标注仅供参考）+ 由成交重构、逐日结转的持仓风格暴露（市值/PB/换手的带符号持仓加权分位偏离，[-1,1]）与申万一级行业净权重；结果持久化为 `experiments/<id>/hitl/analysis/style/<run>_<prefix>.json`。完整 Barra 模型评估结论为不引入：授权因子库/协方差数据本地不可得，且单 Fold 约 20 个交易日撑不起多因子回归；本卡以持仓法暴露+单因子归因覆盖「收益是否来自隐性风格/β 暴露」这一实际验证需求。
 - 周期选择：创建表单的周期下拉由交易日历∩关键数据集分区覆盖（daily 与分钟线）共同约束，不提供无本地数据支撑、会在运行期报错的区间。
 - Fold 分析：Fold 完成后 worker 用预定义模板经 LLMProxy 生成中文策略分析（`src/autotrade/pipelines/fold_analysis.py`；provider conversation log 照常落盘），失败仅记入 status、不阻断实验；控制台可按需重新生成。
 - 防泄漏（guarded test view）：分析模板只接收验证期证据（账本记录投影排除 `test_result`/`test_period`）；控制台把测试期结果放在默认折叠、明确警示的「事后审计」区，并在指令输入处提醒研究者不得把测试期信息编码进后续 Fold 指令——这是 walk-forward 样本外有效性在 HITL 流程中唯一无法机器强制的环节。

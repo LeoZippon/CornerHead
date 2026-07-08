@@ -63,6 +63,9 @@ PARAM_DEFAULTS: dict[str, object] = {
     "experiments_root": "experiments",
     "work_root": ".runtime/sandboxes",
     "template_dir": "configs/agent_output_template",
+    # Seed the first fold from another experiment's latest frozen fold output
+    # instead of the blank template (manager copies + hash-verifies at create).
+    "inherit_from": "",
     "fold_period": "quarter",
     "first_test_period": None,
     "last_test_period": None,
@@ -312,6 +315,12 @@ class ControlState:
     # session_key -> rerun_id: re-run an already-recorded fold. Idempotent: a
     # fold whose latest ledger record carries the same rerun_id is NOT re-run.
     rerun_sessions: dict[str, str] = field(default_factory=dict)
+    # Early finish: stop before the next unrun fold/meta session and jump to
+    # held-out with the latest frozen artifact. Ignored until one fold froze.
+    skip_to_heldout: bool = False
+    # session_key -> GPU count for that fold's sandbox (set at the approval
+    # gate; absent = the experiment's SandboxSpec default).
+    gpu_counts: dict[str, int] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -322,6 +331,8 @@ class ControlState:
             "directives": dict(self.directives),
             "prompt_overrides": dict(self.prompt_overrides),
             "rerun_sessions": dict(self.rerun_sessions),
+            "skip_to_heldout": self.skip_to_heldout,
+            "gpu_counts": dict(self.gpu_counts),
             "updated_at": utc_now_iso(),
         }
 
@@ -344,7 +355,23 @@ def read_control(path: Path) -> ControlState:
         directives={str(k): str(v) for k, v in directives.items()} if isinstance(directives, dict) else {},
         prompt_overrides={str(k): str(v) for k, v in overrides.items()} if isinstance(overrides, dict) else {},
         rerun_sessions={str(k): str(v) for k, v in reruns.items()} if isinstance(reruns, dict) else {},
+        skip_to_heldout=bool(payload.get("skip_to_heldout")),
+        gpu_counts=_int_map(payload.get("gpu_counts")),
     )
+
+
+def _int_map(value: object) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, raw in value.items():
+        try:
+            count = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            out[str(key)] = count
+    return out
 
 
 def write_control(path: Path, state: ControlState) -> None:
@@ -591,15 +618,28 @@ class InteractiveExperimentRunner:
         completed = 0
         self.status.set(total_sessions=total, completed_sessions=0, state="starting")
 
-        parent: FrozenArtifact | None = None
+        # Inherited seed (from another experiment's frozen output) replaces the
+        # blank template as the first fold's parent; hash-verified every start.
+        parent: FrozenArtifact | None = self._load_inherited_parent()
         taste_prompt = ""
         epoch_id = ""
+        # Early finish: with at least one frozen fold, a skip_to_heldout request
+        # stops before the next session that would actually RUN (already-recorded
+        # sessions still restore to keep the parent chain intact) and falls
+        # through to held-out with the latest frozen artifact.
+        skip_now = lambda: parent is not None and read_control(self.control_path).skip_to_heldout  # noqa: E731
+        skipping = False
         for epoch_id in _epoch_ids(self.config.epochs):
+            if skipping:
+                break
             if meta_enabled:
                 key = meta_session_key(epoch_id)
                 restored = meta_records.get(epoch_id)
                 if restored is not None:
                     parent, taste_prompt = self._restore_meta(restored, parent)
+                elif skip_now():
+                    skipping = True
+                    break
                 else:
                     directive = self._gate(key, phase="meta_learning", epoch_id=epoch_id)
                     self.status.set(
@@ -628,6 +668,9 @@ class InteractiveExperimentRunner:
                 if restored is not None and not needs_rerun:
                     parent = self._artifact_from_fold_record(restored)
                 else:
+                    if skip_now():
+                        skipping = True
+                        break
                     if restored is None:
                         self._require_no_orphan_artifact(epoch_id, fold.fold_id)
                     directive = self._gate(key, phase="fold", epoch_id=epoch_id, fold_id=fold.fold_id)
@@ -645,6 +688,7 @@ class InteractiveExperimentRunner:
                         fold_directive=directive,
                         system_prompt_override=control.prompt_overrides.get(key, ""),
                         rerun_id=rerun_id if needs_rerun else None,
+                        sandbox_gpu_count=control.gpu_counts.get(key),
                     )
                     parent = outcome.frozen
                     if needs_rerun:
@@ -743,6 +787,19 @@ class InteractiveExperimentRunner:
             expected_hash=str(record.get("frozen_strategy_artifact_hash")),
             model_path=Path(str(model_path)) if model_path else None,
             expected_model_hash=str(record.get("frozen_model_artifact_hash")),
+        )
+
+    def _load_inherited_parent(self) -> FrozenArtifact | None:
+        payload = read_json(self.hitl_dir / PARAMS_NAME).get("_inherited_artifact")
+        if not isinstance(payload, dict):
+            return None
+        model_path = payload.get("model_path")
+        return self._verified_artifact(
+            artifact_id=str(payload.get("artifact_id")),
+            path=Path(str(payload.get("path"))),
+            expected_hash=str(payload.get("artifact_hash")),
+            model_path=Path(str(model_path)) if model_path else None,
+            expected_model_hash=str(payload.get("model_artifact_hash")),
         )
 
     def _verified_artifact(

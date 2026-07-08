@@ -63,6 +63,9 @@ _FIELDS: list[dict[str, object]] = [
      "help": "最终冻结测试的结束周期。"},
     {"key": "epochs", "group": "基本与排程", "label": "Epoch 数", "type": "int",
      "help": "从首个 Fold 到末个 Fold 完整滚动的轮数；每个 Epoch 开始前运行一次元学习。"},
+    {"key": "inherit_from", "group": "基本与排程", "label": "继承已有实验的 Agent Output", "type": "choice",
+     "choices": [],  # filled at request time with experiments that have ≥1 recorded fold
+     "help": "留空=从空白模板开始。选择后，新实验的首个 Fold 以该实验最新冻结的策略产物（output+models）为父产物起步；创建时拷贝并哈希校验，源实验之后删除也不受影响。"},
     # 运行控制（HITL）
     {"key": "initial_control_mode", "group": "运行控制", "label": "初始运行模式", "type": "choice",
      "choices": ["step", "auto"],
@@ -260,12 +263,15 @@ def suggest_period_defaults(options: dict[str, list[str]]) -> dict[str, dict[str
     return defaults
 
 
-def parameter_schema(trading_days: list[str] | None = None) -> dict[str, object]:
+def parameter_schema(
+    trading_days: list[str] | None = None, inherit_sources: list[str] | None = None
+) -> dict[str, object]:
     """Grouped field schema with live defaults for the creation modal.
 
     With a trading calendar the four period fields become dependent dropdowns
     (``type: period`` + top-level ``period_options``/``period_defaults``);
-    without one they degrade to required text inputs.
+    without one they degrade to required text inputs. ``inherit_sources``
+    fills the inherit_from dropdown (experiments with ≥1 recorded fold).
     """
     period_options = build_period_options(trading_days or [])
     period_defaults = suggest_period_defaults(period_options)
@@ -282,6 +288,8 @@ def parameter_schema(trading_days: list[str] | None = None) -> dict[str, object]
                 default = period_defaults.get(default_cadence, {}).get(key)
             else:
                 entry["type"] = "string"
+        if key == "inherit_from":
+            entry["choices"] = ["", *(inherit_sources or [])]
         entry["default"] = default
         groups[str(entry.pop("group"))].append(entry)
     return {

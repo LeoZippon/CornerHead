@@ -1,3 +1,10 @@
+2026-07-09 控制台七项功能批次：基准曲线/风格验证/流程控制（feat/hitl-webui 线）
+
+- ①收益可视化重构：所有柱状收益图替换为**日度累计收益折线 + 回撤子图**，策略（验证/测试/held-out）对照沪深300（`data/raw/index_daily` 000300.SH，参考 external_references/example_reports.png 版式）。新增 `webui/equity.py`（复用每窗口 `detailed_return.json.equity_curve`，验证子窗口按日链接；端点 `equity` + `folds/<e>/<f>/equity` 只传日收益，前端复利+回撤）；新组件 equityChart（十字光标列命中、终值图例、Held-out 用第 3 分类色 #eda100/#c98500，validator 双模式 PASS）。首页卡片迷你曲线、hero/详情页全曲线、Fold 详情验证曲线（测试曲线留在折叠审计区）、held-out 曲线全部落地。
+- ②Barra 评估结论：完整 Barra 不引入（无授权因子库/协方差，单 Fold ~20 交易日撑不起多因子回归）；落地 **Barra-lite**（`webui/style_analysis.py`）：CSI300 单因子回归 β/年化α/R² + 成交重构、逐日结转持仓的风格暴露（市值/PB/换手带符号分位偏离）与申万一级行业净权重；sidecar 持久化 `hitl/analysis/style/`，UI 卡片入 Fold（验证/测试）与 held-out。test2 实测：测试月 β 0.26、α_ann −7.9%、R² 0.29、23/23 日覆盖。
+- ③提前收官：`skip_to_heldout` 控制（≥1 冻结 Fold；worker 在下一个将运行的会话处跳出，held-out 用最新冻结产物；可取消）。④回滚：`rollback_fold` 回退到任一已记录 Fold——其后 Fold/后续元学习/全部 held-out 记录移除（账本先备份 rollback_*.jsonl、冻结产物归档 _archive/ 以避开孤儿检查与 _freeze 冲突），批准/重跑/GPU 控制清理后自动重启 worker。⑤下载收敛为单一 ZIP：移除逐文件列表/strategy-file 端点。⑥继承创建：`inherit_from` 下拉（有记录 Fold 的实验），创建时拷贝+哈希校验最新冻结产物至 `_inherited/`，worker 每次启动 hash 门重建为首 Fold 父产物。⑦GPU：`GET /api/gpus`（nvidia-smi 实况）+ Fold 门控处 `set_gpu_count`（1..16）→ `run_fold(sandbox_gpu_count)` 覆盖 SandboxSpec.gpu_count。
+- 验证：full suite 564 OK（+9：skip/GPU 透传/继承种子+防篡改/回滚丢弃与归档/控制校验/equity 链接数学/继承导入）；实机重启控制台后 equity/style/gpus/schema 端点对 test2 全部实测通过；静态资产已 sync 前端且端到端健康。文档：pipeline_design §5、parameters_reference §9。
+
 2026-07-08 前端 WebUI 本地用户隔离（feat/hitl-webui 线）
 
 - 需求：前端服务器上仅本人账户（admin）与厂商控制台可登录并控制 WebUI，其余前端本地用户一律拒绝。登录面上一条目（指定 key 白名单 + AllowUsers）已覆盖；本条补齐控制面——原先前端任意本地账户都能 curl 回环 8080/38889 直达无鉴权控制台。

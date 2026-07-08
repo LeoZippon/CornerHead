@@ -226,14 +226,17 @@ function renderMarkdown(text) {
 function themeInk() {
   if (currentTheme() === "dark") {
     return {
-      validColor: "#3987e5", testColor: "#199e70",
-      // Lighter steps of the same hues: the short-side stack segment.
+      // Categorical slots 1-3 (dark steps; validated with the dataviz checker
+      // on the dark panel #1b1f28 — all pass incl. contrast).
+      validColor: "#3987e5", testColor: "#199e70", heldoutColor: "#c98500",
       validLight: "#7fb2ef", testLight: "#5ec49a",
       grid: "#2b303c", baseline: "#4a5163", muted: "#98a0af", faint: "#6f7787", ring: "#1b1f28",
     };
   }
   return {
-    validColor: "#2a78d6", testColor: "#1baf7a",
+    // Light slots 1-3 validated on white; aqua/yellow sit in the sub-3:1
+    // relief band — carried by the result tables and rich tooltips.
+    validColor: "#2a78d6", testColor: "#1baf7a", heldoutColor: "#eda100",
     validLight: "#86b6ef", testLight: "#66cfa4",
     grid: "#e9ebf1", baseline: "#c2c7d2", muted: "#68717f", faint: "#a5abb8", ring: "#ffffff",
   };
@@ -278,24 +281,149 @@ function chartLegend(seriesList) {
       el("span", { class: "legend-swatch", style: `background:${series.color}` }), series.label)));
 }
 
+/* ---- daily equity lines + drawdown subplot (vs 沪深300 benchmark) ----
+   Series = daily simple returns [[YYYYMMDD, r], ...]; the client compounds
+   into cumulative curves and running drawdowns. Benchmark is drawn dashed in
+   neutral ink (a reference, not a categorical slot). */
+const EQUITY_CACHE = new Map(); // experiment_id -> { fp, payload }
+
+async function fetchExperimentEquity(expId, fp) {
+  const hit = EQUITY_CACHE.get(expId);
+  if (hit && hit.fp === fp) return hit.payload;
+  const payload = await api(`/api/experiments/${encodeURIComponent(expId)}/equity`);
+  EQUITY_CACHE.set(expId, { fp, payload });
+  return payload;
+}
+
+/* Async host: renders the chart when the series payload arrives. */
+function equityHost(expId, fp, opts) {
+  const host = el("div", {}, el("div", { class: "hint" }, "收益曲线加载中…"));
+  fetchExperimentEquity(expId, fp)
+    .then((payload) => { host.innerHTML = ""; host.append(equityChart(payload, opts)); })
+    .catch((error) => { host.innerHTML = ""; host.append(el("div", { class: "hint" }, `收益曲线加载失败：${error.message}`)); });
+  return host;
+}
+
+function fmtDateTick(date, withYear) {
+  return withYear ? `${date.slice(2, 4)}/${date.slice(4, 6)}-${date.slice(6, 8)}` : `${date.slice(4, 6)}-${date.slice(6, 8)}`;
+}
+
+function equityChart(payload, { width = 680, height = 240, ddH = 90, mini = false, keys = null } = {}) {
+  const INK = themeInk();
+  const colorOf = { valid: INK.validColor, test: INK.testColor, heldout: INK.heldoutColor, benchmark: INK.muted };
+  const wanted = (payload.series || []).filter((s) => (s.points || []).length && (!keys || keys.includes(s.key)));
+  if (!wanted.length) return el("div", { class: "hint" }, "暂无日度收益数据");
+  const wantedDates = new Set(wanted.flatMap((s) => s.points.map((p) => p[0])));
+  const seriesList = wanted.map((s) => ({ key: s.key, label: s.label, points: [...s.points].sort() }));
+  const bench = payload.benchmark;
+  if (bench && (bench.points || []).length) {
+    const points = bench.points.filter((p) => wantedDates.has(p[0])).sort();
+    if (points.length) seriesList.push({ key: "benchmark", label: bench.label, points });
+  }
+  for (const s of seriesList) {
+    let eq = 1, peak = 1;
+    s.cum = new Map(); s.dd = new Map();
+    for (const [d, r] of s.points) {
+      eq *= 1 + r; peak = Math.max(peak, eq);
+      s.cum.set(d, eq - 1); s.dd.set(d, eq / peak - 1);
+    }
+    s.final = eq - 1;
+    s.color = colorOf[s.key] || INK.validColor;
+    s.dash = s.key === "benchmark" ? "6 4" : null;
+  }
+  const dates = [...new Set(seriesList.flatMap((s) => s.points.map((p) => p[0])))].sort();
+  if (mini) ddH = 0;
+  const showDD = ddH > 0;
+  const padL = mini ? 44 : 52, padR = 12, padT = 8, padB = mini ? 22 : 26, gap = showDD ? 18 : 0;
+  const totalH = height + (showDD ? ddH + gap : 0);
+  const plotW = width - padL - padR, mainH = height - padT - padB;
+  const xOf = (i) => padL + (dates.length === 1 ? plotW / 2 : (i / (dates.length - 1)) * plotW);
+  const cums = seriesList.flatMap((s) => [...s.cum.values()]);
+  let lo = Math.min(0, ...cums), hi = Math.max(0, ...cums);
+  const pad = Math.max((hi - lo) * 0.08, 0.002);
+  lo -= pad; hi += pad;
+  const yOf = (v) => padT + ((hi - v) / (hi - lo)) * mainH;
+  const svg = [];
+  // main gridlines: 4 evenly spaced levels + emphasized zero line
+  for (let t = 0; t <= 4; t += 1) {
+    const v = lo + ((hi - lo) * t) / 4;
+    const y = yOf(v);
+    svg.push(`<line x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}" stroke="${INK.grid}" stroke-width="1"/>`);
+    svg.push(`<text x="${padL - 6}" y="${y + 3.5}" text-anchor="end" font-size="${mini ? 10 : 11}" fill="${INK.muted}">${(v * 100).toFixed(1)}%</text>`);
+  }
+  if (lo < 0 && hi > 0) {
+    svg.push(`<line x1="${padL}" y1="${yOf(0)}" x2="${width - padR}" y2="${yOf(0)}" stroke="${INK.baseline}" stroke-width="1"/>`);
+  }
+  // x ticks (≤7), year shown on the first tick and on year changes
+  const tickEvery = Math.max(1, Math.ceil(dates.length / (mini ? 4 : 7)));
+  let prevYear = null;
+  const tickY = padT + mainH + (mini ? 14 : 16);
+  dates.forEach((d, i) => {
+    if (i % tickEvery !== 0 && i !== dates.length - 1) return;
+    const withYear = prevYear !== d.slice(0, 4);
+    prevYear = d.slice(0, 4);
+    svg.push(`<text x="${xOf(i)}" y="${tickY}" text-anchor="middle" font-size="${mini ? 10 : 11}" fill="${INK.muted}">${fmtDateTick(d, withYear)}</text>`);
+  });
+  // drawdown subplot
+  let ddY = null;
+  if (showDD) {
+    const ddTop = height + gap;
+    const ddLo = Math.min(-0.001, ...seriesList.flatMap((s) => [...s.dd.values()]));
+    ddY = (v) => ddTop + (v / ddLo) * (ddH - 14);
+    svg.push(`<line x1="${padL}" y1="${ddY(0)}" x2="${width - padR}" y2="${ddY(0)}" stroke="${INK.baseline}" stroke-width="1"/>`);
+    svg.push(`<line x1="${padL}" y1="${ddY(ddLo)}" x2="${width - padR}" y2="${ddY(ddLo)}" stroke="${INK.grid}" stroke-width="1"/>`);
+    svg.push(`<text x="${padL - 6}" y="${ddY(ddLo) + 3.5}" text-anchor="end" font-size="10" fill="${INK.muted}">${(ddLo * 100).toFixed(1)}%</text>`);
+    svg.push(`<text x="${padL - 6}" y="${ddY(0) + 3.5}" text-anchor="end" font-size="10" fill="${INK.muted}">回撤</text>`);
+    for (const s of seriesList) {
+      const pts = dates.filter((d) => s.dd.has(d));
+      if (!pts.length) continue;
+      const line = pts.map((d, j) => `${j ? "L" : "M"}${xOf(dates.indexOf(d)).toFixed(1)},${ddY(s.dd.get(d)).toFixed(1)}`).join(" ");
+      if (s.key !== "benchmark") {
+        const first = xOf(dates.indexOf(pts[0])).toFixed(1);
+        const last = xOf(dates.indexOf(pts[pts.length - 1])).toFixed(1);
+        svg.push(`<path d="M${first},${ddY(0).toFixed(1)} ${line.slice(1)} L${last},${ddY(0).toFixed(1)} Z" fill="${s.color}" fill-opacity="0.16" stroke="none"/>`);
+      }
+      svg.push(`<path d="${line}" fill="none" stroke="${s.color}" stroke-width="1.5"${s.dash ? ` stroke-dasharray="${s.dash}"` : ""}/>`);
+    }
+  }
+  // main lines (benchmark first so strategy lines sit on top) + endpoint dots
+  for (const s of [...seriesList].sort((a, b) => (a.key === "benchmark" ? -1 : 0) - (b.key === "benchmark" ? -1 : 0))) {
+    const pts = dates.filter((d) => s.cum.has(d));
+    if (!pts.length) continue;
+    const line = pts.map((d, j) => `${j ? "L" : "M"}${xOf(dates.indexOf(d)).toFixed(1)},${yOf(s.cum.get(d)).toFixed(1)}`).join(" ");
+    svg.push(`<path d="${line}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"${s.dash ? ` stroke-dasharray="${s.dash}"` : ""}/>`);
+    if (s.key !== "benchmark") {
+      const lastDate = pts[pts.length - 1];
+      svg.push(`<circle cx="${xOf(dates.indexOf(lastDate)).toFixed(1)}" cy="${yOf(s.cum.get(lastDate)).toFixed(1)}" r="3.5" fill="${s.color}" stroke="${INK.ring}" stroke-width="2"/>`);
+    }
+  }
+  // hover columns: one hit target per date spanning both plots, rich tooltip
+  const step = dates.length > 1 ? plotW / (dates.length - 1) : plotW;
+  dates.forEach((d, i) => {
+    const lines = [fmtDate(d)];
+    for (const s of seriesList) {
+      if (!s.cum.has(d)) continue;
+      lines.push(`${s.label} 累计 ${(s.cum.get(d) * 100).toFixed(2)}% ｜ 回撤 ${(s.dd.get(d) * 100).toFixed(2)}%`);
+    }
+    const x = i === 0 ? padL : xOf(i) - step / 2;
+    const w = i === 0 || i === dates.length - 1 ? step / 2 : step;
+    svg.push(`<rect class="xcol" x="${x.toFixed(1)}" y="${padT}" width="${Math.max(w, 1).toFixed(1)}" height="${totalH - padT - 4}" data-tip="${escapeHtml(lines.join("\n"))}"/>`);
+  });
+  const wrap = el("div", { class: "svg-chart" },
+    chartLegend(seriesList.map((s) => ({ color: s.color, label: `${s.label}: ${fmtPct(s.final)}` }))));
+  const svgHost = el("div", {});
+  svgHost.innerHTML = `<svg viewBox="0 0 ${width} ${totalH}" xmlns="http://www.w3.org/2000/svg">${svg.join("")}</svg>`;
+  wrap.append(svgHost);
+  wrap.__rerender = () => equityChart(payload, { width, height, ddH, mini, keys });
+  return bindChartTips(wrap);
+}
+
 function niceCeil(value) {
   const mag = Math.pow(10, Math.floor(Math.log10(value)));
   for (const mult of [1, 2, 2.5, 5, 10]) {
     if (mult * mag >= value) return mult * mag;
   }
   return 10 * mag;
-}
-
-/* Stack segment between two y levels; the far (data-end) edge may be rounded. */
-function segmentPath(x, yNear, yFar, w, roundFar) {
-  const top = Math.min(yNear, yFar), bottom = Math.max(yNear, yFar);
-  const h = Math.max(bottom - top, 1);
-  if (!roundFar) return `M${x},${top} H${x + w} V${bottom} H${x} Z`;
-  const r = Math.min(4, w / 2, h);
-  if (yFar < yNear) { // grows upward: round the top corners
-    return `M${x},${bottom} L${x},${top + r} Q${x},${top} ${x + r},${top} L${x + w - r},${top} Q${x + w},${top} ${x + w},${top + r} L${x + w},${bottom} Z`;
-  }
-  return `M${x},${top} L${x + w},${top} L${x + w},${bottom - r} Q${x + w},${bottom} ${x + w - r},${bottom} L${x + r},${bottom} Q${x},${bottom} ${x},${bottom - r} Z`;
 }
 
 /* Rounded data-end bar: square at the baseline, 4px radius at the value end. */
@@ -309,185 +437,6 @@ function barPath(x, zeroY, valueY, w) {
   }
   const y = zeroY + h;
   return `M${x},${zeroY} L${x + w},${zeroY} L${x + w},${y - r} Q${x + w},${y} ${x + w - r},${y} L${x + r},${y} Q${x},${y} ${x},${y - r} Z`;
-}
-
-/* Grouped bars: per-fold two-series returns (default valid vs test). */
-function foldReturnsChart(rows, { width = 640, height = 220, mini = false, series = null } = {}) {
-  const INK = themeInk();
-  const SPEC = seriesSpec();
-  const SERIES = {
-    valid: series ? { ...series[0], color: series[0].color || SPEC.valid.color } : SPEC.valid,
-    test: series ? { ...series[1], color: series[1].color || SPEC.test.color } : SPEC.test,
-  };
-  const validKey = series ? series[0].key : "valid_return";
-  const testKey = series ? series[1].key : "test_return";
-  // Long/short ride INSIDE the default bars as stacked shades of each series'
-  // hue (lighter step = short side); minis and custom series stay solid totals.
-  const splitKeys = { [validKey]: ["valid_long", "valid_short"], [testKey]: ["test_long", "test_short"] };
-  const lightFor = { [validKey]: INK.validLight, [testKey]: INK.testLight };
-  const hasSplit = !series && !mini
-    && rows.some((row) => row.valid_long !== null && row.valid_long !== undefined);
-  const barExtents = (row, key) => {
-    if (hasSplit && row[splitKeys[key][0]] !== null && row[splitKeys[key][0]] !== undefined) {
-      const parts = [row[splitKeys[key][0]] || 0, row[splitKeys[key][1]] || 0];
-      return [
-        parts.filter((v) => v > 0).reduce((a, b) => a + b, 0),
-        parts.filter((v) => v < 0).reduce((a, b) => a + b, 0),
-      ];
-    }
-    return [row[key], row[key]];
-  };
-  const values = rows
-    .flatMap((row) => [...barExtents(row, validKey), ...barExtents(row, testKey)])
-    .filter((v) => v !== null && v !== undefined);
-  if (!rows.length || !values.length) return el("div", { class: "hint" }, "暂无收益数据");
-  const maxAbs = niceCeil(Math.max(0.005, ...values.map(Math.abs)));
-  const padL = mini ? 42 : 50, padR = 10, padB = mini ? 26 : 36, padT = 8;
-  const plotW = width - padL - padR, plotH = height - padT - padB;
-  const zeroY = padT + plotH / 2;
-  const yOf = (v) => zeroY - (v / maxAbs) * (plotH / 2);
-  const groupW = plotW / rows.length;
-  const barW = Math.max(3, Math.min(24, (groupW - 8) / 2 - 1));
-  const svg = [];
-  for (const frac of [-1, -0.5, 0.5, 1]) {
-    const y = yOf(frac * maxAbs);
-    svg.push(`<line x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}" stroke="${INK.grid}" stroke-width="1"/>`);
-    svg.push(`<text x="${padL - 6}" y="${y + 3.5}" text-anchor="end" font-size="${mini ? 10 : 11}" fill="${INK.muted}">${(frac * maxAbs * 100).toFixed(1)}%</text>`);
-  }
-  svg.push(`<line x1="${padL}" y1="${zeroY}" x2="${width - padR}" y2="${zeroY}" stroke="${INK.baseline}" stroke-width="1"/>`);
-  const labelEvery = Math.max(1, Math.ceil(rows.length / (mini ? 5 : 12)));
-  rows.forEach((row, index) => {
-    const cx = padL + groupW * index + groupW / 2;
-    const bars = [
-      { v: row[validKey], key: validKey, series: SERIES.valid, x: cx - barW - 1 }, // 2px surface gap between the pair
-      { v: row[testKey], key: testKey, series: SERIES.test, x: cx + 1 },
-    ];
-    for (const bar of bars) {
-      if (bar.v === null || bar.v === undefined) continue;
-      // Rich hover: headline value plus the row's full breakdown.
-      const lines = [`${String(row.fold_id || "")} ｜ ${bar.series.label} ${(bar.v * 100).toFixed(2)}%`];
-      if (!series) {
-        lines.push(`验证 ${fmtPct(row.valid_return)} ｜ 测试 ${fmtPct(row.test_return)}`);
-        if (row.valid_long !== null && row.valid_long !== undefined) {
-          lines.push(`多头 验证 ${fmtPct(row.valid_long)} / 测试 ${fmtPct(row.test_long)}`);
-          lines.push(`空头 验证 ${fmtPct(row.valid_short)} / 测试 ${fmtPct(row.test_short)}`);
-        }
-        if (row.fold_status) lines.push(`状态 ${row.fold_status}`);
-      }
-      const tip = escapeHtml(lines.join("\n"));
-      const [longVal, shortVal] = hasSplit
-        ? [row[splitKeys[bar.key][0]], row[splitKeys[bar.key][1]]]
-        : [null, null];
-      if (longVal === null || longVal === undefined) {
-        svg.push(`<path d="${barPath(bar.x, zeroY, yOf(bar.v), barW)}" fill="${bar.series.color}" data-tip="${tip}"/>`);
-        continue;
-      }
-      // Stacked long (solid) + short (lighter shade of the same hue), positives
-      // up / negatives down, 2px surface gap between stacked segments; the
-      // outermost segment in each direction carries the rounded data-end.
-      const segments = [
-        { v: longVal || 0, color: bar.series.color },
-        { v: shortVal || 0, color: lightFor[bar.key] },
-      ].filter((seg) => seg.v !== 0);
-      let up = 0, down = 0;
-      const drawn = [];
-      for (const seg of segments) {
-        if (seg.v > 0) { drawn.push({ ...seg, from: up, to: up + seg.v, dir: 1 }); up += seg.v; }
-        else { drawn.push({ ...seg, from: down, to: down + seg.v, dir: -1 }); down += seg.v; }
-      }
-      for (const seg of drawn) {
-        const isOuter = seg.dir > 0 ? seg.to === up : seg.to === down;
-        const gap = seg.from === 0 ? 0 : 2; // surface gap toward the baseline side
-        const yNear = yOf(seg.from) - seg.dir * gap;
-        svg.push(`<path d="${segmentPath(bar.x, yNear, yOf(seg.to), barW, isOuter)}" fill="${seg.color}" data-tip="${tip}"/>`);
-      }
-      if (!drawn.length) {
-        svg.push(`<path d="${barPath(bar.x, zeroY, yOf(bar.v), barW)}" fill="${bar.series.color}" data-tip="${tip}"/>`);
-      }
-    }
-    if (index % labelEvery === 0) {
-      const label = String(row.fold_id || "").replace(/^fold_/, "");
-      svg.push(`<text x="${cx}" y="${height - (mini ? 8 : 18)}" text-anchor="middle" font-size="${mini ? 10 : 11}" fill="${INK.muted}">${escapeHtml(label)}</text>`);
-      if (!mini && row.epoch_label) {
-        svg.push(`<text x="${cx}" y="${height - 5}" text-anchor="middle" font-size="10" fill="${INK.faint}">${escapeHtml(String(row.epoch_label).replace("epoch_", "E"))}</text>`);
-      }
-    }
-  });
-  const legendItems = hasSplit
-    ? [
-        { color: SERIES.valid.color, label: "验证·多头" },
-        { color: INK.validLight, label: "验证·空头" },
-        { color: SERIES.test.color, label: "测试·多头" },
-        { color: INK.testLight, label: "测试·空头" },
-      ]
-    : [SERIES.valid, SERIES.test];
-  const wrap = el("div", { class: "svg-chart" }, chartLegend(legendItems));
-  const svgHost = el("div", {});
-  svgHost.innerHTML = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${svg.join("")}</svg>`;
-  wrap.append(svgHost);
-  wrap.__rerender = () => foldReturnsChart(rows, { width, height, mini, series });
-  return bindChartTips(wrap);
-}
-
-/* Cumulative equity lines: ∏(1+r)−1 across folds, valid vs test. */
-function cumulativeReturnChart(rows, { width = 640, height = 220, labels = null } = {}) {
-  const INK = themeInk();
-  const SPEC = seriesSpec();
-  const SERIES = {
-    valid: { ...SPEC.valid, label: labels?.valid || SPEC.valid.label },
-    test: { ...SPEC.test, label: labels?.test || SPEC.test.label },
-  };
-  const build = (key) => {
-    let equity = 1;
-    const points = [];
-    rows.forEach((row, index) => {
-      const value = row[key];
-      if (value === null || value === undefined) return;
-      equity *= 1 + value;
-      points.push({ index, cum: equity - 1, fold: row.fold_id });
-    });
-    return points;
-  };
-  const seriesData = [
-    { ...SERIES.valid, points: build("valid_return") },
-    { ...SERIES.test, points: build("test_return") },
-  ].filter((series) => series.points.length);
-  const all = seriesData.flatMap((series) => series.points.map((p) => p.cum));
-  if (rows.length < 2 || !all.length) return el("div", { class: "hint" }, "累计曲线需要至少两个已完成 Fold");
-  const maxAbs = niceCeil(Math.max(0.005, ...all.map(Math.abs)));
-  const padL = 50, padR = 14, padB = 30, padT = 8;
-  const plotW = width - padL - padR, plotH = height - padT - padB;
-  const zeroY = padT + plotH / 2;
-  const yOf = (v) => zeroY - (v / maxAbs) * (plotH / 2);
-  const xOf = (index) => padL + (rows.length === 1 ? plotW / 2 : (index / (rows.length - 1)) * plotW);
-  const svg = [];
-  for (const frac of [-1, -0.5, 0.5, 1]) {
-    const y = yOf(frac * maxAbs);
-    svg.push(`<line x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}" stroke="${INK.grid}" stroke-width="1"/>`);
-    svg.push(`<text x="${padL - 6}" y="${y + 3.5}" text-anchor="end" font-size="11" fill="${INK.muted}">${(frac * maxAbs * 100).toFixed(1)}%</text>`);
-  }
-  svg.push(`<line x1="${padL}" y1="${zeroY}" x2="${width - padR}" y2="${zeroY}" stroke="${INK.baseline}" stroke-width="1"/>`);
-  const labelEvery = Math.max(1, Math.ceil(rows.length / 12));
-  rows.forEach((row, index) => {
-    if (index % labelEvery !== 0) return;
-    const label = String(row.fold_id || "").replace(/^fold_/, "");
-    svg.push(`<text x="${xOf(index)}" y="${height - 10}" text-anchor="middle" font-size="11" fill="${INK.muted}">${escapeHtml(label)}</text>`);
-  });
-  for (const series of seriesData) {
-    const path = series.points.map((p, i) => `${i ? "L" : "M"}${xOf(p.index).toFixed(1)},${yOf(p.cum).toFixed(1)}`).join(" ");
-    svg.push(`<path d="${path}" fill="none" stroke="${series.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`);
-    for (const p of series.points) {
-      const tip = `${String(p.fold || "")} 累计${series.label} ${(p.cum * 100).toFixed(2)}%`;
-      // ≥8px marker with a 2px surface ring so overlapping lines stay legible.
-      svg.push(`<circle cx="${xOf(p.index).toFixed(1)}" cy="${yOf(p.cum).toFixed(1)}" r="4.5" fill="${series.color}" stroke="${INK.ring}" stroke-width="2" data-tip="${escapeHtml(tip)}"/>`);
-    }
-  }
-  const wrap = el("div", { class: "svg-chart" }, chartLegend(seriesData));
-  const svgHost = el("div", {});
-  svgHost.innerHTML = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${svg.join("")}</svg>`;
-  wrap.append(svgHost);
-  wrap.__rerender = () => cumulativeReturnChart(rows, { width, height, labels });
-  return bindChartTips(wrap);
 }
 
 function fmtAmount(value) {
@@ -676,7 +625,7 @@ function experimentCard(item) {
     { label: "累计验证收益", value: fmtPct(metrics.cum_valid_return), cls: signCls(metrics.cum_valid_return) },
   ]));
   if ((item.fold_returns || []).length) {
-    card.append(foldReturnsChart(item.fold_returns.map((row) => ({ ...row, epoch_label: row.epoch_id })), { width: 400, height: 130, mini: true }));
+    card.append(equityHost(item.experiment_id, equityFingerprint(item), { width: 400, height: 130, mini: true }));
   }
   const actions = el("div", { class: "actions" });
   if (item.kind === "hitl" && ["interrupted", "stopped", "failed", "created"].includes(item.state)) {
@@ -723,22 +672,20 @@ function pickBestExperiment(list) {
   return scored[0].item;
 }
 
+/* Cache key: equity only changes when new records land (or a rerun replaces
+   results — caught by the cumulative-return components). */
+function equityFingerprint(item) {
+  const metrics = item.metrics || {};
+  return `${item.folds_recorded}|${item.heldout_recorded}|${metrics.cum_test_return}|${metrics.cum_valid_return}|${metrics.cum_heldout_return}`;
+}
+
 function heroPanel(item) {
   const metrics = item.metrics || {};
-  const rows = (item.fold_returns || []).map((row) => ({ ...row, epoch_label: row.epoch_id }));
-  const heldoutRows = (item.heldout_returns || [])
-    .filter((row) => row.return !== null && row.return !== undefined)
-    .map((row) => ({ label: row.label, value: row.return }));
   const panel = el("div", { class: "panel hero", id: "hero-panel" });
-  const charts = el("div", { class: "charts-row section-gap" },
-    el("div", { class: "chart-cell" }, el("h4", {}, "逐 Fold 收益"), foldReturnsChart(rows)),
-    el("div", { class: "chart-cell" }, el("h4", {}, "累计收益曲线"), cumulativeReturnChart(rows)),
+  const charts = el("div", { class: "section-gap" },
+    el("h4", {}, "日度累计收益 vs 沪深300（含回撤）"),
+    equityHost(item.experiment_id, equityFingerprint(item), { width: 980, height: 240, ddH: 90 }),
   );
-  if (heldoutRows.length) {
-    charts.append(el("div", { class: "chart-cell" },
-      el("h4", {}, "Held-out 各期收益（最终样本外）"),
-      singleSeriesBarChart(heldoutRows, { fmt: fmtPct })));
-  }
   panel.append(
     el("div", { class: "control-bar" },
       el("span", { class: "hero-crown" }, "🏆"),
@@ -1038,13 +985,12 @@ async function renderDetailPage(experimentId, selectedKey) {
   const container = el("div", {});
   container.append(head);
   if (detail.kind === "hitl") container.append(controlBar(detail));
-  const chartRows = (detail.fold_returns || []).map((row) => ({ ...row, epoch_label: row.epoch_id }));
-  if (chartRows.length) {
+  if ((detail.fold_returns || []).length) {
     const metrics = detail.metrics || {};
     const sharpe = metrics.mean_test_sharpe;
-    const charts = el("div", { class: "charts-row section-gap" },
-      el("div", { class: "chart-cell" }, el("h4", {}, "逐 Fold 收益（验证 vs 测试）"), foldReturnsChart(chartRows)),
-      el("div", { class: "chart-cell" }, el("h4", {}, "累计收益曲线"), cumulativeReturnChart(chartRows)),
+    const charts = el("div", { class: "section-gap" },
+      el("h4", {}, "日度累计收益 vs 沪深300（含回撤）"),
+      equityHost(detail.experiment_id, equityFingerprint(detail), { width: 980, height: 240, ddH: 90 }),
     );
     // Tile order standardized with the homepage hero: Held-out → test → valid.
     container.append(el("div", { class: "panel section-gap" },
@@ -1101,7 +1047,26 @@ function controlBar(detail) {
   bar.append(modeSelect);
   if (control.request === "pause") bar.append(el("span", { class: "badge state-paused" }, "已请求暂停"));
   if (control.request === "stop") bar.append(el("span", { class: "badge state-stopped" }, "已请求停止"));
+  if (control.skip_to_heldout) bar.append(el("span", { class: "badge state-waiting_user" }, "已请求提前收官"));
   bar.append(el("span", { class: "spacer" }));
+  // Early finish: skip the remaining folds and jump straight to Held-out with
+  // the latest frozen artifact (needs at least one recorded fold).
+  if (detail.state !== "completed") {
+    if (!control.skip_to_heldout && (detail.folds_recorded || 0) > 0) {
+      bar.append(el("button", {
+        class: "btn",
+        onclick: () => {
+          showModal("提前进入 Held-out", el("p", {},
+            "跳过剩余全部 Fold（及后续元学习），直接以最新冻结策略进入 Held-out 冻结测试。已完成的 Fold 不受影响；step 模式下 Held-out 会话仍需批准。确定？"), [
+            el("button", { class: "btn", onclick: closeModal }, "取消"),
+            el("button", { class: "btn primary", onclick: () => { closeModal(); send({ action: "skip_to_heldout" }, "已请求提前进入 Held-out"); } }, "确认提前收官"),
+          ]);
+        },
+      }, "提前收官 → Held-out"));
+    } else if (control.skip_to_heldout) {
+      bar.append(el("button", { class: "btn", onclick: () => send({ action: "cancel_skip_to_heldout" }, "已取消提前收官") }, "取消提前收官"));
+    }
+  }
   if (alive) {
     if (control.request !== "pause") {
       bar.append(el("button", { class: "btn", onclick: () => send({ action: "pause" }, "将在当前 Fold 结束后暂停") }, "暂停"));
@@ -1183,6 +1148,9 @@ function sessionDetailPanel(detail, selectedKey) {
     const recordedFolds = (detail.sessions || []).filter((s) => s.kind === "fold" && s.record);
     if (detail.kind === "hitl" && recordedFolds.length && recordedFolds[recordedFolds.length - 1].key === session.key) {
       panel.append(rerunPanel(detail, session));
+    } else if (detail.kind === "hitl" && recordedFolds.some((s) => s.key === session.key)) {
+      // Any earlier recorded fold can become the frontier again via rollback.
+      panel.append(rollbackPanel(detail, session));
     }
   }
   if (session.kind === "meta_learning" && done) panel.append(metaResultPanel(session));
@@ -1259,8 +1227,50 @@ function directivePanel(detail, session, waiting) {
     buttons.append(el("span", { class: "badge state-completed" }, "已批准"));
   }
   panel.append(buttons);
+  // Pre-fold GPU allocation: live nvidia-smi inventory + per-session count.
+  if (session.kind === "fold" && !session.record) panel.append(gpuAllocationRow(detail, session, send));
   if (waiting) panel.append(el("div", { class: "hint" }, "worker 正在等待此会话的批准。建议先预览完整系统提示词，确认注入内容无误后再批准。"));
   return panel;
+}
+
+/* GPU status + per-fold allocation picker, shown at the fold approval gate.
+   The chosen count rides in control.gpu_counts[session_key]; the sandbox's
+   "auto" selector then picks that many GPUs by free memory at start. */
+function gpuAllocationRow(detail, session, send) {
+  const current = ((detail.control || {}).gpu_counts || {})[session.key];
+  const wrap = el("div", { class: "section-gap" },
+    el("h4", { class: "subsection-title" }, "本 Fold GPU 分配"));
+  const statusHost = el("div", { class: "hint" }, "GPU 状态加载中…");
+  const select = el("select", {});
+  const row = el("div", { class: "control-bar" },
+    el("span", { class: "mode-note" }, "分配数量："), select,
+    el("button", {
+      class: "btn small",
+      onclick: () => send(
+        { action: "set_gpu_count", session_key: session.key, directive: select.value },
+        select.value ? `本 Fold 将分配 ${select.value} 块 GPU` : "已恢复默认 GPU 分配",
+      ),
+    }, "保存"),
+    current ? el("span", { class: "badge state-waiting_user" }, `已设 ${current} 块`) : null,
+  );
+  wrap.append(statusHost, row);
+  api("/api/gpus").then((payload) => {
+    const gpus = payload.gpus || [];
+    if (!gpus.length) {
+      statusHost.textContent = `无可用 GPU 信息${payload.error ? `（${payload.error}）` : ""}；将按默认配置运行`;
+      select.append(el("option", { value: "" }, "默认"));
+      return;
+    }
+    statusHost.innerHTML = "";
+    statusHost.append(el("table", { class: "kv" },
+      ...gpus.map((gpu) => kvRow(`GPU ${gpu.index} · ${gpu.name}`,
+        `空闲 ${(gpu.memory_free_mib / 1024).toFixed(1)}G / 共 ${(gpu.memory_total_mib / 1024).toFixed(1)}G`)),
+    ));
+    select.append(el("option", { value: "" }, "默认（1 块，按空闲显存自动挑选）"));
+    for (let n = 1; n <= gpus.length; n += 1) select.append(el("option", { value: String(n) }, `${n} 块`));
+    if (current) select.value = String(current);
+  }).catch((error) => { statusHost.textContent = `GPU 状态加载失败：${error.message}`; });
+  return wrap;
 }
 
 /* Re-fetch the experiment payload and swap both detail panels in place —
@@ -1629,6 +1639,50 @@ function rerunPanel(detail, session) {
   return panel;
 }
 
+/* Roll the experiment back so this (earlier) fold becomes the frontier:
+   every later ledger record is dropped (frozen dirs archived, ledger backed
+   up server-side) and the run resumes from the next fold. */
+function rollbackPanel(detail, session) {
+  const alive = detail.worker_alive;
+  const panel = el("div", { class: "panel section-gap" },
+    el("h4", { class: "subsection-title" }, "回滚到此 Fold"),
+    el("div", { class: "hint" },
+      "把实验进度回退到本 Fold 刚完成时：其后所有 Fold、后续 Epoch 元学习与全部 Held-out 账本记录将被移除（原账本自动备份、冻结产物归档到 _archive，可人工找回），随后从下一个 Fold 继续（step 模式下等待批准，可先修改指令/提示词）。"),
+  );
+  const bar = el("div", { class: "control-bar section-gap" });
+  if (alive) {
+    bar.append(el("span", { class: "hint warn", style: "margin:0" }, "worker 运行中——先「停止」或「强制终止」后方可回滚。"));
+  } else {
+    bar.append(el("button", {
+      class: "btn danger",
+      onclick: () => {
+        showModal("确认回滚？", el("div", {},
+          el("p", {}, `将把实验回退到 ${session.key} 完成时点，丢弃其后全部账本记录（含 Held-out）。`),
+          el("p", { class: "hint" }, "账本会先备份（experiment_ledger.rollback_*.jsonl），被丢弃的冻结产物移入 strategy_artifacts/_archive/。此操作不可从界面撤销。"),
+        ), [
+          el("button", { class: "btn", onclick: closeModal }, "取消"),
+          el("button", {
+            class: "btn danger",
+            onclick: async () => {
+              closeModal();
+              try {
+                await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`, {
+                  method: "POST",
+                  body: JSON.stringify({ action: "rollback_fold", session_key: session.key }),
+                });
+                toast("已回滚并重启 worker");
+                route();
+              } catch (error) { toast(error.message, true); }
+            },
+          }, "确认回滚"),
+        ]);
+      },
+    }, "回滚到此 Fold"));
+  }
+  panel.append(bar);
+  return panel;
+}
+
 function foldResultPanel(detail, session) {
   const record = session.record || {};
   const validation = record.validation_result || {};
@@ -1654,6 +1708,13 @@ function foldResultPanel(detail, session) {
     (record.accept_reasons || []).length ? kvRow("未接受原因", (record.accept_reasons || []).join("；")) : null,
   );
   panel.append(meta);
+  if (record.run_id) {
+    panel.append(el("div", { class: "section-gap" },
+      el("h4", { class: "subsection-title" }, "验证期日度累计收益 vs 沪深300（含回撤）"),
+      foldEquityHost(detail.experiment_id, session.epoch_id, session.fold_id || record.fold_id, record.run_id, "valid", { width: 860, height: 210, ddH: 76 }),
+    ));
+    panel.append(styleCard(detail.experiment_id, record.run_id, "valid"));
+  }
   if (record.fold_directive) {
     panel.append(el("details", { class: "section-gap" },
       el("summary", { class: "mode-note", style: "cursor:pointer" }, "研究者本 Fold 指令"),
@@ -1685,6 +1746,76 @@ function kvRow(key, value) {
   return el("tr", {}, el("td", {}, key), el("td", {}, value));
 }
 
+/* Barra-lite style validation card: CSI300 alpha/beta regression + holdings
+   style tilts (signed percentile deviation, [-1,1]) + SW industry weights. */
+function styleCard(expId, runId, prefix) {
+  const host = el("div", { class: "section-gap" },
+    el("h4", { class: "subsection-title" }, "风格暴露与基准归因（Barra-lite）"),
+    el("div", { class: "hint" }, "加载中…"));
+  api(`/api/experiments/${encodeURIComponent(expId)}/style?run_id=${encodeURIComponent(runId)}&prefix=${encodeURIComponent(prefix)}`)
+    .then((payload) => {
+      host.querySelector(".hint").remove();
+      const reg = payload.benchmark_regression || {};
+      const style = payload.style || {};
+      const shortWindow = (reg.n_days || 0) < 15;
+      host.append(statTilesRow([
+        { label: "β（vs 沪深300）", value: reg.beta === null || reg.beta === undefined ? "—" : Number(reg.beta).toFixed(2) },
+        { label: "年化 α", value: fmtPct(reg.alpha_annualized), cls: signCls(reg.alpha_annualized) },
+        { label: "R²", value: reg.r2 === null || reg.r2 === undefined ? "—" : Number(reg.r2).toFixed(2) },
+        { label: "样本天数", value: String(reg.n_days ?? "—") },
+      ]));
+      if (shortWindow) host.append(el("div", { class: "hint" }, "窗口较短，回归结果仅供参考。"));
+      const tilts = style.tilts;
+      if (tilts) {
+        const rows = [
+          { label: "市值（+大盘 / −小盘）", value: tilts.size },
+          { label: "PB（+高估值 / −低估值）", value: tilts.pb },
+          { label: "换手（+高换手 / −低换手）", value: tilts.turnover },
+        ];
+        const list = el("div", { class: "tilts section-gap" });
+        for (const row of rows) {
+          const pct = Math.min(Math.abs(row.value), 1) * 50;
+          const side = row.value >= 0 ? "left:50%" : `left:${50 - pct}%`;
+          list.append(el("div", { class: "tilt-row" },
+            el("span", { class: "tilt-label" }, row.label),
+            el("span", { class: "tilt-bar" }, el("span", { class: "tilt-fill", style: `${side};width:${pct}%` })),
+            el("span", { class: "tilt-value" }, (row.value >= 0 ? "+" : "") + Number(row.value).toFixed(2)),
+          ));
+        }
+        host.append(list);
+        host.append(el("div", { class: "hint" },
+          `持仓覆盖 ${style.days} 个交易日 ｜ 日均 ${style.avg_names} 只 ｜ 日均多头 ${fmtAmount(style.avg_long_gross)} / 空头 ${fmtAmount(style.avg_short_gross)}`));
+        if ((style.industries || []).length) {
+          host.append(el("div", { class: "hint" },
+            "行业净权重（申万一级）：" + style.industries.map((i) => `${i.name} ${(i.weight * 100).toFixed(0)}%`).join(" ｜ ")));
+        }
+      } else {
+        host.append(el("div", { class: "hint" }, "该窗口没有可估值的持仓，无风格暴露可计算。"));
+      }
+    })
+    .catch((error) => { host.append(el("div", { class: "hint" }, `风格分析加载失败：${error.message}`)); });
+  return host;
+}
+
+/* Per-fold daily equity (validation and guarded test parts share one fetch). */
+const FOLD_EQUITY_CACHE = new Map(); // `${exp}/${epoch}/${fold}/${run}` -> promise
+function foldEquityHost(expId, epochId, foldId, runId, part, opts) {
+  const key = `${expId}/${epochId}/${foldId}/${runId || ""}`;
+  if (!FOLD_EQUITY_CACHE.has(key)) {
+    FOLD_EQUITY_CACHE.set(key, api(`/api/experiments/${encodeURIComponent(expId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}/equity`));
+  }
+  const host = el("div", {}, el("div", { class: "hint" }, "收益曲线加载中…"));
+  FOLD_EQUITY_CACHE.get(key).then((payload) => {
+    host.innerHTML = "";
+    host.append(equityChart(payload[part] || {}, opts));
+  }).catch((error) => {
+    FOLD_EQUITY_CACHE.delete(key);
+    host.innerHTML = "";
+    host.append(el("div", { class: "hint" }, `收益曲线加载失败：${error.message}`));
+  });
+  return host;
+}
+
 function loadFoldExtras(experimentId, epochId, foldId) {
   const wrap = el("div", { class: "section-gap" }, el("div", { class: "loading" }, "加载策略与分析…"));
   (async () => {
@@ -1697,36 +1828,16 @@ function loadFoldExtras(experimentId, epochId, foldId) {
       return;
     }
     wrap.innerHTML = "";
-    // Strategy files + download.
-    const filesPanel = el("div", {},
-      el("div", { class: "control-bar" },
-        el("h4", { class: "subsection-title" }, "冻结策略代码"),
-        el("span", { class: "spacer" }),
-        el("a", {
-          class: "btn small",
-          href: `/api/experiments/${encodeURIComponent(experimentId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}/strategy.zip`,
-        }, "⬇ 下载 zip（output + models）"),
-      ),
-    );
-    const chips = el("div", { class: "file-list section-gap" });
-    const viewer = el("pre", { class: "code-view section-gap", style: "display:none" });
-    for (const file of fold.strategy_files || []) {
-      chips.append(el("span", {
-        class: "file-chip",
-        onclick: async (event) => {
-          document.querySelectorAll(".file-chip.active").forEach((chip) => chip.classList.remove("active"));
-          event.target.classList.add("active");
-          viewer.style.display = "block";
-          viewer.textContent = "加载中…";
-          try {
-            const response = await fetch(`/api/experiments/${encodeURIComponent(experimentId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}/strategy-file?path=${encodeURIComponent(file.path)}`);
-            viewer.textContent = response.ok ? await response.text() : `加载失败（${response.status}）`;
-          } catch (error) { viewer.textContent = String(error); }
-        },
-      }, `${file.path} (${(file.bytes / 1024).toFixed(1)}K)`));
-    }
-    filesPanel.append(chips, viewer);
-    wrap.append(filesPanel);
+    // Frozen strategy: one ZIP package (output + models), no per-file listing.
+    wrap.append(el("div", { class: "control-bar" },
+      el("h4", { class: "subsection-title" }, "冻结策略产物"),
+      el("span", { class: "mode-note" }, "打包 output 与 models 全部文件"),
+      el("span", { class: "spacer" }),
+      el("a", {
+        class: "btn small",
+        href: `/api/experiments/${encodeURIComponent(experimentId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}/strategy.zip`,
+      }, "⬇ 下载 ZIP 包"),
+    ));
     // Validation-backtest order stream: stats, charts, table, CSV export.
     wrap.append(ordersNode(experimentId, epochId, foldId));
     // Test audit, collapsed with warning.
@@ -1742,6 +1853,11 @@ function loadFoldExtras(experimentId, epochId, foldId) {
           kvRow("测试 Sharpe", test.sharpe !== undefined && test.sharpe !== null ? Number(test.sharpe).toFixed(2) : "—"),
           kvRow("测试回撤", fmtPct(test.max_drawdown)),
         ),
+        el("div", { class: "section-gap" },
+          el("h4", { class: "subsection-title" }, "测试期日度累计收益 vs 沪深300（含回撤）"),
+          foldEquityHost(experimentId, epochId, foldId, (fold.record || {}).run_id, "test", { width: 760, height: 190, ddH: 64 }),
+        ),
+        (fold.record || {}).run_id ? styleCard(experimentId, fold.record.run_id, "test") : null,
         el("div", { class: "section-gap" }, el("a", {
           class: "btn small",
           href: `/api/experiments/${encodeURIComponent(experimentId)}/folds/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}/orders.csv?result=test_000`,
@@ -1921,26 +2037,13 @@ function heldoutPanel(session) {
     { label: "多 / 空贡献（累计）", value: longs.length
         ? `${fmtPct(longs.reduce((a, b) => a + b, 0))} / ${fmtPct(shorts.reduce((a, b) => a + b, 0))}` : "—" },
   ])));
-  const barRows = records
-    .map((record) => ({
-      label: String(record.fold_id || "").replace("heldout_", ""),
-      value: (record.test_result || {}).total_return,
-    }))
-    .filter((row) => row.value !== null && row.value !== undefined);
-  const cumRows = records.map((record) => ({
-    fold_id: String(record.fold_id || "").replace("heldout_", ""),
-    test_return: (record.test_result || {}).total_return,
-    valid_return: null,
-  }));
-  if (barRows.length) {
-    const charts = el("div", { class: "charts-row section-gap" },
-      el("div", { class: "chart-cell" }, el("h4", {}, "各期收益"),
-        singleSeriesBarChart(barRows, { fmt: fmtPct, height: 190 })));
-    if (barRows.length >= 2) {
-      charts.append(el("div", { class: "chart-cell" }, el("h4", {}, "累计收益曲线"),
-        cumulativeReturnChart(cumRows, { height: 190, labels: { test: "Held-out" } })));
-    }
-    panel.append(charts);
+  if (returns.length && detailView) {
+    panel.append(el("div", { class: "section-gap" },
+      el("h4", {}, "日度累计收益 vs 沪深300（含回撤）"),
+      equityHost(detailView.experimentId, equityFingerprint(detailView.detail), { width: 860, height: 220, ddH: 80, keys: ["heldout"] }),
+    ));
+    const lastRun = records[records.length - 1] && records[records.length - 1].run_id;
+    if (lastRun) panel.append(styleCard(detailView.experimentId, String(lastRun), "heldout"));
   }
   panel.append(el("table", { class: "data section-gap" },
     el("tr", {}, el("th", {}, "区间"), el("th", {}, "起止"), el("th", {}, "收益"),

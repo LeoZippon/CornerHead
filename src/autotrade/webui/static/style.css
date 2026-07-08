@@ -261,6 +261,15 @@ textarea.directive {
 /* charts */
 .svg-chart { width: 100%; }
 .svg-chart svg { width: 100%; height: auto; display: block; }
+/* Equity-chart hover columns: invisible per-date hit targets with a light wash. */
+.svg-chart rect.xcol { fill: transparent; }
+.svg-chart rect.xcol:hover { fill: color-mix(in srgb, var(--text) 7%, transparent); }
+/* Style-tilt rows: signed horizontal bars around a center line. */
+.tilt-row { display: grid; grid-template-columns: minmax(11rem, 16rem) 1fr 3.5rem; align-items: center; gap: 0.8rem; margin: 0.3rem 0; font-size: 0.875rem; color: var(--muted); }
+.tilt-bar { position: relative; height: 0.7rem; background: var(--panel-2); border-radius: 999px; overflow: hidden; }
+.tilt-bar::after { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--border); }
+.tilt-fill { position: absolute; top: 1px; bottom: 1px; background: var(--accent); border-radius: 999px; }
+.tilt-value { text-align: right; color: var(--text); font-weight: 600; }
 .charts-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(29rem, 100%), 1fr)); gap: 1.35rem; }
 .chart-cell h4 { margin-bottom: 0.4rem; }
 .chart-legend { display: flex; gap: 1.1rem; margin: 2px 0 0.45rem; font-size: 0.875rem; color: var(--muted); }

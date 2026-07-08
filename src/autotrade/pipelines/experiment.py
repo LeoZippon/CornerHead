@@ -156,7 +156,9 @@ class ExperimentPipeline:
             tree.position_for_hash(parent.artifact_hash, parent.model_artifact_hash) if parent else None
         )
 
-    def _start_sandbox(self, run_id: str, *, kind: str = "fold") -> tuple[LocalSandbox, DockerSandbox | None]:
+    def _start_sandbox(
+        self, run_id: str, *, kind: str = "fold", gpu_count: int | None = None
+    ) -> tuple[LocalSandbox, DockerSandbox | None]:
         sandbox = LocalSandbox(Path(self.config.work_root) / run_id)
         sandbox.prepare_layout()
         if kind == "meta_learning":
@@ -166,6 +168,10 @@ class ExperimentPipeline:
             if kind == "meta_learning" and self.config.meta_learning_sandbox_spec is not None
             else self._active_sandbox_spec
         )
+        if gpu_count is not None:
+            # Per-session HITL override; the "auto" selector still picks the
+            # requested number of GPUs by free memory at container start.
+            spec = replace(spec, gpu_count=int(gpu_count))
         sandbox.write_runtime_env(
             mode="docker" if self.config.use_docker else "local",
             sandbox_spec=spec if self.config.use_docker else None,
@@ -273,9 +279,10 @@ class ExperimentPipeline:
         fold_directive: str = "",
         system_prompt_override: str = "",
         rerun_id: str | None = None,
+        sandbox_gpu_count: int | None = None,
     ) -> FoldOutcome:
         run_id = new_id("run")
-        sandbox, docker = self._start_sandbox(run_id)
+        sandbox, docker = self._start_sandbox(run_id, gpu_count=sandbox_gpu_count)
         paths = sandbox.paths
 
         valid_view = paths.snapshot_views / "valid_decision_input"

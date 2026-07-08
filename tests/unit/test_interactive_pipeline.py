@@ -40,6 +40,7 @@ from autotrade.pipelines.interactive import (
     read_status,
     resolve_options,
     write_control,
+    write_json_atomic,
 )
 
 
@@ -96,9 +97,10 @@ class FakePipeline:
         return parent, taste
 
     def run_fold(self, fold, *, epoch_id, parent, taste_prompt="", fold_directive="",
-                 system_prompt_override="", rerun_id=None):
+                 system_prompt_override="", rerun_id=None, sandbox_gpu_count=None):
         self.calls.append(("fold", epoch_id, fold.fold_id, taste_prompt, fold_directive,
                            parent.artifact_id if parent else None, system_prompt_override, rerun_id))
+        self.gpu_counts_seen = getattr(self, "gpu_counts_seen", []) + [sandbox_gpu_count]
         self._counter += 1
         artifact_id = f"strategy_{epoch_id}_{fold.fold_id}" + (f"__r{rerun_id[:8]}" if rerun_id else "")
         frozen = self._freeze_fake(epoch_id, artifact_id, content=f"# v{self._counter}\n")
@@ -204,6 +206,48 @@ class InteractiveRunnerTest(unittest.TestCase):
         status = read_status(self.hitl_dir / STATUS_NAME)
         self.assertEqual(status["state"], "completed")
         self.assertEqual(status["completed_sessions"], 4)
+
+    def test_skip_to_heldout_after_first_frozen_fold(self) -> None:
+        pipeline = FakePipeline(self.config)
+        # Set from the start: ignored while nothing froze (meta + fold 1 run),
+        # then fold 2 is skipped and held-out runs on fold 1's artifact.
+        self._control(mode="auto", skip_to_heldout=True)
+        result = self._runner(pipeline).run(TRADING_DAYS)
+        self.assertEqual([call[0] for call in pipeline.calls], ["meta", "fold", "heldout"])
+        self.assertEqual(result["final_strategy_artifact"], "strategy_epoch_001_fold_2022Q1")
+        self.assertEqual(result["heldout_runs"], 1)
+
+    def test_gpu_count_override_reaches_run_fold(self) -> None:
+        pipeline = FakePipeline(self.config)
+        self._control(mode="auto", gpu_counts={fold_session_key("epoch_001", "fold_2022Q1"): 2})
+        self._runner(pipeline).run(TRADING_DAYS)
+        self.assertEqual(pipeline.gpu_counts_seen, [2, None])
+
+    def test_inherited_artifact_seeds_first_fold_parent(self) -> None:
+        from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
+
+        seed = self.root / "seed_artifact"
+        seed.mkdir()
+        (seed / "main.py").write_text("def main(ctx):\n    return 'seed'\n", encoding="utf-8")
+        write_json_atomic(self.hitl_dir / "params.json", {
+            "experiment_id": self.config.experiment_id,
+            "_inherited_artifact": {
+                "artifact_id": "strategy_inherited_src",
+                "path": str(seed),
+                "artifact_hash": artifact_hash(seed),
+                "model_path": None,
+                "model_artifact_hash": model_artifact_hash(seed / ".missing_models"),
+            },
+        })
+        pipeline = FakePipeline(self.config)
+        self._control(mode="auto")
+        self._runner(pipeline).run(TRADING_DAYS)
+        # The first fold's parent is the inherited artifact, not None.
+        self.assertEqual(pipeline.calls[1][5], "strategy_inherited_src")
+        # A tampered copy fails the hash gate instead of silently seeding.
+        (seed / "main.py").write_text("tampered", encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            self._runner(FakePipeline(self.config)).run(TRADING_DAYS)
 
     def test_step_mode_waits_for_approval_and_passes_directives(self) -> None:
         pipeline = FakePipeline(self.config)

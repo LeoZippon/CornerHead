@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from autotrade.environment.artifacts import artifact_hash
+from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
 from autotrade.pipelines.interactive import PARAM_DEFAULTS, ControlState, write_control, write_json_atomic
 from autotrade.webui.manager import ExperimentManager, ManagerError
 from autotrade.webui.server import create_app
@@ -104,6 +104,7 @@ class WebuiBackendTest(unittest.TestCase):
                     "frozen_strategy_artifact_hash": artifact_hash(strategy_dir),
                     "frozen_strategy_artifact_path": str(strategy_dir),
                     "frozen_model_artifact_path": None,
+                    "frozen_model_artifact_hash": model_artifact_hash(strategy_dir / ".missing_models"),
                     "validation_result": {"total_return": 0.10, "sharpe": 1.0, "max_drawdown": 0.05,
                                           "long_return": 0.08, "short_return": 0.02},
                     "test_result": {"total_return": 0.20, "sharpe": 1.5, "max_drawdown": 0.04,
@@ -248,20 +249,9 @@ class WebuiBackendTest(unittest.TestCase):
         detail = self.client.get("/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1").json()
         self.assertNotIn("test_result", detail["record"])
         self.assertEqual(detail["test_audit"]["test_result"]["total_return"], 0.20)
-        self.assertEqual(detail["strategy_files"], [{"path": "main.py", "bytes": detail["strategy_files"][0]["bytes"]}])
+        # Downloads are ZIP-only: no per-file listing or file endpoint.
+        self.assertNotIn("strategy_files", detail)
         self.assertTrue(detail["analysis"]["available"])
-
-    def test_strategy_file_serves_content_and_blocks_traversal(self) -> None:
-        ok = self.client.get(
-            "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/strategy-file", params={"path": "main.py"}
-        )
-        self.assertEqual(ok.status_code, 200)
-        self.assertIn("def main", ok.text)
-        for bad in ("../../hitl/params.json", "/etc/passwd"):
-            response = self.client.get(
-                "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/strategy-file", params={"path": bad}
-            )
-            self.assertEqual(response.status_code, 404, bad)
 
     def test_strategy_zip_contains_output_tree(self) -> None:
         response = self.client.get("/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/strategy.zip")
@@ -367,6 +357,130 @@ class WebuiBackendTest(unittest.TestCase):
         control = ok.json()["control"]
         self.assertIn("epoch_001/fold_2022Q1", control["rerun_sessions"])
         self.assertNotIn("epoch_001/fold_2022Q1", control["approved_sessions"])
+
+    def test_skip_to_heldout_and_gpu_count_controls(self) -> None:
+        with patch.object(ExperimentManager, "start_worker", return_value={"spawned_pid": 5}):
+            skip = self.client.post("/api/experiments/exp_hitl/control", json={"action": "skip_to_heldout"})
+        self.assertEqual(skip.status_code, 200, skip.text)
+        self.assertTrue(skip.json()["control"]["skip_to_heldout"])
+        cancel = self.client.post("/api/experiments/exp_hitl/control", json={"action": "cancel_skip_to_heldout"})
+        self.assertFalse(cancel.json()["control"]["skip_to_heldout"])
+        # Without a recorded fold there is nothing to finish early with.
+        bare = self.experiments_root / "exp_bare"
+        (bare / "hitl").mkdir(parents=True)
+        write_json_atomic(bare / "hitl" / "params.json", {"experiment_id": "exp_bare"})
+        write_control(bare / "hitl" / "control.json", ControlState())
+        refused = self.client.post("/api/experiments/exp_bare/control", json={"action": "skip_to_heldout"})
+        self.assertEqual(refused.status_code, 400)
+        # GPU counts: validated int in 1..16, empty clears.
+        ok = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_gpu_count", "session_key": "epoch_001/fold_2022Q2", "directive": "2"},
+        )
+        self.assertEqual(ok.json()["control"]["gpu_counts"], {"epoch_001/fold_2022Q2": 2})
+        for bad in ("abc", "0", "99"):
+            response = self.client.post(
+                "/api/experiments/exp_hitl/control",
+                json={"action": "set_gpu_count", "session_key": "epoch_001/fold_2022Q2", "directive": bad},
+            )
+            self.assertEqual(response.status_code, 400, bad)
+        cleared = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_gpu_count", "session_key": "epoch_001/fold_2022Q2", "directive": ""},
+        )
+        self.assertEqual(cleared.json()["control"]["gpu_counts"], {})
+
+    def test_rollback_drops_later_records_and_archives_artifacts(self) -> None:
+        experiment_dir = self.experiments_root / "exp_hitl"
+        # Give fold_2022Q2 a record + frozen dir so there is something to drop.
+        q2_dir = experiment_dir / "strategy_artifacts" / "epoch_001" / "strategy_epoch_001_fold_2022Q2"
+        q2_dir.mkdir(parents=True)
+        (q2_dir / "main.py").write_text("def main(ctx):\n    return 2\n", encoding="utf-8")
+        ledger = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
+        with ledger.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "record_type": "fold", "experiment_id": "exp_hitl", "epoch_id": "epoch_001",
+                "fold_id": "fold_2022Q2", "run_id": "run_002", "fold_status": "frozen",
+                "frozen_strategy_artifact_id": "strategy_epoch_001_fold_2022Q2",
+                "frozen_strategy_artifact_hash": artifact_hash(q2_dir),
+                "frozen_strategy_artifact_path": str(q2_dir),
+                "frozen_model_artifact_path": None,
+                "validation_result": {"total_return": 0.02}, "test_result": {"total_return": 0.01},
+            }) + "\n")
+        # Approvals for later sessions must be withdrawn by the rollback.
+        self.client.post("/api/experiments/exp_hitl/control",
+                         json={"action": "approve", "session_key": "epoch_001/fold_2022Q2"})
+        self.client.post("/api/experiments/exp_hitl/control",
+                         json={"action": "approve", "session_key": "heldout"})
+        # Rolling back to an unrecorded fold is refused.
+        bad = self.client.post("/api/experiments/exp_hitl/control",
+                               json={"action": "rollback_fold", "session_key": "epoch_001/fold_2099Q9"})
+        self.assertEqual(bad.status_code, 400)
+        with patch.object(ExperimentManager, "start_worker", return_value={"spawned_pid": 9}):
+            ok = self.client.post("/api/experiments/exp_hitl/control",
+                                  json={"action": "rollback_fold", "session_key": "epoch_001/fold_2022Q1"})
+        self.assertEqual(ok.status_code, 200, ok.text)
+        payload = ok.json()
+        self.assertEqual(payload["rolled_back_to"], "epoch_001/fold_2022Q1")
+        self.assertEqual(payload["dropped_records"], 2)  # fold Q2 + heldout
+        # Ledger: Q1 fold + meta kept, Q2/heldout gone; backup preserved.
+        kept = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertEqual({(r["record_type"], r["fold_id"]) for r in kept},
+                         {("meta_learning", "epoch_001_meta_learning"), ("fold", "fold_2022Q1")})
+        backups = list(ledger.parent.glob("experiment_ledger.rollback_*.jsonl"))
+        self.assertEqual(len(backups), 1)
+        self.assertIn("fold_2022Q2", backups[0].read_text(encoding="utf-8"))
+        # Frozen dir of the dropped fold is archived, original path gone.
+        self.assertFalse(q2_dir.exists())
+        archives = list((experiment_dir / "strategy_artifacts" / "_archive").glob("rollback_*/strategy_epoch_001_fold_2022Q2"))
+        self.assertEqual(len(archives), 1)
+        control = payload["control"]
+        self.assertNotIn("epoch_001/fold_2022Q2", control["approved_sessions"])
+        self.assertNotIn("heldout", control["approved_sessions"])
+        # Nothing after the frontier now: a second rollback is refused.
+        again = self.client.post("/api/experiments/exp_hitl/control",
+                                 json={"action": "rollback_fold", "session_key": "epoch_001/fold_2022Q1"})
+        self.assertEqual(again.status_code, 400)
+
+    def test_inherit_import_copies_and_verifies(self) -> None:
+        manager = ExperimentManager(self.repo_root, self.experiments_root)
+        target = self.experiments_root / "exp_child"
+        (target / "hitl").mkdir(parents=True)
+        payload = manager._import_inherited_artifact(target, "exp_hitl")
+        self.assertEqual(payload["source_experiment_id"], "exp_hitl")
+        self.assertEqual(payload["source_fold_id"], "fold_2022Q1")
+        copied = Path(str(payload["path"]))
+        self.assertTrue((copied / "main.py").exists())
+        self.assertEqual(payload["artifact_hash"], artifact_hash(copied))
+        # A source without any recorded fold is refused.
+        bare = self.experiments_root / "exp_bare2"
+        (bare / "hitl").mkdir(parents=True)
+        with self.assertRaises(ManagerError):
+            manager._import_inherited_artifact(target, "exp_bare2")
+
+    def test_equity_endpoint_chains_windows(self) -> None:
+        experiment_dir = self.experiments_root / "exp_hitl"
+        results = experiment_dir / "artifacts" / "run_001" / "results"
+        for name, curve in (
+            ("valid_000", {"20220104": 1_010_000.0, "20220105": 1_000_000.0}),
+            ("valid_001", {"20220106": 1_020_000.0}),
+            ("test_000", {"20220401": 990_000.0}),
+        ):
+            window = results / name
+            window.mkdir(parents=True, exist_ok=True)  # the orders fixture pre-creates some windows
+            (window / "detailed_return.json").write_text(
+                json.dumps({"initial_cash": 1_000_000.0, "equity_curve": curve}), encoding="utf-8"
+            )
+        payload = self.client.get("/api/experiments/exp_hitl/equity").json()
+        by_key = {series["key"]: series["points"] for series in payload["series"]}
+        self.assertEqual([p[0] for p in by_key["valid"]], ["20220104", "20220105", "20220106"])
+        self.assertAlmostEqual(by_key["valid"][0][1], 0.01)   # 1.01M / 1M - 1
+        self.assertAlmostEqual(by_key["valid"][1][1], -1_0000 / 1_010_000, places=6)
+        self.assertAlmostEqual(by_key["valid"][2][1], 0.02)   # new window resets to initial_cash
+        self.assertAlmostEqual(by_key["test"][0][1], -0.01)
+        fold = self.client.get("/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/equity").json()
+        self.assertEqual(len(fold["valid"]["series"][0]["points"]), 3)
+        self.assertEqual(len(fold["test"]["series"][0]["points"]), 1)
 
     def test_delete_requires_confirm_and_no_live_worker(self) -> None:
         missing_confirm = self.client.delete("/api/experiments/exp_legacy")
