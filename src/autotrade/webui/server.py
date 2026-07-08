@@ -455,7 +455,14 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     return app
 
 
-def run(repo_root: Path, *, host: str = "127.0.0.1", port: int = 38888, experiments_root: Path | None = None) -> None:
+def run(
+    repo_root: Path,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 38888,
+    uds: Path | None = None,
+    experiments_root: Path | None = None,
+) -> None:
     import signal
 
     import uvicorn
@@ -464,7 +471,14 @@ def run(repo_root: Path, *, host: str = "127.0.0.1", port: int = 38888, experime
     # (their liveness is judged via status.json pid checks).
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)
     app = create_app(repo_root, experiments_root)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    if uds is not None:
+        # Unix-socket bind: local access control is the parent directory's
+        # filesystem permissions (loopback TCP is reachable by every local
+        # user on a shared host). uvicorn chmods the socket itself to 666,
+        # so the caller must keep the directory 0700.
+        uvicorn.run(app, uds=str(uds), log_level="info")
+    else:
+        uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 __all__ = ["create_app", "run"]

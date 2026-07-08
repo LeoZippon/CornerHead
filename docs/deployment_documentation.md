@@ -361,8 +361,8 @@ MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
                                              │   ├─ /            静态 SPA（/opt/cornerhead/static）
                                              │   └─ /api/  ─▶ 127.0.0.1:38889（仅回环）
                                              ▲
-计算主机 ──autossh -N -R 127.0.0.1:38889:127.0.0.1:38888──┘（主动出站，教育网约束下唯一可行方向）
-          console API：uvicorn 127.0.0.1:38888（仅回环）；实验 worker 为独立分离进程
+计算主机 ──autossh -N -R 127.0.0.1:38889:.runtime/webui/console.sock──┘（主动出站，教育网约束下唯一可行方向）
+          console API：uvicorn 绑定 Unix socket .runtime/webui/console.sock（0700 目录，仅 lzp 可达）；实验 worker 为独立分离进程
 ```
 
 **设计原则**
@@ -381,6 +381,8 @@ MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
 | 计算主机（`~/.ssh/id_ed25519.pub`） | `restrict,port-forwarding,permitlisten="127.0.0.1:38889"` | 只能反向监听 38889（暴露控制台 API） |
 | 研究者 MacBook | `restrict,port-forwarding,permitopen="127.0.0.1:8080"` | 只能本地转发到 8080（访问控制台） |
 
+**计算主机侧本地访问控制**：控制台 API 不监听任何 TCP 端口，只绑定 `.runtime/webui/console.sock`（目录 0700，属主 lzp）——共享机上的其他本地用户被内核文件权限直接隔断（回环 TCP 做不到这一点）。隧道以 lzp 身份连该 socket 后在前端回环暴露为 38889。本地诊断用 `curl --unix-socket .runtime/webui/console.sock http://console/api/health`；不要用 socat 等把 socket 桥回 TCP，否则等于重新开放给全部本地用户。
+
 **nginx**（`ops/webui/nginx-cornerhead.conf` → `/etc/nginx/sites-available/cornerhead`）：`listen 127.0.0.1:8080`；`/` 服务 `/opt/cornerhead/static` 下的 SPA（hash 路由，`try_files` 回退 index.html），`/static/` alias 同目录；`/api/` 反代 `127.0.0.1:38889`，SSE 关闭缓冲、读超时 3600s；计算主机离线（502/504）时返回 503 中文 JSON 提示而非 nginx 错误页；发行版默认站点已移除，80/443 无监听。
 
 **部署命令**（均在计算主机上执行）：
@@ -394,7 +396,7 @@ MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
 
 | 命令 | 作用 |
 |---|---|
-| `start` / `stop` / `status` | 启停控制台 API（uvicorn，回环 38888）与 autossh 反向隧道；status 含前端端到端健康检查 |
+| `start` / `stop` / `status` | 启停控制台 API（uvicorn，Unix socket `.runtime/webui/console.sock`）与 autossh 反向隧道；status 含前端端到端健康检查 |
 | `ensure` | 缺什么补什么（keepalive 目标，幂等） |
 | `sync` | 推送静态 SPA 到前端 |
 | `install-cron` | 安装托管 crontab 块：`*/2` 分钟 `ensure` + `@reboot` |

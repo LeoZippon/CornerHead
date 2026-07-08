@@ -1,3 +1,10 @@
+2026-07-08 控制台本地访问控制：Unix socket 化（feat/hitl-webui 线）
+
+- 威胁核实：计算主机有 30 个可登录用户（当时 4 人在线），控制台原来的 127.0.0.1:38888 回环 TCP 对全部本地用户开放且 API 无鉴权。前端另有 admin 账户，用户决策本轮只做计算主机侧。
+- 方案：console 改绑 Unix socket `.runtime/webui/console.sock`（目录 chmod 700 为强制边界——uvicorn 会把 socket 本身 chmod 666），内核按文件权限限定 lzp；`run_webui.py`/`server.run()` 新增 `--uds`（`--port` 保留仅供显式本地调试）；隧道改 `-R 127.0.0.1:38889:<socket>`（OpenSSH 远端 TCP→本地 socket 转发），前端 nginx、Mac 接入、permitlisten 键限制全部不动；健康检查改 `curl --unix-socket`。
+- 顺手修复自引入缺陷：`start` 拉起的 console/autossh 继承了 grab_lock 的 fd 9，长驻持有 ensure.lock 导致其后每次 cron ensure 超时失败（约 25 分钟，栈本体未受影响）；spawn 命令补 `9>&-`。
+- 验证：38888 无 TCP 监听、run dir 700、锁不再被长驻进程持有、ensure 静默通过、前端端到端（nginx→隧道→socket）含 SSE 实测通过；tests.unit.test_webui_backend + test_interactive_pipeline 41 OK；文档（deployment §10/§11 + pipeline_design §5.3）同步。
+
 2026-07-08 控制台稳定性审计 + WebUI UTC+8 显示（feat/hitl-webui）
 
 - 时区：前端所有显示时间戳统一按 UTC+8（Asia/Shanghai）渲染（app.js 新增 fmtTs/fmtTsTime，基于 Intl，与浏览器本地时区无关）；后端存储保持 UTC ISO 不变；registry 的 mtime 回退时间戳由 naive 本地时间改为 aware-UTC（否则会被前端按浏览器时区误读）。
@@ -1099,3 +1106,9 @@
 - 启动真实 `autotrade-sandbox:latest` Docker Sandbox（`network=none`），加载 2024-01-02..05 的真实 daily / margin_secs 样本，并用真实宿主 `SimBroker` 跑通普通账户、信用账户、融资、融券、买券还券、卖券还款、直接还款、盘前 transfer、cancel、非法 amount/limit 拒单和 pending 查询。
 - Smoke 暴露并修复 pending 字段细节：`close()` 同 tick pending 补 `op_type`，submit-lag pending 优先保留 action 自带 `account/op_type`，`direct_repay()` 同 tick pending 补 `account="credit"` / `op_type=32`。
 - Validation: Docker smoke OK（15 orders / 28 broker events，filled actions 覆盖 `buy/sell/credit_buy/credit_sell/fin_buy/short/cover/sell_repay/direct_repay/transfer`，rejects 覆盖 `invalid_amount` / `invalid_limit_price`）；`tests.unit.test_main_ctx_replay` + `tests.unit.test_broker_engine` -> 115 OK；`git diff --check` clean。当前镜像 build 曾超时，smoke 通过 workspace overlay 使用最新 `main_ctx_driver.py`。
+
+2026-07-07 Remove Agent-facing valid_bars
+
+- 删除 `ctx.broker` 下单原语和 `SimBroker.passorder` 的 `valid_bars` 便捷参数；限价单改为当日有效，直到成交、策略显式 `cancel()` 或日终清扫。
+- Prompt、模板 README、环境文档和相关测试同步改为用 `pending().age_minutes` + `cancel()` 管理“N 分钟后撤单”，更贴近 QMT `passorder` 没有 TIF 参数的真实接口。
+- Validation: 非历史文件 grep 无 `valid_bars` / `remaining_bars` / `expired_unfilled` 残留；`~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine tests.unit.test_main_ctx_replay` -> 143 OK；`py_compile` OK；`git diff --check` clean。

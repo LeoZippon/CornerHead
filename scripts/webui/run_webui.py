@@ -3,10 +3,12 @@
 
 Serves the web console (homepage + experiment detail SPA) and the JSON control
 API over the interactive experiment pipeline. Run on the workstation that
-hosts the pipeline, data, and Docker; binds 127.0.0.1 by default (no auth
-layer — put a trusted reverse proxy in front for any non-local bind).
+hosts the pipeline, data, and Docker. No auth layer: production binds a Unix
+domain socket in a 0700 directory (kernel-enforced single-user access on the
+shared host); loopback TCP is for explicit local debugging only and is
+reachable by every local user.
 
-  ~/miniconda3/envs/quant/bin/python scripts/webui/run_webui.py --port 38888
+  ~/miniconda3/envs/quant/bin/python scripts/webui/run_webui.py --uds .runtime/webui/console.sock
 """
 from __future__ import annotations
 
@@ -31,13 +33,26 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1", help="Bind address; keep loopback unless proxied.")
     parser.add_argument("--port", type=int, default=38888, help="Listen port (default 38888).")
     parser.add_argument(
+        "--uds",
+        type=Path,
+        default=None,
+        help="Bind a Unix domain socket instead of TCP; access control is the socket "
+        "directory's permissions (production mode; overrides --host/--port).",
+    )
+    parser.add_argument(
         "--experiments-root",
         type=Path,
         default=repo_root / "experiments",
         help="Experiments root directory shared with the pipeline CLIs.",
     )
     args = parser.parse_args()
-    run(repo_root, host=args.host, port=args.port, experiments_root=args.experiments_root.resolve())
+    run(
+        repo_root,
+        host=args.host,
+        port=args.port,
+        uds=args.uds,
+        experiments_root=args.experiments_root.resolve(),
+    )
     return 0
 
 

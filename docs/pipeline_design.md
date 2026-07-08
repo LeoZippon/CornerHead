@@ -572,7 +572,7 @@ experiments/<experiment_id>/
 
 ### 5.3 Web 控制台与防泄漏
 
-`scripts/webui/run_webui.py` 启动 FastAPI 控制台（`src/autotrade/webui/`，默认 `127.0.0.1:38888`；无鉴权，非回环绑定必须置于可信反向代理之后）。后端是纯控制面：实验在独立 worker 进程执行（`start_new_session`，与服务进程生死解耦，服务重启不影响运行中的实验），并行运行实验数上限 4（`MAX_RUNNING_EXPERIMENTS`）。
+`scripts/webui/run_webui.py` 启动 FastAPI 控制台（`src/autotrade/webui/`；无鉴权。生产部署经 `webui_stack.sh` 绑定 `--uds .runtime/webui/console.sock`（0700 目录，内核级限定 lzp——计算主机是多用户共享机，回环 TCP 对所有本地用户开放）；`--port` 仅供显式本地调试，非回环绑定必须置于可信反向代理之后）。后端是纯控制面：实验在独立 worker 进程执行（`start_new_session`，与服务进程生死解耦，服务重启不影响运行中的实验），并行运行实验数上限 4（`MAX_RUNNING_EXPERIMENTS`）。
 
 - 首页：列出全部实验（HITL 与历史只读实验），含状态、Fold 进度、累计验证/测试/held-out 收益与逐 Fold 收益图；新建实验模态（表单 schema 由 `PARAM_DEFAULTS` 派生，覆盖全部可配参数并附中文说明）；删除实验（需输入实验名确认，worker 存活时拒绝，同时清理该实验专属 sandbox work root）。
 - 详情页：会话导航（逐 Epoch 的元学习/Fold 与 held-out）、控制条（模式切换/暂停/停止/强制终止/恢复运行）、逐会话指令编辑与批准；批准前可经 `prompt-preview` 端点审阅完整装配后的系统提示词（含 Taste 与指令；运行时「当前实验事实」块以 Fold 信息+验收规则原文代替，且与运行时一致地不含测试排程）；运行中的会话经 SSE 按字节偏移实时尾随 `agent_trace.jsonl`（每事件独立 flush），并显示沙箱/快照准备指示器、按事件类型聚合的实时统计（`trace/stats`：LLM/搜索/回测/Shell 次数、回测累计墙钟、token 总量）与计入回测回补的推理倒计时；已完成 Fold 展示验证结果、Step 历史、冻结策略代码浏览与 zip 下载（output + models），trace 支持分批加载与原始 `.jsonl` 下载（`trace/download`）。

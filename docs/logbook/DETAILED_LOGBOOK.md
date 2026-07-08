@@ -16668,3 +16668,32 @@ Reported-only optimization opportunities (not implemented; ranked): `trace/stats
 Healthy by design (agent-verified, no action): os.replace atomic publish (reader side), status.json single-writer with zombie detection, SIGCHLD=SIG_IGN no-zombie reaping, detached workers surviving console restarts, registry's defensive ledger reads, orders served only from immutable collected run_ids, path-traversal guards, nginx 503 degradation + SSE unbuffered, autossh self-heal parameters, ledger resume hash-verification, cron flock reentrancy.
 
 Validation: full suite 555 OK (+1 `test_recycled_pid_counts_as_dead`); stack stop/start cycle clean; cron reinstalled; local SSE and frontend-path SSE (nginx→tunnel→API) stream verified live; `sshd -T` shows clientalive 30/3; frontend e2e health ok. Resource check: hub 414G RAM available, console RSS 144M/15 fds; frontend 1.6G RAM ok, disk 20%, nginx logrotate present. Docs: deployment_documentation §12 (locking, rotation, cmdline-verified liveness, ClientAlive, UTC+8 display convention).
+
+## 2026-07-08 Console local access control: Unix-socket bind (feat/hitl-webui line)
+
+Task: restrict WebUI access on the compute hub to user lzp, blocking all other local users; adjust the frontend as needed. Proposal presented with options; user chose hub-only scope (frontend `admin` is their own account; the proposed nftables owner-match rules for the frontend loopback ports were documented but not applied).
+
+Threat verified before designing: the hub has 30 login-capable users (4 logged in at the time); the console's 127.0.0.1:38888 was plain loopback TCP with no auth — any local user could curl the full control API. Toolchain verified: OpenSSH 10.0 on the hub (remote-TCP→local-unix -R supported), uvicorn 0.50.2 `uds=` supported, socket path 47 chars < 108 limit.
+
+Design (kernel-enforced, zero secrets): console binds `.runtime/webui/console.sock`; the run dir is chmod 700 (uvicorn chmods the socket itself to 0666 — the DIRECTORY is the enforcement boundary, same convention as PostgreSQL socket dirs). The autossh reverse forward becomes `-R 127.0.0.1:38889:<socket>` — ssh connects to the socket as lzp on the hub and still binds TCP 38889 on the frontend loopback, so nginx, the Mac path, and the `permitlisten` key restriction are all untouched. A frontend unix-socket hop was considered and rejected: `permitlisten/permitopen` only govern TCP, so allowing streamlocal forwards would weaken the per-key scoping, plus StreamLocalBindUnlink/nginx-socket-permission complexity.
+
+Changes: `run_webui.py` + `server.run()` gained `--uds` (overrides host/port; TCP retained for explicit local debugging only, docstring rewritten); `webui_stack.sh` — SOCK var, chmod 700 on RUN_DIR at init, `rm -f $SOCK` before spawn (stale socket file blocks the bind), tunnel targets the socket, `status` health check via `curl --unix-socket $SOCK http://console/api/health`; PORT var removed from the stack script. Docs: deployment_documentation §10 diagram + §11 new 计算主机侧本地访问控制 paragraph (incl. the warning not to bridge the socket back to TCP with socat) + §12 command table; pipeline_design §5.3.
+
+Self-introduced defect caught during cutover: `start`'s spawned console/autossh inherited grab_lock's fd 9 and held `ensure.lock` indefinitely — every cron `ensure` for ~25 min timed out with "another stack operation holds the lock" (stack itself stayed healthy; confirmed holders via `fuser -v`). Fix: `9>&-` on both spawn commands. Recovery required killing the fd-holding pids directly since `stop` itself couldn't take the lock.
+
+Validation: `ss -ltn` shows no 38888 listener; run dir `drwx------ lzp`; `fuser` shows the lock free after restart; `ensure` silent-clean; frontend end-to-end incl. SSE streaming verified through nginx→tunnel→socket; tests.unit.test_webui_backend + test_interactive_pipeline 41 OK; py_compile clean. Console restarts do not require a tunnel restart (the forward targets the socket by path; the recreated socket is picked up on the next connection).
+
+## 2026-07-07 Broker API alignment: remove `valid_bars`
+
+Task: align the Agent-facing broker order API with real QMT semantics. QMT `passorder` does not expose a `valid_bars` / bar-count time-in-force parameter, so stale-order handling should be expressed by strategy logic through `pending()` and `cancel()`, not by a synthetic broker argument.
+
+Changes:
+1. Removed `valid_bars` from the Sandbox driver methods `buy/sell/credit_buy/credit_sell/fin_buy/short/cover/sell_repay`; generated broker action records no longer carry the field.
+2. Removed `valid_bars` from `SimBroker.passorder` and `WorkingOrder`. Limit orders now rest as day orders until filled, explicitly cancelled, or swept at day end; unfilled limit orders no longer decrement a synthetic bar counter or emit `expired_unfilled`.
+3. Updated replay translation, unit fixtures, environment docs, Fold prompt text, exported `PROMPTS.md`, and `configs/agent_output_template/README.md` to document the new pattern: read `pending().age_minutes` inside a substep and call `cancel(order_id, reason=...)` for policy-driven stale-order expiry.
+
+Validation:
+- `rg -n "valid_bars|remaining_bars|expired_unfilled|限价窗口" src configs docs tests -g '*.py' -g '*.md' -g '*.json' -g '!docs/logbook/**'` -> no matches.
+- `python3 -m py_compile src/autotrade/environment/broker.py src/autotrade/environment/main_ctx_driver.py src/autotrade/environment/main_ctx_engine.py tests/unit/test_main_ctx_replay.py tests/unit/test_broker_engine.py` -> OK.
+- `~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine tests.unit.test_main_ctx_replay` -> 143 OK.
+- `git diff --check` -> clean.
