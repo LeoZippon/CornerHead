@@ -17,15 +17,30 @@ MAC_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEQeydwT+R05m4vwfgWN3Sw0PdQILVqq
 ssh "$FRONTEND" bash -s <<REMOTE
 set -euo pipefail
 id cornerhead >/dev/null 2>&1 || useradd --create-home --shell /usr/sbin/nologin cornerhead
-install -d -m 700 -o cornerhead -g cornerhead /home/cornerhead/.ssh
-cat > /home/cornerhead/.ssh/authorized_keys <<'KEYS'
+# Designated-keys-only sshd: all key material lives in a root-owned central
+# store, so no account (including a compromised one) can grant itself SSH
+# access by editing user dotfiles; AllowUsers refuses every other account.
+install -d -m 755 /etc/ssh/authorized_keys.d
+for u in root admin; do
+  h=\$(eval echo ~\$u)
+  [ -f "/etc/ssh/authorized_keys.d/\$u" ] || install -m 644 -o root -g root "\$h/.ssh/authorized_keys" "/etc/ssh/authorized_keys.d/\$u"
+done
+cat > /etc/ssh/authorized_keys.d/cornerhead <<'KEYS'
 # compute hub: reverse tunnel only (exposes the console API on loopback)
 restrict,port-forwarding,permitlisten="127.0.0.1:38889" ${HUB_PUBKEY}
 # researcher MacBook: local forward to the console only
 restrict,port-forwarding,permitopen="127.0.0.1:8080" ${MAC_PUBKEY}
 KEYS
-chown cornerhead:cornerhead /home/cornerhead/.ssh/authorized_keys
-chmod 600 /home/cornerhead/.ssh/authorized_keys
+chmod 644 /etc/ssh/authorized_keys.d/cornerhead
+cat > /etc/ssh/sshd_config.d/10-designated-keys.conf <<'CONF'
+# Designated-keys-only access: key material lives in a root-owned directory,
+# so no account (including a compromised one) can grant itself SSH access
+# by editing user dotfiles. Managed by ops/webui/frontend_setup.sh.
+AuthorizedKeysFile /etc/ssh/authorized_keys.d/%u
+AllowUsers root admin cornerhead
+AuthenticationMethods publickey
+CONF
+sshd -t
 install -d -m 755 /opt/cornerhead/static
 rm -f /etc/nginx/sites-enabled/default
 systemctl enable --now nginx >/dev/null 2>&1 || true
@@ -36,7 +51,7 @@ ClientAliveInterval 30
 ClientAliveCountMax 3
 SSHD
 systemctl reload ssh 2>/dev/null || systemctl reload sshd
-echo "frontend user + dirs + sshd keepalive ready"
+echo "frontend user + designated-keys sshd + keepalive ready"
 REMOTE
 
 scp -q "$HERE/nginx-cornerhead.conf" "$FRONTEND:/etc/nginx/sites-available/cornerhead"

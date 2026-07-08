@@ -16683,6 +16683,18 @@ Self-introduced defect caught during cutover: `start`'s spawned console/autossh 
 
 Validation: `ss -ltn` shows no 38888 listener; run dir `drwx------ lzp`; `fuser` shows the lock free after restart; `ensure` silent-clean; frontend end-to-end incl. SSE streaming verified through nginx→tunnel→socket; tests.unit.test_webui_backend + test_interactive_pipeline 41 OK; py_compile clean. Console restarts do not require a tunnel restart (the forward targets the socket by path; the recreated socket is picked up on the next connection).
 
+## 2026-07-08 Frontend sshd designated-keys whitelist (feat/hitl-webui line)
+
+Task: restrict frontend-server SSH access to designated keys only, elegantly.
+
+Audit first (sshd -T + per-user authorized_keys + live sshd sessions/listeners): password/kbd-interactive already off globally, but AuthorizedKeysFile was the default user-writable dotfile (any account — or its compromiser — could self-grant access), no AllowUsers, authenticationmethods any. Designated-key inventory: 8 entries — root 4 (hub `lzp-h200-aliyun-20260528`, `windows-jump-reverse-20260603`, `windows-jump-system-reverse-20260603`, Mac), admin 2 (SWAS-imported ECDSA, Mac), cornerhead 2 (restricted). Discovered en route: the windows-jump keys are UNRESTRICTED root keys serving the QMT relay (live root session holding 127.0.0.1:2222 reverse listener), and the Mac key grants a full root shell. Both tightenings (restrict+permitlisten on the windows keys; dropping the Mac key from root) were proposed; user chose core-only scope.
+
+Design (all native sshd, one drop-in): `/etc/ssh/sshd_config.d/10-designated-keys.conf` (low sort = first-obtained wins) with `AuthorizedKeysFile /etc/ssh/authorized_keys.d/%u` (key designation becomes root-owned config; every `~/.ssh/authorized_keys` inert), `AllowUsers root admin cornerhead` (all other present/future accounts refused at auth), `AuthenticationMethods publickey`. All 8 keys migrated verbatim (cornerhead's per-key restrict options preserved) into root-owned 0644 files in a 0755 dir (passes StrictModes).
+
+Lockout-proof application: since each Bash call is a discrete SSH connection (no held session), the change was applied with a 120-second revert guard (`nohup sleep 120; [ -f /run/dk-ok ] || rm drop-in && reload`) armed in the same command as the reload; a NEW root connection then touched /run/dk-ok to disarm. Verification: `sshd -T` shows the three directives effective; tunnel restarted successfully with cornerhead's home dotfile temporarily moved aside (proves the central store is the sole source); `sync@` refused (AllowUsers); `frontend_setup.sh` re-run is a no-op reproducing the same state (cornerhead file md5 stable); end-to-end health ok. Mac-side login left for the user to confirm. Caveat documented: cloud-vendor web terminals that inject temp keys into `~/.ssh` will no longer work; VNC rescue (local tty login) is unaffected.
+
+frontend_setup.sh now provisions the central store idempotently: rewrites `authorized_keys.d/cornerhead`, bootstraps root/admin files only if missing (never clobbers), writes the drop-in, `sshd -t` before the final reload. Docs: deployment_documentation §11 new 指定 key 白名单 paragraph.
+
 ## 2026-07-07 Broker API alignment: remove `valid_bars`
 
 Task: align the Agent-facing broker order API with real QMT semantics. QMT `passorder` does not expose a `valid_bars` / bar-count time-in-force parameter, so stale-order handling should be expressed by strategy logic through `pending()` and `cancel()`, not by a synthetic broker argument.

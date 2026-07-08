@@ -374,7 +374,9 @@ MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
 
 ## 11. 前端部署与访问控制
 
-**专用隧道用户 `cornerhead`**（`/usr/sbin/nologin`，无 shell/exec 能力），`authorized_keys` 按 key 精确限权：
+**指定 key 白名单（sshd 层）**：前端 sshd 只认 root 所有的中央 key 目录——`AuthorizedKeysFile /etc/ssh/authorized_keys.d/%u`（`10-designated-keys.conf`），各用户 `~/.ssh/authorized_keys` 全部失效，任何账户（包括被入侵的）都无法自行加 key 获得访问；`AllowUsers root admin cornerhead` 拒绝其余现有/未来账户；`AuthenticationMethods publickey` 锁死认证方法（密码/交互式全局关闭）。指定 key 全集即 `/etc/ssh/authorized_keys.d/` 下三个文件，一处审计。增删 key = root 编辑对应文件（cornerhead 的由 `frontend_setup.sh` 管理并幂等重写）。云厂商网页终端若依赖向 `~/.ssh` 注入临时 key 将失效；VNC 救援控制台走本地 tty 登录，不受影响。
+
+**专用隧道用户 `cornerhead`**（`/usr/sbin/nologin`，无 shell/exec 能力），中央 key 文件内按 key 精确限权：
 
 | 终端 | key 选项 | 能力 |
 |---|---|---|

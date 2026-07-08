@@ -1,3 +1,9 @@
+2026-07-08 前端 sshd 指定 key 白名单（feat/hitl-webui 线）
+
+- 核查：前端虽已 key-only，但 `AuthorizedKeysFile` 是各用户自有 dotfile（被入侵账户可自我加 key 持久化）、无 AllowUsers；指定 key 全集 8 条（root 4：hub、windows-jump×2、Mac；admin 2；cornerhead 2 受限 key）。发现 windows-jump 两把无限制 root key 实为 QMT 中继隧道（现持 127.0.0.1:2222）、Mac key 有 root shell——收紧项已提议，用户选择只做核心三层。
+- 方案落地：`AuthorizedKeysFile /etc/ssh/authorized_keys.d/%u`（key 指定权收归 root，dotfile 全部失效）+ `AllowUsers root admin cornerhead` + `AuthenticationMethods publickey`；8 条 key 原样迁入；`frontend_setup.sh` 幂等管理（cornerhead 文件重写，root/admin 仅缺失时自举）。
+- 实施带 120s 自动回滚保险丝（reload 后新连接验证成功才解除）。验证：新 root 连接 OK；把 cornerhead 的 home dotfile 移走后重启隧道仍认证成功（证明中央目录唯一生效）；非白名单用户 `sync` 被拒；provisioning 重跑幂等；前端端到端健康。Mac 侧登录待用户自验。
+
 2026-07-08 控制台本地访问控制：Unix socket 化（feat/hitl-webui 线）
 
 - 威胁核实：计算主机有 30 个可登录用户（当时 4 人在线），控制台原来的 127.0.0.1:38888 回环 TCP 对全部本地用户开放且 API 无鉴权。前端另有 admin 账户，用户决策本轮只做计算主机侧。
