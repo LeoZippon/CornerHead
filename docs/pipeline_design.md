@@ -522,7 +522,7 @@ experiments/<experiment_id>/
 
 **数据和可见性**
 
-- 所有正式输入满足 Timeview 可见性口径：行级 `available_at` 不晚于当前刷新节点 cutoff，且该节点已在仿真时钟下完成。
+- 所有正式输入满足 Timeview 可见性口径：取当前仿真时钟下已完成的最新刷新节点作为 cutoff，仅暴露行级 `available_at <= cutoff` 的数据。
 - 测试/held-out 数据、结果和日志不反馈给 Agent。
 - `universe.parquet` 使用决策日在市口径。
 
