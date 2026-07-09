@@ -167,8 +167,11 @@ flowchart LR
 | 全球指数 | `index_global` | 按指数代码+年份 | 跨市场风险偏好 |
 | 外汇日线 | `fx_daily` | 按外汇代码+年份 | 汇率上下文 |
 | 央行货币政策执行报告 | `monetary_policy` | 按发布年份 | 政策文本 evidence |
+| A 股核心宽基指数 | `index_daily` | 按指数代码+年份（上证指数/上证50/沪深300/中证500/中证1000/创业板指/科创50，`DEFAULT_CN_INDEX_CODES`） | 指数择时、β 管理、相对强弱；同时是宿主基准/Barra-lite 数据源 |
 
 只有日期或月份的数据不得用于同日开盘决策；进入环境层后应优先使用精确发布时间或保守延后时间。
+
+**Agent 暴露（2026-07 raw 覆盖审计批次）**：`repo_daily`、`us_tycr`、`us_trycr`、`shibor_quote`、`index_daily` 已加入 `SnapshotConfig.macro_datasets`（macro 域，晚间节点，D-1 可见）。`shibor_quote` 此前只有一次性回填、从未进晚间刷新（漂移），现已加入 `MACRO_REGIME_DEFAULT_DATASETS` 并补齐缺口。`index_daily` 新建下载 spec（`date_year_by_ts_code` 策略、`available_at=conservative_date_eod`）并纳入晚间 cron；存量沪深300 基准分区已重写补齐 `available_at` 列。`cn_schedule` **不暴露**：源端只保留当期数月、无历史（79 个分区仅 7 个非空），对回测无贡献；`hibor`/`libor`/`us_tbr`/`us_tltr` 不暴露（停更或与 `us_tycr` 冗余）。
 
 ### 1.5 历史分钟线
 
@@ -230,6 +233,8 @@ flowchart LR
 - `limit_list_d` 与 `limit_list_ths` 口径不同，不能互相覆盖。
 - `first_time/open_times/fd_amount/limit_amount` 等日终字段不能用于盘中决策。
 
+**Agent 暴露（2026-07 raw 覆盖审计批次）**：`kpl_list`、`limit_step`、`limit_cpt_list`、`limit_list_ths`、`ths_hot`、`dc_hot`、`hm_detail`、`hm_list` 已加入 `SnapshotConfig.events_datasets`（events 域按 `dataset` 列区分，行级 `available_at` 门控）；打板三件套映射盘前 `cn_preopen_board_backfill_0850` 节点（次日盘前可见），热榜/游资走晚间节点（次日 02:05 可见）。定位为情绪/题材**描述性弱信号**：空值、口径变动与榜单重复键由使用方容忍，不作为成交、可交易性、资金或风控真相源。`limit_list_d` 维持不暴露（无行级 `available_at`、`limit_amount` 历史回写不稳定；与 `limit_list_ths` 重叠，如需再按日频合同+字段白名单接入）。
+
 ### 1.7 文本数据
 
 数据层只保存文本原始数据、发布时间、来源和 hash。进入 Agent 前，证据层再生成 `evidence_id`、截断正文、实体映射和来源质量。
@@ -242,7 +247,7 @@ flowchart LR
 | 政策法规库 | `npr` | 按月份 | `pubtime` |
 | 券商研究报告 | `research_report` | 按月份 | 只有日期时不能用于同日开盘 |
 | 盈利预测 | `report_rc` | 按月份 | `create_time` 仅在与 `report_date` 相差 -1~+3 天内可信；否则回退 `report_date 22:00`（官方当日 19:00-22:00 更新） |
-| 新闻快讯 | `news` | 按来源+日期 | `datetime` |
+| 新闻快讯 | `news` | 按来源+日期 | `datetime`；**已暴露给 Agent（带闸门）**：仅 `news_sources` 高信噪源子集（默认 cls/wallstreetcn/eastmoney），仅 `news_window_months`（默认 2 个月）滚动窗口，按正文 hash 跨源去重（最早可见副本保留）；盘前 `cn_preopen_text_backfill_0855` 节点当日盘前可见 |
 
 带日期基准的文本时间字段只在接近源日期时才视为发布时间：回填历史里 `rec_time`/`create_time` 常是 TuShare 采集时间（如 2020 年公告带 2025 时间戳），超出 -1~+3 天窗口即按上表回退，规则标记 `conservative_from:<date>:implausible_<time>`。存量分区可用本地命令重写派生列（不调 API）：
 

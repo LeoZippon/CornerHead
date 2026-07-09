@@ -149,6 +149,13 @@ EVENT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
     "margin_secs": ("cn_preopen_margin_secs_backfill_0903", "cn_preopen_margin_secs_retry_0913"),
     "margin": ("cn_preopen_margin_backfill_0905", "cn_preopen_margin_retry_0915"),
     "margin_detail": ("cn_preopen_margin_backfill_0905", "cn_preopen_margin_retry_0915"),
+    # Board-trading sources publishing next-day ~08:30: the 08:50 pre-open
+    # backfill is their real landing job (the evening node refines backfills).
+    "kpl_list": (EVENING_NODE, "cn_preopen_board_backfill_0850"),
+    "limit_step": (EVENING_NODE, "cn_preopen_board_backfill_0850"),
+    "limit_cpt_list": (EVENING_NODE, "cn_preopen_board_backfill_0850"),
+    # limit_list_ths / ths_hot / dc_hot / hm_detail / hm_list land in the
+    # evening window only — the default node is already correct for them.
 }
 
 # Per-dataset overrides inside the text domain (default = cn_evening_full). The

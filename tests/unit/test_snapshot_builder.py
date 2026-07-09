@@ -407,6 +407,68 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(meta["rows"], 1)
             self.assertEqual(meta["dropped"]["announced_after_ex_date"], 1)
 
+    def test_default_config_exposes_coverage_audit_additions(self):
+        # Drift guard for the 2026-07 raw-coverage audit batch: board/sentiment
+        # events, macro regime additions, the news wire, and the A-share index
+        # set stay exposed; cn_schedule stays out (source keeps no history).
+        config = SnapshotConfig()
+        for dataset in ("kpl_list", "limit_step", "limit_cpt_list", "limit_list_ths",
+                        "ths_hot", "dc_hot", "hm_detail", "hm_list"):
+            self.assertIn(dataset, config.events_datasets, dataset)
+        for dataset in ("repo_daily", "us_tycr", "us_trycr", "shibor_quote", "index_daily"):
+            self.assertIn(dataset, config.macro_datasets, dataset)
+        self.assertIn("news", config.text_datasets)
+        self.assertNotIn("cn_schedule", config.macro_datasets)
+
+    def test_news_text_guards_sources_window_and_dedup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            flash = {"title": "", "channels": "要闻"}
+            def write_news(src, day, rows):
+                out = raw / "news" / f"src={src}" / f"date={day}.parquet"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                pd.DataFrame([
+                    {"datetime": f"{day[:4]}-{day[4:6]}-{day[6:]} {9 + i:02d}:00:00", "content": content,
+                     "available_at": f"{day[:4]}-{day[4:6]}-{day[6:]}T{9 + i:02d}:00:00+08:00",
+                     "available_at_rule": "source:datetime", **flash}
+                    for i, content in enumerate(rows)
+                ]).to_parquet(out, index=False)
+            # In-window day: cls carries the flash first; eastmoney repeats one
+            # of them later plus a unique item; sina is NOT a configured source.
+            write_news("cls", "20210920", ["A股放量上行", "两融余额创新高"])
+            write_news("eastmoney", "20210920", ["A股放量上行", "北向资金净流入"])
+            write_news("sina", "20210920", ["不应出现的来源"])
+            # Outside the 1-month news window (though inside the text window).
+            write_news("cls", "20210601", ["过期快讯"])
+            builder = SnapshotBuilder(raw, Path(tmp) / "fund_events_missing")
+            config = SnapshotConfig(
+                events_datasets=(), macro_datasets=(), fundamental_datasets=(),
+                text_datasets=("news",), news_sources=("cls", "eastmoney"), news_window_months=1,
+                intraday_trade_days=1, include_industry=False,
+            )
+            out_dir = Path(tmp) / "text_out"
+            out_dir.mkdir()
+            window_start = pd.Timestamp("2021-01-01", tz="Asia/Shanghai")
+            index, _ = builder._build_text(config, DECISION, window_start, out_dir)
+            news = index[index["dataset"] == "news"]
+            bodies = pd.read_parquet(out_dir / "text_library" / "news.parquet")["body"]
+            joined = "\n".join(bodies)
+            # Duplicate flash collapsed to the earliest copy; unique rows kept.
+            self.assertEqual(len(news), 3)
+            self.assertEqual(int(news["source_hash"].duplicated().sum()), 0)
+            self.assertIn("北向资金净流入", joined)
+            # Unconfigured source and beyond-window rows never enter.
+            self.assertNotIn("不应出现的来源", joined)
+            self.assertNotIn("过期快讯", joined)
+            # A configured source with no raw directory fails fast.
+            bad = SnapshotConfig(
+                events_datasets=(), macro_datasets=(), fundamental_datasets=(),
+                text_datasets=("news",), news_sources=("cls", "missing_src"),
+                intraday_trade_days=1, include_industry=False,
+            )
+            with self.assertRaises(FileNotFoundError):
+                builder._build_text(bad, DECISION, window_start, out_dir)
+
     def test_missing_configured_dataset_fails_fast(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"

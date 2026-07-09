@@ -1,3 +1,13 @@
+2026-07-09 raw 覆盖审计落地：14 个数据集进 Agent 决策输入（feat/hitl-webui 线）
+
+- 依据 check.md（GPT 整理的 76 数据集覆盖审计，48 进/28 未进——逐项核实无误）的分档结论实施。机制事实：events/macro/text 域无需 DatasetContract——行级 `available_at` 在下载时按规则打入（回填安全），暴露开关只是 `SnapshotConfig` 域元组 + 刷新节点映射；可见性为双重门（行级 available_at ∧ 节点完成），配置只会更保守、不会泄漏。
+- 批次一（11 项）：events 增打板/热榜/游资 `kpl_list`/`limit_step`/`limit_cpt_list`/`limit_list_ths`/`ths_hot`/`dc_hot`/`hm_detail`/`hm_list`（打板三件套映射盘前 0850 节点=次日盘前可见，实测 cutoff 正确；热榜/游资走晚间；新增 ~6.7k 行/日，与现有 events 同量级），macro 增 `repo_daily`/`us_tycr`/`us_trycr`。`cn_schedule` 审后剔除：源端无历史（79 分区仅 7 非空），对回测零贡献。
+- 批次二：`shibor_quote` 确认从未进晚间刷新（比"漂移风险"更糟），加入 `MACRO_REGIME_DEFAULT_DATASETS`、补齐 5/25→7/8 缺口（+557 行，revision ledger 记录）并暴露。
+- 批次三（news 带闸门）：`SnapshotConfig` 新增 `news_sources`（默认 cls/wallstreetcn/eastmoney）与 `news_window_months`（默认 2），`_build_text` 按源子集读取、独立窗口截取、正文 hash 跨源去重（最早副本保留）；实测 21 个月文本窗口下 news 仅 +63.7k 行（全库 3.88M 的 1.6%）、零重复、库文件 ~10MB。
+- 批次四（index_daily 程序化）：新建下载 spec（`date_year_by_ts_code`、`available_at=conservative_date_eod`）+ `DEFAULT_CN_INDEX_CODES` 七只核心宽基（000001/000016/000300/000905/000852/399006/000688）+ `--cn-index-code` CLI + 晚间 cron + schedule.json 接口表；回填 2020–2026 共 49 分区 11,039 行（存量沪深300 基准分区重写补 `available_at`，webui 基准读取兼容验证通过）；暴露进 macro 域。
+- 提示词可见性表同步（打板盘前行、热榜/指数/新闻归行、情绪弱信号定性一段），PROMPTS.md 重导出；文档：data_documentation §1.4/§1.6/§1.7 暴露注记、parameters_reference §1 新旋钮。
+- 验证：full suite 571 OK（+3：默认暴露漂移守卫、news 源过滤/窗口/去重/缺源 fail-fast、打板盘前节点 cutoff）；新 events/macro 域真实数据构建通过（heldout 期 188k 行 events、7 指数 301 行）；refresh-node 漂移守卫 15 OK。
+
 2026-07-09 逐 Step Barra-lite 归因进回测闭环（feat/hitl-webui 线）
 
 - 动机（经评估采纳）：Step 结果原本只有绝对指标，Agent 无基准语境（大盘 +5% 月份的 +3% 会被当成功证据）；宿主侧预计算一次 ~2s（回放槽 daily.parquet 本就含全市场 circ_mv/pb/turnover_rate 横截面，风格暴露完全来自 Agent 可见数据），相对回放墙钟开销 1–3%。

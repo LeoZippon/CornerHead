@@ -149,6 +149,20 @@ class VisibilityCutoffTest(unittest.TestCase):
             domain_visible_cutoff("daily", when),
         )
 
+    def test_board_datasets_visible_from_preopen_backfill(self) -> None:
+        # kpl_list/limit_step/limit_cpt_list publish next-day ~08:30 and land in
+        # the 08:50 pre-open backfill: visible from 08:55, not the prior evening.
+        for dataset in ("kpl_list", "limit_step", "limit_cpt_list"):
+            after = event_dataset_visible_cutoff(dataset, datetime(2022, 1, 5, 8, 56, tzinfo=CN_TZ))
+            self.assertEqual(after, datetime(2022, 1, 5, 8, 50, tzinfo=CN_TZ), dataset)
+            before = event_dataset_visible_cutoff(dataset, datetime(2022, 1, 5, 8, 40, tzinfo=CN_TZ))
+            self.assertEqual(before, datetime(2022, 1, 4, 23, 35, tzinfo=CN_TZ), dataset)
+        # Hot lists land in the evening window only: default node applies.
+        self.assertEqual(
+            event_dataset_visible_cutoff("dc_hot", datetime(2022, 1, 5, 8, 56, tzinfo=CN_TZ)),
+            datetime(2022, 1, 4, 23, 35, tzinfo=CN_TZ),
+        )
+
     def test_visible_cutoff_none_before_any_node_completes(self) -> None:
         # Just after midnight on the very first day, no evening node has finished.
         when = datetime(2022, 1, 1, 0, 5, tzinfo=CN_TZ)

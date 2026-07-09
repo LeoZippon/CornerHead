@@ -103,11 +103,14 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 
 | 数据域 | 落库节点（北京时间，含刷新耗时） | 对回测的可见性 |
 |---|---|---|
-| 日线核心（daily/daily_basic/复权/涨跌停/停牌）、资金流、大宗、股东/回购/解禁/龙虎榜、宏观全域、分钟历史、批量文本 | `cn_evening_full` 23:35 启动、约次日 02:05 完成 | 交易日内横截面只到 **D-1**；当日日线要等次日约 02:05 才可见，当日实时行情用 `ctx.bars`/`ctx.price` |
+| 日线核心（daily/daily_basic/复权/涨跌停/停牌）、资金流、大宗、股东/回购/解禁/龙虎榜、热榜情绪（ths_hot/dc_hot）、同花顺涨跌停榜（limit_list_ths）、游资明细（hm_detail/hm_list）、宏观全域（含 A 股核心宽基指数 index_daily、回购利率、美债名义/实际曲线、SHIBOR 报价）、分钟历史、批量文本 | `cn_evening_full` 23:35 启动、约次日 02:05 完成 | 交易日内横截面只到 **D-1**；当日日线要等次日约 02:05 才可见，当日实时行情用 `ctx.bars`/`ctx.price` |
 | 基本面 PIT 事件 | `cn_nightly_pit_event_build` 约 03:50 | 次日凌晨可查 |
 | 当日融券标的 `margin_secs` | 盘前 `cn_preopen_margin_secs_*` 约 09:05/09:15 | **当日**盘前可见 |
 | 上一交易日两融 `margin`/`margin_detail` | 盘前 `cn_preopen_margin_*` 约 09:07/09:17 | 次日盘前可见 |
-| 短讯/新闻联播（cctv_news/news） | 盘前 `cn_preopen_text_backfill` 约 09:00 | 当日盘前可见 |
+| 上一交易日打板数据（kpl_list/limit_step/limit_cpt_list） | 盘前 `cn_preopen_board_backfill` 约 08:55 | 次日盘前可见 |
+| 短讯快电（news 多源，已去重）/新闻联播（cctv_news） | 盘前 `cn_preopen_text_backfill` 约 09:00 | 当日盘前可见（news 仅保留近月滚动窗口） |
+
+打板/热榜/游资类字段（events 域 `dataset` 列区分）是**情绪与题材的描述性弱信号**：日终榜单、排名与席位映射存在空值和口径变动，只用于次日及以后的情绪延续判断与复盘，绝不作为成交、可交易性、资金或风控的真相源。指数序列（`macro` 域 `dataset=index_daily`，七只核心宽基）用于市场择时、β 管理与相对强弱基准。
 
 `ctx.asof_dir` 用 `pd.read_parquet(ctx.asof_dir / "daily")` 读取 parquet parts 域（域名 `daily`/`events`/`macro`/`fundamentals`/`intraday_1min`/`text_index`）；文本正文在 `ctx.asof_dir / "text_library"`，只包含已可见 `text_index` 行引用的 body shard。盘中无刷新节点跨越，视图冻结、`ctx.asof_version` 不变——按它缓存读取、变化时再重算。`ctx.snapshot_dir` 是 Fold 决策时点（区间前一交易日收盘）冻结的研究基准快照。
 

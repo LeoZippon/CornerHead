@@ -55,6 +55,17 @@ class SnapshotConfig:
         "share_float_complete",
         "top_list",
         "top_inst",
+        # Board-trading / sentiment cluster (row-level available_at; day-end or
+        # next-morning labels — descriptive sentiment signals, never a truth
+        # source for fills/tradability/risk):
+        "kpl_list",
+        "limit_step",
+        "limit_cpt_list",
+        "limit_list_ths",
+        "ths_hot",
+        "dc_hot",
+        "hm_detail",
+        "hm_list",
     )
     macro_datasets: tuple[str, ...] = (
         "cn_gdp",
@@ -64,13 +75,29 @@ class SnapshotConfig:
         "cn_m",
         "sf_month",
         "shibor",
+        "shibor_quote",
         "shibor_lpr",
         "monetary_policy",
         "eco_cal",
         "index_global",
+        # Core A-share benchmark indexes (000001/000016/000300/000905/000852/
+        # 399006/000688): market timing, beta management, relative strength.
+        "index_daily",
         "fx_daily",
+        # Regime/background additions: repo liquidity, US nominal + real yield
+        # curves (risk appetite). cn_schedule deliberately NOT exposed: the
+        # source keeps no history (only current months), so it contributes
+        # nothing to historical replay.
+        "repo_daily",
+        "us_tycr",
+        "us_trycr",
     )
-    text_datasets: tuple[str, ...] = ("anns_d", "major_news", "cctv_news", "npr", "research_report", "report_rc")
+    text_datasets: tuple[str, ...] = ("anns_d", "major_news", "cctv_news", "npr", "research_report", "report_rc", "news")
+    # Newswire guards: ~4k rows/day across 9 sources would swamp the text index
+    # at the full text window. Only the high-signal sources are ingested, over a
+    # shorter rolling window, with cross-source content dedup (earliest wins).
+    news_sources: tuple[str, ...] = ("cls", "wallstreetcn", "eastmoney")
+    news_window_months: int = 2
     fundamental_datasets: tuple[str, ...] = FUNDAMENTAL_EVENT_DATASETS
     include_intraday: bool = True
     include_industry: bool = True
@@ -635,7 +662,21 @@ class SnapshotBuilder:
             dataset_dir = self.raw_dir / dataset
             if not dataset_dir.exists():
                 raise FileNotFoundError(f"missing configured text dataset: {dataset_dir}")
-            rows = self._read_dataset_window(dataset_dir, decision_time, window_start)
+            if dataset == "news":
+                news_start = max(
+                    window_start, pd.Timestamp(decision_time) - pd.DateOffset(months=config.news_window_months)
+                )
+                source_frames = []
+                for source in config.news_sources:
+                    source_dir = dataset_dir / f"src={source}"
+                    if not source_dir.exists():
+                        raise FileNotFoundError(f"missing configured news source: {source_dir}")
+                    source_rows = self._read_dataset_window(source_dir, decision_time, news_start)
+                    if not source_rows.empty:
+                        source_frames.append(source_rows.assign(src=source))
+                rows = pd.concat(source_frames, ignore_index=True) if source_frames else pd.DataFrame()
+            else:
+                rows = self._read_dataset_window(dataset_dir, decision_time, window_start)
             if rows.empty:
                 continue
             title_column = next((c for c in ("title", "report_title", "name") if c in rows.columns), None)
@@ -649,6 +690,13 @@ class SnapshotBuilder:
             for key in body_columns[1:]:
                 bodies = bodies + "\n" + rows[key].fillna("").astype(str)
             bodies = bodies.str.slice(0, config.text_body_chars)
+            if dataset == "news":
+                # Cross-source duplicate flashes collapse to the earliest copy;
+                # identity is the truncated body content.
+                order = rows["available_at"].astype(str).sort_values(kind="stable").index
+                hashes = pd.Series([hashlib.sha1(body.encode("utf-8")).hexdigest() for body in bodies], index=rows.index)
+                keep = order[~hashes.loc[order].duplicated().values]
+                rows, titles, bodies = rows.loc[keep], titles.loc[keep], bodies.loc[keep]
             available = rows["available_at"].astype(str)
             text_ids = [
                 hashlib.sha1(f"{dataset}|{avail}|{title[:200]}|{position}".encode("utf-8")).hexdigest()

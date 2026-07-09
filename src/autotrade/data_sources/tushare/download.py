@@ -434,7 +434,12 @@ def download_macro(args: argparse.Namespace) -> int:
         elif spec.strategy == "date_year_by_curr_type":
             download_macro_date_year_by_curr_type(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), selected_libor_currencies(args), revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "date_year_by_ts_code":
-            codes = selected_index_codes(args) if dataset == "index_global" else selected_fx_codes(args)
+            if dataset == "index_global":
+                codes = selected_index_codes(args)
+            elif dataset == "index_daily":
+                codes = selected_cn_index_codes(args)
+            else:
+                codes = selected_fx_codes(args)
             download_macro_date_year_by_ts_code(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), codes, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "eco_cal_month":
             download_macro_eco_cal_month(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), args, revision_ledger, allow_empty_revision_overwrite)

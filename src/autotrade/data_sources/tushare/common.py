@@ -170,6 +170,7 @@ MACRO_DATASETS = [
     "us_trycr",
     "us_tbr",
     "us_tltr",
+    "index_daily",
     "index_global",
     "fx_daily",
     "eco_cal",
@@ -185,8 +186,13 @@ MACRO_REGIME_DEFAULT_DATASETS = [
     "cn_m",
     "sf_month",
     "shibor",
+    # Bank-level SHIBOR quotes: downloaded once historically but never part of
+    # the evening refresh (drift found in the 2026-07 coverage audit).
+    "shibor_quote",
     "shibor_lpr",
     "repo_daily",
+    # Core A-share benchmark indexes (see DEFAULT_CN_INDEX_CODES).
+    "index_daily",
     "monetary_policy",
 ]
 
@@ -203,6 +209,19 @@ GLOBAL_CONTEXT_DEFAULT_DATASETS = [
 ]
 
 DEFAULT_GLOBAL_INDEX_CODES = ["XIN9", "HSI", "HKTECH", "DJI", "SPX", "IXIC", "FTSE", "GDAXI", "N225", "RUT"]
+
+# Core A-share benchmark indexes for `index_daily` (上证指数、上证50、沪深300、
+# 中证500、中证1000、创业板指、科创50): market timing, beta management, and
+# relative-strength context for the Agent, plus the host-side CSI300 benchmark.
+DEFAULT_CN_INDEX_CODES = [
+    "000001.SH",
+    "000016.SH",
+    "000300.SH",
+    "000905.SH",
+    "000852.SH",
+    "399006.SZ",
+    "000688.SH",
+]
 
 DEFAULT_FX_CODES = ["USDCNH.FXCM"]
 
@@ -302,6 +321,7 @@ INTEGRATED_DOC_REFS = {
     "us_trycr": "https://tushare.pro/document/2?doc_id=219",
     "us_tbr": "https://tushare.pro/document/2?doc_id=220",
     "us_tltr": "https://tushare.pro/document/2?doc_id=222",
+    "index_daily": "https://tushare.pro/document/2?doc_id=95",
     "index_global": "https://tushare.pro/document/2?doc_id=211",
     "fx_daily": "https://tushare.pro/document/2?doc_id=179",
     "eco_cal": "https://tushare.pro/document/2?doc_id=233",
@@ -639,6 +659,13 @@ MACRO_SPECS = {
         fields="date,ltc,cmt,e_factor",
         key_columns=("date",),
         date_column="date",
+    ),
+    "index_daily": MacroDataset(
+        api_name="index_daily",
+        strategy="date_year_by_ts_code",
+        fields="ts_code,trade_date,open,close,high,low,pre_close,change,pct_chg,vol,amount",
+        key_columns=("trade_date", "ts_code"),
+        date_column="trade_date",
     ),
     "index_global": MacroDataset(
         api_name="index_global",
@@ -1462,6 +1489,10 @@ def selected_index_codes(args: argparse.Namespace) -> list[str]:
     values = [str(value).strip() for value in getattr(args, "index_code", None) or [] if str(value).strip()]
     return values or list(DEFAULT_GLOBAL_INDEX_CODES)
 
+def selected_cn_index_codes(args: argparse.Namespace) -> list[str]:
+    values = [str(value).strip() for value in getattr(args, "cn_index_code", None) or [] if str(value).strip()]
+    return values or list(DEFAULT_CN_INDEX_CODES)
+
 def selected_fx_codes(args: argparse.Namespace) -> list[str]:
     values = [str(value).strip() for value in getattr(args, "fx_code", None) or [] if str(value).strip()]
     return values or list(DEFAULT_FX_CODES)
@@ -2040,6 +2071,7 @@ def add_daily_selection_args(parser: argparse.ArgumentParser, choices: list[str]
 
 def add_macro_filter_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--index-code", action="append", default=[], help="Global index ts_code for index_global; repeatable. Defaults to a curated major-index list.")
+    parser.add_argument("--cn-index-code", action="append", default=[], help="A-share index ts_code for index_daily; repeatable. Defaults to the core benchmark set (上证指数/上证50/沪深300/中证500/中证1000/创业板指/科创50).")
     parser.add_argument("--fx-code", action="append", default=[], help="FX ts_code for fx_daily; repeatable. Defaults to USDCNH.FXCM.")
     parser.add_argument("--libor-currency", action="append", default=[], help="LIBOR currency code; repeatable. Defaults to USD/EUR/JPY/GBP/CHF.")
     parser.add_argument("--eco-country", action="append", default=[], help="Optional eco_cal country filter; repeatable. Omit for all countries.")
