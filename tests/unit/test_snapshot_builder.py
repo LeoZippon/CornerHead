@@ -408,9 +408,9 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(meta["dropped"]["announced_after_ex_date"], 1)
 
     def test_default_config_exposes_coverage_audit_additions(self):
-        # Drift guard for the 2026-07 raw-coverage audit batch: board/sentiment
-        # events, macro regime additions, the news wire, and the A-share index
-        # set stay exposed; cn_schedule stays out (source keeps no history).
+        # Drift guard for the raw-coverage audit batch: board/sentiment events,
+        # macro regime additions, the news wire, and the A-share index set stay
+        # exposed; cn_schedule stays out (source keeps no history).
         config = SnapshotConfig()
         for dataset in ("kpl_list", "limit_step", "limit_cpt_list", "limit_list_ths",
                         "ths_hot", "dc_hot", "hm_detail", "hm_list"):

@@ -32,6 +32,7 @@ from autotrade.environment.llm.proxy import LLMProxy
 from autotrade.environment.managed_proxy import ManagedProxySession
 from autotrade.environment.runtime import AgentTraceWriter, RunManifest, new_id, utc_now_iso
 from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree
+from autotrade.environment.style_analysis import write_style_rollup
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import PHASE_FROZEN, BacktestTool, ModificationCheckTool, ToolContext
 
@@ -156,12 +157,20 @@ class ExperimentPipeline:
             tree.position_for_hash(parent.artifact_hash, parent.model_artifact_hash) if parent else None
         )
 
-    def _snapshot_raw_dir(self) -> str | None:
-        """Raw-lake path as known by the snapshot provider chain (None for
-        fully synthetic providers, e.g. unit-test fakes)."""
-        provider = getattr(self.snapshots, "_provider", self.snapshots)
-        raw_dir = getattr(getattr(provider, "builder", None), "raw_dir", None)
-        return str(raw_dir) if raw_dir else None
+    @staticmethod
+    def _write_style_rollups(results_root: Path, *prefixes: str) -> str | None:
+        """Aggregate per-window attribution sidecars into ``style_<prefix>.json``.
+
+        Advisory analytics: a rollup failure must not discard a finished
+        fold/held-out run, so each prefix is attempted independently and any
+        errors are returned for the ledger record instead of raising."""
+        errors: list[str] = []
+        for prefix in prefixes:
+            try:
+                write_style_rollup(results_root, prefix)
+            except Exception as exc:  # noqa: BLE001 - recorded in the ledger by the caller
+                errors.append(f"{prefix}: {type(exc).__name__}: {exc}")
+        return "; ".join(errors) or None
 
     def _start_sandbox(
         self, run_id: str, *, kind: str = "fold", gpu_count: int | None = None
@@ -342,9 +351,6 @@ class ExperimentPipeline:
                 "data_summary_ref": "/mnt/artifacts/data_summary.json",
                 "fold_period": self.config.fold_period,
                 "snapshot_config": self.config.snapshot_config.to_record(),
-                # Host-side raw lake for the backtest tool's benchmark/style
-                # attribution (CSI300 + SW industries; window dates only).
-                "raw_dir": self._snapshot_raw_dir(),
                 "valid_decision_time": fold.valid_decision_time.isoformat(),
                 "test_decision_time": fold.test_decision_time.isoformat(),
                 "snapshots": {
@@ -432,6 +438,7 @@ class ExperimentPipeline:
         finally:
             if docker is not None:
                 docker.stop()
+        style_rollup_error = self._write_style_rollups(paths.results, "valid", "test")
         if self.config.step_tree_enabled and paths.steps.exists():
             link_copytree(paths.steps, self.config.experiment_dir / "steps")
         # Collect artifacts, then ALWAYS append the fold ledger entry — even if
@@ -480,6 +487,7 @@ class ExperimentPipeline:
                 "state_changed_during_test": False,
                 "run_manifest_ref": run_manifest_ref,
                 "snapshot_ids": {key: ref["snapshot_id"] for key, ref in manifest.data["snapshots"].items()},
+                "style_rollup_error": style_rollup_error,
                 "finalize_error": (
                     f"{type(finalize_error).__name__}: {finalize_error}" if finalize_error is not None else None
                 ),
@@ -1045,6 +1053,7 @@ class ExperimentPipeline:
                 raise RuntimeError("held-out run modified the frozen strategy artifact")
             if model_artifact_hash(paths.model_artifacts) != final.model_artifact_hash:
                 raise RuntimeError("held-out run modified the frozen model artifacts")
+            style_rollup_error = self._write_style_rollups(paths.results, "heldout")
             # Collect artifacts, then ALWAYS append the held-out ledger entry — even
             # if collection fails — then re-raise the collection failure (C1).
             collect_error: Exception | None = None
@@ -1064,6 +1073,7 @@ class ExperimentPipeline:
                     "strategy_artifact_hash": final.artifact_hash,
                     "model_artifact_hash": final.model_artifact_hash,
                     "test_result": _metrics(summary),
+                    "style_rollup_error": style_rollup_error,
                     "finalize_error": (
                         f"{type(collect_error).__name__}: {collect_error}" if collect_error is not None else None
                     ),

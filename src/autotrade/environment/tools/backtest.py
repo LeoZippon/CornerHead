@@ -322,20 +322,18 @@ class BacktestTool:
             json.dumps(sanitize_for_log(stats), ensure_ascii=False, indent=2, sort_keys=True, default=str),
             encoding="utf-8",
         )
-        # Barra-lite attribution for validation replays: style exposure from the
-        # replay slot's own cross-section (Agent-visible data) + CSI300 series
-        # from the raw lake (window dates only). Descriptive diagnostics — the
-        # compact block rides in the tool result; the full payload is written
-        # next to detailed_return.json for the Agent to read on demand.
-        style_payload: dict[str, object] | None = None
-        if mode == "valid":
-            style_payload = replay_style_analysis(
-                replay_daily, order_records, stats, manifest.get("raw_dir")
-            )
-            (result_dir / "style_analysis.json").write_text(
-                json.dumps(sanitize_for_log(style_payload), ensure_ascii=False, indent=2, sort_keys=True, default=str),
-                encoding="utf-8",
-            )
+        # Barra-lite attribution, computed once per replay from frozen run
+        # inputs only: replay-slot cross-section + slot index_daily benchmark +
+        # snapshot universe industry. Every mode gets a sidecar (test/held-out
+        # replays run after the Agent session); the compact block rides in the
+        # tool result. Descriptive diagnostics, never an optimization target.
+        style_payload = replay_style_analysis(
+            replay_daily, order_records, stats, replay_dir=replay_dir, snapshot_dir=snapshot_dir
+        )
+        (result_dir / "style_analysis.json").write_text(
+            json.dumps(sanitize_for_log(style_payload), ensure_ascii=False, indent=2, sort_keys=True, default=str),
+            encoding="utf-8",
+        )
         staging_audit = replay.state_staging_audit or []
         unmerged = sum(1 for record in staging_audit if not record.get("merged"))
         if staging_audit:
@@ -375,7 +373,7 @@ class BacktestTool:
             "max_holdings_reject_count": stats["max_holdings_reject_count"],
             # Descriptive attribution vs 沪深300 (see style_analysis.json) —
             # interpretation aid, NOT an optimization target.
-            "benchmark": style_payload.get("compact") if style_payload else None,
+            "benchmark": style_payload.get("compact"),
             "orders_path": self.ctx.executor.map_path(orders_path) if orders_path else None,
             "host_orders_path": str(orders_path) if orders_path else None,
             "nl_tool_dir": self.ctx.executor.map_path(nl_tool_dir),
@@ -410,7 +408,7 @@ class BacktestTool:
                 complete_validation=True,
                 attachments={
                     "detailed_return.json": result_dir / "detailed_return.json",
-                    **({"style_analysis.json": result_dir / "style_analysis.json"} if style_payload else {}),
+                    "style_analysis.json": result_dir / "style_analysis.json",
                 },
             )
         return summary

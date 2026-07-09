@@ -777,9 +777,49 @@ substep 的声明预算 `B` 同时定义三件事：
 - 结束或中止保证有一条终止 `backtest` 事件；外部中止记录 `status="aborted"`。
 - 结果目录结构集中列在 §2.1。
 
-`detailed_return.json` 至少包含总收益、long/short 收益、年化收益、Sharpe、最大回撤、胜率、turnover、订单状态、拒单统计、费用、信用利息（`credit_interest_accrued` / `credit_interest_paid`）、权益曲线、逐笔平仓/减仓和 Broker 事件。回测 summary 另含 `started_at`、`replay_wall_seconds`、`replayed_trade_days`、`state_staged_writes` / `state_unmerged_writes`、逐 substep 的 `substep_runtime`（count/total_real_wall_s/max_real_wall_s）、按阶段拆分的 `phase_seconds`（`strategy_compute` / `nl_service` / `timeview_build` / `state_merge` / `broker_match`）以及 `total_ticks` / `intraday_ticks` / `offsession_ticks` 计数。
+`detailed_return.json` 至少包含：
 
-**逐 Step 归因（Barra-lite，仅 valid 模式）**：每次验证回测结束后宿主计算基准/风格归因（`autotrade/environment/style_analysis.py`）——风格暴露取自回放槽自身 `daily.parquet` 的全市场横截面（Agent 本就可见的数据，市值/PB/换手带符号持仓加权分位偏离 + 申万一级行业净权重，持仓由成交逐日结转重构），沪深300 序列与行业表由宿主按窗口日期从 run manifest 记录的 `raw_dir` 读取。完整载荷写入 `results/valid_*/style_analysis.json`（Agent 可读）；紧凑块（同窗基准收益、超额、β、n_days、市值倾斜——刻意不含年化 α/R²，短窗年化只放大噪声）以 `benchmark` 字段进回测 summary/trace/账本 Step 摘要与 step_tree 附件。定位是描述性诊断（提示词明示不得作为优化目标）；输入缺失时各块降级为 None，绝不使回测失败。frozen_eval/held-out 不生成 Agent 可见归因。
+| 类别 | 字段/内容 |
+|---|---|
+| 收益与风险 | 总收益、long/short 收益、年化收益、Sharpe、最大回撤、胜率、turnover |
+| 权益序列 | `equity_curve`：每个交易日收盘后的账户权益时间序列，用于计算日收益、累计收益和回撤 |
+| 订单与拒单 | 订单状态、拒单统计、逐笔平仓/减仓 |
+| 成本与两融 | 费用、信用利息（`credit_interest_accrued` / `credit_interest_paid`） |
+| Broker 审计 | Broker 事件 |
+
+回测 summary 另含：
+
+| 类别 | 字段/内容 |
+|---|---|
+| 开始与耗时 | `started_at`、`replay_wall_seconds` |
+| 回放规模 | `replayed_trade_days`、`total_ticks`、`intraday_ticks`、`offsession_ticks` |
+| 状态写入 | `state_staged_writes` / `state_unmerged_writes` |
+| substep 统计 | `substep_runtime`，含 count、total_real_wall_s、max_real_wall_s |
+| 阶段耗时 | `phase_seconds`，含 `strategy_compute`、`nl_service`、`timeview_build`、`state_merge`、`broker_match` |
+
+**逐窗口归因（Barra-lite，全部回放模式）**
+
+每次回放（`valid` 与 `frozen_eval`/held-out 一样）结束后，宿主计算基准/风格归因并写入该结果窗口的 `style_analysis.json`；test/held-out 回放发生在 Agent 会话结束后，因此 Agent 实际只会读到验证期归因。窗口链完成时（Fold 的 test 评估后、held-out 各期后），Pipeline 把逐窗口 sidecar 聚合为 `results/style_<prefix>.json`（回归在拼接日序列上重跑、暴露按天数加权合并），控制台**只读**这些落盘文件，不做任何归因计算。实现位于 `autotrade/environment/style_analysis.py`。输入缺失时对应块降级为 None，绝不使回测失败。
+
+输入口径（全部为冻结运行数据，不触及可被源端回写的 raw 数据湖，保证事后重读与 Agent 当时所见一致）：
+
+- 风格输入来自回放槽自身 `daily.parquet` 的全市场横截面，属于 Agent 本就可见的数据；持仓由成交逐日结转重构。
+- 基准输入为回放槽 `macro.parquet` 中 `dataset=index_daily` 的沪深300 窗口行；行业表取决策快照 `universe.parquet` 的申万一级归属（决策日口径，月度窗口内漂移可忽略）。
+- sidecar 同时落盘策略与基准日收益序列，使下游（rollup、控制台收益曲线）完全脱离原始数据源。
+
+完整载荷指标：
+
+| 指标 | 计算口径 |
+|---|---|
+| `benchmark_return` | 同窗沪深300复合收益。先按 `equity_curve` 日期取可匹配的沪深300日收益 `r_b`，再连乘计算 `prod(1 + r_b) - 1`；缺少基准日期不会参与连乘。 |
+| `beta` | 策略对沪深300的市场暴露。先从 `equity_curve` 计算策略日收益 `r_s`，与同日沪深300日收益 `r_b` 配对，再按单因子回归斜率计算 `cov(r_s, r_b) / var(r_b)`。 |
+| `alpha_annualized` | 单因子回归截距的年化值。先计算日 alpha：`mean(r_s) - beta * mean(r_b)`，再乘以年交易日数 `244`；短窗口下只作诊断参考。 |
+| `r2` | 单因子回归解释度，表示策略日收益有多少波动可由沪深300解释。计算式为 `cov(r_s, r_b)^2 / (var(r_s) * var(r_b))`；它不是年化指标。 |
+| `n_days` | 策略日收益和沪深300日收益都存在的配对交易日数量。少于最小回归天数时，`beta`、`alpha_annualized` 和 `r2` 降级为 None。 |
+| 风格倾斜 | 先按成交记录逐日结转持仓，再用当日收盘价计算每只股票持仓市值和带符号权重；对全市场 `circ_mv`、`pb`、`turnover_rate` 做横截面分位排名，计算持仓加权分位相对 0.5 中位数的偏离，映射到约 `[-1, 1]`，最后对窗口内有效日期求平均。 |
+| 行业净权重 | 使用同一套带符号持仓权重，按申万一级行业聚合并对窗口内有效日期求平均，保留绝对暴露较大的主要行业。 |
+
+进入回测 summary、trace、账本 Step 摘要和 step_tree 附件的 `benchmark` 紧凑块只保留同窗基准收益、超额收益、β、n_days 和市值倾斜；其中超额收益为 `total_return - benchmark_return`。紧凑块刻意不放 `alpha_annualized` 和 `r2`：短窗年化 alpha 容易放大噪声，R² 则更适合作为完整诊断字段。Barra-lite 只做描述性诊断，用于提示是否存在市场 beta、风格或行业暴露，不得作为直接优化目标。
 
 ## 4. 运行日志、审计与验收
 

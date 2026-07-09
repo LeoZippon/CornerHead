@@ -268,7 +268,7 @@
 | `inherit_from` | `""` | 创建时继承另一实验最新冻结 Fold 的 Agent Output（拷贝+哈希校验到 `strategy_artifacts/_inherited/`，源删除不影响） |
 | 逐 Fold GPU 分配 | `set_gpu_count`（1..16）+ `GET /api/gpus` | Fold 门控处按 nvidia-smi 实况设定该 Fold 沙箱 GPU 数，运行时覆盖 `SandboxSpec.gpu_count` |
 | 收益曲线端点 | `equity` / `folds/<e>/<f>/equity` | 日度收益序列（验证/测试/held-out 链 + 沪深300 基准，000300.SH `index_daily`），前端复利+回撤渲染 |
-| 风格验证端点 | `style?run_id&prefix` | Barra-lite：CSI300 回归 β/年化α/R² + 持仓法风格暴露（市值/PB/换手分位偏离）与申万一级行业净权重；sidecar 落 `hitl/analysis/style/`。另在每次验证回测后逐 Step 计算（environment/style_analysis.py）：完整版写 `results/valid_*/style_analysis.json`（Agent 可读），紧凑 `benchmark` 块（基准/超额收益、β、市值倾斜）进回测 summary 与账本 Step 摘要 |
+| 风格验证端点 | `style?run_id&prefix` | 原样返回该 run 落盘的 `results/style_<prefix>.json` rollup（回放时由宿主从冻结数据计算，Web 层零计算）。逐窗口完整版在 `results/<窗口>/style_analysis.json`（验证窗口 Agent 可读），紧凑 `benchmark` 块（基准/超额收益、β、市值倾斜）进回测 summary 与账本 Step 摘要 |
 | 策略产物下载 | 仅单一 ZIP（`strategy.zip`） | output+models 打包；不提供逐文件浏览/下载端点 |
 | `analysis_max_tokens` | 6000 | 单次策略分析输出 token 基础配额（length 停止时按 2 倍重试一次） |
 | trace 统计/下载 | `trace/stats` / `trace/download` | 按事件类型聚合的实时运行统计（含回测累计墙钟，用于倒计时回补显示）与原始 JSONL 下载 |

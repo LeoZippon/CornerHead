@@ -1,3 +1,11 @@
+2026-07-09 指标计算层统一：回放时一次计算、Web 纯读、前端纯渲染（feat/hitl-webui 线）
+
+- 动机（用户提出，核实成立）：Barra-lite 与前端事后计算各自读 raw——而 raw 会被源端回写（revision ledger 即证据），事后重算可能与 Agent 当时所见不一致；快照是哈希冻结的，回放时计算是唯一可复现口径。
+- 落地单一计算点：`environment/style_analysis.py` 全部输入改冻结运行数据——基准 ← 回放槽 `macro.parquet` 的 `dataset=index_daily` 行（本日 index_daily 入 macro 域后才可行）、行业 ← 决策快照 `universe.parquet` 申万一级（决策日口径）、横截面 ← 回放槽 daily（原样）；raw 读取器（基准/行业/daily_basic 分位）与 run manifest `raw_dir` 字段全部删除。backtest 工具对**全部模式**（valid/frozen_eval/heldout）落盘逐窗口 `style_analysis.json`（含策略与基准日收益序列，使下游彻底脱离数据源）；Pipeline 在窗口链完成时聚合为 `results/style_<prefix>.json`（回归拼接重跑、暴露按天数加权），失败按前缀隔离并记入账本 `style_rollup_error` 字段。
+- Web 层退化为读模型：style 端点原样返回落盘 rollup（零计算）；equity 端点策略序列读 `detailed_return.json`、基准读 rollup，**累计/回撤由服务端算好数组**；`app.js` equityChart 删除复利与回撤循环成纯渲染器。旧实验（无 rollup）按无兼容指令直接降级：策略曲线照常、基准线缺省、style 404（实机验证）。
+- 全面复查（用户要求）：6 路审查（2 路完成 + 4 路因会话额度中断、由主线人工补齐关键追踪）产出 8 项发现，7 项修复（样式块拼装去重、死抽象/死过滤器清理、run_series 复用 _chain、server 改用 read_json、rollup 失败按前缀隔离 + 账本落痕替代裸 print）、1 项核实后驳回（rollup 撕裂读竞态不存在——控制台只读一次性写入的收集副本）；代码内版本信息（schema_version、带日期注释）按指令全部移除。
+- 验证：full suite 572 OK（style 单测重写为冻结输入 fixture + rollup 天数加权/缺 sidecar 用例；equity 测试改断言服务端 cum/回撤数组与 rollup 基准来源）；实机重启：旧实验策略曲线正常、基准优雅缺省、style 干净 404；前端已同步。文档：environment_design §3.7（含用户扩写的指标口径表，输入口径改冻结数据源）、pipeline_design §5.3 单一计算点原则、parameters_reference。
+
 2026-07-09 raw 覆盖审计落地：14 个数据集进 Agent 决策输入（feat/hitl-webui 线）
 
 - 依据 check.md（GPT 整理的 76 数据集覆盖审计，48 进/28 未进——逐项核实无误）的分档结论实施。机制事实：events/macro/text 域无需 DatasetContract——行级 `available_at` 在下载时按规则打入（回填安全），暴露开关只是 `SnapshotConfig` 域元组 + 刷新节点映射；可见性为双重门（行级 available_at ∧ 节点完成），配置只会更保守、不会泄漏。

@@ -308,30 +308,30 @@ function fmtDateTick(date, withYear) {
   return withYear ? `${date.slice(2, 4)}/${date.slice(4, 6)}-${date.slice(6, 8)}` : `${date.slice(4, 6)}-${date.slice(6, 8)}`;
 }
 
+/* Pure renderer: the server delivers per-series {dates, cum, drawdown, final}
+   already computed from frozen run artifacts — no return math happens here. */
 function equityChart(payload, { width = 680, height = 240, ddH = 90, mini = false, keys = null } = {}) {
   const INK = themeInk();
   const colorOf = { valid: INK.validColor, test: INK.testColor, heldout: INK.heldoutColor, benchmark: INK.muted };
-  const wanted = (payload.series || []).filter((s) => (s.points || []).length && (!keys || keys.includes(s.key)));
+  const wanted = (payload.series || []).filter((s) => (s.dates || []).length && (!keys || keys.includes(s.key)));
   if (!wanted.length) return el("div", { class: "hint" }, "暂无日度收益数据");
-  const wantedDates = new Set(wanted.flatMap((s) => s.points.map((p) => p[0])));
-  const seriesList = wanted.map((s) => ({ key: s.key, label: s.label, points: [...s.points].sort() }));
+  const wantedDates = new Set(wanted.flatMap((s) => s.dates));
+  const shown = [...wanted];
   const bench = payload.benchmark;
-  if (bench && (bench.points || []).length) {
-    const points = bench.points.filter((p) => wantedDates.has(p[0])).sort();
-    if (points.length) seriesList.push({ key: "benchmark", label: bench.label, points });
+  if (bench && (bench.dates || []).length && bench.dates.some((d) => wantedDates.has(d))) {
+    shown.push(bench);
   }
-  for (const s of seriesList) {
-    let eq = 1, peak = 1;
-    s.cum = new Map(); s.dd = new Map();
-    for (const [d, r] of s.points) {
-      eq *= 1 + r; peak = Math.max(peak, eq);
-      s.cum.set(d, eq - 1); s.dd.set(d, eq / peak - 1);
-    }
-    s.final = eq - 1;
-    s.color = colorOf[s.key] || INK.validColor;
-    s.dash = s.key === "benchmark" ? "6 4" : null;
-  }
-  const dates = [...new Set(seriesList.flatMap((s) => s.points.map((p) => p[0])))].sort();
+  const seriesList = shown.map((s) => ({
+    key: s.key,
+    label: s.label,
+    final: s.final,
+    dates: s.dates,
+    cum: new Map(s.dates.map((d, i) => [d, s.cum[i]])),
+    dd: new Map(s.dates.map((d, i) => [d, s.drawdown[i]])),
+    color: colorOf[s.key] || INK.validColor,
+    dash: s.key === "benchmark" ? "6 4" : null,
+  }));
+  const dates = [...new Set(seriesList.flatMap((s) => s.dates))].sort();
   if (mini) ddH = 0;
   const showDD = ddH > 0;
   const padL = mini ? 44 : 52, padR = 12, padT = 8, padB = mini ? 22 : 26, gap = showDD ? 18 : 0;

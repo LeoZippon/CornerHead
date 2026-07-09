@@ -458,7 +458,7 @@ class WebuiBackendTest(unittest.TestCase):
         with self.assertRaises(ManagerError):
             manager._import_inherited_artifact(target, "exp_bare2")
 
-    def test_equity_endpoint_chains_windows(self) -> None:
+    def test_equity_endpoint_serves_precomputed_curves(self) -> None:
         experiment_dir = self.experiments_root / "exp_hitl"
         results = experiment_dir / "artifacts" / "run_001" / "results"
         for name, curve in (
@@ -471,16 +471,31 @@ class WebuiBackendTest(unittest.TestCase):
             (window / "detailed_return.json").write_text(
                 json.dumps({"initial_cash": 1_000_000.0, "equity_curve": curve}), encoding="utf-8"
             )
+        # The benchmark series comes from the run's persisted style rollup —
+        # the web layer never touches the raw lake.
+        (results / "style_valid.json").write_text(
+            json.dumps({"benchmark_daily": [["20220104", 0.005], ["20220106", -0.002]]}), encoding="utf-8"
+        )
         payload = self.client.get("/api/experiments/exp_hitl/equity").json()
-        by_key = {series["key"]: series["points"] for series in payload["series"]}
-        self.assertEqual([p[0] for p in by_key["valid"]], ["20220104", "20220105", "20220106"])
-        self.assertAlmostEqual(by_key["valid"][0][1], 0.01)   # 1.01M / 1M - 1
-        self.assertAlmostEqual(by_key["valid"][1][1], -1_0000 / 1_010_000, places=6)
-        self.assertAlmostEqual(by_key["valid"][2][1], 0.02)   # new window resets to initial_cash
-        self.assertAlmostEqual(by_key["test"][0][1], -0.01)
+        by_key = {series["key"]: series for series in payload["series"]}
+        valid = by_key["valid"]
+        self.assertEqual(valid["dates"], ["20220104", "20220105", "20220106"])
+        # Cumulative + drawdown are server-computed; the SPA only plots.
+        self.assertAlmostEqual(valid["cum"][0], 0.01)                       # 1.01M / 1M - 1
+        self.assertAlmostEqual(valid["cum"][1], 0.0, places=6)              # back to 1M
+        self.assertAlmostEqual(valid["cum"][2], 0.02, places=6)             # 1.01 × (1/1.01) × 1.02 - 1
+        self.assertAlmostEqual(valid["drawdown"][1], 1.0 / 1.01 - 1.0, places=6)
+        self.assertAlmostEqual(valid["drawdown"][2], 0.0)
+        self.assertEqual(valid["final"], valid["cum"][-1])
+        self.assertAlmostEqual(by_key["test"]["cum"][0], -0.01)
+        benchmark = payload["benchmark"]
+        self.assertEqual(benchmark["dates"], ["20220104", "20220106"])
+        self.assertAlmostEqual(benchmark["cum"][1], 1.005 * 0.998 - 1.0, places=6)
         fold = self.client.get("/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/equity").json()
-        self.assertEqual(len(fold["valid"]["series"][0]["points"]), 3)
-        self.assertEqual(len(fold["test"]["series"][0]["points"]), 1)
+        self.assertEqual(len(fold["valid"]["series"][0]["dates"]), 3)
+        self.assertEqual(fold["valid"]["benchmark"]["dates"], ["20220104", "20220106"])
+        self.assertEqual(fold["test"]["benchmark"]["dates"], [])  # no rollup for the test chain
+        self.assertEqual(len(fold["test"]["series"][0]["dates"]), 1)
 
     def test_delete_requires_confirm_and_no_live_worker(self) -> None:
         missing_confirm = self.client.delete("/api/experiments/exp_legacy")

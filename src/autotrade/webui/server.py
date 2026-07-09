@@ -21,8 +21,6 @@ from starlette.background import BackgroundTask
 from autotrade.pipelines.fold_analysis import analysis_paths, analyze_fold
 from autotrade.pipelines.interactive import ANALYSIS_DIR_NAME, HITL_DIR_NAME, PARAMS_NAME, STATUS_NAME, read_json, read_status
 
-from autotrade.environment.style_analysis import style_analysis
-
 from . import equity, registry
 from .manager import ExperimentManager, ManagerError, MAX_RUNNING_EXPERIMENTS
 from .params_schema import parameter_schema
@@ -286,13 +284,13 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.get("/api/experiments/{experiment_id}/equity")
     def get_experiment_equity(experiment_id: str) -> dict[str, object]:
         _experiment_dir(experiment_id)
-        return equity.experiment_equity_payload(manager.experiments_root, experiment_id, repo_root)
+        return equity.experiment_equity_payload(manager.experiments_root, experiment_id)
 
     @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/equity")
     def get_fold_equity(experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
         _experiment_dir(experiment_id)
         try:
-            return equity.fold_equity_payload(manager.experiments_root, experiment_id, epoch_id, fold_id, repo_root)
+            return equity.fold_equity_payload(manager.experiments_root, experiment_id, epoch_id, fold_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -301,15 +299,17 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     def get_style_analysis(
         experiment_id: str, run_id: str = Query(...), prefix: str = Query(...)
     ) -> dict[str, object]:
+        """Serve the run's persisted style rollup verbatim — the pipeline wrote
+        it at replay time from frozen inputs; the web layer computes nothing."""
         experiment_dir = _experiment_dir(experiment_id)
         if prefix not in ("valid", "test", "heldout"):
             raise HTTPException(status_code=400, detail="prefix must be valid|test|heldout")
-        if not (experiment_dir / "artifacts" / run_id).is_dir() or "/" in run_id or run_id.startswith("."):
-            raise HTTPException(status_code=404, detail=f"run {run_id!r} not found in this experiment")
-        try:
-            return style_analysis(experiment_dir, run_id, prefix, repo_root / "data" / "raw")
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if "/" in run_id or run_id.startswith("."):
+            raise HTTPException(status_code=400, detail="invalid run_id")
+        payload = read_json(experiment_dir / "artifacts" / run_id / "results" / f"style_{prefix}.json")
+        if not payload:
+            raise HTTPException(status_code=404, detail="该运行没有已落盘的风格归因结果")
+        return payload
 
     # ---- fold orders ----------------------------------------------------------------
     @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/orders")

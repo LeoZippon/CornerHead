@@ -186,8 +186,8 @@ MACRO_REGIME_DEFAULT_DATASETS = [
     "cn_m",
     "sf_month",
     "shibor",
-    # Bank-level SHIBOR quotes: downloaded once historically but never part of
-    # the evening refresh (drift found in the 2026-07 coverage audit).
+    # Bank-level SHIBOR quotes ride the evening refresh like the other rate
+    # series (historically a one-off download that silently went stale).
     "shibor_quote",
     "shibor_lpr",
     "repo_daily",
