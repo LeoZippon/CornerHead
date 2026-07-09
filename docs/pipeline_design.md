@@ -78,7 +78,20 @@ flowchart TD
     FINAL --> HO["Held-out 按配置周期冻结测试"]
 ```
 
-Pipeline 不实现投资逻辑，也不改写 Agent 代码；它只做调度、冻结、校验和记录。完整流程是：每个 Epoch 先运行一次元学习会话，基于 development 历史、父产物、可见数据和联网检索生成非空 Taste，并可选产出小幅正则化后的父产物；随后 Pipeline 按配置周期依次启动普通 Fold Agent，把同一份 Taste 注入本 Epoch 所有 Fold Prompt，让它作为策略实现、NL 使用、交易取舍和正则化偏好的关键指导；策略产物和模型参数则按 Fold 链式继承，第一个 Fold 继承初始模板或元学习正则化后的父产物，之后每个 Fold 继承上一个 Fold 在测试前冻结的策略和模型产物，若没有可接受更新则继承 fallback 父产物；所有 development Fold 完成后固定最终策略产物，再执行 held-out 冻结测试。Taste 在同一 Epoch 内保持一致，下一 Epoch 可基于 development 结果生成新的 Taste。完整实验运行不可原地续跑：`ExperimentPipeline.run()` 在目标 experiment 已存在冻结产物或 Fold 账本记录时直接 fail-fast，要求换用新的 experiment id，避免冻结写入落到已填充的实验目录。需要人工介入（逐 Fold 批准、注入指令、暂停/停止）或会话级续跑时使用交互式入口，见第 5 章。
+Pipeline 不实现投资逻辑，也不改写 Agent 代码；它只做调度、冻结、校验和记录。
+
+完整流程：
+
+- 每个 Epoch 先运行一次元学习会话，基于 development 历史、父产物、可见数据和联网检索生成非空 Taste，并可选产出小幅正则化后的父产物。
+- Pipeline 随后按配置周期依次启动普通 Fold Agent，把同一份 Taste 注入本 Epoch 所有 Fold Prompt，作为策略实现、NL 使用、交易取舍和正则化偏好的关键指导。
+- 策略产物和模型参数按 Fold 链式继承：第一个 Fold 继承初始模板或元学习正则化后的父产物；之后每个 Fold 继承上一个 Fold 在测试前冻结的策略和模型产物；若没有可接受更新，则继承 fallback 父产物。
+- 所有 development Fold 完成后固定最终策略产物，再执行 held-out 冻结测试。
+- Taste 在同一 Epoch 内保持一致；下一 Epoch 可基于 development 结果生成新的 Taste。
+
+运行入口：
+
+- 完整实验运行不可原地续跑：`ExperimentPipeline.run()` 在目标 experiment 已存在冻结产物或 Fold 账本记录时直接 fail-fast，要求换用新的 experiment id，避免冻结写入落到已填充的实验目录。
+- 需要人工介入（逐 Fold 批准、注入指令、暂停/停止）或会话级续跑时使用交互式入口，见第 5 章。
 
 ### 1.2 Fold 时间、泄漏边界与运行约束
 

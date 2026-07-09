@@ -198,7 +198,7 @@ def _style_exposures(
     positions_by_date: dict[str, dict[str, float]],
     basics_by_date: Mapping[str, dict[str, tuple[float, float, float, float]]],
     industry_by_code: Mapping[str, str],
-) -> dict[str, object]:
+) -> tuple[dict[str, object], dict[str, object]]:
     tilt_sums = {"size": 0.0, "pb": 0.0, "turnover": 0.0}
     industry_sums: dict[str, float] = {}
     days_used = 0
@@ -228,7 +228,17 @@ def _style_exposures(
             tilt_sums["turnover"] += weight * (turn_pct - 0.5) * 2
             industry = industry_by_code.get(code) or "未分类"
             industry_sums[industry] = industry_sums.get(industry, 0.0) + weight
-    return _style_block(days_used, tilt_sums, industry_sums, names, long_gross_total, short_gross_total)
+    return (
+        _style_block(days_used, tilt_sums, industry_sums, names, long_gross_total, short_gross_total),
+        {
+            "days": days_used,
+            "tilt_sums": tilt_sums,
+            "industry_sums": industry_sums,
+            "names": names,
+            "long_gross": long_gross_total,
+            "short_gross": short_gross_total,
+        },
+    )
 
 
 def _rank_cross_section(df) -> dict[str, tuple[float, float, float, float]]:
@@ -300,6 +310,7 @@ def replay_style_analysis(
     regression = _benchmark_regression(strategy, bench)
 
     style: dict[str, object] = dict(_EMPTY_STYLE)
+    style_rollup: dict[str, object] | None = None
     if all(column in replay_daily.columns for column in ("ts_code", "trade_date", "close", *_STYLE_COLUMNS)):
         window_dates = sorted(str(d) for d in (curve or {}))
         by_date = {
@@ -308,7 +319,7 @@ def replay_style_analysis(
             if str(date) in set(window_dates)
         }
         positions = _positions_from_fills(_group_fills(order_records), window_dates)
-        style = _style_exposures(positions, by_date, _snapshot_industry(snapshot_dir))
+        style, style_rollup = _style_exposures(positions, by_date, _snapshot_industry(snapshot_dir))
 
     payload = {
         "benchmark": BENCHMARK_TS_CODE,
@@ -320,6 +331,8 @@ def replay_style_analysis(
         "benchmark_daily": [[date, bench[date]] for date, _ in strategy if date in bench],
         "created_at": utc_now_iso(),
     }
+    if style_rollup is not None:
+        payload["style_rollup"] = style_rollup
     payload["compact"] = _compact(regression, style, stats.get("total_return"))
     return payload
 
@@ -365,20 +378,31 @@ def write_style_rollup(results_root: Path, prefix: str) -> dict[str, object] | N
     short_gross = 0.0
     for p in payloads:
         window_style = p.get("style") or {}
-        days = int(window_style.get("days") or 0)
+        rollup_source = p.get("style_rollup")
+        days = int((rollup_source if isinstance(rollup_source, Mapping) else window_style).get("days") or 0)
         if not days:
             continue
         total_days += days
-        tilts = window_style.get("tilts") or {}
-        for key in tilt_sums:
-            tilt_sums[key] += float(tilts.get(key) or 0.0) * days
-        for item in window_style.get("industries") or []:
-            industry_sums[str(item["name"])] = (
-                industry_sums.get(str(item["name"]), 0.0) + float(item["weight"]) * days
-            )
-        names += float(window_style.get("avg_names") or 0.0) * days
-        long_gross += float(window_style.get("avg_long_gross") or 0.0) * days
-        short_gross += float(window_style.get("avg_short_gross") or 0.0) * days
+        if isinstance(rollup_source, Mapping):
+            for key, value in (rollup_source.get("tilt_sums") or {}).items():
+                if key in tilt_sums:
+                    tilt_sums[key] += float(value or 0.0)
+            for name, value in (rollup_source.get("industry_sums") or {}).items():
+                industry_sums[str(name)] = industry_sums.get(str(name), 0.0) + float(value or 0.0)
+            names += float(rollup_source.get("names") or 0.0)
+            long_gross += float(rollup_source.get("long_gross") or 0.0)
+            short_gross += float(rollup_source.get("short_gross") or 0.0)
+        else:
+            tilts = window_style.get("tilts") or {}
+            for key in tilt_sums:
+                tilt_sums[key] += float(tilts.get(key) or 0.0) * days
+            for item in window_style.get("industries") or []:
+                industry_sums[str(item["name"])] = (
+                    industry_sums.get(str(item["name"]), 0.0) + float(item["weight"]) * days
+                )
+            names += float(window_style.get("avg_names") or 0.0) * days
+            long_gross += float(window_style.get("avg_long_gross") or 0.0) * days
+            short_gross += float(window_style.get("avg_short_gross") or 0.0) * days
     style = _style_block(total_days, tilt_sums, industry_sums, names, long_gross, short_gross)
 
     strategy_total = 1.0

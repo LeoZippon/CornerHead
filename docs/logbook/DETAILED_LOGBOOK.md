@@ -14821,6 +14821,7 @@ Validation:
 - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow.ToolFlowTest.test_strategy_program_context_does_not_expose_workspace_dir tests.unit.test_tools_flow.ToolFlowTest.test_modification_check_backtest_and_finish_fold tests.unit.test_tools_flow.ToolFlowTest.test_backtest_runs_strategy_program_trade_intents` -> 3 tests OK.
 - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow` -> 67 tests OK. Existing ResourceWarning about unclosed file descriptors in `ast.py` appeared, but tests passed.
 - `git diff --check` -> clean.
+
 - `find src tests scripts -type d -name __pycache__ -print` -> no output.
 
 Follow-up audit:
@@ -16777,3 +16778,13 @@ Validation:
 - `python3 -m py_compile src/autotrade/environment/broker.py src/autotrade/environment/main_ctx_driver.py src/autotrade/environment/main_ctx_engine.py tests/unit/test_main_ctx_replay.py tests/unit/test_broker_engine.py` -> OK.
 - `~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine tests.unit.test_main_ctx_replay` -> 143 OK.
 - `git diff --check` -> clean.
+
+## 2026-07-09 Barra-lite industry rollup completeness and contract cleanup
+
+Task: preserve complete industry exposure across per-window Barra-lite rollups and finish the related Environment/Pipeline documentation review.
+
+Implementation: per-window style analysis now stores untruncated day-summed tilt, industry, name-count, and gross-exposure accumulators in `style_rollup`; the compact display block remains limited to the eight largest absolute industry exposures. Prefix rollups consume the complete accumulators when present and retain the existing display payload as the fallback for older sidecars. Unit coverage includes an industry omitted from the display list but retained by the final rollup.
+
+Documentation: expanded the Snapshot source inventory; clarified frozen-input attribution and complete rollup data; tightened frozen artifact manifest wording; separated audit evidence from freeze/test acceptance gates; and reformatted the Pipeline overview without changing behavior.
+
+Validation: `~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_style_analysis` -> 5 OK; `~/miniconda3/envs/quant/bin/python -m py_compile src/autotrade/environment/style_analysis.py tests/unit/test_style_analysis.py` -> OK; `git diff --check` -> clean. This was a lightweight unit-test/documentation pass, so no GPU or system-memory probe was required.

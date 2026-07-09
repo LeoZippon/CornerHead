@@ -85,6 +85,7 @@ class ReplayStyleAnalysisTest(unittest.TestCase):
         self.assertEqual(style["days"], 2)  # position carried forward
         self.assertAlmostEqual(style["tilts"]["size"], -0.5)  # smallest of 4
         self.assertEqual(style["industries"][0], {"name": "银行", "weight": 1.0})
+        self.assertEqual(payload["style_rollup"]["industry_sums"], {"银行": 2.0})
         compact = payload["compact"]
         self.assertAlmostEqual(compact["excess_return"], 0.002 - (1.01 * 0.995 - 1.0), places=6)
         # Persisted series make downstream consumers artifact-only.
@@ -130,6 +131,9 @@ class StyleRollupTest(unittest.TestCase):
                     "style": {"days": 1, "tilts": {"size": -0.5, "pb": 0.0, "turnover": 0.0},
                               "industries": [{"name": "银行", "weight": 1.0}],
                               "avg_names": 1, "avg_long_gross": 1000, "avg_short_gross": 0},
+                    "style_rollup": {"days": 1, "tilt_sums": {"size": -0.5, "pb": 0.0, "turnover": 0.0},
+                                     "industry_sums": {"银行": 1.0, "传媒": 0.2},
+                                     "names": 1, "long_gross": 1000, "short_gross": 0},
                 },
                 "valid_001": {
                     "strategy_daily": [[D2, 0.02]],
@@ -137,6 +141,9 @@ class StyleRollupTest(unittest.TestCase):
                     "style": {"days": 3, "tilts": {"size": 0.5, "pb": 0.4, "turnover": 0.0},
                               "industries": [{"name": "电子", "weight": 1.0}],
                               "avg_names": 3, "avg_long_gross": 3000, "avg_short_gross": 0},
+                    "style_rollup": {"days": 3, "tilt_sums": {"size": 1.5, "pb": 1.2, "turnover": 0.0},
+                                     "industry_sums": {"电子": 3.0, "传媒": 0.3},
+                                     "names": 9, "long_gross": 9000, "short_gross": 0},
                 },
             }
             for name, payload in windows.items():
@@ -156,6 +163,7 @@ class StyleRollupTest(unittest.TestCase):
         weights = {item["name"]: item["weight"] for item in written["style"]["industries"]}
         self.assertAlmostEqual(weights["电子"], 0.75)
         self.assertAlmostEqual(weights["银行"], 0.25)
+        self.assertAlmostEqual(weights["传媒"], 0.125)
         # Compact excess uses the chained compounded return.
         expected_strategy = 1.01 * 1.02 - 1.0
         self.assertAlmostEqual(

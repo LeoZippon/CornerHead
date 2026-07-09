@@ -80,15 +80,17 @@
 
 准备窗口由实验启动前的 `SnapshotConfig` 冻结并写入 run manifest；默认值用于未显式覆盖的数据域。窗口可以按数据域分别调整；snapshot manifest 必须记录各域实际行数和日期覆盖。
 
-| 数据域 | Snapshot 文件 | 主要来源 | 用途 | 窗口配置 |
+| 数据域 | Snapshot 文件 | 默认 raw 数据集/来源 | 用途 | 窗口配置 |
 |---|---|---|---|---|
-| `daily` | `daily.parquet` | 日线、每日指标、复权因子和交易日历 | 日频行情、交易约束、日线估值、强制清仓，以及分钟数据缺失时的退化回放 | `daily_window_months`，缺省回退 `window_months`；默认最近 21 个月 |
-| `intraday_1min` | `intraday_1min.parquet` | 1 分钟线和交易日历 | 分钟级回放与撮合主输入，日内策略、开收盘和做 T 研究 | `intraday_trade_days`；默认最近 21 个交易日 |
-| `fundamentals` | `fundamentals.parquet` | 财报、财务指标、分红、业绩预告/快报、披露计划和主营构成 | 财务和经营质量窗口，保留可追溯版本字段 | `fundamentals_window_months`，缺省回退 `window_months`；默认最近 21 个月可见披露 |
-| `events` | `events.parquet` | 资金流、两融、股东、回购、解禁、大宗交易、龙虎榜等 | 异构事件 union；`dataset` 标记来源，其余列按来源表解释 | `events_window_months`，缺省回退 `window_months`；默认最近 21 个月 |
-| `macro` | `macro.parquet` | 宏观、政策、利率、全球事件和跨市场数据 | 市场背景窗口 | `macro_window_months`，缺省回退 `window_months`；默认最近 21 个月 |
-| `text` | `text_index.parquet`、`text_library/` | 公告、新闻、研报、政策文本 | PIT 文本检索库，必须可追溯到文本 ID | `text_window_months`，缺省回退 `window_months`；默认最近 21 个月 |
-| `universe` | `universe.parquet` | `stock_basic` 的 L/D/P 状态和上市/退市日期 | 决策日在市股票池，避免当前上市名单造成幸存者偏差 | 不使用月份窗口；按决策日在市口径生成 |
+| `daily` | `daily.parquet` | `daily`、`daily_basic`、`adj_factor`、`stk_limit`、`suspend_d` | 日频行情、交易约束、日线估值、强制清仓，以及分钟数据缺失时的退化回放 | `daily_window_months`，缺省回退 `window_months`；默认最近 21 个月 |
+| `intraday_1min` | `intraday_1min.parquet` | `stk_mins_1min_by_date` | 分钟级回放与撮合主输入，日内策略、开收盘和做 T 研究 | `intraday_trade_days`；默认最近 21 个交易日 |
+| `fundamentals` | `fundamentals.parquet` | `income_vip`、`balancesheet_vip`、`cashflow_vip`、`fina_indicator_vip`、`forecast_vip`、`express_vip`、`dividend`、`fina_audit`、`fina_mainbz_vip`、`disclosure_date` 经财务 PIT 事件索引归并 | 财务和经营质量窗口，保留可追溯版本字段 | `fundamentals_window_months`，缺省回退 `window_months`；默认最近 21 个月可见披露 |
+| `events` | `events.parquet` | 两融/资金/事件：`margin`、`margin_detail`、`margin_secs`、`moneyflow`、`block_trade`、`stk_holdernumber`、`stk_holdertrade`、`repurchase`、`share_float_complete`、`top_list`、`top_inst`；打板/热榜/游资：`kpl_list`、`limit_step`、`limit_cpt_list`、`limit_list_ths`、`ths_hot`、`dc_hot`、`hm_detail`、`hm_list` | 异构事件 union；`dataset` 标记来源，其余列按来源表解释 | `events_window_months`，缺省回退 `window_months`；默认最近 21 个月 |
+| `macro` | `macro.parquet` | 国内宏观/利率/政策：`cn_gdp`、`cn_cpi`、`cn_ppi`、`cn_pmi`、`cn_m`、`sf_month`、`shibor`、`shibor_quote`、`shibor_lpr`、`monetary_policy`、`eco_cal`；跨市场/指数/汇率：`index_global`、`index_daily`、`fx_daily`、`repo_daily`、`us_tycr`、`us_trycr` | 市场背景、指数择时、β 管理和相对强弱窗口 | `macro_window_months`，缺省回退 `window_months`；默认最近 21 个月 |
+| `text` | `text_index.parquet`、`text_library/` | `anns_d`、`major_news`、`cctv_news`、`npr`、`research_report`、`report_rc`、`news`；`news` 默认读取 raw 中所有 `src=` 来源并按正文 hash 去重 | PIT 文本检索库，必须可追溯到文本 ID | `text_window_months`，缺省回退 `window_months`；默认最近 21 个月 |
+| `universe` | `universe.parquet` | `stock_basic` 的 L/D/P 状态和上市/退市日期，叠加 `namechange` 的 as-of 名称与 `index_member_all` 的 as-of 申万一级行业 | 决策日在市股票池，避免当前上市名单造成幸存者偏差 | 不使用月份窗口；按决策日在市口径生成 |
+
+`limit_list_d` 当前不进入 Agent 可读域：该表缺行级 `available_at`，且 `limit_amount` 已确认存在历史回写为空的风险。`index_daily` 已作为 `macro`/reference 类输入暴露给 Agent；Barra-lite 和前端基准使用回放时落盘的冻结运行产物，不再从 raw 重新计算。
 
 run manifest 记录本次实验生效的 `snapshot_config.decision_windows`；snapshot manifest 记录该次构建的 `window_config`、各数据域 `domain_windows`、实际行数和日期覆盖。Pipeline 的 Fold `input_window` 是由基础 `window_months` 推出的调度摘要，用于说明验证期前的默认研究输入区间；当各数据域单独覆盖窗口时，实际可见历史以 `snapshot_config.decision_windows` 和 snapshot manifest 为准。
 
@@ -806,6 +808,7 @@ substep 的声明预算 `B` 同时定义三件事：
 - 风格输入来自回放槽自身 `daily.parquet` 的全市场横截面，属于 Agent 本就可见的数据；持仓由成交逐日结转重构。
 - 基准输入为回放槽 `macro.parquet` 中 `dataset=index_daily` 的沪深300 窗口行；行业表取决策快照 `universe.parquet` 的申万一级归属（决策日口径，月度窗口内漂移可忽略）。
 - sidecar 同时落盘策略与基准日收益序列，使下游（rollup、控制台收益曲线）完全脱离原始数据源。
+- sidecar 保留用于 rollup 的完整行业累计；展示字段仍只保留绝对暴露较大的主要行业。
 
 完整载荷指标：
 
@@ -847,7 +850,7 @@ experiments/<id>/artifacts/run_<id>/host_run_manifest.json  # 宿主审计副本
 - 决策时点、训练/验证可见区间和 snapshot hash；测试和 held-out 调度不写入 Agent 可见 manifest。
 - 父产物 ID/hash、当前 artifact hash、冻结标记。Agent 可见 manifest 里的 `parent_strategy_artifact_id`（以及 `fold_id`）会投影为不透明引用 `strategy_ref_*`（和 `fold_ref_*`），因为原始 artifact id 内嵌 Fold 标签（`strategy_<epoch>_fold_<period>`）；该投影与 Agent 可见账本视图和系统提示词的实验事实一致，避免向 Fold Agent 泄漏原始周期标签。
 - 父模型参数 hash、当前模型 artifact hash 和 combined hash。
-- Broker profile、短券模式、成本参数和资源配置。
+- Broker profile、做空/融券模式、成本参数和资源配置。
 - runtime env 路径，以及普通 Fold 或元学习需要的实验参数摘要。
 - 修改约束和 deadline。
 - 关键结果目录和状态摘要。
@@ -863,33 +866,31 @@ experiments/<id>/artifacts/run_<id>/host_run_manifest.json  # 宿主审计副本
 - Agent 在训练/验证期只读可见验证结果。
 - 测试和 held-out 结果、日志、NL 明细和 Broker 事件不反馈给 Agent。
 - 宿主可读完整审计目录。
-- 冻结 artifact 的 `manifest.json` 是冻结元数据，不参与策略 artifact hash。
+- 冻结 artifact 的 `manifest.json` 是冻结元数据，不参与策略 artifact hash。Pipeline 冻结策略时会在冻结 artifact 目录内写入该文件；Agent 工作副本 `/mnt/agent/output/` 不需要也不应自行创建。
 
 
 ### 4.3 审计检查与验收清单
 
+本节是运行后复核清单，不新增执行入口。审计检查关注记录是否足以复盘运行过程；验收清单关注当前产物是否允许冻结、测试或进入 held-out。
+
 **审计检查**
 
-- 工具调用状态、stdout/stderr（适用时）和错误状态完整。
-- run manifest 包含关键版本、hash、路径和时间。
-- 工具调用（含 shell）没有越权路径、网络访问或测试数据读取。
-- `output` 无缓存、隐藏文件/目录和非法后缀。
-- `models` 无缓存、隐藏文件/目录、非法后缀和超限文件。
-- strategy/model hash、modification check hash、backtest hash 和 frozen eval hash 一致。
-- Broker 拒单、未成交、强平和费用可追溯。
-- NL evidence 能追溯到 as-of `text_id` 或 `source_hash`。
-- API key 和 Authorization header 未进入日志。
-- 失败显式报错，不能静默 fallback。
+- `run_manifest.json`、`host_run_manifest.json`、`agent_trace.jsonl` 记录关键版本、hash、路径、时间、阶段和关联 ID。
+- 工具调用（含 shell）记录状态、stdout/stderr（适用时）、长输出引用和错误摘要。
+- 工具调用没有越权路径、越权网络访问或测试/held-out 数据读取。
+- Sandbox 写入面只限 `workspace`、未锁定的 `output` 和未锁定的 `models`；锁定后正式产物保持只读。
+- PIT 输入有可复核的 Timeview 证据：刷新节点 cutoff、行级 `available_at` 过滤和 `/mnt/snapshot` decision input hash 均与 manifest 一致。
+- Broker 事件在发生时可追溯到订单、成交/拒单/撤单、费用、两融、维保和强平记录。
+- 文本检索、NL Sub Agent 输出、NL evidence 和 provider 调用在发生时可追溯到 as-of `text_id` 或 `source_hash`。
+- API key、Authorization header 和代理配置正文未进入 prompt、trace、artifact 或日志。
+- 失败显式报错并进入 trace，不能静默 fallback。
 
 
 **验收清单**
 
-- PIT 输入满足 Timeview 可见性口径：取当前仿真时钟下已完成的最新刷新节点作为 cutoff，仅暴露行级 `available_at <= cutoff` 的数据。
-- `/mnt/snapshot` 与 run manifest 中的 decision input hash 一致。
-- Sandbox 写入面只限 `workspace`、未锁定的 `output` 和未锁定的 `models`。
-- `modification_check` 在正式回测前通过。
-- `backtest` 写入完整结果目录和 manifest 摘要。
-- Broker 对成交、拒单、费用、做空和强平事件有记录。
-- 文本检索、NL Sub Agent 输出和 provider 调用可追溯。
-- 冻结策略和模型产物在测试、held-out 前后 hash 不变。
-- 所有失败条件显式报错并进入 trace。
+- `output` 包含可加载的 `main(ctx)`，且无缓存、隐藏文件/目录、非法后缀、日志、数据 dump、notebook、密钥或模型权重。
+- `models` 无缓存、隐藏文件/目录、非法后缀和超限文件。
+- `modification_check` 已在正式回测前通过，且其 strategy/model hash 与当前产物一致。
+- 至少一次完整验证 `backtest` 成功，且验证 summary 的 strategy/model hash 与当前产物一致；调试 `replay_window` 不满足冻结条件。
+- `finish_fold` 成功后，冻结策略和模型产物在 test / held-out 前后 hash 不变。
+- 回测结果目录、manifest 摘要和必要的订单/Broker/NL sidecar 已写入；无相关事件时可以为空但不能缺失应有文件。

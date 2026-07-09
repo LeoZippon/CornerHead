@@ -1,3 +1,9 @@
+2026-07-09 Barra-lite 行业 rollup 完整性与设计文档收口（fix/broker-fill-realism）
+
+- 修复逐窗口展示只保留前 8 个行业时，跨窗口 rollup 会永久丢失其余行业暴露的问题：sidecar 额外保留完整日度累计量，展示仍保持前 8；旧 sidecar 读取路径保持可用。
+- 补齐 Snapshot raw 来源、冻结输入归因、冻结 artifact manifest、审计/验收边界，并把 Pipeline 总流程改为可读分点。
+- 验证：`tests.unit.test_style_analysis` 5 项通过；相关模块 `py_compile` 通过；`git diff --check` clean。
+
 2026-07-09 指标计算层统一：回放时一次计算、Web 纯读、前端纯渲染（feat/hitl-webui 线）
 
 - 动机（用户提出，核实成立）：Barra-lite 与前端事后计算各自读 raw——而 raw 会被源端回写（revision ledger 即证据），事后重算可能与 Agent 当时所见不一致；快照是哈希冻结的，回放时计算是唯一可复现口径。
