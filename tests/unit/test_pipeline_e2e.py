@@ -940,6 +940,31 @@ class PipelineEndToEndTest(unittest.TestCase):
             cache_entries = [p for p in (config.experiment_dir / "snapshot_cache").iterdir() if not p.name.startswith(".")]
             self.assertEqual(len(cache_entries), decision_builds + replay_builds)
 
+    def test_failed_attempt_writes_permanent_ledger_record(self):
+        # A run that throws before its success record must leave an
+        # attempt_failed record (error evidence, re-runnable), never nothing.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+
+            class ExplodingAgent:
+                def run(self) -> dict[str, object]:
+                    raise RuntimeError("boom mid-run")
+
+            pipeline = ExperimentPipeline(
+                config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ExplodingAgent(), proxy=ScriptedLLM([])
+            )
+            folds = build_fold_schedule("2022Q1", "2022Q1", TRADING_DAYS)
+            with self.assertRaisesRegex(RuntimeError, "boom mid-run"):
+                pipeline.run_fold(folds[0], epoch_id="epoch_001", parent=None)
+            (failure,) = pipeline.ledger.read("attempt_failed")
+            self.assertEqual(failure["fold_id"], folds[0].fold_id)
+            self.assertEqual(failure["epoch_id"], "epoch_001")
+            self.assertEqual(failure["error_type"], "RuntimeError")
+            self.assertIn("boom mid-run", failure["trace"])
+            self.assertTrue(failure["run_id"])
+            self.assertEqual(pipeline.ledger.read("fold"), [])
+
     def test_failed_acceptance_falls_back_to_parent(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

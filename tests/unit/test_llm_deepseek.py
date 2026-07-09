@@ -281,9 +281,16 @@ class DeepSeekClientTest(unittest.TestCase):
             records = [json.loads(line) for line in files[0].read_text(encoding="utf-8").splitlines()]
             record = records[-1]
         self.assertEqual([item["status"] for item in records], ["started", "ok"])
+        started = records[0]
         self.assertEqual(record["status"], "ok")
         self.assertEqual(record["provider"], "deepseek")
-        self.assertEqual(record["payload"]["messages"][1]["content"], "json please")
+        # The payload is stored once (the first attempt's started record); the
+        # terminal record joins it via call_id + request_hash, not a duplicate.
+        self.assertEqual(started["payload"]["messages"][1]["content"], "json please")
+        self.assertNotIn("payload", record)
+        self.assertTrue(record["call_id"])
+        self.assertEqual(record["call_id"], started["call_id"])
+        self.assertEqual(record["request_hash"], started["request_hash"])
         self.assertEqual(record["raw_response"]["choices"][0]["message"]["content"], "{\"action\":\"hold\"}")
         self.assertEqual(record["usage"]["total_tokens"], 12)
         self.assertNotIn(fake_secret, json.dumps(records))

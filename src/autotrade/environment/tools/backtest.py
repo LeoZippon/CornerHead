@@ -318,6 +318,11 @@ class BacktestTool:
             account_type="STOCK", data_type="ORDER"
         ) + replay.broker.get_trade_detail_data(account_type="CREDIT", data_type="ORDER")
         orders_path = self._write_orders(result_dir, order_records)
+        # Broker end-of-day positions per (date, account, ts_code, side): the
+        # attribution ground truth (forced closes / bonus shares / hedged legs).
+        position_records = replay.broker.positions_eod_records()
+        if position_records:
+            pd.DataFrame(position_records).to_parquet(result_dir / "positions_eod.parquet", index=False)
         # allow_nan=False: detailed_return.json feeds acceptance and the console;
         # a NaN metric must fail the replay here, not pass thresholds silently.
         (result_dir / "detailed_return.json").write_text(
@@ -330,7 +335,7 @@ class BacktestTool:
         # replays run after the Agent session); the compact block rides in the
         # tool result. Descriptive diagnostics, never an optimization target.
         style_payload = replay_style_analysis(
-            replay_daily, order_records, stats, replay_dir=replay_dir, snapshot_dir=snapshot_dir
+            replay_daily, position_records, stats, replay_dir=replay_dir, snapshot_dir=snapshot_dir
         )
         (result_dir / "style_analysis.json").write_text(
             json.dumps(sanitize_for_log(style_payload), ensure_ascii=False, indent=2, sort_keys=True, default=str),

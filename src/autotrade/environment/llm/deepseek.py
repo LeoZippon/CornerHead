@@ -12,7 +12,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from autotrade.environment.runtime import sanitize_for_log
+from autotrade.environment.runtime import new_id, sanitize_for_log
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -259,10 +259,14 @@ class DeepSeekClient:
 
     def _post_with_retries(self, payload: dict[str, Any]) -> DeepSeekResponse:
         attempts = self.config.max_retries + 1
+        # One call_id per logical call: every attempt's log records reference it,
+        # and the full payload is written once (the first attempt's "started"
+        # record); terminal/retry records join via call_id + request_hash.
+        call_id = new_id("call")
         last_error: DeepSeekAPIError | None = None
         for attempt in range(attempts):
             try:
-                return self._post_json(payload, attempt=attempt + 1, max_attempts=attempts)
+                return self._post_json(payload, attempt=attempt + 1, max_attempts=attempts, call_id=call_id)
             except DeepSeekAPIError as exc:
                 last_error = exc
                 if not exc.retryable or attempt == attempts - 1:
@@ -270,7 +274,7 @@ class DeepSeekClient:
                 time.sleep(self.config.retry_backoff_seconds * (2 ** attempt))
         raise last_error or DeepSeekAPIError("DeepSeek request failed")
 
-    def _post_json(self, payload: dict[str, Any], *, attempt: int, max_attempts: int) -> DeepSeekResponse:
+    def _post_json(self, payload: dict[str, Any], *, attempt: int, max_attempts: int, call_id: str = "") -> DeepSeekResponse:
         started_at = _utc_now_iso()
         started_perf = time.perf_counter()
         log_path = self._conversation_log_path(started_at)
@@ -286,6 +290,8 @@ class DeepSeekClient:
                     attempt=attempt,
                     max_attempts=max_attempts,
                     status="started",
+                    call_id=call_id,
+                    include_payload=attempt == 1,
                 ),
             )
         request = Request(
@@ -324,6 +330,7 @@ class DeepSeekClient:
                     attempt=attempt,
                     max_attempts=max_attempts,
                     status="error",
+                    call_id=call_id,
                     http_status_code=exc.code,
                     response_body=body,
                     error=error,
@@ -343,6 +350,7 @@ class DeepSeekClient:
                     attempt=attempt,
                     max_attempts=max_attempts,
                     status="error",
+                    call_id=call_id,
                     error=error,
                 ),
             )
@@ -360,6 +368,7 @@ class DeepSeekClient:
                     attempt=attempt,
                     max_attempts=max_attempts,
                     status="error",
+                    call_id=call_id,
                     http_status_code=http_status_code,
                     response_body=raw_body,
                     error=error,
@@ -379,6 +388,7 @@ class DeepSeekClient:
                     attempt=attempt,
                     max_attempts=max_attempts,
                     status="error",
+                    call_id=call_id,
                     http_status_code=http_status_code,
                     response_body=raw_body,
                     error=error,
@@ -400,6 +410,7 @@ class DeepSeekClient:
                     attempt=attempt,
                     max_attempts=max_attempts,
                     status="error",
+                    call_id=call_id,
                     http_status_code=http_status_code,
                     raw_response=data,
                     error=exc,
@@ -417,6 +428,7 @@ class DeepSeekClient:
                 attempt=attempt,
                 max_attempts=max_attempts,
                 status="ok",
+                call_id=call_id,
                 http_status_code=http_status_code,
                 raw_response=data,
             ),
@@ -427,16 +439,19 @@ class DeepSeekClient:
         if self.config.conversation_log_dir is None:
             return None
         date_key = started_at[:10].replace("-", "")
-        return Path(self.config.conversation_log_dir) / "deepseek" / self.config.model / f"{date_key}.jsonl"
+        # Per-process file: concurrent HITL workers share the log dir, and an
+        # append over PIPE_BUF is not atomic across writers — isolating by pid
+        # makes interleaving impossible without any locking.
+        name = f"{date_key}-p{os.getpid()}.jsonl"
+        return Path(self.config.conversation_log_dir) / "deepseek" / self.config.model / name
 
     def _write_conversation_log(self, path: Path | None, record: dict[str, Any]) -> None:
         if path is None:
             return
         try:
             _ensure_log_parent(path)
-            # Append is not atomic for records over PIPE_BUF, but every caller (Runner,
-            # NL/explore host service) drives DeepSeek serially, so lines never interleave.
-            # Add a lock or O_APPEND-with-size-guard only if these calls are ever parallelized.
+            # Within one process every caller (Runner, NL/explore host service)
+            # drives DeepSeek serially, so appends to the per-pid file never interleave.
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         except OSError as exc:
@@ -669,18 +684,24 @@ def _conversation_log_record(
     attempt: int,
     max_attempts: int,
     status: str,
+    call_id: str = "",
+    include_payload: bool = False,
     http_status_code: int | None = None,
     raw_response: dict[str, Any] | None = None,
     response_body: str | None = None,
     error: DeepSeekAPIError | None = None,
 ) -> dict[str, Any]:
+    """One log line. The full (redacted) payload is stored once per logical
+    call — the first attempt's "started" record; every other record joins it
+    via ``call_id`` + ``request_hash`` instead of duplicating the history."""
     safe_payload = _redact_secrets_in_obj(payload)
     safe_response = _redact_secrets_in_obj(raw_response) if raw_response is not None else None
     safe_body = _redact_secrets(response_body) if response_body is not None else None
     record: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "provider": "deepseek",
         "model": config.model,
+        "call_id": call_id,
         "request_started_at": started_at,
         "request_completed_at": completed_at,
         "duration_seconds": round(max(duration_seconds, 0.0), 6),
@@ -689,9 +710,10 @@ def _conversation_log_record(
         "status": status,
         "http_status_code": http_status_code,
         "request_hash": _stable_hash(safe_payload),
-        "payload": safe_payload,
         "metadata": config.safe_metadata(),
     }
+    if include_payload:
+        record["payload"] = safe_payload
     if safe_response is not None:
         record["raw_response"] = safe_response
         record["response_hash"] = _stable_hash(safe_response)

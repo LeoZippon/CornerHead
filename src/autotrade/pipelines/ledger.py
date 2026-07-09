@@ -3,6 +3,9 @@
 One JSONL file per experiment. Records are distinguished by ``record_type``
 (``fold`` / ``meta_learning`` / ``heldout``); Steps are lightweight
 summaries inside the fold record's ``steps[]``, never separate files.
+``attempt_failed`` records are appended when a run throws before its success
+record — they carry the error evidence and are ignored by every reader that
+selects the success types, so a failed attempt is re-runnable but auditable.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ from pathlib import Path
 
 from autotrade.environment.runtime import sanitize_for_log, utc_now_iso
 
-RECORD_TYPES = ("fold", "meta_learning", "heldout")
+RECORD_TYPES = ("fold", "meta_learning", "heldout", "attempt_failed")
 LINK_KEYS = ("experiment_id", "epoch_id", "fold_id", "run_id")
 
 

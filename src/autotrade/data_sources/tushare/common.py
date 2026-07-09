@@ -17,7 +17,7 @@ from typing import Any
 import pandas as pd
 import requests
 
-from .io import append_jsonl, has_pagination_probe, parquet_meta, parquet_rows, read_many, write_parquet
+from .io import append_jsonl, file_sha256, has_pagination_probe, parquet_meta, parquet_rows, read_many, write_parquet
 
 
 API_URL = "https://api.tushare.pro"

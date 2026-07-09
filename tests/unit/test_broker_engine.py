@@ -1142,6 +1142,61 @@ class FillRealismTest(unittest.TestCase):
         self.assertAlmostEqual(broker.credit.positions["000002.SZ"].last_price, 6.5)
 
 
+class OrderEvidenceTest(unittest.TestCase):
+    def make_broker(self):
+        return SimBroker(BrokerProfile(), MarketData(REPLAY), shortable_codes=frozenset({"000001.SZ"}))
+
+    def test_cancelled_order_stays_in_order_records(self):
+        broker = self.make_broker()
+        order_id = broker.passorder(
+            optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.5, 1000, submitted_at="09:31"
+        )
+        self.assertTrue(broker.cancel(order_id, reason="day_end_unfilled", trade_date="20220104", minute_key="15:00"))
+        (record,) = [
+            o for o in broker.get_trade_detail_data(account_type="STOCK", data_type="ORDER")
+            if o["order_id"] == order_id
+        ]
+        self.assertEqual(record["status"], "cancelled")
+        self.assertEqual(record["reject_reason"], "day_end_unfilled")
+        self.assertEqual(record["limit_price"], 9.5)
+        self.assertEqual(record["submitted_at"], "09:31")
+
+    def test_fill_records_carry_submit_time_limit_price_and_fees(self):
+        broker = self.make_broker()
+        broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.8, 1000, submitted_at="09:31")
+        broker.match_bar(
+            "20220104", "09:33",
+            pd.DataFrame([{"ts_code": "000001.SZ", "open": 10.0, "high": 10.1, "low": 9.79, "close": 9.9}]),
+        )
+        (record,) = broker.get_trade_detail_data(account_type="STOCK", data_type="ORDER")
+        self.assertEqual(record["status"], "filled")
+        self.assertEqual(record["submitted_at"], "09:31")  # submit time survives the resting bars
+        self.assertEqual(record["limit_price"], 9.8)  # original limit; price is the fill
+        self.assertEqual(record["decision_time"], "09:33")
+        self.assertGreater(record["fee"], 0.0)
+        broker.roll_to_date("20220105")
+        broker.execute("000001.SZ", "sell", trade_date="20220105", raw_price=10.6, amount=1000)
+        sell = [o for o in broker.get_trade_detail_data(account_type="STOCK", data_type="ORDER") if o["action"] == "sell"][0]
+        self.assertGreater(sell["fee"], 0.0)
+        self.assertGreater(sell["stamp_duty"], 0.0)
+
+    def test_positions_eod_records_reflect_marks_and_exit_liquidation(self):
+        broker = self.make_broker()
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.mark_to_market("20220104")
+        rows = broker.positions_eod_records()
+        self.assertEqual(
+            [(r["date"], r["account"], r["ts_code"], r["side"], r["quantity"]) for r in rows],
+            [("20220104", "stock", "000001.SZ", "long", 1000)],
+        )
+        self.assertAlmostEqual(rows[0]["last_price"], 10.5)  # marked to the daily close
+        broker.roll_to_date("20220105")
+        broker.mark_to_market("20220105")
+        broker.close_all("20220105")
+        broker.record_positions_eod("20220105")  # exit-day refresh (the engine does this)
+        self.assertEqual([r["date"] for r in broker.positions_eod_records()], ["20220104"])
+
+
 class BrokerProfileValidationTest(unittest.TestCase):
     def test_negative_fees_rates_and_slippage_are_rejected(self):
         for field_name in ("commission_bps", "slippage_bps", "transfer_fee_bps", "fin_rate_annual"):

@@ -23,19 +23,13 @@ def main() -> int:
     parser.add_argument("--experiment-id", required=True)
     parser.add_argument("--experiments-root", type=Path, default=Path("experiments"))
     parser.add_argument("--output-dir", type=Path, help="Defaults to <experiment>/reports/.")
-    parser.add_argument("--benchmark-code", default="000300.SH", help="Benchmark index code; default is CSI 300 000300.SH.")
-    parser.add_argument("--benchmark-raw-dir", type=Path, help="Raw data root containing index_daily/; defaults to auto-detected data/raw.")
-    parser.add_argument("--no-benchmark", action="store_true", help="Disable benchmark/active-return overlays.")
     args = parser.parse_args()
     experiment_dir = args.experiments_root / args.experiment_id
     ledger = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
     output_dir = args.output_dir or experiment_dir / "reports"
-    summary = build_experiment_report(
-        ledger,
-        output_dir,
-        benchmark_code=None if args.no_benchmark else args.benchmark_code,
-        benchmark_raw_dir=args.benchmark_raw_dir,
-    )
+    # Benchmark returns come from each ledger record's frozen benchmark block
+    # (computed at replay time); the report never reads the raw lake.
+    summary = build_experiment_report(ledger, output_dir)
     # build_experiment_report sets summary["status"] (ok|warning); default to ok.
     result = {"output_dir": str(output_dir), **summary}
     result.setdefault("status", "ok")

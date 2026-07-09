@@ -491,8 +491,8 @@ experiments/<experiment_id>/
 **报告**
 
 - 默认命令：`scripts/experiments/report_experiment.py`。
-- 默认 benchmark：`000300.SH`。
-- 缺基准数据时，summary status 必须标记 warning。
+- benchmark（沪深300 `000300.SH`）取自账本各记录中回放时冻结的 `benchmark` 块（回放槽数据计算），报告不读可变 raw 数据湖，与 Agent/控制台所见完全一致。
+- 有成绩的周期缺冻结 benchmark 块时，summary status 必须标记 warning。
 - 输出 `reports/epoch_comparison_returns.png`。
 - 输出 `reports/epoch_returns/<epoch_id>_returns.png`。
 - 逐 Fold `active_return` 是该 Fold 策略收益减 benchmark 收益。
@@ -552,7 +552,7 @@ experiments/<experiment_id>/
 
 - 冻结策略产物 manifest 完整。
 - 测试和 held-out 前后策略/model artifact hash 不变。
-- `experiment_ledger.jsonl` 写入 Fold、meta-learning 和 held-out 记录。
+- `experiment_ledger.jsonl` 写入 Fold、meta-learning 和 held-out 记录；运行在成功记录之前抛错时追加 `attempt_failed` 记录（run_id、异常类型、消息与 traceback），使恢复流程能区分「从未开始」与「中途失败」，失败尝试仍可重跑（全部 reader 只选取成功类型）。
 - run manifest、agent trace、LLM/compact conversation log 和结果目录可互相追溯。
 
 **报告**

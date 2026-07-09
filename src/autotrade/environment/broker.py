@@ -283,7 +283,11 @@ class MarketData:
 
 @dataclass
 class Order:
-    """Audited record of a single broker primitive call (filled or rejected)."""
+    """Audited record of a single broker primitive call (filled, rejected or
+    cancelled). ``submitted_at`` is the submission time (a resting order keeps
+    it across bars; ``decision_time`` is the settlement/reject bar), ``limit_price``
+    the original 指定价 when the order was a limit order (``price`` is the final
+    fill price), and ``fee``/``stamp_duty`` the per-order cost breakdown."""
 
     ts_code: str
     action: str  # buy | sell | short | cover | close | fin_buy | sell_repay | direct_repay
@@ -291,7 +295,9 @@ class Order:
     requested_amount: int
     trade_date: str
     decision_time: str = ""
+    submitted_at: str = ""
     price: float | None = None
+    limit_price: float | None = None
     filled_quantity: int = 0
     status: str = "submitted"
     reject_reason: str | None = None
@@ -300,6 +306,8 @@ class Order:
     price_label: str = "price"
     account: str = ""
     op_type: int | None = None
+    fee: float = 0.0
+    stamp_duty: float = 0.0
     order_id: str = field(default_factory=lambda: new_id("ord"))
 
     def to_record(self) -> dict[str, object]:
@@ -313,11 +321,15 @@ class Order:
             "requested_amount": self.requested_amount,
             "filled_quantity": self.filled_quantity,
             "price": self.price,
+            "limit_price": self.limit_price,
             "price_label": self.price_label,
             "status": self.status,
             "reject_reason": self.reject_reason,
             "decision_time": self.decision_time,
+            "submitted_at": self.submitted_at,
             "trade_date": self.trade_date,
+            "fee": self.fee,
+            "stamp_duty": self.stamp_duty,
             "reason": self.reason,
             "source_artifacts": list(self.source_artifacts),
         }
@@ -530,6 +542,11 @@ class SimBroker:
         self.traded_notional = 0.0
         self.reject_counts: dict[str, int] = {}
         self.current_date = ""
+        # End-of-day position snapshots per (date, account, ts_code, side): the
+        # ground truth for downstream attribution (forced closes, bonus shares
+        # and per-account long/short legs are all reflected — a fills-only
+        # reconstruction misses them). Replace-by-date keeps re-marking idempotent.
+        self._positions_eod: dict[str, list[dict[str, object]]] = {}
 
     @property
     def stock(self) -> AccountState:
@@ -848,12 +865,33 @@ class SimBroker:
         """Cancel a working order by id (QMT ``cancel``); the audit kwargs are sim
         extensions used by the replay engine's cancel events. Order ids are unique
         across both accounts, so ``account_type`` is validated when given but not
-        needed for the lookup."""
+        needed for the lookup. The cancelled order stays in the ORDER records
+        with ``status="cancelled"`` (``reject_reason`` carries the cancel reason)
+        — live QMT flows filter ORDER by status, so a vanished order would break
+        that mirror and erase the audit trail."""
         if account_type:
             self._normalize_account(account_type)
         for index, order in enumerate(self._book):
             if order.order_id == order_id:
                 self._book.pop(index)
+                self.orders.append(
+                    Order(
+                        ts_code=order.ts_code,
+                        action=order.action,
+                        side="short" if order.action in {"short", "cover"} else "long",
+                        requested_amount=int(order.volume or 0),
+                        trade_date=str(trade_date or self.current_date),
+                        decision_time=str(minute_key or ""),
+                        submitted_at=order.submitted_at,
+                        limit_price=order.price,
+                        status="cancelled",
+                        reject_reason=reason,
+                        reason=order.reason,
+                        account=order.account,
+                        op_type=order.op_type,
+                        order_id=order.order_id,
+                    )
+                )
                 payload = {
                     "trade_date": str(trade_date or self.current_date),
                     "ts_code": order.ts_code,
@@ -904,7 +942,8 @@ class SimBroker:
                     rejected = Order(
                         ts_code=order.ts_code, action="short", side="short",
                         requested_amount=int(order.volume or 0), trade_date=str(trade_date),
-                        decision_time=str(minute_key), reason=order.reason,
+                        decision_time=str(minute_key), submitted_at=order.submitted_at,
+                        limit_price=order.price, reason=order.reason,
                         account="credit", op_type=order.op_type, order_id=order.order_id,
                     )
                     self.orders.append(rejected)
@@ -926,6 +965,8 @@ class SimBroker:
                     # market orders take slippage. Limit orders never take slippage.
                     apply_slippage=not order.is_limit and not order.is_auction,
                     order_id=order.order_id,
+                    submitted_at=order.submitted_at,
+                    limit_price=order.price,
                 )
             else:
                 survivors.append(order)
@@ -986,6 +1027,7 @@ class SimBroker:
             requested_amount=requested,
             trade_date=self.current_date,
             decision_time=str(submitted_at or ""),
+            submitted_at=str(submitted_at or ""),
             reason=action,
             account=pair[0] if pair else "",
             op_type=pair[1] if pair else None,
@@ -1123,6 +1165,8 @@ class SimBroker:
         price_label: str = "price",
         apply_slippage: bool = True,
         order_id: str | None = None,
+        submitted_at: str = "",
+        limit_price: float | None = None,
     ) -> Order:
         """Apply one strategy primitive at the current bar with full constraints.
 
@@ -1147,6 +1191,8 @@ class SimBroker:
             requested_amount=int(amount) if amount is not None else 0,
             trade_date=str(trade_date),
             decision_time=str(time),
+            submitted_at=str(submitted_at or ""),
+            limit_price=limit_price,
             reason=str(reason or action),
             **({"order_id": order_id} if order_id else {}),
             source_artifacts=list(source_artifacts or []),
@@ -1219,6 +1265,7 @@ class SimBroker:
             return self._reject(order, "insufficient_cash")
         state.cash += fill.cash_delta
         self.fees_paid += fill.fee
+        order.fee = fill.fee
         self._add_to_position(state, order.ts_code, "long", shares, fill.price, fill.cost_basis, order.trade_date)
         return self._fill(order, fill.price, shares, "open")
 
@@ -1240,6 +1287,7 @@ class SimBroker:
         ):
             return self._reject(order, "fin_quota_exceeded")
         self.fees_paid += fill.fee  # financed into the contract, counted as cost incurred
+        order.fee = fill.fee
         self._add_to_position(state, order.ts_code, "long", shares, fill.price, fill.cost_basis, order.trade_date)
         state.contracts.append(
             self._new_contract(
@@ -1266,6 +1314,8 @@ class SimBroker:
         state.cash += fill.cash_delta
         self.fees_paid += fill.fee
         self.stamp_duty_paid += fill.duty
+        order.fee = fill.fee
+        order.stamp_duty = fill.duty
         # entry_cost for a short is the net sale proceeds released proportionally on cover.
         self._add_to_position(state, order.ts_code, "short", shares, fill.price, fill.cost_basis, order.trade_date)
         state.contracts.append(
@@ -1306,6 +1356,9 @@ class SimBroker:
             return self._reject(order, "limit_up_blocked_cover")
         price = self.profile.slipped_price(raw_price, is_buy=is_buy) if apply_slippage else raw_price
         fill = self._reduce_position(state, pos, shares, price, order.trade_date)
+        if fill is not None:
+            order.fee = fill.fee
+            order.stamp_duty = fill.duty
         if order.action == "sell_repay" and fill is not None:
             # 卖券还款: the sold shares come off the code's fin contracts, and the net
             # proceeds (already banked by _reduce_position) repay 融资 debt interest-
@@ -1347,7 +1400,29 @@ class SimBroker:
             # account is not collateral and is untouched by the forced close.
             self._event("forced_close_triggered", trade_date=trade_date, maintenance_ratio=ratio)
             self.close_all(trade_date, forced=True, account="credit")
+        self.record_positions_eod(trade_date)
         return self.equity()
+
+    def record_positions_eod(self, trade_date: str) -> None:
+        """Snapshot end-of-day positions for this date (replace-by-date, so the
+        exit-day mandatory liquidation can refresh the same date afterwards)."""
+        self._positions_eod[str(trade_date)] = [
+            {
+                "date": str(trade_date),
+                "account": state.name,
+                "ts_code": pos.ts_code,
+                "side": pos.side,
+                "quantity": int(pos.quantity),
+                "last_price": float(pos.last_price),
+                "market_value": float(pos.market_value),
+            }
+            for state in self.accounts.values()
+            for pos in state.positions.values()
+        ]
+
+    def positions_eod_records(self) -> list[dict[str, object]]:
+        """All end-of-day position snapshots, date-ordered."""
+        return [row for date in sorted(self._positions_eod) for row in self._positions_eod[date]]
 
     def _apply_contract_terms(self, trade_date: str) -> None:
         term_days = int(self.profile.debt_contract_term_days or 0)

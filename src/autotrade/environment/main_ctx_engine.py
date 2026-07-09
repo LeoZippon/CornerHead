@@ -662,6 +662,7 @@ def run_main_ctx_replay(
         if trade_date == exit_date and any(state.positions for state in broker.accounts.values()):
             broker.close_all(trade_date)
             equity = broker.equity()
+            broker.record_positions_eod(trade_date)  # refresh: only unsellable leftovers remain
         equity_by_date[trade_date] = equity
 
     for delayed in delayed_actions:
@@ -1346,6 +1347,8 @@ def _execute_afterhours_action(broker: SimBroker, action: dict[str, object], *, 
         price_label="afterhours_fixed",
         apply_slippage=False,
         order_id=str(action.get("order_id") or "") or None,
+        submitted_at=str(action.get("submitted_at") or ""),
+        limit_price=limit,
     )
     return True
 

@@ -13,6 +13,7 @@ import json
 import re
 import shlex
 import subprocess
+import traceback
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,7 +31,7 @@ from autotrade.environment.executor import DockerExecutor
 from autotrade.environment.identity import agent_visible_ref as _agent_visible_ref
 from autotrade.environment.llm.proxy import LLMProxy
 from autotrade.environment.managed_proxy import ManagedProxySession
-from autotrade.environment.runtime import AgentTraceWriter, RunManifest, new_id, utc_now_iso
+from autotrade.environment.runtime import AgentTraceWriter, RunManifest, new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree
 from autotrade.environment.style_analysis import write_style_rollup
 from autotrade.environment.step_tree import StepTree
@@ -298,6 +299,35 @@ class ExperimentPipeline:
         sandbox_gpu_count: int | None = None,
     ) -> FoldOutcome:
         run_id = new_id("run")
+        try:
+            return self._run_fold_impl(
+                fold,
+                run_id=run_id,
+                epoch_id=epoch_id,
+                parent=parent,
+                taste_prompt=taste_prompt,
+                fold_directive=fold_directive,
+                system_prompt_override=system_prompt_override,
+                rerun_id=rerun_id,
+                sandbox_gpu_count=sandbox_gpu_count,
+            )
+        except Exception as exc:
+            self._record_attempt_failure(epoch_id=epoch_id, fold_id=fold.fold_id, run_id=run_id, exc=exc)
+            raise
+
+    def _run_fold_impl(
+        self,
+        fold: FoldSpec,
+        *,
+        run_id: str,
+        epoch_id: str,
+        parent: FrozenArtifact | None,
+        taste_prompt: str = "",
+        fold_directive: str = "",
+        system_prompt_override: str = "",
+        rerun_id: str | None = None,
+        sandbox_gpu_count: int | None = None,
+    ) -> FoldOutcome:
         sandbox, docker = self._start_sandbox(run_id, gpu_count=sandbox_gpu_count)
         paths = sandbox.paths
 
@@ -518,6 +548,31 @@ class ExperimentPipeline:
         if self.meta_learner is None:
             raise RuntimeError("no meta learner configured")
         run_id = new_id("run")
+        try:
+            return self._run_meta_learning_impl(
+                run_id=run_id,
+                epoch_id=epoch_id,
+                parent=parent,
+                previous_taste=previous_taste,
+                visible_fold=visible_fold,
+                directive_override=directive_override,
+            )
+        except Exception as exc:
+            self._record_attempt_failure(
+                epoch_id=epoch_id, fold_id=f"{epoch_id}_meta_learning", run_id=run_id, exc=exc
+            )
+            raise
+
+    def _run_meta_learning_impl(
+        self,
+        *,
+        run_id: str,
+        epoch_id: str,
+        parent: FrozenArtifact | None,
+        previous_taste: str = "",
+        visible_fold: FoldSpec | None = None,
+        directive_override: str | None = None,
+    ) -> tuple[FrozenArtifact | None, str]:
         sandbox, docker = self._start_sandbox(run_id, kind="meta_learning")
         paths = sandbox.paths
         has_parent = parent is not None
@@ -968,6 +1023,27 @@ class ExperimentPipeline:
         epoch_id: str,
         skip_labels: frozenset[str] | set[str] | None = None,
     ) -> list[dict[str, object]]:
+        attempt: dict[str, str] = {}
+        try:
+            return self._run_heldout_impl(
+                final, trading_days, epoch_id=epoch_id, skip_labels=skip_labels, attempt=attempt
+            )
+        except Exception as exc:
+            if attempt:
+                self._record_attempt_failure(
+                    epoch_id=epoch_id, fold_id=attempt["fold_id"], run_id=attempt["run_id"], exc=exc
+                )
+            raise
+
+    def _run_heldout_impl(
+        self,
+        final: FrozenArtifact,
+        trading_days: list[str],
+        *,
+        epoch_id: str,
+        skip_labels: frozenset[str] | set[str] | None,
+        attempt: dict[str, str],
+    ) -> list[dict[str, object]]:
         periods = heldout_periods(
             self.config.heldout_first_period,
             self.config.heldout_last_period,
@@ -982,6 +1058,7 @@ class ExperimentPipeline:
             if skip_labels and str(period["label"]) in skip_labels:
                 continue
             run_id = new_id("run")
+            attempt.update(run_id=run_id, fold_id=f"heldout_{period['label']}")
             sandbox, docker = self._start_sandbox(run_id)
             paths = sandbox.paths
             copy_artifact(final.path, paths.parent_output)
@@ -1085,6 +1162,27 @@ class ExperimentPipeline:
         return summaries
 
     # ---- internals ----
+
+    def _record_attempt_failure(self, *, epoch_id: str, fold_id: str, run_id: str, exc: Exception) -> None:
+        """Append a permanent ``attempt_failed`` ledger record when a run throws
+        before its success record, so recovery can distinguish a failed attempt
+        from a never-started one and the error evidence survives. Best-effort:
+        a failing append must never mask the original exception."""
+        try:
+            self.ledger.append(
+                {
+                    "record_type": "attempt_failed",
+                    "experiment_id": self.config.experiment_id,
+                    "epoch_id": epoch_id,
+                    "fold_id": fold_id,
+                    "run_id": run_id,
+                    "error_type": type(exc).__name__,
+                    "error": sanitize_for_log(str(exc))[:2000],
+                    "trace": sanitize_for_log("".join(traceback.format_exception(exc)))[-4000:],
+                }
+            )
+        except Exception:  # noqa: BLE001 - audit write only; the run error propagates
+            pass
 
     def _accept_or_fallback(
         self,

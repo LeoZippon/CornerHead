@@ -244,6 +244,8 @@ def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, o
         # Legacy experiment: synthesize session rows from ledger records only.
         for record in records:
             kind = str(record.get("record_type"))
+            if kind not in ("fold", "meta_learning", "heldout"):
+                continue  # attempt_failed etc. are audit evidence, not sessions
             entry: dict[str, object] = {
                 "key": f"{record.get('epoch_id')}/{record.get('fold_id')}",
                 "kind": kind,

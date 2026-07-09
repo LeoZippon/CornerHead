@@ -436,11 +436,10 @@ Agent 主对话、Runner context compact 和 NL 工具调用都只能经宿主 `
 
 **Provider 调用记录**
 
-- `experiment_id`、`fold_id`、`run_id`、`conversation_id`、`call_id`。
-- 调用来源：Agent 主会话、NL 工具、元学习或其他受控入口。
-- 输入 messages / prompt。
-- 原始 provider 响应。
-- 模型、超时、耗时、token 或费用统计（如可用）。
+- provider conversation log 按天+进程分文件（`<dir>/deepseek/<model>/<YYYYMMDD>-p<pid>.jsonl`）：并行 HITL worker 各写各的文件，无跨进程交错风险；进程内调用串行。
+- 每次逻辑调用生成 `call_id`：完整（脱敏后）payload 只随首次 attempt 的 `started` 记录保存一次，重试与终止记录经 `call_id` + `request_hash` 关联，不重复嵌入历史。
+- 终止记录附原始 provider 响应、`response_hash`/`response_id`、usage、错误与重试信息；模型、超时、耗时齐备。
+- run/fold/conversation 级归属由 `agent_trace.jsonl` 的 `llm_call` 事件与 `nl_tool/` 明细承担（见下）；conversation log 是原始请求/响应审计层。
 - 错误、超时和修复策略。
 
 `agent_trace.jsonl` 对主对话记录 `llm_call`，对 context compact 记录 `context_compaction`。每条 `llm_call` 只记录本轮首次出现的消息增量（`new_messages`）与 `message_count`，不再每轮重复嵌入整段历史；把各轮 `new_messages` 与该轮 `content`/`tool_calls` 顺序拼接即可还原完整对话，trace 体积随对话线性增长而非二次膨胀，完整 prompt 仍由 provider conversation log 承担。compact trace 至少包含 provider、model、触发 token 估算、调用次数、压缩前后消息数、summary hash、usage、状态和错误摘要。
@@ -459,7 +458,7 @@ Agent 主对话、Runner context compact 和 NL 工具调用都只能经宿主 `
 6. 若 `main` 在决策时调用 `ctx.nl()`，通过宿主控制的 JSONL 文件 RPC 请求 NL 服务（宿主在等待 `main` 返回时同时服务 NL 请求）。
 7. 收集本 tick `main` 发出的 Broker 原语调用，宿主 Broker 按延迟进入订单簿，逐 bar 撮合并强制约束。
 8. 按 tick 推进直到回放区间末日强制清仓。
-9. 写结果（`detailed_return.json`、`orders.parquet`）、Broker 事件、NL 工具日志、策略/model hash 和 manifest 摘要。
+9. 写结果（`detailed_return.json`、`orders.parquet`、`positions_eod.parquet`——Broker 逐日 (date, account, ts_code, side) 日终持仓快照）、Broker 事件、NL 工具日志、策略/model hash 和 manifest 摘要。
 
 临时 Python 回测、Shell 中的手工脚本和 notebook 只能作为探索，不构成正式 valid/test/held-out 结果。正式结果只能由 `backtest` 写入。
 
@@ -649,8 +648,11 @@ QMT 订单参数口径：
 | `order_id` | `m_strOrderSysID` | sim 中也对应 `user_order_id` / 投资备注 `m_strRemark` 关联键 |
 | `op_type` | passorder `opType` | 官方操作码 |
 | `order_volume` | `m_nVolumeTotalOriginal` | 原始委托数量 |
-| `status` | `m_nOrderStatus` | 委托状态 |
-| `price` | `m_dTradedPrice` / `m_dLimitPrice` | 成交价或限价 |
+| `status` | `m_nOrderStatus` | 委托状态；撤单保留为 `status="cancelled"` 的 ORDER 记录（`reject_reason` 携带撤单原因），与 live 按 status 过滤 ORDER 的口径一致 |
+| `price` | `m_dTradedPrice` | 最终成交价 |
+| `limit_price` | `m_dLimitPrice` | 原始指定价（限价单）；市价单为空 |
+| `submitted_at` | `m_strInsertTime` 口径 | 提交时间，挂单跨 bar 保留；`decision_time` 是成交/拒单 bar |
+| `fee` / `stamp_duty` | 佣金+过户费 / 印花税 | 逐单成本拆分（组合级累计仍在 `fees_paid`/`stamp_duty_paid`） |
 | 持仓 `quantity` | `m_nVolume` | 当前持仓数量 |
 | `sellable_quantity` | `m_nCanUseVolume` | 可卖 / 可平数量 |
 | `entry_price` | `m_dOpenPrice` | 开仓均价 |
@@ -805,7 +807,7 @@ substep 的声明预算 `B` 同时定义三件事：
 
 **逐窗口归因（Barra-lite，全部回放模式）**
 
-每次回放（`valid` 与 `frozen_eval`/held-out 一样）结束后，宿主计算基准/风格归因并写入该结果窗口的 `style_analysis.json`；test/held-out 回放发生在 Agent 会话结束后，因此 Agent 实际只会读到验证期归因。窗口链完成时（Fold 的 test 评估后、held-out 各期后），Pipeline 把逐窗口 sidecar 聚合为 `results/style_<prefix>.json`（回归在拼接日序列上重跑、暴露按天数加权合并），控制台**只读**这些落盘文件，不做任何归因计算。实现位于 `autotrade/environment/style_analysis.py`。输入缺失时对应块降级为 None，绝不使回测失败。
+每次回放（`valid` 与 `frozen_eval`/held-out 一样）结束后，宿主计算基准/风格归因并写入该结果窗口的 `style_analysis.json`；test/held-out 回放发生在 Agent 会话结束后，因此 Agent 实际只会读到验证期归因。持仓输入取 Broker 落盘的日终持仓快照（`positions_eod.parquet`，逐 (date, account, ts_code, side)）——强平、送股和跨账户多空对冲腿全部如实反映，不再从成交单重建。窗口链完成时（Fold 的 test 评估后、held-out 各期后），Pipeline 把逐窗口 sidecar 聚合为 `results/style_<prefix>.json`（回归在拼接日序列上重跑、暴露按天数加权合并），控制台**只读**这些落盘文件，不做任何归因计算；CLI 报告（`report_experiment.py`）的基准同样取账本记录中回放时冻结的 benchmark 块，不读可变 raw。实现位于 `autotrade/environment/style_analysis.py`。输入缺失时对应块降级为 None，绝不使回测失败。
 
 输入口径（全部为冻结运行数据，不触及可被源端回写的 raw 数据湖，保证事后重读与 Agent 当时所见一致）：
 

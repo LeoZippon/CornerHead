@@ -1626,11 +1626,32 @@ def audit_integrated_filesystem(raw_dir: Path, datasets: list[str], add) -> None
         meta_files.extend(ds_meta)
         tmp_files.extend(ds_tmp)
         per_dataset[dataset] = {"parquet_files": len(ds_parquet), "meta_files": len(ds_meta), "tmp_files": len(ds_tmp)}
-    parquet_meta = {str(path.with_suffix(path.suffix + ".meta.json")) for path in parquet_files}
+    parquet_meta_paths = {str(path.with_suffix(path.suffix + ".meta.json")) for path in parquet_files}
     meta_set = {str(path) for path in meta_files}
-    missing_meta = sorted(parquet_meta - meta_set)
-    orphan_meta = sorted(meta_set - parquet_meta)
-    add("error" if missing_dirs or missing_meta or orphan_meta or tmp_files else "info", "integrated_filesystem", "base research parquet sidecar inventory", {
+    missing_meta = sorted(parquet_meta_paths - meta_set)
+    orphan_meta = sorted(meta_set - parquet_meta_paths)
+    # Content-hash spot check: a sidecar carrying parquet_sha256 must match the
+    # parquet bytes (a torn write_parquet pair surfaces here). Sidecars written
+    # before the field existed are counted as legacy, not failed; the newest
+    # pairs per dataset are verified so fresh writes are always covered.
+    hash_mismatches: list[str] = []
+    hashes_checked = 0
+    legacy_meta_without_hash = 0
+    verifiable: list[tuple[float, Path, str]] = []
+    for path in parquet_files:
+        expected_sha = str(parquet_meta(path).get("parquet_sha256") or "")
+        if not expected_sha:
+            legacy_meta_without_hash += 1
+            continue
+        try:
+            verifiable.append((path.stat().st_mtime, path, expected_sha))
+        except OSError:
+            continue
+    for _mtime, path, expected_sha in sorted(verifiable, reverse=True)[:5]:
+        hashes_checked += 1
+        if file_sha256(path) != expected_sha:
+            hash_mismatches.append(str(path))
+    add("error" if missing_dirs or missing_meta or orphan_meta or tmp_files or hash_mismatches else "info", "integrated_filesystem", "base research parquet sidecar inventory", {
         "datasets": datasets,
         "per_dataset": per_dataset,
         "parquet_files": len(parquet_files),
@@ -1641,6 +1662,9 @@ def audit_integrated_filesystem(raw_dir: Path, datasets: list[str], add) -> None
         "missing_dataset_dirs": missing_dirs,
         "missing_meta_sample": missing_meta[:10],
         "orphan_meta_sample": orphan_meta[:10],
+        "parquet_sha256_checked": hashes_checked,
+        "parquet_sha256_mismatches": hash_mismatches[:10],
+        "legacy_meta_without_parquet_sha256": legacy_meta_without_hash,
     })
 
 def audit_fundamental_completeness(raw_dir: Path, args: argparse.Namespace, add) -> None:

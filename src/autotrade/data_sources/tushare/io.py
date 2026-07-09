@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -10,6 +11,14 @@ from typing import Any
 
 import pandas as pd
 import pyarrow.parquet as pq
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def write_parquet(
@@ -21,23 +30,35 @@ def write_parquet(
     fields: list[str],
     source_hash: str,
 ) -> None:
+    """Write the parquet and its sidecar as a verifiable pair.
+
+    ``parquet_sha256`` is computed over the staged parquet bytes before either
+    file is published, and both writes go through tmp + ``os.replace``, so a
+    crash between them leaves at worst a hash-mismatched pair that the data
+    audit detects — never a silently wrong (new parquet, old sidecar) combo.
+    ``source_hash`` stays the API-response content hash; it does not prove the
+    on-disk bytes, which is exactly what ``parquet_sha256`` adds."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     df.to_parquet(tmp, index=False)
-    os.replace(tmp, path)
     meta = {
         "api_name": api_name,
         "params": params,
         "fields": fields,
         "row_count": int(len(df)),
         "source_hash": source_hash,
+        "parquet_sha256": file_sha256(tmp),
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "format": "parquet",
     }
-    path.with_suffix(path.suffix + ".meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True),
+    os.replace(tmp, path)
+    meta_path = path.with_suffix(path.suffix + ".meta.json")
+    meta_tmp = meta_path.with_suffix(meta_path.suffix + ".tmp")
+    meta_tmp.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False),
         encoding="utf-8",
     )
+    os.replace(meta_tmp, meta_path)
 
 
 def parquet_meta(path: Path) -> dict[str, Any]:

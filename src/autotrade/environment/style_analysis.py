@@ -6,6 +6,9 @@ the revision ledger; recomputing later from raw could disagree with what the
 Agent actually saw):
 
 - strategy daily returns: the window's own ``equity_curve``;
+- holdings: the Broker's persisted end-of-day position snapshots (per
+  date/account/ts_code/side — forced closes, bonus shares and hedged
+  long/short legs are all reflected, unlike a fills-only reconstruction);
 - cross-sectional style ranks: the replay slot's ``daily.parquet``;
 - CSI 300 benchmark: ``index_daily`` rows inside the replay slot's
   ``macro.parquet``;
@@ -35,11 +38,6 @@ BENCHMARK_TS_CODE = "000300.SH"
 BENCHMARK_LABEL = "沪深300"
 TRADING_DAYS_PER_YEAR = 244
 _MIN_REGRESSION_DAYS = 8
-# Signed direction of each broker action for position reconstruction.
-_ACTION_SIGN = {
-    "buy": 1, "cover": 1, "fin_buy": 1, "credit_buy": 1,
-    "sell": -1, "short": -1, "credit_sell": -1, "sell_repay": -1,
-}
 _STYLE_COLUMNS = ("circ_mv", "pb", "turnover_rate")
 
 
@@ -130,36 +128,24 @@ def _benchmark_regression(strategy: list[tuple[str, float]], bench: Mapping[str,
     return result
 
 
-def _positions_from_fills(
-    fills_by_date: Mapping[str, list[Mapping[str, object]]], window_dates: list[str]
-) -> dict[str, dict[str, float]]:
-    """date -> {ts_code: signed shares held at EOD}, carried forward across
-    every replayed trading day (holdings between trades still count)."""
-    holdings: dict[str, float] = {}
-    positions_by_date: dict[str, dict[str, float]] = {}
-    for date in window_dates:
-        for row in fills_by_date.get(date, []):
-            sign = _ACTION_SIGN.get(str(row.get("action")))
-            if sign is None:
-                continue
-            code = str(row.get("ts_code"))
-            holdings[code] = holdings.get(code, 0.0) + sign * float(row.get("filled_quantity") or 0.0)
-            if abs(holdings[code]) < 1e-9:
-                holdings.pop(code, None)
-        if holdings:
-            positions_by_date[date] = dict(holdings)
-    return positions_by_date
-
-
-def _group_fills(order_records: list[Mapping[str, object]]) -> dict[str, list[Mapping[str, object]]]:
-    filled = [
-        row for row in order_records
-        if str(row.get("status")) == "filled" and float(row.get("filled_quantity") or 0.0) > 0
-    ]
-    filled.sort(key=lambda row: (str(row.get("trade_date")), str(row.get("decision_time"))))
-    by_date: dict[str, list[Mapping[str, object]]] = {}
-    for row in filled:
-        by_date.setdefault(str(row.get("trade_date")), []).append(row)
+def _positions_from_eod(
+    position_records: list[Mapping[str, object]], window_dates: list[str]
+) -> dict[str, list[tuple[str, float]]]:
+    """date -> [(ts_code, signed EOD shares)] from the Broker's persisted daily
+    position snapshots. A hedged name (stock-account long + credit-account
+    short) contributes both legs, so long/short gross stay truthful while the
+    signed weights net naturally in the tilt sums."""
+    wanted = set(window_dates)
+    by_date: dict[str, list[tuple[str, float]]] = {}
+    for row in position_records:
+        date = str(row.get("date"))
+        if date not in wanted:
+            continue
+        quantity = float(row.get("quantity") or 0.0)
+        if quantity <= 0:
+            continue
+        signed = quantity if str(row.get("side")) == "long" else -quantity
+        by_date.setdefault(date, []).append((str(row.get("ts_code")), signed))
     return by_date
 
 
@@ -195,7 +181,7 @@ def _style_block(
 
 
 def _style_exposures(
-    positions_by_date: dict[str, dict[str, float]],
+    positions_by_date: dict[str, list[tuple[str, float]]],
     basics_by_date: Mapping[str, dict[str, tuple[float, float, float, float]]],
     industry_by_code: Mapping[str, str],
 ) -> tuple[dict[str, object], dict[str, object]]:
@@ -208,7 +194,7 @@ def _style_exposures(
     for date, holdings in sorted(positions_by_date.items()):
         basics = basics_by_date.get(date, {})
         valued = []
-        for code, quantity in holdings.items():
+        for code, quantity in holdings:
             info = basics.get(code)
             if info is None:
                 continue
@@ -294,13 +280,16 @@ def _compact(regression: Mapping[str, object], style: Mapping[str, object], tota
 # ---------------------------------------------------------------------------
 def replay_style_analysis(
     replay_daily,
-    order_records: list[Mapping[str, object]],
+    position_records: list[Mapping[str, object]],
     stats: Mapping[str, object],
     *,
     replay_dir: Path,
     snapshot_dir: Path,
 ) -> dict[str, object]:
-    """Attribution for one just-finished replay, from frozen run inputs only."""
+    """Attribution for one just-finished replay, from frozen run inputs only.
+
+    ``position_records`` are the Broker's end-of-day position snapshots
+    (``SimBroker.positions_eod_records``)."""
     curve = stats.get("equity_curve")
     strategy = (
         daily_returns_from_curve(curve, float(stats.get("initial_cash") or 0.0))
@@ -318,7 +307,7 @@ def replay_style_analysis(
             for date, group in replay_daily.groupby("trade_date")
             if str(date) in set(window_dates)
         }
-        positions = _positions_from_fills(_group_fills(order_records), window_dates)
+        positions = _positions_from_eod(position_records, window_dates)
         style, style_rollup = _style_exposures(positions, by_date, _snapshot_industry(snapshot_dir))
 
     payload = {

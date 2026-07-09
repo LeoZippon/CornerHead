@@ -34,12 +34,13 @@ def _replay_daily() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _orders() -> list[dict[str, object]]:
+def _positions_eod() -> list[dict[str, object]]:
+    # Broker end-of-day snapshots: the long carried across both days.
     return [
-        {"status": "filled", "filled_quantity": 100, "action": "buy",
-         "ts_code": "000001.SZ", "trade_date": D1, "decision_time": "2022-01-04T09:31:00"},
-        {"status": "rejected", "filled_quantity": 0, "action": "buy",
-         "ts_code": "000004.SZ", "trade_date": D1, "decision_time": "2022-01-04T09:32:00"},
+        {"date": D1, "account": "stock", "ts_code": "000001.SZ", "side": "long",
+         "quantity": 100, "last_price": 10.0, "market_value": 1000.0},
+        {"date": D2, "account": "stock", "ts_code": "000001.SZ", "side": "long",
+         "quantity": 100, "last_price": 10.0, "market_value": 1000.0},
     ]
 
 
@@ -75,7 +76,7 @@ class ReplayStyleAnalysisTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             replay_dir, snapshot_dir = _write_slot(Path(tmp), with_benchmark=True, with_industry=True)
             payload = replay_style_analysis(
-                _replay_daily(), _orders(), _stats(), replay_dir=replay_dir, snapshot_dir=snapshot_dir
+                _replay_daily(), _positions_eod(), _stats(), replay_dir=replay_dir, snapshot_dir=snapshot_dir
             )
         regression = payload["benchmark_regression"]
         self.assertEqual(regression["n_days"], 2)
@@ -96,7 +97,7 @@ class ReplayStyleAnalysisTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             replay_dir, snapshot_dir = _write_slot(Path(tmp), with_benchmark=False, with_industry=False)
             payload = replay_style_analysis(
-                _replay_daily(), _orders(), _stats(), replay_dir=replay_dir, snapshot_dir=snapshot_dir
+                _replay_daily(), _positions_eod(), _stats(), replay_dir=replay_dir, snapshot_dir=snapshot_dir
             )
         self.assertEqual(payload["benchmark_regression"]["n_days"], 0)
         self.assertIsNone(payload["compact"]["excess_return"])
@@ -105,7 +106,7 @@ class ReplayStyleAnalysisTest(unittest.TestCase):
         bare = pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": [D1], "close": [10.0]})
         with tempfile.TemporaryDirectory() as tmp:
             replay_dir, snapshot_dir = _write_slot(Path(tmp), with_benchmark=False, with_industry=False)
-            payload = replay_style_analysis(bare, _orders(), _stats(), replay_dir=replay_dir, snapshot_dir=snapshot_dir)
+            payload = replay_style_analysis(bare, _positions_eod(), _stats(), replay_dir=replay_dir, snapshot_dir=snapshot_dir)
         self.assertEqual(payload["style"]["days"], 0)
         self.assertIsNone(payload["style"]["tilts"])
 

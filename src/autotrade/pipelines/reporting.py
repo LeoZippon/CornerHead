@@ -18,7 +18,6 @@ import math
 from pathlib import Path
 
 import matplotlib
-import pandas as pd
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -37,19 +36,12 @@ LEGACY_REPORT_FILES = ("fold_returns.png", "cumulative_test_return.png", "summar
 DEFAULT_BENCHMARK_CODE = "000300.SH"
 DEFAULT_BENCHMARK_LABEL = "CSI 300"
 
-# Benchmark sub-statuses that are NOT a warning: a fully-covered benchmark ("ok")
-# and an intentional --no-benchmark ("disabled"). Any other status means the
-# benchmark data is missing, which the report must flag (docs/pipeline_design.md §4.2).
-_BENCHMARK_OK_STATUSES = {"ok", "disabled"}
 
-
-def build_experiment_report(
-    ledger_path: str | Path,
-    output_dir: str | Path,
-    *,
-    benchmark_code: str | None = DEFAULT_BENCHMARK_CODE,
-    benchmark_raw_dir: str | Path | None = None,
-) -> dict[str, object]:
+def build_experiment_report(ledger_path: str | Path, output_dir: str | Path) -> dict[str, object]:
+    """Charts + summary from the ledger only. Benchmark returns come from each
+    record's frozen ``benchmark`` block (computed at replay time from slot
+    data), so the report never reads the mutable raw lake and always matches
+    what the Agent and the console saw."""
     ledger = ExperimentLedger(ledger_path)
     folds = ledger.read("fold")
     heldout = ledger.read("heldout")
@@ -60,11 +52,7 @@ def build_experiment_report(
 
     rows = [_fold_row(record) for record in folds]
     rows += [_heldout_row(record) for record in heldout]
-    benchmark_info = _attach_benchmark_returns(
-        rows,
-        benchmark_code=benchmark_code,
-        raw_dir=Path(benchmark_raw_dir) if benchmark_raw_dir is not None else _infer_raw_dir(Path(ledger_path)),
-    )
+    benchmark_info = _benchmark_summary(rows)
 
     _remove_legacy_report_files(output_dir)
     epoch_files = _plot_epoch_returns(rows, output_dir / "epoch_returns")
@@ -72,9 +60,9 @@ def build_experiment_report(
     _plot_epoch_comparison(rows, epoch_comparison)
     summary = _summarize(rows)
     summary["benchmark"] = benchmark_info
-    # Flag the whole report when benchmark data is missing (raw dir / data / period
-    # coverage) so downstream gates can react; "ok"/"disabled" are not warnings.
-    summary["status"] = "ok" if str(benchmark_info.get("status")) in _BENCHMARK_OK_STATUSES else "warning"
+    # Flag the whole report when frozen benchmark blocks are missing for scored
+    # periods so downstream gates can react (docs/pipeline_design.md §4.2).
+    summary["status"] = "ok" if str(benchmark_info.get("status")) == "ok" else "warning"
     summary["epoch_return_charts"] = [str(path) for path in epoch_files]
     summary["epoch_comparison_chart"] = str(epoch_comparison)
     return summary
@@ -83,6 +71,8 @@ def build_experiment_report(
 def _fold_row(record: dict[str, object]) -> dict[str, object]:
     validation = record.get("validation_result") or {}
     test = record.get("test_result") or {}
+    benchmark_return, benchmark_label = _frozen_benchmark(test)
+    test_return = _num(test.get("total_return"))
     return {
         "epoch_id": str(record.get("epoch_id", "")),
         "label": str(record.get("fold_id", "")).replace("fold_", ""),
@@ -91,7 +81,7 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
         "valid_return": _num(validation.get("total_return")),
         "valid_sharpe": _num(validation.get("sharpe")),
         "valid_drawdown": _num(validation.get("max_drawdown")),
-        "test_return": _num(test.get("total_return")),
+        "test_return": test_return,
         "long_return": _num(test.get("long_return")),
         "short_return": _num(test.get("short_return")),
         "test_sharpe": _num(test.get("sharpe")),
@@ -102,13 +92,20 @@ def _fold_row(record: dict[str, object]) -> dict[str, object]:
         "finish_reason": record.get("finish_reason"),
         "period_start": _period_part(record.get("test_period"), "start"),
         "period_end": _period_part(record.get("test_period"), "end"),
-        "benchmark_return": None,
-        "active_return": None,
+        "benchmark_return": benchmark_return,
+        "benchmark_label": benchmark_label,
+        "active_return": (
+            test_return - benchmark_return
+            if test_return is not None and benchmark_return is not None
+            else None
+        ),
     }
 
 
 def _heldout_row(record: dict[str, object]) -> dict[str, object]:
     test = record.get("test_result") or {}
+    benchmark_return, benchmark_label = _frozen_benchmark(test)
+    test_return = _num(test.get("total_return"))
     return {
         "epoch_id": str(record.get("epoch_id", "")),
         "label": str(record.get("fold_id", "")).replace("heldout_", "HO "),
@@ -117,7 +114,7 @@ def _heldout_row(record: dict[str, object]) -> dict[str, object]:
         "valid_return": None,
         "valid_sharpe": None,
         "valid_drawdown": None,
-        "test_return": _num(test.get("total_return")),
+        "test_return": test_return,
         "long_return": _num(test.get("long_return")),
         "short_return": _num(test.get("short_return")),
         "test_sharpe": _num(test.get("sharpe")),
@@ -128,8 +125,13 @@ def _heldout_row(record: dict[str, object]) -> dict[str, object]:
         "finish_reason": "heldout",
         "period_start": _period_part(record.get("period"), "start"),
         "period_end": _period_part(record.get("period"), "end"),
-        "benchmark_return": None,
-        "active_return": None,
+        "benchmark_return": benchmark_return,
+        "benchmark_label": benchmark_label,
+        "active_return": (
+            test_return - benchmark_return
+            if test_return is not None and benchmark_return is not None
+            else None
+        ),
     }
 
 
@@ -143,107 +145,33 @@ def _period_part(value: object, key: str) -> str | None:
     return None
 
 
-def _attach_benchmark_returns(
-    rows: list[dict[str, object]],
-    *,
-    benchmark_code: str | None,
-    raw_dir: Path | None,
-) -> dict[str, object]:
-    if not benchmark_code:
-        return {"enabled": False, "code": None, "label": None, "status": "disabled"}
-    label = DEFAULT_BENCHMARK_LABEL if benchmark_code == DEFAULT_BENCHMARK_CODE else benchmark_code
-    for row in rows:
-        row["benchmark_label"] = label
-    if raw_dir is None:
-        return {"enabled": True, "code": benchmark_code, "label": label, "status": "missing_raw_dir"}
-    frame = _load_benchmark_frame(raw_dir, benchmark_code)
-    if frame is None or frame.empty:
-        return {
-            "enabled": True,
-            "code": benchmark_code,
-            "label": label,
-            "status": "missing_data",
-            "raw_dir": str(raw_dir),
-        }
-    covered = 0
-    for row in rows:
-        bench = _benchmark_period_return(frame, row.get("period_start"), row.get("period_end"))
-        row["benchmark_return"] = bench
-        test_return = _num(row.get("test_return"))
-        row["active_return"] = test_return - bench if test_return is not None and bench is not None else None
-        covered += int(bench is not None)
+def _frozen_benchmark(test: dict[str, object]) -> tuple[float | None, str | None]:
+    """(benchmark_return, label) from a record's frozen ``benchmark`` block."""
+    block = test.get("benchmark")
+    if not isinstance(block, dict):
+        return None, None
+    label = block.get("label")
+    return _num(block.get("benchmark_return")), (str(label) if label else None)
+
+
+def _benchmark_summary(rows: list[dict[str, object]]) -> dict[str, object]:
+    """Coverage of the frozen benchmark blocks across scored periods."""
+    scored = [row for row in rows if row.get("test_return") is not None]
+    covered = sum(1 for row in scored if row.get("benchmark_return") is not None)
+    if covered == len(scored) and scored:
+        status = "ok"
+    elif covered:
+        status = "partial_coverage"
+    else:
+        status = "missing_frozen_benchmark"
     return {
-        "enabled": True,
-        "code": benchmark_code,
-        "label": label,
-        "status": "ok" if covered else "no_period_coverage",
-        "raw_dir": str(raw_dir),
+        "source": "ledger_frozen_style",
+        "code": DEFAULT_BENCHMARK_CODE,
+        "label": _benchmark_label(rows),
+        "status": status,
         "covered_periods": covered,
-        "total_periods": len(rows),
+        "total_periods": len(scored),
     }
-
-
-def _infer_raw_dir(ledger_path: Path) -> Path | None:
-    candidates: list[Path] = []
-    if ledger_path.is_absolute():
-        candidates.extend(parent / "data" / "raw" for parent in ledger_path.parents)
-    candidates.append(Path("data/raw"))
-    for path in candidates:
-        if path.exists():
-            return path
-    return None
-
-
-def _load_benchmark_frame(raw_dir: Path, code: str) -> pd.DataFrame | None:
-    roots = [
-        raw_dir / "index_daily" / f"ts_code={code}",
-        raw_dir / "index_daily",
-        raw_dir / "index_global" / f"ts_code={code}",
-    ]
-    frames: list[pd.DataFrame] = []
-    for root in roots:
-        if root.is_file() and root.suffix == ".parquet":
-            files = [root]
-        elif root.is_dir():
-            files = sorted(root.glob("*.parquet"))
-        else:
-            continue
-        for file in files:
-            try:
-                frame = pd.read_parquet(file)
-            except Exception:
-                continue
-            if "ts_code" in frame.columns:
-                frame = frame[frame["ts_code"].astype(str) == code]
-            if frame.empty:
-                continue
-            needed = [col for col in ("trade_date", "open", "close") if col in frame.columns]
-            if "trade_date" not in needed or "close" not in needed:
-                continue
-            frames.append(frame[needed].copy())
-    if not frames:
-        return None
-    out = pd.concat(frames, ignore_index=True)
-    out["trade_date"] = out["trade_date"].astype(str)
-    out = out.drop_duplicates(subset=["trade_date"]).sort_values("trade_date").reset_index(drop=True)
-    return out
-
-
-def _benchmark_period_return(frame: pd.DataFrame, start: object, end: object) -> float | None:
-    if not start or not end:
-        return None
-    rows = frame[(frame["trade_date"] >= str(start)) & (frame["trade_date"] <= str(end))].sort_values("trade_date")
-    if rows.empty:
-        return None
-    first = rows.iloc[0]
-    last = rows.iloc[-1]
-    entry = _num(first.get("open")) if "open" in rows.columns else None
-    if entry is None or entry <= 0:
-        entry = _num(first.get("close"))
-    exit_price = _num(last.get("close"))
-    if entry is None or exit_price is None or entry <= 0:
-        return None
-    return exit_price / entry - 1.0
 
 
 def _remove_legacy_report_files(output_dir: Path) -> None:
@@ -428,9 +356,11 @@ def _benchmark_by_label(rows: list[dict[str, object]]) -> dict[str, float | None
 
 
 def _benchmark_label(rows: list[dict[str, object]]) -> str:
+    """Chart label. Non-ASCII frozen labels (沪深300) map to the English default
+    so headless-host fonts render them (module docstring)."""
     for row in rows:
         label = row.get("benchmark_label")
-        if label:
+        if label and str(label).isascii():
             return str(label)
     return DEFAULT_BENCHMARK_LABEL
 
