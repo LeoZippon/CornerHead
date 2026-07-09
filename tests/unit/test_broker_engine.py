@@ -7,6 +7,7 @@ import pandas as pd
 
 from autotrade.environment.backtest_engine import (
     BacktestError,
+    ReplayResult,
     compute_return_stats,
     hide_snapshot_slots_from_agent,
 )
@@ -1074,6 +1075,115 @@ class FillRealismTest(unittest.TestCase):
         self.assertEqual(SimBroker.validate_share_amount(99, "830799.BJ"), (0, "amount_below_lot_size"))
         # Non-BSE boards keep the 100-multiple rule.
         self.assertEqual(SimBroker.validate_share_amount(150, "000001.SZ"), (0, "amount_not_lot_aligned"))
+
+    def test_close_auction_limit_clears_at_single_price(self):
+        # The close call auction matches every order at ONE price: a buy limit
+        # below the auction price must not fill retroactively against the bar's
+        # intraday low, which predates the order by hours.
+        broker = self.make_broker()
+        broker.passorder(
+            optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.5, 1000,
+            is_auction=True, auction_close=True,
+        )
+        broker.match_bar("20220104", "15:00", self.bar_group(10.0, 10.4, 9.0, 10.3))
+        self.assertEqual(broker.position_quantity("000001.SZ"), 0)
+        self.assertEqual(len(broker.working_orders()), 1)  # rests; the day-end sweep voids it
+        # A marketable close-auction limit clears at the auction price, not the limit.
+        broker.passorder(
+            optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 10.5, 1000,
+            is_auction=True, auction_close=True,
+        )
+        broker.match_bar("20220104", "15:00", self.bar_group(10.0, 10.4, 9.0, 10.3))
+        fill = next(e for e in broker.events if e["event_type"] == "order_filled")
+        self.assertAlmostEqual(fill["price"], 10.3)
+
+    def test_synthetic_fallback_bar_has_no_range_trade_through(self):
+        # A synthetic daily-fallback bar's high/low span the whole session, so a
+        # resting limit order must not fill against prices that predate it; the
+        # same shape on a real bar still fills by strict trade-through.
+        broker = self.make_broker()
+        broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.5, 1000)
+        broker.match_bar("20220104", "15:00", self.bar_group(10.3, 10.4, 9.0, 10.3).assign(synthetic=True))
+        self.assertEqual(broker.position_quantity("000001.SZ"), 0)
+        broker.match_bar("20220104", "15:00", self.bar_group(10.3, 10.4, 9.0, 10.3))
+        self.assertEqual(broker.position_quantity("000001.SZ"), 1000)
+
+    def test_match_bar_marks_positions_at_open_for_admission_and_close_after(self):
+        # Two-phase re-marking: margin admission values existing holdings at THIS
+        # bar's open (a gapped-down collateral cannot back new credit exposure at
+        # yesterday's close), and the post-bar view uses this bar's close.
+        crash = make_daily(
+            [
+                ("20220104", "000001.SZ", 10.0, 10.0, 11.0, 9.0, False),
+                ("20220104", "000002.SZ", 20.0, 20.0, 22.0, 18.0, False),
+                ("20220105", "000001.SZ", 10.0, 10.0, 11.0, 9.0, False),
+                ("20220105", "000002.SZ", 6.0, 6.5, 22.0, 5.0, False),
+            ]
+        )
+        broker = SimBroker(
+            BrokerProfile(credit_initial_cash=25_000.0),
+            MarketData(crash),
+            shortable_codes=frozenset({"000001.SZ", "000002.SZ"}),
+        )
+        broker.execute("000002.SZ", "credit_buy", trade_date="20220104", raw_price=20.0, amount=1000)
+        broker.roll_to_date("20220105")
+        broker.passorder(optype.FIN_BUY, 1101, "", "000001.SZ", prtype.FIX, 10.0, 1000)
+        group = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "open": 10.0, "high": 10.1, "low": 9.9, "close": 10.0},
+                {"ts_code": "000002.SZ", "open": 6.0, "high": 6.6, "low": 5.9, "close": 6.5},
+            ]
+        )
+        broker.match_bar("20220105", "09:31", group)
+        # At yesterday's 20.0 collateral mark the bail balance (~19k) would admit the
+        # ~10k fin_buy; at this bar's 6.0 open (~9.2k) it must reject.
+        self.assertEqual(broker.orders[-1].reject_reason, "insufficient_bail_balance")
+        # Post-match marks use the bar close: the agent-visible account reflects 6.5.
+        self.assertAlmostEqual(broker.credit.positions["000002.SZ"].last_price, 6.5)
+
+
+class ReturnStatsTest(unittest.TestCase):
+    def test_day0_baseline_counts_first_day_loss(self):
+        # 1,000,000 initial -> 700,000 -> 1,010,000: total return ~+1%, and the
+        # -30% first day / initial-equity peak must enter drawdown and Sharpe
+        # instead of being dropped by the first pct_change.
+        broker = SimBroker(BrokerProfile(), MarketData(REPLAY), shortable_codes=frozenset())
+        result = ReplayResult(
+            equity_curve=pd.Series({"20220104": 700_000.0, "20220105": 1_010_000.0}),
+            broker=broker, decision_date="20220104", exit_date="20220105",
+        )
+        stats = compute_return_stats(result)
+        self.assertAlmostEqual(stats["total_return"], 0.01)
+        self.assertAlmostEqual(stats["max_drawdown"], 0.30)
+        self.assertNotEqual(stats["sharpe"], 0.0)
+        self.assertTrue(stats["liquidation_complete"])
+        self.assertEqual(stats["unliquidated_positions"], [])
+        self.assertEqual(stats["remaining_liabilities"], 0.0)
+
+    def test_exit_day_leftovers_reported_as_incomplete_liquidation(self):
+        suspended_exit = make_daily(
+            [
+                ("20220104", "000001.SZ", 10.0, 10.0, 11.0, 9.0, False),
+                ("20220105", "000001.SZ", 10.0, 10.0, 11.0, 9.0, True),
+            ]
+        )
+        broker = SimBroker(BrokerProfile(), MarketData(suspended_exit), shortable_codes=frozenset())
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.mark_to_market("20220104")
+        broker.roll_to_date("20220105")
+        broker.mark_to_market("20220105")
+        broker.close_all("20220105")
+        result = ReplayResult(
+            equity_curve=pd.Series({"20220104": broker.equity(), "20220105": broker.equity()}),
+            broker=broker, decision_date="20220104", exit_date="20220105",
+        )
+        stats = compute_return_stats(result)
+        self.assertFalse(stats["liquidation_complete"])
+        (leftover,) = stats["unliquidated_positions"]
+        self.assertEqual(leftover["ts_code"], "000001.SZ")
+        self.assertEqual(leftover["account"], "stock")
+        self.assertEqual(leftover["quantity"], 1000)
+        self.assertEqual(leftover["blocked_reason"], "suspended")
 
 
 # After-hours-eligible replay: main-board dates on/after the 2026-07-06 rule

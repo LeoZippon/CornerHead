@@ -90,7 +90,14 @@ def build_raw(raw: Path) -> None:
     )
     write(
         raw / "namechange" / "namechange.parquet",
-        pd.DataFrame([{"ts_code": "000001.SZ", "name": "平安银行", "start_date": "20120801", "end_date": "", "ann_date": "20120730", "change_reason": "改名"}]),
+        pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "name": "平安银行", "start_date": "20120801", "end_date": "", "ann_date": "20120730", "change_reason": "改名"},
+                {"ts_code": "000005.SZ", "name": "世纪星源", "start_date": "19901210", "end_date": "", "ann_date": "19901210", "change_reason": "上市"},
+                # Renamed AFTER the decision day: the as-of universe must keep 世纪星源.
+                {"ts_code": "000005.SZ", "name": "ST星源", "start_date": "20230601", "end_date": "", "ann_date": "20230525", "change_reason": "ST"},
+            ]
+        ),
     )
 
 
@@ -168,7 +175,12 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertIn("000005.SZ", codes)  # delisted 2024 -> alive at the 2021 decision
             self.assertNotIn("000003.SZ", codes)  # delisted 2002 -> excluded
             named = universe.set_index("ts_code")
-            self.assertEqual(named.loc["000001.SZ", "name_asof"], "平安银行")
+            self.assertEqual(named.loc["000001.SZ", "name"], "平安银行")
+            # PIT name: the 2023 rename must not leak into a 2021 decision snapshot.
+            self.assertEqual(named.loc["000005.SZ", "name"], "世纪星源")
+            # Future information is masked: survivors' delistings are all post-decision.
+            self.assertNotIn("delist_date", universe.columns)
+            self.assertNotIn("name_asof", universe.columns)
 
             self.assertEqual(manifest["kind"], "decision_input")
             verify_snapshot_hash(out)

@@ -59,7 +59,8 @@ def _build_one(
     context: dict[str, object] = {"ts_code": code, "sources": []}
     if code in universe.index:
         row = universe.loc[code]
-        context["name"] = str(row.get("name_asof", row.get("name", "")))
+        name = row.get("name")
+        context["name"] = "" if name is None or pd.isna(name) else str(name)
         context["exchange"] = str(row.get("exchange", ""))
         if pd.notna(row.get("l1_name", None)):
             context["industry_l1"] = str(row.get("l1_name"))

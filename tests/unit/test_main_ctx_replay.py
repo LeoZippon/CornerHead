@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from autotrade.environment.backtest_engine import BacktestError, compute_return_stats
+from autotrade.environment.backtest_engine import BacktestError, MinuteMarketData, compute_return_stats
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.executor import LocalExecutor
-from autotrade.environment.main_ctx_engine import MainPolicyRunner, run_main_ctx_replay
+from autotrade.environment.main_ctx_engine import MainPolicyRunner, _day_tick_plan, run_main_ctx_replay
 from autotrade.environment.sandbox import LocalSandbox
 
 
@@ -1513,6 +1513,27 @@ def main(ctx):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DayTickPlanTest(unittest.TestCase):
+    def test_0925_view_excludes_codes_without_opening_print(self) -> None:
+        # A code whose first bar of the day arrives mid-session (intraday
+        # resumption, late first trade) has no matched open: exposing its later
+        # first price at the 09:25 auction tick would be look-ahead.
+        minutes = pd.DataFrame(
+            [
+                {"trade_date": "20220104", "ts_code": "000001.SZ", "trade_time": "09:30", "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0},
+                {"trade_date": "20220104", "ts_code": "000001.SZ", "trade_time": "10:00", "open": 10.2, "high": 10.3, "low": 10.1, "close": 10.2},
+                {"trade_date": "20220104", "ts_code": "000009.SZ", "trade_time": "10:00", "open": 50.0, "high": 50.0, "low": 50.0, "close": 50.0},
+            ]
+        )
+        rows = MinuteMarketData(minutes).rows_for_date("20220104")
+        plan = _day_tick_plan(rows, True, "09:15", "09:25", 2)
+        tick = next(t for t in plan if t.minute_key == "09:25")
+        self.assertEqual(set(tick.group["ts_code"]), {"000001.SZ"})
+        # The opening code exposes exactly its 09:30 print (collapsed to the open).
+        row = tick.group.iloc[0]
+        self.assertEqual((row["open"], row["high"], row["low"], row["close"]), (10.0, 10.0, 10.0, 10.0))
 
 
 class DecisionGridTest(unittest.TestCase):

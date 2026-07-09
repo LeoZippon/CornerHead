@@ -73,7 +73,7 @@ def make_snapshot_dir(out_dir: Path, *, decision_date: str, kind: str) -> dict[s
     pd.DataFrame(
         [{"trade_date": decision_date, "ts_code": TS_CODE, "open": 10.0, "close": 10.5, "vol": 100000.0, "amount": 1050000.0}]
     ).to_parquet(out_dir / "daily.parquet", index=False)
-    pd.DataFrame([{"ts_code": TS_CODE, "name": "平安银行", "name_asof": "平安银行", "exchange": "SZSE"}]).to_parquet(
+    pd.DataFrame([{"ts_code": TS_CODE, "name": "平安银行", "exchange": "SZSE"}]).to_parquet(
         out_dir / "universe.parquet", index=False
     )
     pd.DataFrame([{"dataset": "margin_secs", "trade_date": decision_date, "ts_code": TS_CODE}]).to_parquet(

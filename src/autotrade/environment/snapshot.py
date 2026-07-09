@@ -735,7 +735,11 @@ class SnapshotBuilder:
         """Stocks listed as of the decision day (delistings after it included).
 
         Building from the current L partition alone would drop names delisted
-        later than the decision day and inject survivorship bias.
+        later than the decision day and inject survivorship bias. Point-in-time
+        columns: ``name`` is the name in force at the decision day (from
+        namechange — the current stock_basic name may be a future rename), and
+        ``delist_date`` is dropped after filtering — every survivor's delisting
+        is after the decision day, i.e. future information.
         """
         day = decision_time.strftime("%Y%m%d")
         frames = []
@@ -746,7 +750,7 @@ class SnapshotBuilder:
         if not frames:
             raise FileNotFoundError(f"missing stock_basic partitions under {self.raw_dir / 'stock_basic'}")
         basic = pd.concat(frames, ignore_index=True)
-        keep = [col for col in ("ts_code", "name", "exchange", "list_date", "delist_date", "market") if col in basic.columns]
+        keep = [col for col in ("ts_code", "exchange", "list_date", "delist_date", "market") if col in basic.columns]
         universe = basic[keep].copy()
         universe["ts_code"] = universe["ts_code"].astype(str)
         universe = universe.drop_duplicates("ts_code", keep="first")
@@ -755,10 +759,8 @@ class SnapshotBuilder:
         if "delist_date" in universe.columns:
             delist = universe["delist_date"].fillna("").astype(str)
             universe = universe[(delist == "") | (delist == "None") | (delist > day)]
-        name_asof = self._names_as_of(decision_time)
-        if not name_asof.empty:
-            universe = universe.merge(name_asof, on="ts_code", how="left")
-            universe["name_asof"] = universe["name_asof"].fillna(universe.get("name"))
+            universe = universe.drop(columns=["delist_date"])
+        universe = universe.merge(self._names_as_of(decision_time), on="ts_code", how="left")
         if config.include_industry:
             industry = self._industry_membership(decision_time.strftime("%Y%m%d"))
             if not industry.empty:
@@ -766,16 +768,22 @@ class SnapshotBuilder:
         return universe.reset_index(drop=True)
 
     def _names_as_of(self, decision_time: datetime) -> pd.DataFrame:
+        """``ts_code -> name`` in force at the decision day (announced by then).
+
+        The namechange dataset carries every code's listing name, so a null
+        merge result is a genuine data gap, not a normal case; the current
+        stock_basic name is never used as a fallback — it may be a rename the
+        market had not seen at the decision day."""
         path = self.raw_dir / "namechange" / "namechange.parquet"
         if not path.exists():
-            return pd.DataFrame()
+            raise FileNotFoundError(f"namechange dataset required for as-of universe names: {path}")
         names = pd.read_parquet(path)
         day = decision_time.strftime("%Y%m%d")
         if "ann_date" in names.columns:
             names = names[names["ann_date"].astype(str).str.strip().le(day) | names["ann_date"].isna()]
         names = names[names["start_date"].astype(str) <= day]
         names = names.sort_values("start_date").drop_duplicates("ts_code", keep="last")
-        return names[["ts_code", "name"]].rename(columns={"name": "name_asof"})
+        return names[["ts_code", "name"]]
 
     def _industry_membership(self, decision_day: str) -> pd.DataFrame:
         """As-of SW level-1 membership: in_date <= decision day < out_date."""

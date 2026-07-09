@@ -840,7 +840,15 @@ class SimBroker:
 
         Fillable orders settle via :meth:`execute` (still subject to cash, T+1, lot,
         price-limit, suspension and short-inventory rejects); unfilled orders rest
-        until filled, explicitly cancelled, or swept at day end."""
+        until filled, explicitly cancelled, or swept at day end.
+
+        Held positions are re-marked to this bar in two phases: the bar OPEN before
+        matching, so cash/margin admission values existing holdings at the bar the
+        order reaches (not the previous session's close), and the bar CLOSE after
+        matching, so the agent-visible account state reflects the completed bar.
+        Interest accrual and the forced-close check keep their own end-of-day
+        schedule in :meth:`mark_to_market`."""
+        self._mark_positions_to_bars(minute_group, at_open=True)
         survivors: list[WorkingOrder] = []
         for order in self._book:
             bar = _bar_for_code(minute_group, order.ts_code)
@@ -891,6 +899,20 @@ class SimBroker:
             else:
                 survivors.append(order)
         self._book = survivors
+        self._mark_positions_to_bars(minute_group, at_open=False)
+
+    def _mark_positions_to_bars(self, minute_group: pd.DataFrame, *, at_open: bool) -> None:
+        """Re-mark held positions to the current bar (open or close phase)."""
+        if minute_group.empty:
+            return
+        for state in self.accounts.values():
+            for pos in state.positions.values():
+                bar = _bar_for_code(minute_group, pos.ts_code)
+                if bar is None:
+                    continue
+                price = _open_price(bar) if at_open else _close_price(bar)
+                if price is not None:
+                    pos.last_price = price
 
     def position_quantity(self, ts_code: str, account: str | None = None) -> int:
         """Signed share count (long positive, short negative, flat zero); the
@@ -1394,6 +1416,11 @@ class SimBroker:
     def equity(self) -> float:
         """Combined net assets across the stock and credit accounts."""
         return self.account_equity("stock") + self.account_equity("credit")
+
+    def outstanding_liabilities(self) -> float:
+        """Open credit-account liabilities at current marks: 融资 principal plus
+        accrued unpaid interest plus the marked 融券 share liability."""
+        return self._fin_amount_outstanding() + self._interest_outstanding() + self._slo_mv_outstanding()
 
     def maintenance_ratio(self) -> float | None:
         """维持担保比例 over CREDIT-ACCOUNT assets only (the stock account is not
@@ -2091,6 +2118,11 @@ def _close_price(bar: pd.Series) -> float | None:
     return None
 
 
+def _is_synthetic_bar(bar: pd.Series) -> bool:
+    flag = bar.get("synthetic")
+    return flag is not None and pd.notna(flag) and bool(flag)
+
+
 def _limit_fill_price(order: WorkingOrder, bar: pd.Series, *, use_close: bool = False) -> float | None:
     """Fill price for a working order against this bar, or None if not fillable now.
 
@@ -2101,18 +2133,29 @@ def _limit_fill_price(order: WorkingOrder, bar: pd.Series, *, use_close: bool = 
     reference price when it is already at or below the limit, otherwise at the limit
     when the bar low goes STRICTLY below it — a bare touch (low == limit) leaves the
     resting order in the unmodelled queue at that price, unfilled. Sell/short orders
-    are symmetric (high strictly above the limit)."""
+    are symmetric (high strictly above the limit).
+
+    Two cases clear at ONE price (the reference) with no range trade-through: a
+    close call auction, which by rule matches every order at the single auction
+    price, and a synthetic daily-fallback bar, whose high/low span the whole
+    session — hours before the order could exist — so filling against them would
+    be retroactive."""
     ref_price = _close_price(bar) if use_close else _open_price(bar)
     if order.price is None or ref_price is None:
         return ref_price
+    single_price = use_close or _is_synthetic_bar(bar)
     limit = order.price
     if order.action in ("buy", "credit_buy", "fin_buy", "cover"):
         if ref_price <= limit:
             return ref_price
+        if single_price:
+            return None
         low = bar.get("low")
         return limit if (low is not None and pd.notna(low) and float(low) < limit) else None
     if ref_price >= limit:
         return ref_price
+    if single_price:
+        return None
     high = bar.get("high")
     return limit if (high is not None and pd.notna(high) and float(high) > limit) else None
 

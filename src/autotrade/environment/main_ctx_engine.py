@@ -788,7 +788,13 @@ def _day_tick_plan(
     for key in _offsession_keys(0, open_min, offsession_tick_minutes):
         plan.append(_Tick(key, _empty_minute_rows(), None, False, False, True))
     if auction_enabled:
-        first = minute_rows.sort_values("minute_sort", kind="stable").drop_duplicates("ts_code", keep="first").copy()
+        # The 09:25 tick may expose only the matched OPENING print, so the per-code
+        # "first bar" is restricted to opening bars (<= 09:31). A code whose first
+        # bar arrives later (intraday resumption, late first trade) has no matched
+        # open: it stays absent from the 09:25 view until its real bar — exposing
+        # its later first price here would be look-ahead.
+        opening = minute_rows[minute_rows["minute_sort"] <= _minute_sort("09:31")]
+        first = opening.sort_values("minute_sort", kind="stable").drop_duplicates("ts_code", keep="first").copy()
         open_group = first.assign(high=first["open"], low=first["open"], close=first["open"])
         for column in ("vol", "amount"):
             if column in open_group.columns:

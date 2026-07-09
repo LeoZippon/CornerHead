@@ -656,7 +656,7 @@ def _candidate_terms(ts_code: str, company_terms: list[str] | None = None) -> li
 def _company_terms(context: dict[str, object], ts_code: str) -> list[str]:
     code = str(ts_code or "").strip()
     terms: list[str] = [code] if code else []
-    for key in ("name", "name_asof", "fullname", "company_name", "short_name"):
+    for key in ("name", "fullname", "company_name", "short_name"):
         value = context.get(key)
         if isinstance(value, str) and value.strip():
             terms.append(value.strip())

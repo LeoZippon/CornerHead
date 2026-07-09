@@ -233,7 +233,13 @@ def _empty_minute_rows() -> pd.DataFrame:
 
 
 def _synthetic_daily_minutes(replay_daily: pd.DataFrame, trade_date: str) -> pd.DataFrame:
-    """Fallback minute bars (09:30 open, 15:00 close) for daily-only dates."""
+    """Fallback minute bars (09:30 open, 15:00 close) for daily-only dates.
+
+    Both bars carry ``synthetic=True``: the 15:00 bar's high/low span the whole
+    session, so the Broker restricts synthetic bars to reference-price fills
+    (no range trade-through — see ``_limit_fill_price``). The day range stays
+    visible at the 15:00 tick, where it is legitimately known.
+    """
     rows = replay_daily[replay_daily["trade_date"].astype(str) == str(trade_date)].copy()
     if rows.empty:
         return _empty_minute_rows()
@@ -255,6 +261,7 @@ def _synthetic_daily_minutes(replay_daily: pd.DataFrame, trade_date: str) -> pd.
     close_rows["low"] = lows
     close_rows["minute_key"] = "15:00"
     frame = pd.concat([open_rows, close_rows], ignore_index=True)
+    frame["synthetic"] = True
     frame["minute_sort"] = frame["minute_key"].map(_minute_sort)
     return frame.sort_values(["minute_sort", "ts_code"], kind="stable").reset_index(drop=True)
 
@@ -307,12 +314,21 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
     curve = result.equity_curve
     initial = broker.initial_equity
     total_return = curve.iloc[-1] / initial - 1.0 if len(curve) else 0.0
-    daily_returns = curve.pct_change().dropna()
+    # Day-0 baseline: daily returns and drawdown are measured against the initial
+    # equity, so the first day's return (initial -> day-1 close) and a peak below
+    # the initial level are never dropped. The persisted equity_curve and the
+    # trade-day count stay end-of-day-based; style_analysis.daily_returns_from_curve
+    # seeds the same baseline for attribution.
+    baselined = pd.concat(
+        [pd.Series([float(initial)]), pd.Series(curve.to_numpy(dtype=float))],
+        ignore_index=True,
+    )
+    daily_returns = baselined.pct_change().dropna()
     sharpe = 0.0
     if len(daily_returns) > 1 and daily_returns.std(ddof=1) > 0:
         sharpe = float(daily_returns.mean() / daily_returns.std(ddof=1) * math.sqrt(TRADING_DAYS_PER_YEAR))
-    peak = curve.cummax()
-    max_drawdown = float(((peak - curve) / peak).max()) if len(curve) else 0.0
+    peak = baselined.cummax()
+    max_drawdown = float(((peak - baselined) / peak).max()) if len(curve) else 0.0
     years = max(len(curve), 1) / TRADING_DAYS_PER_YEAR
     annualized = float((1.0 + total_return) ** (1.0 / years) - 1.0) if total_return > -1.0 else -1.0
     realized = [event for event in broker.events if event["event_type"] in {"position_closed", "position_reduced"}]
@@ -348,6 +364,29 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
     status_counts: dict[str, int] = {}
     for order in orders:
         status_counts[str(order["status"])] = status_counts.get(str(order["status"]), 0) + 1
+    # Exit-date liquidation evidence: the mandatory exit leaves unsellable
+    # inventory (suspension, limit lock, T+1, missing price) in the book. Final
+    # equity already marks it to market; the leftovers are reported explicitly so
+    # an incomplete liquidation is never mistaken for a clean close-out.
+    exit_blocked = {
+        (str(event.get("ts_code")), str(event.get("side"))): str(event["event_type"]).removeprefix("exit_blocked_")
+        for event in broker.events
+        if str(event["event_type"]).startswith("exit_blocked_")
+        and str(event.get("trade_date")) == str(result.exit_date)
+    }
+    unliquidated = [
+        {
+            "account": state.name,
+            "ts_code": pos.ts_code,
+            "side": pos.side,
+            "quantity": pos.quantity,
+            "last_price": pos.last_price,
+            "market_value": pos.market_value,
+            "blocked_reason": exit_blocked.get((pos.ts_code, pos.side)),
+        }
+        for state in broker.accounts.values()
+        for pos in state.positions.values()
+    ]
     margin_secs_reject_count = sum(
         broker.reject_counts.get(reason, 0)
         for reason in ("margin_secs_not_collateral", "margin_secs_not_finable", "margin_secs_not_shortable")
@@ -380,6 +419,9 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "dividend_cash_received": float(broker.dividend_cash_received),
         "dividend_compensation_paid": float(broker.dividend_compensation_paid),
         "forced_close_events": sum(1 for e in broker.events if e["event_type"] == "forced_close_triggered"),
+        "liquidation_complete": not unliquidated,
+        "unliquidated_positions": unliquidated,
+        "remaining_liabilities": float(broker.outstanding_liabilities()),
         "replay_granularity": result.granularity,
         "replay_wall_seconds": result.replay_wall_seconds,
         "replayed_trade_days": result.replayed_trade_days,

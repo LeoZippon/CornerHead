@@ -369,6 +369,11 @@ class BacktestTool:
             "short_return": stats["short_return"],
             "sharpe": stats["sharpe"],
             "max_drawdown": stats["max_drawdown"],
+            # Exit-day liquidation completeness: final equity is mark-to-market
+            # either way; leftovers (suspension/limit-lock/T+1) are itemized in
+            # detailed_return.json's unliquidated_positions.
+            "liquidation_complete": stats["liquidation_complete"],
+            "unliquidated_position_count": len(stats["unliquidated_positions"]),
             "margin_secs_reject_count": stats["margin_secs_reject_count"],
             "max_holdings_reject_count": stats["max_holdings_reject_count"],
             # Descriptive attribution vs 沪深300 (see style_analysis.json) —
