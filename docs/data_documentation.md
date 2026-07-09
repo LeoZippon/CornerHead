@@ -247,7 +247,7 @@ flowchart LR
 | 政策法规库 | `npr` | 按月份 | `pubtime` |
 | 券商研究报告 | `research_report` | 按月份 | 只有日期时不能用于同日开盘 |
 | 盈利预测 | `report_rc` | 按月份 | `create_time` 仅在与 `report_date` 相差 -1~+3 天内可信；否则回退 `report_date 22:00`（官方当日 19:00-22:00 更新） |
-| 新闻快讯 | `news` | 按来源+日期 | `datetime`；**已暴露给 Agent（带闸门）**：仅 `news_sources` 高信噪源子集（默认 cls/wallstreetcn/eastmoney），仅 `news_window_months`（默认 2 个月）滚动窗口，按正文 hash 跨源去重（最早可见副本保留）；盘前 `cn_preopen_text_backfill_0855` 节点当日盘前可见 |
+| 新闻快讯 | `news` | 按来源+日期 | `datetime`；**已暴露给 Agent**：默认全部来源、跟随文本域完整窗口，按正文 hash 跨源去重（最早可见副本保留；实测完整窗口 4.56M 行去重后 2.60M、库文件约 0.4GB、去重率 43%）；`news_sources`/`news_window_months` 旋钮保留用于收紧；盘前 `cn_preopen_text_backfill_0855` 节点当日盘前可见 |
 
 带日期基准的文本时间字段只在接近源日期时才视为发布时间：回填历史里 `rec_time`/`create_time` 常是 TuShare 采集时间（如 2020 年公告带 2025 时间戳），超出 -1~+3 天窗口即按上表回退，规则标记 `conservative_from:<date>:implausible_<time>`。存量分区可用本地命令重写派生列（不调 API）：
 

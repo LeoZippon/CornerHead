@@ -507,8 +507,10 @@ def status_pid_alive(status: Mapping[str, object]) -> bool:
             return False
     except OSError:
         pass
+    # (pid, kernel start ticks) identifies a process incarnation; a status
+    # without a matching recorded start time is dead (or a recycled pid).
     recorded_ticks = status.get("pid_start_ticks")
-    if isinstance(recorded_ticks, int) and proc_start_ticks(pid) != recorded_ticks:
+    if not isinstance(recorded_ticks, int) or proc_start_ticks(pid) != recorded_ticks:
         return False
     return True
 

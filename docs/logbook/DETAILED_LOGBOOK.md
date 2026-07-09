@@ -16749,6 +16749,8 @@ Prompt: visibility table rows updated (board pre-open row added; hot lists/index
 
 Validation: full suite 571 OK (+3 tests: default-exposure drift guard incl. cn_schedule exclusion, news source/window/dedup/fail-fast fixture test [one fixture bug found & fixed: f-string hour "010" produced NaT → PIT-filtered], board pre-open cutoff semantics); refresh-node drift guards 15 OK (node names ↔ real cron jobs); real-data domain builds pass for all additions.
 
+Follow-up same day (user review): (1) news guards relaxed on the maximize-agent-data principle — defaults now ALL sources (`news_sources=()` auto-discovers src= partitions; explicit lists stay fail-fast) and the FULL text window (`news_window_months=None`), keeping only body-hash dedup. Measured at full window/all sources: 4.56M rows → 2.60M after dedup (43% duplicates), ~0.4GB library, 45s scan+dedup — acceptable in testing; knobs retained for tightening. The original 2-month clamp was a live-trading intuition — for research the Agent legitimately needs historical flashes across the whole input window (event studies). (2) Per the new "no historical-experiment compatibility" directive (recorded in memory), `status_pid_alive` now REQUIRES a matching `pid_start_ticks` (statuses without it read dead; the optional-check back-compat branch removed); fixtures updated. Full suite re-run 571 OK; PROMPTS.md re-exported (news row simplified).
+
 ## 2026-07-07 Broker API alignment: remove `valid_bars`
 
 Task: align the Agent-facing broker order API with real QMT semantics. QMT `passorder` does not expose a `valid_bars` / bar-count time-in-force parameter, so stale-order handling should be expressed by strategy logic through `pending()` and `cancel()`, not by a synthetic broker argument.

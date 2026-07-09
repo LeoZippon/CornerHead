@@ -108,7 +108,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 | 当日融券标的 `margin_secs` | 盘前 `cn_preopen_margin_secs_*` 约 09:05/09:15 | **当日**盘前可见 |
 | 上一交易日两融 `margin`/`margin_detail` | 盘前 `cn_preopen_margin_*` 约 09:07/09:17 | 次日盘前可见 |
 | 上一交易日打板数据（kpl_list/limit_step/limit_cpt_list） | 盘前 `cn_preopen_board_backfill` 约 08:55 | 次日盘前可见 |
-| 短讯快电（news 多源，已去重）/新闻联播（cctv_news） | 盘前 `cn_preopen_text_backfill` 约 09:00 | 当日盘前可见（news 仅保留近月滚动窗口） |
+| 短讯快电（news 全源合并、按正文去重）/新闻联播（cctv_news） | 盘前 `cn_preopen_text_backfill` 约 09:00 | 当日盘前可见 |
 
 打板/热榜/游资类字段（events 域 `dataset` 列区分）是**情绪与题材的描述性弱信号**：日终榜单、排名与席位映射存在空值和口径变动，只用于次日及以后的情绪延续判断与复盘，绝不作为成交、可交易性、资金或风控的真相源。指数序列（`macro` 域 `dataset=index_daily`，七只核心宽基）用于市场择时、β 管理与相对强弱基准。
 

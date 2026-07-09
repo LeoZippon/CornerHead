@@ -93,11 +93,13 @@ class SnapshotConfig:
         "us_trycr",
     )
     text_datasets: tuple[str, ...] = ("anns_d", "major_news", "cctv_news", "npr", "research_report", "report_rc", "news")
-    # Newswire guards: ~4k rows/day across 9 sources would swamp the text index
-    # at the full text window. Only the high-signal sources are ingested, over a
-    # shorter rolling window, with cross-source content dedup (earliest wins).
-    news_sources: tuple[str, ...] = ("cls", "wallstreetcn", "eastmoney")
-    news_window_months: int = 2
+    # Newswire knobs. Defaults are deliberately generous (testing phase,
+    # maximize Agent-visible data): every src= partition on disk, the full
+    # text window. Cross-source content dedup always applies — measured 43%
+    # of full-window rows are duplicates (4.56M -> 2.60M, ~0.4GB library).
+    # Tighten via an explicit source tuple and/or a months clamp if needed.
+    news_sources: tuple[str, ...] = ()  # empty = all sources present on disk
+    news_window_months: int | None = None  # None = follow the text window
     fundamental_datasets: tuple[str, ...] = FUNDAMENTAL_EVENT_DATASETS
     include_intraday: bool = True
     include_industry: bool = True
@@ -663,17 +665,23 @@ class SnapshotBuilder:
             if not dataset_dir.exists():
                 raise FileNotFoundError(f"missing configured text dataset: {dataset_dir}")
             if dataset == "news":
-                news_start = max(
-                    window_start, pd.Timestamp(decision_time) - pd.DateOffset(months=config.news_window_months)
-                )
+                news_start = window_start
+                if config.news_window_months is not None:
+                    news_start = max(
+                        window_start, pd.Timestamp(decision_time) - pd.DateOffset(months=config.news_window_months)
+                    )
+                if config.news_sources:
+                    source_dirs = [dataset_dir / f"src={source}" for source in config.news_sources]
+                    for source_dir in source_dirs:
+                        if not source_dir.exists():
+                            raise FileNotFoundError(f"missing configured news source: {source_dir}")
+                else:
+                    source_dirs = sorted(p for p in dataset_dir.glob("src=*") if p.is_dir())
                 source_frames = []
-                for source in config.news_sources:
-                    source_dir = dataset_dir / f"src={source}"
-                    if not source_dir.exists():
-                        raise FileNotFoundError(f"missing configured news source: {source_dir}")
+                for source_dir in source_dirs:
                     source_rows = self._read_dataset_window(source_dir, decision_time, news_start)
                     if not source_rows.empty:
-                        source_frames.append(source_rows.assign(src=source))
+                        source_frames.append(source_rows.assign(src=source_dir.name.split("=", 1)[1]))
                 rows = pd.concat(source_frames, ignore_index=True) if source_frames else pd.DataFrame()
             else:
                 rows = self._read_dataset_window(dataset_dir, decision_time, window_start)

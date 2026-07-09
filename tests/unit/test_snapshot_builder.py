@@ -460,6 +460,19 @@ class SnapshotBuilderTest(unittest.TestCase):
             # Unconfigured source and beyond-window rows never enter.
             self.assertNotIn("不应出现的来源", joined)
             self.assertNotIn("过期快讯", joined)
+            # Default (empty news_sources) discovers every source on disk.
+            all_sources = SnapshotConfig(
+                events_datasets=(), macro_datasets=(), fundamental_datasets=(),
+                text_datasets=("news",), news_window_months=None,
+                intraday_trade_days=1, include_industry=False,
+            )
+            out_all = Path(tmp) / "text_out_all"
+            out_all.mkdir()
+            index_all, _ = builder._build_text(all_sources, DECISION, window_start, out_all)
+            joined_all = "\n".join(pd.read_parquet(out_all / "text_library" / "news.parquet")["body"])
+            self.assertIn("不应出现的来源", joined_all)   # sina now included
+            self.assertIn("过期快讯", joined_all)          # no month clamp
+            self.assertEqual(len(index_all[index_all["dataset"] == "news"]), 5)
             # A configured source with no raw directory fails fast.
             bad = SnapshotConfig(
                 events_datasets=(), macro_datasets=(), fundamental_datasets=(),

@@ -7,6 +7,7 @@
 - 批次四（index_daily 程序化）：新建下载 spec（`date_year_by_ts_code`、`available_at=conservative_date_eod`）+ `DEFAULT_CN_INDEX_CODES` 七只核心宽基（000001/000016/000300/000905/000852/399006/000688）+ `--cn-index-code` CLI + 晚间 cron + schedule.json 接口表；回填 2020–2026 共 49 分区 11,039 行（存量沪深300 基准分区重写补 `available_at`，webui 基准读取兼容验证通过）；暴露进 macro 域。
 - 提示词可见性表同步（打板盘前行、热榜/指数/新闻归行、情绪弱信号定性一段），PROMPTS.md 重导出；文档：data_documentation §1.4/§1.6/§1.7 暴露注记、parameters_reference §1 新旋钮。
 - 验证：full suite 571 OK（+3：默认暴露漂移守卫、news 源过滤/窗口/去重/缺源 fail-fast、打板盘前节点 cutoff）；新 events/macro 域真实数据构建通过（heldout 期 188k 行 events、7 指数 301 行）；refresh-node 漂移守卫 15 OK。
+- 用户复核后放宽 news 闸门（原则：测试阶段最大化 Agent 可见数据）：默认改为**全部来源 + 跟随文本域完整窗口**（`news_sources=()` 自动发现、`news_window_months=None`），仅保留正文 hash 去重——实测完整窗口 4.56M 行去重后 2.60M（去重率 43%）、库 ~0.4GB、扫描+去重 45s，可承受；两旋钮保留供收紧。同轮按"测试阶段不保历史实验兼容"指令收紧 `status_pid_alive`：`pid_start_ticks` 从可选校验改为必需匹配（旧 status 一律判死）。full suite 复跑 571 OK。
 
 2026-07-09 逐 Step Barra-lite 归因进回测闭环（feat/hitl-webui 线）
 

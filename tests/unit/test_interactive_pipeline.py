@@ -540,8 +540,8 @@ class StatusPidTest(unittest.TestCase):
         self.assertIsInstance(ticks, int)
         self.assertTrue(status_pid_alive({"pid": pid, "pid_start_ticks": ticks}))
         self.assertFalse(status_pid_alive({"pid": pid, "pid_start_ticks": ticks - 1}))
-        # Statuses written before the field existed keep the old behavior.
-        self.assertTrue(status_pid_alive({"pid": pid}))
+        # A status without the recorded start time never reads as alive.
+        self.assertFalse(status_pid_alive({"pid": pid}))
 
 
 class ControlFileTest(unittest.TestCase):

@@ -35,8 +35,8 @@
 | `macro_window_months` | None（回退基础） | `macro` 域月窗口 |
 | `text_window_months` | None（回退基础） | `text` 域月窗口 |
 | `intraday_trade_days` | 21 | 决策输入快照的分钟线交易日窗口（回放槽分钟窗口由 Fold 周期决定，与此无关） |
-| `news_sources` | cls / wallstreetcn / eastmoney | `news` 快讯的高信噪源子集（9 源全量约 4k 行/日，只暴露该子集并按正文 hash 跨源去重） |
-| `news_window_months` | 2 | `news` 独立滚动窗口（短于 text 域基础窗口；近月快讯才有决策价值） |
+| `news_sources` | ()（=磁盘上全部来源） | `news` 快讯来源子集；空元组表示自动发现全部 `src=` 分区，显式列表逐源 fail-fast 校验。跨源正文 hash 去重恒开启（完整窗口实测去重率 43%） |
+| `news_window_months` | None（跟随 text 窗口） | `news` 独立滚动窗口钳制；None 表示不额外钳制 |
 
 `universe` 域不使用月窗口，按决策日在市口径生成（`environment_design.md` §1.1）。数据集默认清单（`events_datasets`/`macro_datasets`/`text_datasets`）经 2026-07 raw 覆盖审计扩充：events 增打板/热榜/游资 8 项、macro 增回购利率/美债两曲线/SHIBOR 报价/A 股核心宽基指数 `index_daily` 5 项、text 增 `news`；明细与 PIT 口径见 `data_documentation.md` §1.4/§1.6/§1.7。
 

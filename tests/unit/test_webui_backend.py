@@ -485,10 +485,13 @@ class WebuiBackendTest(unittest.TestCase):
     def test_delete_requires_confirm_and_no_live_worker(self) -> None:
         missing_confirm = self.client.delete("/api/experiments/exp_legacy")
         self.assertEqual(missing_confirm.status_code, 400)
-        # Simulate a live worker on the HITL experiment (our own pid is alive).
+        # Simulate a live worker on the HITL experiment (our own pid is alive;
+        # liveness requires the recorded kernel start ticks to match).
+        from autotrade.pipelines.interactive import proc_start_ticks
+
         write_json_atomic(
             self.experiments_root / "exp_hitl" / "hitl" / "status.json",
-            {"pid": os.getpid(), "state": "running_session"},
+            {"pid": os.getpid(), "pid_start_ticks": proc_start_ticks(os.getpid()), "state": "running_session"},
         )
         alive = self.client.delete("/api/experiments/exp_hitl", params={"confirm": "exp_hitl"})
         self.assertEqual(alive.status_code, 409)
