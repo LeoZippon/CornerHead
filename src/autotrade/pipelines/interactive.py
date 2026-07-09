@@ -169,7 +169,12 @@ def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
     # never share a temp file, or interleaved chunks get os.replace'd into place.
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
+        # allow_nan=False: NaN/inf in a control/ledger file would silently pass
+        # every downstream threshold comparison — fail at the write instead.
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str, allow_nan=False),
+            encoding="utf-8",
+        )
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)

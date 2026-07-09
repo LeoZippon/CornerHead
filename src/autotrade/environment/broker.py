@@ -130,10 +130,29 @@ class BrokerProfile:
     maintenance_source: str = "https://www.gjzq.com.cn/main/a/rzrq/index.html"
 
     def __post_init__(self) -> None:
-        if self.stock_initial_cash < 0 or self.credit_initial_cash < 0:
-            raise ValueError("initial cash must be non-negative")
+        # Range checks fail closed against NaN too: every `NaN <op> x` is False,
+        # so the guards are written as "not (valid range)".
+        for name in ("stock_initial_cash", "credit_initial_cash"):
+            if not (math.isfinite(getattr(self, name)) and getattr(self, name) >= 0):
+                raise ValueError(f"{name} must be a non-negative finite number")
         if self.stock_initial_cash + self.credit_initial_cash <= 0:
             raise ValueError("combined initial cash must be positive")
+        # Fees, rates and slippage must be non-negative: a negative slippage or
+        # fee would improve both buy and sell fills (free alpha from a typo).
+        for name in (
+            "commission_bps", "min_commission_cny", "stamp_duty_sell_bps_before_cutover",
+            "stamp_duty_sell_bps_from_cutover", "transfer_fee_bps", "slippage_bps",
+            "fin_rate_annual", "slo_rate_annual",
+        ):
+            if not (math.isfinite(getattr(self, name)) and getattr(self, name) >= 0):
+                raise ValueError(f"{name} must be a non-negative finite number")
+        for name in ("fin_margin_ratio", "slo_margin_ratio", "slo_margin_ratio_private_fund"):
+            if not (math.isfinite(getattr(self, name)) and getattr(self, name) > 0):
+                raise ValueError(f"{name} must be a positive finite number")
+        for name in ("fin_max_quota", "slo_max_quota"):
+            quota = getattr(self, name)
+            if quota is not None and not (math.isfinite(quota) and quota >= 0):
+                raise ValueError(f"{name} must be a non-negative finite number when set")
         if self.short_inventory_mode not in SHORT_INVENTORY_MODES:
             raise ValueError(f"unsupported short_inventory_mode={self.short_inventory_mode}")
         if self.corporate_actions not in CORPORATE_ACTION_MODES:
@@ -142,10 +161,21 @@ class BrokerProfile:
             raise ValueError("dividend_tax_rate must be in [0, 1)")
         if self.max_total_holdings is not None and self.max_total_holdings <= 0:
             raise ValueError("max_total_holdings must be positive")
-        if self.max_single_name_weight is not None and self.max_single_name_weight <= 0:
-            raise ValueError("max_single_name_weight must be positive")
+        if self.max_single_name_weight is not None and not (
+            math.isfinite(self.max_single_name_weight) and self.max_single_name_weight > 0
+        ):
+            raise ValueError("max_single_name_weight must be a positive finite number")
         if not 0.0 < self.assure_ratio <= 1.0:
             raise ValueError("assure_ratio must be in (0, 1]")
+        if not (
+            math.isfinite(self.maintenance_closeout_ratio)
+            and math.isfinite(self.maintenance_warning_ratio)
+            and math.isfinite(self.maintenance_withdraw_ratio)
+            and 0.0 < self.maintenance_closeout_ratio
+            <= self.maintenance_warning_ratio
+            <= self.maintenance_withdraw_ratio
+        ):
+            raise ValueError("maintenance ratios must be finite and ordered: 0 < closeout <= warning <= withdraw")
 
     @property
     def effective_slo_margin_ratio(self) -> float:
@@ -577,11 +607,12 @@ class SimBroker:
 
     def get_enable_short_contract(self, account_id: str = "") -> list[dict[str, object]]:
         """当日可融券标的 (QMT ``get_enable_short_contract``): the fill-day margin_secs
-        set. Quantities are unknown in proxy mode, so records carry eligibility only."""
-        shortable = self.shortable_by_date.get(self.current_date, self.shortable_codes)
+        set (empty on a per-day data gap — same fail-closed rule the short gate
+        applies). Quantities are unknown in proxy mode, so records carry
+        eligibility only."""
         return [
             {"ts_code": code, "slo_ratio": self.profile.effective_slo_margin_ratio, "slo_status": "normal"}
-            for code in sorted(shortable)
+            for code in sorted(self._fill_day_shortable() or ())
         ]
 
     @staticmethod
@@ -1166,11 +1197,13 @@ class SimBroker:
         if MarketData.limit_up_blocked_at_price(bar, raw_price):
             return self._reject(order, "limit_up_blocked_buy")
         if order.action == "credit_buy":
-            if self._credit_target_reject(order.ts_code):
-                return self._reject(order, "margin_secs_not_collateral")
+            reject = self._credit_target_reject(order.ts_code, "margin_secs_not_collateral")
+            if reject is not None:
+                return self._reject(order, reject)
         if order.action == "fin_buy":
-            if self._credit_target_reject(order.ts_code):
-                return self._reject(order, "margin_secs_not_finable")
+            reject = self._credit_target_reject(order.ts_code, "margin_secs_not_finable")
+            if reject is not None:
+                return self._reject(order, reject)
             return self._fill_fin_open(order, state, raw_price, shares, apply_slippage)
         return self._fill_long_open(order, state, raw_price, shares, apply_slippage)
 
@@ -1642,10 +1675,22 @@ class SimBroker:
         )
         return order
 
+    def _fill_day_shortable(self) -> frozenset[str] | None:
+        """The fill-day 融券标的 set; None = per-day data exists but misses this
+        day — a data gap, fail closed (the real list is published daily, so a
+        stale set would overstate availability). An empty by-date map means the
+        replay slot carries no margin_secs domain at all: the documented
+        degraded mode that keeps the frozen decision-day set."""
+        if not self.shortable_by_date:
+            return self.shortable_codes
+        return self.shortable_by_date.get(self.current_date)
+
     def _short_inventory_reject(self, ts_code: str) -> str | None:
         mode = self.profile.short_inventory_mode
         if mode == "proxy_margin_secs":
-            shortable = self.shortable_by_date.get(self.current_date, self.shortable_codes)
+            shortable = self._fill_day_shortable()
+            if shortable is None:
+                return "margin_secs_data_missing"
             return None if ts_code in shortable else "margin_secs_not_shortable"
         if mode == "broker_inventory":
             # Real CITIC inventory/fee files are not wired yet; without them the
@@ -1960,17 +2005,20 @@ class SimBroker:
             business_vol=int(shares),
         )
 
-    def _credit_target_reject(self, ts_code: str) -> bool:
-        """信用账户标的池近似 gate.
+    def _credit_target_reject(self, ts_code: str, reason: str) -> str | None:
+        """信用账户标的池近似 gate; returns the reject reason or None if eligible.
 
         ``margin_secs`` carries no 担保品/融资/融券 split in the current TuShare
         feed, so credit_buy and fin_buy share the same per-fill-day set as the
-        short-side proxy. ``theoretical_short`` lifts this gate for research runs.
+        short-side proxy (same fail-closed rule on a per-day data gap).
+        ``theoretical_short`` lifts this gate for research runs.
         """
         if self.profile.short_inventory_mode == "theoretical_short":
-            return False
-        eligible = self.shortable_by_date.get(self.current_date, self.shortable_codes)
-        return str(ts_code) not in eligible
+            return None
+        eligible = self._fill_day_shortable()
+        if eligible is None:
+            return "margin_secs_data_missing"
+        return None if str(ts_code) in eligible else reason
 
     def _direct_repay(self, amount: float, *, order_id: str, reason: str = "", submitted_at: str = "") -> str:
         """直接还款: an immediate cash operation (no order book, no bar matching).

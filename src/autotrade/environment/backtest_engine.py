@@ -389,7 +389,12 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
     ]
     margin_secs_reject_count = sum(
         broker.reject_counts.get(reason, 0)
-        for reason in ("margin_secs_not_collateral", "margin_secs_not_finable", "margin_secs_not_shortable")
+        for reason in (
+            "margin_secs_not_collateral",
+            "margin_secs_not_finable",
+            "margin_secs_not_shortable",
+            "margin_secs_data_missing",
+        )
     )
 
     return {

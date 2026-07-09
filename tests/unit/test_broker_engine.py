@@ -1142,6 +1142,22 @@ class FillRealismTest(unittest.TestCase):
         self.assertAlmostEqual(broker.credit.positions["000002.SZ"].last_price, 6.5)
 
 
+class BrokerProfileValidationTest(unittest.TestCase):
+    def test_negative_fees_rates_and_slippage_are_rejected(self):
+        for field_name in ("commission_bps", "slippage_bps", "transfer_fee_bps", "fin_rate_annual"):
+            with self.assertRaisesRegex(ValueError, field_name):
+                BrokerProfile(**{field_name: -1.0})
+
+    def test_nan_numeric_fields_are_rejected(self):
+        for field_name in ("stock_initial_cash", "slippage_bps", "fin_margin_ratio", "maintenance_closeout_ratio"):
+            with self.assertRaises(ValueError):
+                BrokerProfile(**{field_name: float("nan")})
+
+    def test_maintenance_ratio_ordering_is_enforced(self):
+        with self.assertRaisesRegex(ValueError, "maintenance ratios"):
+            BrokerProfile(maintenance_closeout_ratio=1.5, maintenance_warning_ratio=1.4)
+
+
 class ReturnStatsTest(unittest.TestCase):
     def test_day0_baseline_counts_first_day_loss(self):
         # 1,000,000 initial -> 700,000 -> 1,010,000: total return ~+1%, and the
@@ -1432,6 +1448,16 @@ class ReplayIntegrationTest(unittest.TestCase):
             main_policy=FakeMainPolicy(go_short),
         )
         self.assertTrue(denied.broker.reject_counts.get("margin_secs_not_shortable"))
+
+        # A fill day MISSING from present per-day data is a data gap: fail closed
+        # (reject the short) instead of silently reusing a stale eligibility set.
+        gap = run_main_ctx_replay(
+            REPLAY, BrokerProfile(),
+            shortable_codes=frozenset({"000002.SZ"}),
+            shortable_by_date={"20220105": frozenset({"000002.SZ"})},
+            main_policy=FakeMainPolicy(go_short),
+        )
+        self.assertTrue(gap.broker.reject_counts.get("margin_secs_data_missing"))
 
     def test_fin_buy_and_direct_repay_through_replay(self):
         # 融资买入 at the pre-open decision, 直接还款 the next day: the contract shows

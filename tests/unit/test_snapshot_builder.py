@@ -114,6 +114,22 @@ def build_fundamental_events(root: Path) -> None:
 
 def write_fundamental_status(path: Path, *, status: str = "ok", errors: int = 0) -> None:
     path.write_text(json.dumps({"status": status, "errors": errors, "warnings": 0}), encoding="utf-8")
+    write_domain_statuses(path.parent)
+
+
+def write_domain_statuses(quality_dir: Path, **overrides: str) -> None:
+    """The per-domain audit statuses the snapshot gates read (default all ok)."""
+    for domain, filename in (
+        ("daily", "base_research_status.json"),
+        ("intraday_1min", "intraday_minutes_status.json"),
+        ("events", "event_flow_status.json"),
+        ("macro", "macro_context_status.json"),
+        ("text", "text_evidence_status.json"),
+    ):
+        quality_dir.mkdir(parents=True, exist_ok=True)
+        (quality_dir / filename).write_text(
+            json.dumps({"status": overrides.get(domain, "ok"), "datasets": {}}), encoding="utf-8"
+        )
 
 
 CONFIG = SnapshotConfig(
@@ -569,6 +585,40 @@ class SnapshotBuilderTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "status is required"):
                 SnapshotBuilder(raw, events_root).build_decision_snapshot(DECISION, Path(tmp) / "snap", config)
+
+    def test_critical_domain_audit_error_blocks_decision_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            events_root = Path(tmp) / "fund_events"
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            write_fundamental_status(status_path)
+            write_domain_statuses(Path(tmp), daily="error")
+
+            with self.assertRaisesRegex(ValueError, "execution-critical domain 'daily'"):
+                SnapshotBuilder(raw, events_root, status_path).build_decision_snapshot(
+                    DECISION, Path(tmp) / "snap", CONFIG
+                )
+
+    def test_research_domain_audit_error_degrades_to_manifest_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            events_root = Path(tmp) / "fund_events"
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            write_fundamental_status(status_path)
+            write_domain_statuses(Path(tmp), macro="error")
+            (Path(tmp) / "event_flow_status.json").unlink()  # enabled but never audited
+
+            manifest = SnapshotBuilder(raw, events_root, status_path).build_decision_snapshot(
+                DECISION, Path(tmp) / "snap", CONFIG
+            )
+            warnings = manifest["data_quality_warnings"]
+            self.assertIn("audit status is error", warnings["macro"])
+            self.assertIn("status file missing", warnings["events"])
+            self.assertNotIn("text", warnings)
 
     def test_fundamental_event_audit_error_blocks_decision_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:

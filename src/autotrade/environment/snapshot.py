@@ -176,6 +176,9 @@ class SnapshotBuilder:
         self.raw_dir = Path(raw_dir)
         self.fundamental_events_root = Path(fundamental_events_root)
         self.fundamental_events_status = Path(fundamental_events_status) if fundamental_events_status is not None else None
+        # The per-domain audit status files live next to the fundamental one
+        # (results/data_quality/); no status path disables the domain gates too.
+        self.data_quality_dir = self.fundamental_events_status.parent if self.fundamental_events_status is not None else None
         self.contracts = default_tushare_contracts()
         self.store = PITDataStore(self.raw_dir, self.contracts)
 
@@ -194,6 +197,7 @@ class SnapshotBuilder:
         text_window_start = config.window_start_for(decision_time, "text")
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        data_quality_warnings = self._domain_status_gates(config)
         domains: dict[str, dict[str, object]] = {}
         profiles: dict[str, dict[str, object]] = {}
         total_started = time.perf_counter()
@@ -275,6 +279,7 @@ class SnapshotBuilder:
                 "intraday_1min": {"trade_days": config.intraday_trade_days},
             },
             "domains": domains,
+            "data_quality_warnings": data_quality_warnings,
             "build_profile": {
                 "total_seconds": round(time.perf_counter() - total_started, 3),
                 "domains": _profile_timings(profiles),
@@ -285,6 +290,56 @@ class SnapshotBuilder:
         manifest["snapshot_hash"] = _snapshot_hash(output_dir)
         _write_manifest(output_dir, manifest)
         return manifest
+
+    # Enabled-domain data-quality gates over the audit status files. Execution-
+    # critical domains (daily bars, intraday minutes; fundamentals has its own
+    # stricter gate) hard-fail on a missing/unreadable/error status — bad
+    # execution data invalidates every fill. Research domains (events/macro/
+    # text) degrade to a manifest warning: their audits flag source-level
+    # sparsity and calibration artifacts that should not block an experiment.
+    _DOMAIN_STATUS_FILES: tuple[tuple[str, str, bool], ...] = (
+        ("daily", "base_research_status.json", True),
+        ("intraday_1min", "intraday_minutes_status.json", True),
+        ("events", "event_flow_status.json", False),
+        ("macro", "macro_context_status.json", False),
+        ("text", "text_evidence_status.json", False),
+    )
+
+    def _domain_status_gates(self, config: SnapshotConfig) -> dict[str, str]:
+        """Check each enabled domain's audit status; return research-domain warnings."""
+        if self.data_quality_dir is None:
+            return {}
+        enabled = {
+            "daily": True,
+            "intraday_1min": bool(config.include_intraday),
+            "events": bool(config.events_datasets),
+            "macro": bool(config.macro_datasets),
+            "text": bool(config.text_datasets),
+        }
+        warnings: dict[str, str] = {}
+        for domain, filename, critical in self._DOMAIN_STATUS_FILES:
+            if not enabled[domain]:
+                continue
+            path = self.data_quality_dir / filename
+            problem = ""
+            if not path.exists():
+                problem = "status file missing"
+            else:
+                try:
+                    status = str(json.loads(path.read_text(encoding="utf-8")).get("status", "")).lower()
+                except json.JSONDecodeError:
+                    problem = "status file unreadable"
+                else:
+                    if status == "error":
+                        problem = "audit status is error"
+            if not problem:
+                continue
+            if critical:
+                raise ValueError(
+                    f"data-quality gate failed for execution-critical domain {domain!r}: {problem} ({path})"
+                )
+            warnings[domain] = f"{problem} ({filename})"
+        return warnings
 
     def _assert_fundamental_event_status_ok(self) -> None:
         if self.fundamental_events_status is None:

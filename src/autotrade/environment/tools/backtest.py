@@ -318,8 +318,10 @@ class BacktestTool:
             account_type="STOCK", data_type="ORDER"
         ) + replay.broker.get_trade_detail_data(account_type="CREDIT", data_type="ORDER")
         orders_path = self._write_orders(result_dir, order_records)
+        # allow_nan=False: detailed_return.json feeds acceptance and the console;
+        # a NaN metric must fail the replay here, not pass thresholds silently.
         (result_dir / "detailed_return.json").write_text(
-            json.dumps(sanitize_for_log(stats), ensure_ascii=False, indent=2, sort_keys=True, default=str),
+            json.dumps(sanitize_for_log(stats), ensure_ascii=False, indent=2, sort_keys=True, default=str, allow_nan=False),
             encoding="utf-8",
         )
         # Barra-lite attribution, computed once per replay from frozen run

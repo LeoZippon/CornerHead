@@ -399,7 +399,7 @@ TuShare 下载、更新和审计保留少量外层入口，业务实现集中在
 - 修正账本 `revision_events.jsonl` / `revision_summary.json`，见第 4 章。
 - PIT 事件索引状态 `fundamental_events_status.json`，由 `cn_nightly_pit_event_build` 生成，供 Environment snapshot 做财报版本可见性过滤；启用 fundamentals 时该文件缺失或为 error 会阻断 snapshot 构造。Snapshot 读取财务事件时按决策窗口选择 `available_month` 分区，再用 `available_at` 二次过滤，避免短窗口扫描全历史分区。
 
-正式状态文件应由 cron 编排层生成并保持最新。数据门禁以文件内容为准：`status=ok` 或 `warning` 且没有 error finding 时可继续下游流程；`status=error`、文件缺失、无法解析或审计时间明显滞后时应阻断使用并重新下载/审计。
+正式状态文件应由 cron 编排层生成并保持最新。数据门禁由 snapshot 构建按已启用域强制执行（`SnapshotBuilder._domain_status_gates`）：**执行关键域**（daily → `base_research_status.json`、分钟 → `intraday_minutes_status.json`、fundamentals → `fundamental_events_status.json`）的状态文件缺失、无法解析或 `status=error` 直接阻断快照构建；**研究域**（events/macro/text）的同类问题降级为快照 manifest 的 `data_quality_warnings` 记录（研究域审计会标记源端稀疏与校准类 error，不应阻断实验），实验仍可运行但告警随 manifest 留档。
 
 | 状态文件 | 合格条件 | 常见 warning |
 |---|---|---|

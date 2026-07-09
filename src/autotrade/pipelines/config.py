@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 import uuid
 from dataclasses import InitVar, asdict, dataclass, field, is_dataclass
@@ -102,7 +103,7 @@ class CachingSnapshotProvider:
             staging = self._root / f".{parts[0]}_{key}.{uuid.uuid4().hex[:8]}"
             manifest = build(staging / "view")
             (staging / "cache_manifest.json").write_text(
-                json.dumps(manifest, ensure_ascii=False, sort_keys=True, default=str),
+                json.dumps(manifest, ensure_ascii=False, sort_keys=True, default=str, allow_nan=False),
                 encoding="utf-8",
             )
             try:
@@ -122,14 +123,34 @@ class AcceptanceRules:
     max_drawdown: float = 0.25
     require_complete_validation: bool = True
 
+    def __post_init__(self) -> None:
+        for name in ("min_return", "min_sharpe", "max_drawdown"):
+            if not math.isfinite(float(getattr(self, name))):
+                raise ValueError(f"acceptance rule {name} must be finite, got {getattr(self, name)!r}")
+        if not 0.0 <= float(self.max_drawdown) <= 1.0:
+            raise ValueError(f"max_drawdown must be within [0, 1], got {self.max_drawdown!r}")
+
     def evaluate(self, summary: dict[str, object]) -> tuple[bool, list[str]]:
+        """Non-finite metrics are hard rejects: every IEEE comparison against NaN
+        is False, so without this guard a NaN metric would pass all thresholds."""
         reasons: list[str] = []
-        if float(summary.get("total_return", -1.0)) < self.min_return:
-            reasons.append(f"validation return {summary.get('total_return')} < {self.min_return}")
-        if float(summary.get("sharpe", -1.0)) < self.min_sharpe:
-            reasons.append(f"sharpe {summary.get('sharpe')} < {self.min_sharpe}")
-        if float(summary.get("max_drawdown", 1.0)) > self.max_drawdown:
-            reasons.append(f"max drawdown {summary.get('max_drawdown')} > {self.max_drawdown}")
+        total_return = float(summary.get("total_return", -1.0))
+        sharpe = float(summary.get("sharpe", -1.0))
+        max_drawdown = float(summary.get("max_drawdown", 1.0))
+        non_finite = [
+            name
+            for name, value in (("total_return", total_return), ("sharpe", sharpe), ("max_drawdown", max_drawdown))
+            if not math.isfinite(value)
+        ]
+        if non_finite:
+            reasons.append(f"non-finite validation metrics: {non_finite}")
+        else:
+            if total_return < self.min_return:
+                reasons.append(f"validation return {summary.get('total_return')} < {self.min_return}")
+            if sharpe < self.min_sharpe:
+                reasons.append(f"sharpe {summary.get('sharpe')} < {self.min_sharpe}")
+            if max_drawdown > self.max_drawdown:
+                reasons.append(f"max drawdown {summary.get('max_drawdown')} > {self.max_drawdown}")
         if self.require_complete_validation and not summary.get("complete_validation"):
             reasons.append("accepted step requires successful main.py execution and broker replay")
         return (not reasons, reasons)
@@ -323,6 +344,29 @@ class ExperimentConfig:
         object.__setattr__(self, "heldout_last_period", str(heldout_last_period))
         if self.snapshot_config is None:
             object.__setattr__(self, "snapshot_config", SnapshotConfig(window_months=self.window_months))
+        # Budget/limit knobs must be positive finite numbers: CLI/HITL inputs are
+        # coerced with bare float()/int(), so NaN/inf/zero would otherwise flow
+        # silently into deadlines and caps.
+        for name in (
+            "epochs", "window_months", "max_fold_minutes", "per_call_timeout_seconds",
+            "max_steps_per_fold", "max_backtests_per_fold", "execution_lag_bars",
+            "intraday_decision_minutes", "backtest_max_seconds_per_decision",
+            "backtest_max_seconds_per_trading_day", "nl_max_calls_per_decision_day",
+        ):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be a positive finite number, got {getattr(self, name)!r}")
+        for name in ("finalize_before_deadline_seconds", "offsession_tick_minutes", "meta_memory_max_epochs"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be a non-negative finite number, got {getattr(self, name)!r}")
+        for name in (
+            "decision_max_sim_minutes", "backtest_final_eval_max_seconds_per_decision",
+            "backtest_final_eval_max_seconds_per_trading_day", "nl_max_calls_per_backtest",
+        ):
+            optional = getattr(self, name)
+            if optional is not None and (not math.isfinite(float(optional)) or float(optional) <= 0):
+                raise ValueError(f"{name} must be a positive finite number when set, got {optional!r}")
         # Held-out boundaries are frozen in config before the experiment starts.
         assert_no_overlap(str(last_test_period), str(heldout_first_period), period=self.fold_period)
 

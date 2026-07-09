@@ -236,7 +236,7 @@ Pipeline 不为 Step 单独维护账本文件。Shell、LLM、Broker、NL 和回
 | `max_drawdown` | `0.25` |
 | `require_complete_validation` | `true` |
 
-实验 CLI 可用 `--min-return`、`--min-sharpe`、`--max-drawdown` 覆盖收益/风险阈值；`require_complete_validation` 恒为 `true`（冻结候选池只从完整验证回测中选取，不完整验证无法被冻结），流程烟测只放宽收益/风险阈值、不放宽完整验证要求。
+实验 CLI 可用 `--min-return`、`--min-sharpe`、`--max-drawdown` 覆盖收益/风险阈值；`require_complete_validation` 恒为 `true`（冻结候选池只从完整验证回测中选取，不完整验证无法被冻结），流程烟测只放宽收益/风险阈值、不放宽完整验证要求。数值健壮性：非有限指标（NaN/inf）是硬拒绝（IEEE 比较对 NaN 恒 False，无该守卫时 NaN 会绕过全部阈值）；规则自身的阈值在构造时校验有限性与范围，实验级预算/上限旋钮在 `ExperimentConfig` 构造时校验正有限性，正式 JSON 落盘统一 `allow_nan=False`。
 
 **完整验证**
 
