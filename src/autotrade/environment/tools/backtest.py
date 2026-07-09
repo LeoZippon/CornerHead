@@ -558,6 +558,9 @@ class _StrategyNLService:
         # Set per tick by the replay engine; rolls ctx.nl() text on the same nodes as
         # the Timeview. None (Timeview off / no replay) keeps the frozen PIT corpus.
         self.current_when = None
+        # Absolute monotonic deadline of the decision currently being served
+        # (set by MainPolicyRunner). NL provider calls are clamped to it.
+        self.deadline_at: float | None = None
         # Per-ts_code company context is constant for the frozen snapshot, so load the
         # universe/fundamentals parquet once and memoize rather than re-reading both on
         # every nl() call.
@@ -598,6 +601,17 @@ class _StrategyNLService:
                 self._write_result(request, result)
                 return result
             raise BacktestError("strategy called nl() but no LLM proxy is configured")
+        if self.deadline_at is not None and self.deadline_at - time.monotonic() <= 1.0:
+            # The decision's wall cap is already spent: fail the request without
+            # starting a provider round (the runner will kill the decision at
+            # its next deadline check regardless).
+            result = _error_result(
+                ts_code, state="timeout", error="decision wall-clock deadline exhausted before the NL task"
+            )
+            self._write_result(request, result)
+            if self.failure_policy == "fail":
+                raise BacktestError(f"nl() deadline exhausted for {ts_code or 'general'}")
+            return result
         engine = NLSubAgentEngine(
             self.proxy,
             self.retriever,
@@ -606,6 +620,7 @@ class _StrategyNLService:
         config = NLSubAgentConfig(
             per_call_timeout_seconds=self.per_call_timeout_seconds,
             failure_policy=self.failure_policy,
+            deadline_at=self.deadline_at,
         )
         _nl_t0 = time.monotonic()
         result = engine.run(ts_code=ts_code, prompt=prompt, request_kwargs=kwargs, config=config)

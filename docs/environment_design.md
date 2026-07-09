@@ -399,6 +399,10 @@ Sandbox 内的 `nl()` 只写请求并等待响应。宿主 Environment 使用以
 
 NL Sub Agent 的最终回答不限定格式；只有它请求 `text_retrieve` 时使用内部标准工具 schema。`ts_code` 可选：传入时作为单股上下文和检索排序提示，不是硬过滤；不传时按 prompt 在当前可见文本库中做事件、主题、行业、宏观或市场级检索。Sandbox 只收到 result dict，常用字段为 `status`、`scope`、`content`、`tool_calls`、`evidence` 和 `error`。策略若需要数值分、风险标签或交易过滤条件，必须在 Agent 代码中自行解析 `content`。
 
+`text_retrieve` 的 pattern 按 **RE2/grep 语义**执行（DuckDB `regexp_matches`，线性时间——灾难性回溯模式无法占死宿主 CPU）：不支持反向引用与环视，长度上限 256 字符，越界/不支持的模式返回可修复的工具错误。正文扫描经 DuckDB 对 `text_library/` 分片做列裁剪 + LIMIT 的原地查询，多 GB 语料不驻留宿主内存，只缓存返回的 snippet。
+
+NL 与决策墙钟：回放引擎把当前决策的绝对 deadline 传给 NL 服务——每轮 provider 调用的超时钳制到剩余时间（被钳制时禁用重试），deadline 已耗尽的 NL 请求不再发起 provider 调用直接失败。单决策最坏超程 = 一次有界 HTTP 调用的剩余量，而非一个完整多轮 NL 任务。
+
 **NL 结果写入**
 
 ```text

@@ -8,12 +8,20 @@ version = "0.1.0"
 description = "Heuristic Learning trading research framework for AutoTrade."
 requires-python = ">=3.11"
 dependencies = [
+  "duckdb",
   "matplotlib",
   "numpy",
   "pandas",
   "pyarrow",
   "PyYAML",
   "requests",
+]
+
+[project.optional-dependencies]
+# Console/WebUI service deps: `pip install -e '.[webui]'`
+webui = [
+  "fastapi",
+  "uvicorn",
 ]
 
 [tool.setuptools.packages.find]

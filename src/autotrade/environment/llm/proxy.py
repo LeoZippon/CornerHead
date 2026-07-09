@@ -71,12 +71,14 @@ class LLMProxy(abc.ABC):
         tool_choice: str | dict[str, object] = "auto",
         timeout_seconds: float,
         max_tokens: int | None = None,
+        max_retries: int | None = None,
     ) -> ProviderResponse:
         """Run one native function-calling turn.
 
         ``messages`` are OpenAI-shaped (assistant turns may carry ``tool_calls``;
         ``tool`` turns carry ``tool_call_id``). The response may carry
-        ``tool_calls`` with empty ``content``.
+        ``tool_calls`` with empty ``content``. ``max_retries`` overrides the
+        provider's retry count for this call (deadline-clamped callers pass 0).
         """
         raise NotImplementedError("this proxy does not support native tool calling")
 
@@ -162,12 +164,17 @@ class DeepSeekProxy(LLMProxy):
         tool_choice: str | dict[str, object] = "auto",
         timeout_seconds: float,
         max_tokens: int | None = None,
+        max_retries: int | None = None,
     ) -> ProviderResponse:
         if timeout_seconds <= 0:
             raise LLMProxyError("provider calls require a positive timeout")
+        overrides: dict[str, object] = {}
         if abs(self.client.config.timeout_seconds - timeout_seconds) > 1e-9:
-            config = DeepSeekConfig(**{**_config_kwargs(self.client.config), "timeout_seconds": timeout_seconds})
-            client = DeepSeekClient(config)
+            overrides["timeout_seconds"] = timeout_seconds
+        if max_retries is not None and max_retries != self.client.config.max_retries:
+            overrides["max_retries"] = max_retries
+        if overrides:
+            client = DeepSeekClient(DeepSeekConfig(**{**_config_kwargs(self.client.config), **overrides}))
         else:
             client = self.client
         try:
@@ -224,6 +231,7 @@ class ScriptedLLM(LLMProxy):
         tool_choice: str | dict[str, object] = "auto",
         timeout_seconds: float,
         max_tokens: int | None = None,
+        max_retries: int | None = None,
     ) -> ProviderResponse:
         self.calls.append(
             {
@@ -232,6 +240,7 @@ class ScriptedLLM(LLMProxy):
                 "tool_choice": tool_choice,
                 "timeout_seconds": timeout_seconds,
                 "max_tokens": max_tokens,
+                "max_retries": max_retries,
             }
         )
         return self._next()

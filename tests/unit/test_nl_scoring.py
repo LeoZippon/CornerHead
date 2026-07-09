@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -232,7 +233,56 @@ class NLSubAgentEngineTest(unittest.TestCase):
             self.assertEqual(hits[0]["text_id"], "t1")
             hits = retriever.search("正文", ts_code="000001.SZ", max_results=5)
             self.assertEqual(len(hits), 1)
-            self.assertEqual(retriever.search("([bad", ts_code="000001.SZ"), [])
+
+    def test_pattern_outside_re2_contract_is_rejected(self):
+        # Invalid syntax, backreferences and oversize patterns raise a fixable
+        # ValueError (the tool surfaces it as status=error); a valid pattern that
+        # would be catastrophic under backtracking runs fine on RE2.
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, _ = self.make_engine([], Path(tmp))
+            retriever = engine.retriever
+            with self.assertRaisesRegex(ValueError, "RE2"):
+                retriever.search("([bad", ts_code="000001.SZ")
+            with self.assertRaisesRegex(ValueError, "RE2"):
+                retriever.search(r"(公告)\1", ts_code="000001.SZ")
+            with self.assertRaisesRegex(ValueError, "too long"):
+                retriever.search("a" * 300, ts_code="000001.SZ")
+            self.assertEqual(retriever.search("(a+)+$", ts_code="000001.SZ"), [])
+
+    def test_decision_deadline_clamps_provider_timeout_and_disables_retries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, proxy = self.make_engine(["结论中性。"], Path(tmp))
+            config = NLSubAgentConfig(per_call_timeout_seconds=300, deadline_at=time.monotonic() + 5.0)
+            result = engine.run(ts_code="000001.SZ", prompt="p", request_kwargs={}, config=config)
+            self.assertEqual(result.state, "completed")
+            call = proxy.calls[0]
+            self.assertLessEqual(call["timeout_seconds"], 5.0)
+            self.assertEqual(call["max_retries"], 0)  # no retry can fit near the deadline
+
+    def test_exhausted_decision_deadline_fails_before_any_provider_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, proxy = self.make_engine(["unused"], Path(tmp))
+            config = NLSubAgentConfig(
+                per_call_timeout_seconds=300,
+                failure_policy="return_error_with_audit",
+                deadline_at=time.monotonic() - 1.0,
+            )
+            result = engine.run(ts_code="000001.SZ", prompt="p", request_kwargs={}, config=config)
+            self.assertEqual(result.state, "timeout")
+            self.assertIn("deadline", result.error)
+            self.assertEqual(proxy.calls, [])
+
+    def test_unsupported_regex_returns_tool_error_to_subagent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, _ = self.make_engine(
+                [tool_call_response(make_tool_call("text_retrieve", pattern=r"(公告)\1")), "模式修正后保持中性。"],
+                Path(tmp),
+            )
+            result = self.run_agent(engine)
+            self.assertEqual(result.state, "completed")
+            self.assertEqual(result.tool_calls[0]["status"], "error")
+            self.assertIn("RE2", result.tool_calls[0]["error"])
+            self.assertEqual(result.evidence, [])
 
     def test_candidate_related_hits_rank_before_generic_hits(self):
         with tempfile.TemporaryDirectory() as tmp:

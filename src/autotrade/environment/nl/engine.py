@@ -12,10 +12,12 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 
 from autotrade.environment.data.contracts import text_dataset_visible_cutoff
@@ -26,16 +28,18 @@ from autotrade.environment.tools.base import ActionField, ActionSpec, ToolSchema
 
 MAX_TOOL_ROUNDS = 3
 TEXT_RETRIEVE_TOOL = "text_retrieve"
+MAX_PATTERN_CHARS = 256
 
 TEXT_RETRIEVE_SPEC = ActionSpec(
     action=TEXT_RETRIEVE_TOOL,
     tool_name="nl_text_retrieve_tool",
     description=(
         "Retrieve point-in-time text evidence by case-insensitive grep/regex over titles, "
-        "codes, and optional full text bodies."
+        "codes, and optional full text bodies. RE2 semantics: backreferences and "
+        "lookaround are unsupported; patterns are capped at 256 chars."
     ),
     fields=(
-        ActionField("pattern", "string", required=True, description="Case-insensitive grep/regex pattern."),
+        ActionField("pattern", "string", required=True, description="Case-insensitive grep/regex pattern (RE2 semantics)."),
         ActionField(
             "ts_code",
             "string",
@@ -73,11 +77,13 @@ fact.
 
 # Available Tool
 Call the ``text_retrieve`` function tool (native function calling) to fetch text
-evidence. ``pattern`` uses case-insensitive grep/regex semantics over titles,
-codes, and optional full text bodies; prefer company/code/business-context
-patterns for single-stock requests, and broad event/sector/macro patterns for
-general requests. Optional arguments: ``ts_code``, ``max_results`` (1-20),
-``search_bodies``. ``ts_code`` is a context/ranking hint, not a hard filter.
+evidence. ``pattern`` uses case-insensitive grep/regex semantics (RE2 engine:
+backreferences and lookaround are unsupported; max 256 chars — an out-of-contract
+pattern returns a fixable tool error) over titles, codes, and optional full text
+bodies; prefer company/code/business-context patterns for single-stock requests,
+and broad event/sector/macro patterns for general requests. Optional arguments:
+``ts_code``, ``max_results`` (1-20), ``search_bodies``. ``ts_code`` is a
+context/ranking hint, not a hard filter.
 
 # Final Answer
 When you have enough information, answer in any format that is useful to the
@@ -100,6 +106,11 @@ class NLSubAgentConfig:
     # returns an auditable result dict with status=error so Agent code can
     # decide how to handle unavailable text analysis.
     failure_policy: str = "fail"
+    # Absolute monotonic deadline shared with the calling decision: every
+    # provider round's timeout is clamped to the remaining time and retries are
+    # disabled once clamped, so an in-flight NL task cannot stretch a decision
+    # far past its wall cap (worst overrun = one bounded HTTP call).
+    deadline_at: float | None = None
 
     def __post_init__(self) -> None:
         if self.max_tool_rounds < 0:
@@ -144,18 +155,21 @@ class NLSubAgentResult:
 class TextRetriever:
     """Grep-style retrieval over the snapshot text index and as-of text library.
 
-    The NL Sub Agent supplies a regex pattern (case-insensitive grep semantics).
-    Titles/codes are matched first, then full bodies when more results are
-    needed; results rank candidate-related hits before broad background hits,
-    recency second. Bodies live in per-dataset parquet shards under
-    ``text_library/`` and are loaded lazily.
+    The NL Sub Agent supplies a regex pattern (case-insensitive grep semantics,
+    RE2 engine — linear-time matching, so an adversarial or accidental
+    catastrophic-backtracking pattern cannot pin the host CPU; unsupported
+    constructs are rejected with a fixable error). Titles/codes are matched
+    first, then full bodies when more results are needed; results rank
+    candidate-related hits before broad background hits, recency second.
 
-    The frozen research snapshot index/library plus the replay-slot index/library
-    are read together (zero-copy: both library dirs are searched in place, the
-    1.6GB corpus is never merged). ``as_of`` rolls the corpus on the same cron
-    refresh nodes as the agent Timeview: frozen rows are always visible; replay
-    rows appear only once their dataset's node has completed by ``as_of``. ``as_of``
-    None (Timeview off) keeps the frozen-only point-in-time view.
+    Bodies live in per-dataset parquet shards under ``text_library/`` and are
+    scanned in place via DuckDB with column projection and result limits — the
+    multi-GB corpus is never resident in host memory; only the returned
+    snippets are cached. The frozen research snapshot index/library plus the
+    replay-slot index/library are read together. ``as_of`` rolls the corpus on
+    the same cron refresh nodes as the agent Timeview: frozen rows are always
+    visible; replay rows appear only once their dataset's node has completed
+    by ``as_of``. ``as_of`` None (Timeview off) keeps the frozen-only view.
     """
 
     def __init__(
@@ -187,9 +201,8 @@ class TextRetriever:
             if not self.index.empty and "available_at" in self.index.columns
             else pd.Series([], dtype="datetime64[ns, Asia/Shanghai]")
         )
-        self._bodies: dict[str, dict[str, str]] = {}
-        self._body_series: dict[str, pd.Series] = {}
-        self._load_lock = threading.Lock()
+        self._snippets: dict[tuple[str, str], str] = {}
+        self._query_lock = threading.Lock()  # DuckDB default connection is not thread-safe
 
     def _visible_index(self) -> pd.DataFrame:
         """Index rows visible at ``self.as_of``: frozen rows always, replay rows only
@@ -214,15 +227,12 @@ class TextRetriever:
         search_bodies: bool = True,
         company_terms: list[str] | None = None,
     ) -> list[dict[str, object]]:
+        """Raises ValueError for patterns outside the RE2/grep contract."""
         index = self._visible_index()
         if index.empty:
             return []
-        regex = _safe_regex(pattern)
-        titles = index.get("title", pd.Series("", index=index.index)).astype(str)
-        codes = index.get("ts_codes", pd.Series("", index=index.index)).astype(str)
-        pattern_hit = titles.str.contains(regex, case=False, regex=True, na=False) | codes.str.contains(
-            regex, case=False, regex=True, na=False
-        )
+        regex = _validate_pattern(pattern)
+        pattern_hit = self._title_code_match(index, regex)
         own_hit = self._candidate_mask(index, ts_code=ts_code, company_terms=company_terms)
         hits = index[pattern_hit].copy()
         hits["_relevance"] = "background"
@@ -296,44 +306,84 @@ class TextRetriever:
         terms = _candidate_terms(ts_code, company_terms)
         return bool(terms) and any(term.lower() in lowered for term in terms)
 
+    def _shards(self, dataset: str) -> list[str]:
+        return [str(d / f"{dataset}.parquet") for d in self.library_dirs if (d / f"{dataset}.parquet").exists()]
+
+    def _title_code_match(self, index: pd.DataFrame, regex: str) -> pd.Series:
+        """RE2 title/code match over the visible index (boolean mask)."""
+        frame = pd.DataFrame(
+            {
+                "row": index.index,
+                "title": index.get("title", pd.Series("", index=index.index)).astype(str),
+                "ts_codes": index.get("ts_codes", pd.Series("", index=index.index)).astype(str),
+            }
+        )
+        with self._query_lock:
+            con = duckdb.connect()
+            try:
+                con.register("visible_index", frame)
+                rows = con.execute(
+                    "SELECT row FROM visible_index "
+                    "WHERE regexp_matches(title, ?, 'i') OR regexp_matches(ts_codes, ?, 'i')",
+                    [regex, regex],
+                ).fetchall()
+            except duckdb.Error as exc:
+                raise ValueError(f"unsupported regex (RE2/grep semantics): {exc}") from exc
+            finally:
+                con.close()
+        matched = {row[0] for row in rows}
+        return pd.Series([idx in matched for idx in index.index], index=index.index)
+
     def _grep_bodies(self, index: pd.DataFrame, regex: str, *, exclude: set[str], limit: int) -> set[str]:
+        """Linear-time full-body grep with column projection and a result cap;
+        matched snippets are cached so ranking never re-reads the shards."""
         found: set[str] = set()
         datasets = index.get("dataset")
         if datasets is None:
             return found
         for dataset in datasets.astype(str).unique():
-            series = self._body_series_for(dataset)
-            if series is None or series.empty:
+            shards = self._shards(dataset)
+            if not shards:
                 continue
-            matched = series[series.str.contains(regex, case=False, regex=True, na=False)]
-            found.update(tid for tid in matched.index.astype(str) if tid not in exclude)
+            rows = self._body_query(
+                "SELECT text_id, substr(body, 1, ?) FROM read_parquet(?) "
+                "WHERE regexp_matches(body, ?, 'i') LIMIT ?",
+                [self.snippet_chars, shards, regex, limit + len(exclude)],
+            )
+            for text_id, snippet in rows:
+                tid = str(text_id)
+                self._snippets.setdefault((dataset, tid), str(snippet or ""))
+                if tid not in exclude:
+                    found.add(tid)
             if len(found) >= limit:
                 break
         return found
 
-    def _body_series_for(self, dataset: str) -> pd.Series | None:
-        with self._load_lock:
-            if dataset not in self._body_series:
-                # Bodies live in the frozen library and, when rolling, the replay
-                # library; both are read in place (no 1.6GB merge) and combined.
-                shards = [d / f"{dataset}.parquet" for d in self.library_dirs]
-                frames = [pd.read_parquet(s) for s in shards if s.exists()]
-                if not frames:
-                    self._body_series[dataset] = pd.Series(dtype=str)
-                    self._bodies[dataset] = {}
-                else:
-                    frame = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
-                    series = pd.Series(frame["body"].astype(str).values, index=frame["text_id"].astype(str))
-                    series = series[~series.index.duplicated(keep="first")]
-                    self._body_series[dataset] = series
-                    self._bodies[dataset] = series.to_dict()
-            return self._body_series[dataset]
+    def _body_query(self, query: str, params: list[object]) -> list[tuple]:
+        with self._query_lock:
+            try:
+                return duckdb.execute(query, params).fetchall()
+            except duckdb.Error as exc:
+                raise ValueError(f"text_retrieve body query failed (RE2/grep semantics): {exc}") from exc
 
     def _snippet(self, dataset: str, text_id: str) -> str:
         if not dataset or not text_id:
             return ""
-        self._body_series_for(dataset)
-        return self._bodies.get(dataset, {}).get(text_id, "")[: self.snippet_chars]
+        key = (dataset, text_id)
+        cached = self._snippets.get(key)
+        if cached is None:
+            shards = self._shards(dataset)
+            rows = (
+                self._body_query(
+                    "SELECT substr(body, 1, ?) FROM read_parquet(?) WHERE text_id = ? LIMIT 1",
+                    [self.snippet_chars, shards, text_id],
+                )
+                if shards
+                else []
+            )
+            cached = str(rows[0][0]) if rows and rows[0][0] is not None else ""
+            self._snippets[key] = cached
+        return cached
 
 
 class TextRetrieveTool:
@@ -382,13 +432,33 @@ class TextRetrieveTool:
                 },
                 [],
             )
-        evidence = self.retriever.search(
-            pattern,
-            ts_code=ts_code,
-            max_results=max_results,
-            search_bodies=search_bodies,
-            company_terms=company_terms,
-        )
+        try:
+            evidence = self.retriever.search(
+                pattern,
+                ts_code=ts_code,
+                max_results=max_results,
+                search_bodies=search_bodies,
+                company_terms=company_terms,
+            )
+        except ValueError as exc:
+            # Pattern outside the RE2/grep contract: fixable tool error the
+            # sub-agent can retry with a simpler pattern.
+            return (
+                {
+                    "name": TEXT_RETRIEVE_TOOL,
+                    "arguments": {
+                        "pattern": pattern,
+                        "ts_code": ts_code,
+                        "max_results": max_results,
+                        "search_bodies": search_bodies,
+                    },
+                    "status": "error",
+                    "error": str(exc),
+                    "hits": 0,
+                    "result_ids": [],
+                },
+                [],
+            )
         record = {
             "name": TEXT_RETRIEVE_TOOL,
             "arguments": {
@@ -499,6 +569,15 @@ class NLSubAgentEngine:
         purpose: str,
         tool_choice: str = "auto",
     ) -> ProviderResponse:
+        timeout = config.per_call_timeout_seconds
+        deadline_clamped = False
+        if config.deadline_at is not None:
+            remaining = config.deadline_at - time.monotonic()
+            if remaining <= 1.0:
+                raise LLMProxyError("NL task reached the decision wall-clock deadline", timeout=True)
+            if remaining < timeout:
+                timeout = remaining
+                deadline_clamped = True
         detail: dict[str, object] = {
             "task_id": task.task_id,
             "ts_code": task.ts_code,
@@ -513,8 +592,10 @@ class NLSubAgentEngine:
                 messages,
                 tools=[TEXT_RETRIEVE_SCHEMA],
                 tool_choice=tool_choice,
-                timeout_seconds=config.per_call_timeout_seconds,
+                timeout_seconds=timeout,
                 max_tokens=config.max_tokens,
+                # Near the deadline a retry cannot fit: one bounded attempt only.
+                max_retries=0 if deadline_clamped else None,
             )
         except Exception as exc:
             detail.update(status="error", error=sanitize_for_log(str(exc)), completed_at=utc_now_iso())
@@ -626,16 +707,25 @@ def _read_index(path: "str | Path | None") -> pd.DataFrame:
     return pd.read_parquet(candidate) if candidate is not None and candidate.exists() else pd.DataFrame()
 
 
-def _safe_regex(pattern: str) -> str:
-    """Use the pattern as a regex; fall back to a literal match when invalid."""
+def _validate_pattern(pattern: str) -> str:
+    """Gate the sub-agent pattern to the RE2/grep contract before any scan.
+
+    Length is capped and the pattern is compiled by DuckDB's RE2 up front:
+    unsupported constructs (backreferences, lookaround) fail here with a
+    fixable message instead of silently matching nothing or falling back to a
+    backtracking engine."""
     text = str(pattern or "").strip()
     if not text:
-        return r"(?!)"  # match nothing
+        raise ValueError("pattern must be a non-empty grep/regex string")
+    if len(text) > MAX_PATTERN_CHARS:
+        raise ValueError(f"pattern too long (>{MAX_PATTERN_CHARS} chars); use a shorter grep pattern")
     try:
-        re.compile(text)
-        return text
-    except re.error:
-        return re.escape(text)
+        duckdb.execute("SELECT regexp_matches('', ?)", [text]).fetchall()
+    except duckdb.Error as exc:
+        raise ValueError(
+            f"unsupported regex (RE2/grep semantics — no backreferences or lookaround): {exc}"
+        ) from exc
+    return text
 
 
 def _candidate_terms(ts_code: str, company_terms: list[str] | None = None) -> list[str]:

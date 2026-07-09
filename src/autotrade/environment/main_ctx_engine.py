@@ -280,6 +280,13 @@ class MainPolicyRunner:
         # killed immediately and the backtest fails. No inactivity reset: a decision that
         # leans on slow/serial NL is what the cap is meant to catch.
         deadline = time.monotonic() + self.timeout_seconds
+        if self.nl_service is not None:
+            # NL requests served inside this decision share the same absolute
+            # deadline: each provider round's timeout is clamped to the remaining
+            # time (retries disabled once clamped), so an in-flight synchronous
+            # NL task cannot stretch the decision far past its cap — the kill
+            # below only fires between pump iterations.
+            self.nl_service.deadline_at = deadline
         while time.monotonic() < deadline:
             self._pump_nl()
             if proc.poll() is not None:
