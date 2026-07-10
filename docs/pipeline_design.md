@@ -565,7 +565,7 @@ experiments/<experiment_id>/
 
 ### 5.1 交互式 Worker 与会话门控
 
-`scripts/experiments/run_interactive_experiment.py` 是交互式（human-in-the-loop）实验入口：`InteractiveExperimentRunner`（`src/autotrade/pipelines/interactive.py`）按与 `ExperimentPipeline.run()` 相同的顺序驱动 `run_meta_learning` / `run_fold` / `run_heldout`，但在每个会话（元学习、单个 Fold、held-out）开始前经过一次研究者门控。控制面是 `experiments/<id>/hitl/` 下的单写者原子 JSON 文件：
+`scripts/experiments/run_interactive_experiment.py` 是交互式（human-in-the-loop）实验入口：`InteractiveExperimentRunner`（`src/autotrade/pipelines/interactive.py`；控制面文件协议与参数面在 `src/autotrade/pipelines/hitl_state.py`，webui 与 worker 共用）按与 `ExperimentPipeline.run()` 相同的顺序驱动 `run_meta_learning` / `run_fold` / `run_heldout`，但在每个会话（元学习、单个 Fold、held-out）开始前经过一次研究者门控。控制面是 `experiments/<id>/hitl/` 下的单写者原子 JSON 文件：
 
 | 文件 | 写入方 | 内容 |
 |---|---|---|

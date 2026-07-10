@@ -1,3 +1,13 @@
+2026-07-10 架构梳理重构：职责归位与边界拆分（refactor/architecture-cleanup，5 commits）
+
+- 依四路 Opus 子代理逐子系统架构评审（environment 核心 / tushare 数据层 / pipelines+agent / tools+nl+webui）+ 人工裁决后全量实施；核心结论：分层本就干净（无向上引用），问题集中在"职责放错家"与四份手写重复。全程行为保持：每批 full suite 596 OK，PROMPTS.md 导出字节不变。
+- 批次 1 零风险清理（7c32a2a）：删生产死代码（`broker_core.lot_floor/resolve_shares` 连测试、`_int_or_none`、common.py 尾部无效 `__main__`）；runner 复用 compact 的 `_drop_leading_orphan_tools`（原逐字节复制）；`runtime._write_json_atomic` 临时名唯一化（原固定 `.tmp` 有并发交错竞态）；broker.py 补 `Iterable` 导入并去引号（原缺导入使 `get_type_hints` 潜在报错）。
+- 批次 2 归位搬移（f9255bd）：删除 `backtest_engine.py` 杂物间（engine 曾跨模块导它 6 个私有符号）——分钟行情+合成 bar → `replay_market.py`（助手转公开名）、`ReplayResult`+`compute_return_stats` → `replay_stats.py`、`BacktestError`/NL 泵/`_jsonable` 并回 `main_ctx_engine`、`hide_snapshot_slots_from_agent` → `sandbox.py`；NL RPC 服务（`StrategyNLService` ~180 行）从 tools/backtest.py 迁 `nl/service.py`，`TextRetriever` 拆 `nl/retrieval.py`；派生镜像生命周期 ~250 行从 experiment.py 迁 `environment/sandbox_images.py`；fold/meta/heldout 三份 finalize 尾（collect→必记账→再抛，耐久性不变量）收敛为 `_finalize_run(record_builder)`；`build_experiment_facts`+18 个投影助手从 prompts.py 迁 `agent/experiment_facts.py`（prompts 回归纯提示词 ~550 行），顺带发现并单源化 `META_SEARCH_PERSPECTIVES` 双定义；deepseek 会话日志+脱敏簇拆 `llm/conversation_log.py`；driver 不再携带 close op 提示——engine `_resolve_close` 成为 cover/sell_repay/credit_sell/sell 三分支唯一权威（pending 视图同源解析），删除 driver 侧漂移副本。**driver 变更 → 沙箱镜像已重建**。
+- 批次 3 边界拆分（218136a）：新建 `pipelines/hitl_state.py` 承载 HITL 共享词汇（文件名常量、PARAM_DEFAULTS+派生、resolve_options、control/status 文件协议、StatusReporter、会话计划），interactive.py 只剩 worker（1004→550 行）——webui 五个模块此前读一个文件名常量都要连带导入 worker+threading；`write_json_atomic` 单源于 runtime.py；webui/server.py 回归纯路由（520→366 行）：`AnalysisService` 线程任务控制迁 `webui/analysis.py`、75 行 prompt-preview 路由体迁 `webui/prompt_preview.py`（顺带消除对 registry 私有函数的越权访问——`read_ledger_records` 转正）、数据覆盖/交易日钳制迁 registry。
+- 批次 4 数据层收敛（b701d13）：`audit_{text,macro,event,board}_dataset/_keys` 四对手写副本（已发生真实漂移：分页探测排除不均、text 独有空表早退、event 独有 zero_rows_ok）收敛为 `DomainAuditProfile` 参数化的单实现 + 四个薄适配器；**对真实数据湖固定 end-date 前后对拍，四份 status JSON 逐字节一致**（modulo created_at）。有意不做：pit/unit rules 表挂 spec（多处引用、作为数据表内聚，搬移纯属搅动）。
+- 评审明确否决的重构（记录以防反复）：不合并 runner 与 NL engine 两个工具循环；不做跨 fold/meta/heldout 的通用 run 脚手架；不拆 reporting.py/search.py/app.js/driver；broker 撮合引擎拆分仅当撮合模型要长大（部分成交/队列）时再做；driver 侧因 stdlib-only 隔离而复制的常量/写入器保留。
+- 验证：全程五批各自 full suite 596 OK；四域审计实数据对拍一致；`git diff --check` clean；镜像按钉扎 digest 重建成功；pipeline_design/parameters_reference 模块引用同步。
+
 2026-07-09 第五轮审计裁决与全量修复（fix/audit5-remediation，5 commits）
 
 - 对 GPT 第五轮审计（check.md，22 项 P0–P2）先做 5 路并行代码核实（逐项 file:line 证据），再按三原则裁决：16 项采纳（多数缩水实施）、6 项拒绝（#6 盘后北交资格系既定设计、#19 分红 pay_date 系已记档残差、#22 状态 RPC 关不住内存绕过、#12d 部分成交维持实证推迟；三模式拆分/读路径全量哈希/NL 可终止进程以轻量替代覆盖）。

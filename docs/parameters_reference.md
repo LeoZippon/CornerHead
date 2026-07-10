@@ -120,7 +120,7 @@
 | `nl_max_calls_per_backtest` | None | 可选进一步收紧（取 min） |
 | `nl_failure_policy` | `return_error_with_audit` | NL 失败时对策略的返回策略 |
 | NL 单次调用超时（派生） | `0.8 ×` 单决策上限 | 为决策 tick 的其余计算留余量（`tools/backtest.py`）；每轮再钳制到本决策剩余墙钟（被钳制时禁用 provider 重试），deadline 耗尽的 NL 请求直接失败 |
-| NL 检索 pattern 上限（常量） | 256 字符 | `text_retrieve` 模式长度上限；RE2/grep 语义（线性时间，不支持反向引用/环视），越界或不支持返回可修复工具错误（`nl/engine.py`） |
+| NL 检索 pattern 上限（常量） | 256 字符 | `text_retrieve` 模式长度上限；RE2/grep 语义（线性时间，不支持反向引用/环视），越界或不支持返回可修复工具错误（`nl/retrieval.py`） |
 
 有意不设固定回测总上限：总耗时上界 = 交易日数 × 单日上限（`environment_design.md` §3.7）。
 
@@ -252,7 +252,7 @@
 
 ## 9. HITL 交互式运行与控制台
 
-定义：`src/autotrade/pipelines/interactive.py`（`PARAM_DEFAULTS`）、`src/autotrade/pipelines/fold_analysis.py`、`src/autotrade/webui/`；权威文档 `pipeline_design.md` §5。创建参数与 `run_experiment` CLI dest 一一对应，下表只列 HITL 专有旋钮与常量。
+定义：`src/autotrade/pipelines/hitl_state.py`（`PARAM_DEFAULTS` 与控制面文件协议）、`src/autotrade/pipelines/interactive.py`（worker）、`src/autotrade/pipelines/fold_analysis.py`、`src/autotrade/webui/`；权威文档 `pipeline_design.md` §5。创建参数与 `run_experiment` CLI dest 一一对应，下表只列 HITL 专有旋钮与常量。
 
 | 参数 | 默认 | 作用 |
 |---|---:|---|

@@ -16814,3 +16814,24 @@ Key implementation notes beyond the concise log:
 Resource checks: pre-run `free -h` showed ~301Gi available; work was CPU-light (unit tests only, ~100s per full-suite run), no GPU workload.
 
 Validation: full suite grew 572 -> 597 tests, all OK after each batch; `git diff --check` clean per commit; PROMPTS.md re-exported in batches A/B/D/E; living docs updated in the same commits (environment_design §1.4/§3.x/§7, data_documentation §3.1 gates + sidecar contract, pipeline_design §2.2/§4.1/§4.2, deployment_documentation webui extra, parameters_reference §2/§3/§7/§8).
+
+## 2026-07-10 Architecture cleanup: responsibility re-homing and boundary splits
+
+Task: full architecture review of the core code (four parallel Opus subagent sweeps over environment core / tushare data layer / pipelines+agent / tools+nl+webui, rulings by the main agent), then implement every adopted refactor. Branch `refactor/architecture-cleanup` (stacked on fix/audit5-remediation), commits `7c32a2a`, `f9255bd`, `218136a`, `b701d13` + docs/logbook commit. Not pushed.
+
+Review verdict recorded up front: package layering was already clean (zero environment->pipelines/webui imports); the real defects were misplaced responsibilities in four >800-line files, one cross-module private-symbol import web (backtest_engine), one safety-relevant duplicated decision rule (close-op), and four hand-copied domain auditors with real drift.
+
+New modules: environment/replay_market.py, environment/replay_stats.py, environment/sandbox_images.py, nl/service.py, nl/retrieval.py, agent/experiment_facts.py, llm/conversation_log.py, pipelines/hitl_state.py, webui/analysis.py, webui/prompt_preview.py. Deleted: environment/backtest_engine.py.
+
+Key mechanics worth remembering:
+- backtest_engine helpers were renamed public on the move (minute_sort, empty_minute_rows, minute_rows_with_daily_fallback) - the private-import smell was the point of the split.
+- ExperimentPipeline._finalize_run(sandbox, run_id, record_builder, raise_after) now owns the collect -> ALWAYS ledger.append -> re-raise ordering for all three run kinds; record builders are closures receiving (collected, collect_error). Fold deliberately records (not raises) test_eval_error; meta raises collect first then image error via raise_after.
+- maybe_rebuild_sandbox_image returns (result, active_spec); the pipeline swaps self._active_sandbox_spec only on success. The vestigial run_id parameter was dropped.
+- The driver no longer computes close op hints (main_ctx_driver._close_op_type deleted); engine _pending_view resolves close actions through _resolve_close + account_op_for_action. Driver change => sandbox image rebuilt (digest-pinned base + DuckDB sha check verified in the same build).
+- hitl_state split: webui imports only the protocol module; interactive.py keeps the worker. write_json_atomic canonical in runtime.py (unique pid+uuid temp name).
+- Audit consolidation verified by running macro / event-flow / board-trading CLI audits and a text-completeness harness against the real lake with --end-date 20260709 before and after: all four payloads byte-identical modulo created_at (scratch baseline under the session scratchpad audit_baseline/). Net -62 lines in audit.py (less than the ~-330 projected: the per-domain details-key contract had to be preserved verbatim), but the four families now share one implementation so per-domain drift is structurally impossible.
+- Explicitly rejected refactors are listed in LOGBOOK to prevent relitigating: no unified tool loop, no run-scaffold mega-builder, no reporting/search/app.js/driver splits, broker matching split deferred until the fill model grows.
+
+Resource checks: CPU-only test runs (~100 s per full suite); docker image rebuild logged under logs/sandbox_image_rebuild_*.log.
+
+Validation: full suite 596 OK after every batch; PROMPTS.md export byte-identical; git diff --check clean; four-domain audit output parity on real data; sandbox image rebuilt from the digest-pinned base with the SHA-256-verified DuckDB CLI.
