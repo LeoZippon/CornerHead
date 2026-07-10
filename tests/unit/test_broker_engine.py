@@ -1706,13 +1706,6 @@ class BrokerCoreTest(unittest.TestCase):
         cover = self.core.project_reduce(self.cost, side="short", raw_price=9.0, shares=500, trade_date="20220105")
         self.assertLess(cover.cash_delta, 0)  # covering a short pays cash
 
-    def test_lot_floor_and_resolve_shares(self):
-        self.assertEqual(self.core.lot_floor(1099), 1000)
-        self.assertEqual(self.core.lot_floor("abc"), 0)
-        self.assertEqual(self.core.resolve_shares(350), 300)
-        self.assertEqual(self.core.resolve_shares(1099), 1000)
-        self.assertEqual(self.core.resolve_shares(None), 0)
-
     def _contract(self, kind, **kw):
         defaults = dict(
             compact_id=kw.pop("compact_id", "D1"), kind=kind, ts_code="000001.SZ",

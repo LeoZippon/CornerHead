@@ -8,6 +8,7 @@ never replaces these records.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import uuid
@@ -291,13 +292,18 @@ def _default_host_manifest_path(public_path: Path) -> Path:
 
 def _write_json_atomic(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    # allow_nan=False: a NaN in a run manifest is an upstream bug — fail here.
-    tmp.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str, allow_nan=False),
-        encoding="utf-8",
-    )
-    tmp.replace(path)
+    # Unique temp name: concurrent writers must never share a temp file, or
+    # interleaved chunks get os.replace'd into place.
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        # allow_nan=False: a NaN in a run manifest is an upstream bug — fail here.
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str, allow_nan=False),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:

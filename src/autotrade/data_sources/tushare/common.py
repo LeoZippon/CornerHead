@@ -2112,6 +2112,3 @@ def add_intraday_by_date_common_args(
     parser.add_argument("--min-rows-per-day", type=int, default=0)
     parser.add_argument("--allow-missing-codes", type=int, default=0)
     parser.add_argument("--existing-allow-missing-codes", type=int, default=50)
-
-if __name__ == "__main__":
-    raise SystemExit(main())

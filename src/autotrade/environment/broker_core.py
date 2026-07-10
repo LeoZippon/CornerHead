@@ -107,22 +107,6 @@ class CostModel:
         return price * (1.0 + slip) if is_buy else price * (1.0 - slip)
 
 
-def lot_floor(amount: object) -> int:
-    """Round a desired share count down to a whole board lot."""
-    try:
-        shares = int(float(amount))
-    except (TypeError, ValueError):
-        return 0
-    return (shares // LOT_SIZE) * LOT_SIZE
-
-
-def resolve_shares(amount: object) -> int:
-    """Share count from an explicit ``amount`` — lot-aligned. 0 when unusable."""
-    if amount is not None and str(amount).strip() != "":
-        return lot_floor(amount)
-    return 0
-
-
 @dataclass(frozen=True)
 class OpenFill:
     """Deterministic projection of opening a position (``buy`` long / ``short``)."""

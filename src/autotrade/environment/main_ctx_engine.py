@@ -1591,15 +1591,6 @@ def _market_state(
     }
 
 
-def _int_or_none(value: object) -> int | None:
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return None
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return None
-
-
 def _float_or_none(value: object) -> float | None:
     if value is None or (isinstance(value, str) and not value.strip()):
         return None

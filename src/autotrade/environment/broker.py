@@ -43,6 +43,7 @@ order/reject is recorded.
 from __future__ import annotations
 
 from bisect import bisect_left
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 import math
@@ -643,7 +644,7 @@ class SimBroker:
         self,
         account: str,
         *,
-        pending_orders: "Iterable[object]" = (),
+        pending_orders: Iterable[object] = (),
     ) -> dict[str, object]:
         """Account view visible to the strategy.
 
@@ -684,7 +685,7 @@ class SimBroker:
         self,
         account: str,
         *,
-        pending_orders: "Iterable[object]" = (),
+        pending_orders: Iterable[object] = (),
     ) -> list[dict[str, object]]:
         account = self._normalize_account(account)
         return [
@@ -1544,7 +1545,7 @@ class SimBroker:
     def enable_bail_balance(
         self,
         *,
-        pending_orders: "Iterable[object]" = (),
+        pending_orders: Iterable[object] = (),
         exclude_order_id: str | None = None,
     ) -> float:
         """保证金可用余额 per the 实施细则 formula (broker_core docstring),
@@ -1848,7 +1849,7 @@ class SimBroker:
         self,
         account: str,
         *,
-        pending_orders: "Iterable[object]" = (),
+        pending_orders: Iterable[object] = (),
         exclude_order_id: str | None = None,
     ) -> float:
         """One account's cash deployable for buys (and outbound transfers):
@@ -1872,7 +1873,7 @@ class SimBroker:
         account: str,
         ts_code: str,
         *,
-        pending_orders: "Iterable[object]" = (),
+        pending_orders: Iterable[object] = (),
         exclude_order_id: str | None = None,
     ) -> int:
         """Shares available for a new reduce/close after pending reduce orders."""
@@ -1895,7 +1896,7 @@ class SimBroker:
     def _reservation_orders(
         self,
         *,
-        pending_orders: "Iterable[object]" = (),
+        pending_orders: Iterable[object] = (),
         exclude_order_id: str | None = None,
     ) -> list[dict[str, object]]:
         excluded = str(exclude_order_id or "")
@@ -1920,7 +1921,7 @@ class SimBroker:
         self,
         account: str,
         *,
-        pending_orders: "Iterable[object]" = (),
+        pending_orders: Iterable[object] = (),
         exclude_order_id: str | None = None,
     ) -> float:
         total = 0.0
@@ -1946,7 +1947,7 @@ class SimBroker:
     def _reserved_bail(
         self,
         *,
-        pending_orders: "Iterable[object]" = (),
+        pending_orders: Iterable[object] = (),
         exclude_order_id: str | None = None,
     ) -> float:
         total = 0.0
@@ -1986,7 +1987,7 @@ class SimBroker:
         account: str,
         ts_code: str,
         *,
-        pending_orders: "Iterable[object]" = (),
+        pending_orders: Iterable[object] = (),
         exclude_order_id: str | None = None,
     ) -> int:
         total = 0

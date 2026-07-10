@@ -42,6 +42,7 @@ from autotrade.environment.web_search import WebSearchError, WebSearchProvider
 from .compact import (
     ContextCompactionConfig,
     ContextCompactor,
+    _drop_leading_orphan_tools,
     estimate_messages_tokens,
     is_compaction_message,
     is_llm_compaction_message,
@@ -847,17 +848,9 @@ class AgentSessionRunner:
             )
         return messages
 
-    @staticmethod
-    def _drop_leading_orphan_tools(seq: list[dict[str, object]]) -> list[dict[str, object]]:
-        """Drop leading ``tool`` messages whose ``assistant`` turn was trimmed away.
-
-        A ``tool`` message must follow the ``assistant`` ``tool_calls`` that
-        produced it; a window that starts with one would be rejected.
-        """
-        index = 0
-        while index < len(seq) and isinstance(seq[index], dict) and seq[index].get("role") == "tool":
-            index += 1
-        return list(seq[index:])
+    # Shared with compaction: a trimmed window must not start with an orphan
+    # ``tool`` message (it must follow its ``assistant`` tool_calls turn).
+    _drop_leading_orphan_tools = staticmethod(_drop_leading_orphan_tools)
 
     def _trim(self, messages: list[dict[str, object]]) -> list[dict[str, object]]:
         # Primary trigger is the estimated token budget; the message count is a
