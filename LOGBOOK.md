@@ -1,3 +1,15 @@
+2026-07-10 控制台全面巡检：launching 状态、收益曲线纠偏、实时视图修复（feat/step-tree-rollback，0a77e02）
+
+- 「创建并启动」后详情页长时间显示未启动：worker 进程拉起到首次写 status.json 之间（解释器+导入耗秒级）状态读作 created，且该窗口 worker_alive=false 会放行重复拉起/删除。权衡后实现 launching 存根（成本=每次拉起一次原子写，无轮询开销）：manager 在 Popen 前写入（进程尚不存在，单写者不破坏）、保留进度字段；新鲜期显示脉动「启动中」徽标并计入并行上限、阻止重复启动/续跑/删除；超 180s 未接管降级 interrupted（worker 拉起失败可见）。
+- 全面巡检（Opus 只读检查器对全部端点实测 + 前后端代码核对）确认 1 个正确性缺陷 + 6 个小缺陷，全部修复：
+  - **收益曲线混拼（正确性）**：equity 把一个 run 里所有 valid_* 窗口（同一验证区间、不同策略版本的反复尝试）按日期拼接，test2 渲染 -3.92% 而账本头名 +0.98%。改为只取账本记录的选定 Step 窗口（`fold_valid_window`：selected_step 的 validation_result_ref，缺省回退最后验证 Step），实测曲线终值与账本一致（+0.983%）。
+  - 详情页首次渲染丢 Held-out 收益图/风格卡（detailView 在面板构建后才赋值，且跨实验导航可能画到上一实验数据）→ 先赋值再建面板。
+  - trace/stats 每 5s 全量重读 trace（test2 2MB）→ 按 path 增量聚合缓存（20.5ms→0.06ms）。
+  - SSE trace 流断线后从 0 重放 → 页界 SSE id + Last-Event-ID 续传 + retry 提示。
+  - 分析面板轮询 timer 不随导航清理 → 纳入 liveTimers；zip 端点构包异常泄漏临时文件 → 失败即删；无风格 rollup 显示「加载失败」→ 改为「该运行未落盘风格归因数据」。
+- 有意缓办（记录理由）：list_experiments 逐轮全量汇总（当前仅 2 实验，失效键复杂度不值当）；分析 pending 状态持久化（重启恰逢生成中属罕见，恢复=再点一次）。
+- 验证：full suite 611 OK；同步静态并重启 console（端到端 ok）；test2 实测 equity 三条曲线、trace/stats 正常。
+
 2026-07-10 Step 树面板重设计：悬停修复、旧格式下载、规模化交互（feat/step-tree-rollback，7479d4c）
 
 - 两个报告缺陷确诊并修复：① 悬停卡是每行内部的 absolute 子元素，被树容器 overflow-y 裁剪（且鼠标扫过行时闪烁）——重做为 document.body 上单个 position:fixed 共享 tooltip（视口收敛、pointer-events:none，大树零冗余 DOM）；② 历史节点无法下载——旧平铺布局快照（test2 全部节点）被判 has_snapshot=false 整行失活。控制台读取层改为布局无关：`node_layout()` 识别 split/flat，两种布局均可下载（旧格式按目录原样打包）；回滚仍仅限新布局（payload 增 `restorable`，set_parent_override 拒绝旧格式，UI 标「旧格式」徽标）。行时间从仅时刻改为完整日期时间。

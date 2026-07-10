@@ -16901,3 +16901,22 @@ Fixes/redesign:
 - Tests: test_legacy_flat_nodes_stay_downloadable_but_not_restorable (fixture rewrites a node dir to the flat layout; asserts view flags, zip contains root main.py, override 400 with 旧格式).
 
 Live verification after webui_stack.sh sync + restart: /api/experiments/test2/steps shows all three nodes has_snapshot=true/restorable=false, valid_007 frozen_for=['epoch_001/fold_202512'] (hash matching confirmed working); source.zip for valid_007 returns 17.6KB with README/candidate/main/trading/nl_prompt/detailed_return.
+
+## 2026-07-10 Console sweep: launching state, equity correctness, live-view fixes
+
+Task: (1) analyze the create->running dead window and add a launching indicator if warranted; (2) inspect every WebUI component and fix what's broken/optimizable. Branch feat/step-tree-rollback, commit 0a77e02. Full suite 611 OK; deployed (static sync + console restart, end-to-end ok).
+
+Launching state: manager writes an atomic {state:"launching", launched_at, +progress fields} stub to status.json strictly BEFORE Popen (no concurrent writer exists yet, so the worker remains the single steady-state writer); registry.experiment_state keeps "launching" while fresh and degrades stale stubs (>LAUNCH_GRACE_SECONDS=180) to interrupted; launching counts toward MAX_RUNNING_EXPERIMENTS and blocks start_worker/resume/delete during the import window (closing a real double-spawn hole); UI: STATE_LABELS launching=启动中 (pulsing badge), starting relabelled 初始化. Trade-off: one file write per spawn vs seconds of misleading "created" - implemented.
+
+Inspection (read-only Opus agent exercised every endpoint against test2 + code cross-check). Confirmed and fixed:
+- equity.py blended ALL valid_* windows of a run (overlapping attempts by different strategy versions): test2 curve -3.92% vs ledger +0.98%. run_series(window=...) + fold_valid_window(record) (selected step's validation_result_ref, fallback last validated step; None -> empty, never blend). Both payload builders updated; test fixture rewritten to the corrected contract (selected window only).
+- app.js renderDetailPage assigned detailView AFTER building panels: heldoutPanel's equity chart + style card silently skipped on first render, and a stale detailView could chart the previous experiment. Assign before building.
+- traces.trace_stats re-read the whole file per 5s poll: incremental per-path cache (offset of last complete line + running aggregates, additive; truncation detected by size shrink -> rescan; LRU-ish cap 32). Parity-verified cold vs warm on the real 2MB trace.
+- SSE stream_trace: emits retry:5000 and a page-boundary "id: <next_offset>" on the last event of each page; server honors Last-Event-ID on reconnect (max with explicit offset). Reconnects resume near the tail (at most one page re-sent, never lost) instead of restreaming from 0.
+- analysisPanel setTimeout chains now registered in liveTimers (route() cancels them; previously they polled a detached DOM forever while pending).
+- Both zip endpoints unlink the NamedTemporaryFile if archive construction raises (BackgroundTask only covers the happy path).
+- styleCard: /style 404 (rollup never persisted) renders as 该运行未落盘风格归因数据 instead of 加载失败.
+
+Deferred (rationale in commit): list_experiments memoization; persistent analysis-pending marker.
+
+Verified working per the inspection: health/parameter-schema/gpus, experiments list/detail/status, fold detail + strategy.zip, steps + node zip, orders(+csv incl. traversal guard), analysis GET, trace page/download, prompt-preview POST, timezone rendering, dark-theme vars, no 500s on any GET.
