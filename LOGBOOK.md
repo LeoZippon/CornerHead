@@ -1,3 +1,9 @@
+2026-07-10 Step 树面板重设计：悬停修复、旧格式下载、规模化交互（feat/step-tree-rollback，7479d4c）
+
+- 两个报告缺陷确诊并修复：① 悬停卡是每行内部的 absolute 子元素，被树容器 overflow-y 裁剪（且鼠标扫过行时闪烁）——重做为 document.body 上单个 position:fixed 共享 tooltip（视口收敛、pointer-events:none，大树零冗余 DOM）；② 历史节点无法下载——旧平铺布局快照（test2 全部节点）被判 has_snapshot=false 整行失活。控制台读取层改为布局无关：`node_layout()` 识别 split/flat，两种布局均可下载（旧格式按目录原样打包）；回滚仍仅限新布局（payload 增 `restorable`，set_parent_override 拒绝旧格式，UI 标「旧格式」徽标）。行时间从仅时刻改为完整日期时间。
+- 规模化与全量可见（用户补充要求）：子树折叠（逐节点 ▸/▾ + 全部展开/折叠，折叠行显示 +N）、文本筛选（匹配 Fold/节点/结果名，保留祖先链上下文 + 命中计数，筛选时强制展开）、行内直接下载/回滚按钮（无需进弹窗）、62vh 滚动区、触屏隐藏 tooltip（弹窗承载全量字段）。节点弹窗补模型 hash 与冻结用途行。
+- 实机验证（同步静态 + 重启 console）：test2 三个旧格式节点全部可下载（zip 含完整源码 + detailed_return.json），valid_007 正确标注「冻结 epoch_001/fold_202512」，回滚按钮对旧格式正确隐藏。full suite 608 OK。
+
 2026-07-10 Step 树 GPT 审计裁决与修复（feat/step-tree-rollback，feb8739）
 
 - 5 项审计意见逐项对码核验：2 项确认修复、2 项核实后否决、1 项文档补齐。full suite 607 OK。

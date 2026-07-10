@@ -16888,3 +16888,16 @@ Claim 3 (REJECTED): include_models=false does not corrupt lineage - every node r
 Claim 4 (REJECTED): restore atomicity would be a special case - copy_artifact is delete-then-copy across the whole pipeline (parent installs, freeze). Failure recovery = re-invoke the tool (all validated states live in the read-only tree); set_position runs only after both hash verifications. Documented in the tool docstring instead of adding a transactional swap.
 
 Claim 5: pipeline_design §5 and parameters_reference §9 updated (tree pruning on rollback, past-only override constraint); doc changes remain in the working tree alongside the researcher's in-flight documentation pass.
+
+## 2026-07-10 Step-tree panel redesign (hover fix, legacy downloads, scale)
+
+Task: user reported (a) hover popups showing broken/incorrect content and (b) downloads unavailable on historical nodes; mid-task addendum: design for potentially large experiment/step volumes with full data visibility. Branch feat/step-tree-rollback, commit 7479d4c. Full suite 608 OK.
+
+Root causes: (a) per-row hover cards were position:absolute children INSIDE .step-tree { overflow-y:auto; max-height:420px } - absolutely positioned descendants are clipped by the scroll container, so cards rendered truncated or invisible and flickered while moving across rows; rows also showed bare HH:MM for days-old nodes. (b) pre-2026-07-10 flat-layout node dirs (all of test2, the only real experiment) have main.py at the node root, so has_snapshot=(node/output/).is_dir() was false and rows were fully inert - no modal, no download, even though the source files exist on disk.
+
+Fixes/redesign:
+- webui/steps.py node_layout(steps_root, node_id) -> split|flat|None; has_snapshot = any layout, new 'restorable' field = split only; node_export_dir accepts both (legacy zipped verbatim). manager._validate_parent_override additionally requires split (error 旧格式节点仅支持查看与下载); worker _parent_from_step_node was already split-only.
+- app.js: one shared #step-tip on document.body (position:fixed, viewport-clamped via getBoundingClientRect, flips above when near the bottom, pointer-events:none, hidden on scroll/click/toggle); rows use fmtTs (full date+time); collapsible subtrees with per-node toggle and expand/collapse-all (collapsed rows show +N chip); search filter over node_id/fold/result/frozen_for keeping ancestor chains for lineage context, with hit counter and filter-overrides-collapse; inline row actions (download anchor with stopPropagation, rollback button when restorable && hitl); modal gains model hash + frozen_for rows and legacy/failed hints. CSS: bordered 62vh scroll area, chips, toggle, tip styles; @media (hover:none) hides the tip; narrow screens drop the time column.
+- Tests: test_legacy_flat_nodes_stay_downloadable_but_not_restorable (fixture rewrites a node dir to the flat layout; asserts view flags, zip contains root main.py, override 400 with 旧格式).
+
+Live verification after webui_stack.sh sync + restart: /api/experiments/test2/steps shows all three nodes has_snapshot=true/restorable=false, valid_007 frozen_for=['epoch_001/fold_202512'] (hash matching confirmed working); source.zip for valid_007 returns 17.6KB with README/candidate/main/trading/nl_prompt/detailed_return.
