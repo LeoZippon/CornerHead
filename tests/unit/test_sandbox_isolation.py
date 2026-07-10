@@ -84,10 +84,11 @@ class SandboxSpecTest(unittest.TestCase):
             class Completed:
                 returncode = 0
                 stderr = ""
+                stdout = "sha256:testimage|"
 
             with patch("subprocess.run", return_value=Completed()) as run:
                 docker.start()
-            command = run.call_args.args[0]
+            command = run.call_args_list[0].args[0]
             self.assertIn("--gpus", command)
             self.assertIn('"device=5,6,7"', command)
 
@@ -100,10 +101,11 @@ class SandboxSpecTest(unittest.TestCase):
             class Completed:
                 returncode = 0
                 stderr = ""
+                stdout = "sha256:testimage|"
 
             with patch("subprocess.run", return_value=Completed()) as run:
                 docker.start()
-            command = run.call_args.args[0]
+            command = run.call_args_list[0].args[0]
             self.assertIn(f"{paths.artifacts}:/mnt/artifacts:ro", command)
             self.assertIn(f"{paths.agent}:/mnt/agent:rw", command)
             self.assertIn(f"{paths.current_snapshot}:/mnt/snapshot:ro", command)
@@ -121,10 +123,11 @@ class SandboxSpecTest(unittest.TestCase):
             class Completed:
                 returncode = 0
                 stderr = ""
+                stdout = "sha256:testimage|"
 
             with patch("subprocess.run", return_value=Completed()) as run:
                 docker.start()
-            command = run.call_args.args[0]
+            command = run.call_args_list[0].args[0]
             for key, value in (("HF_HOME", "/tmp/sandbox-cache/hf"),
                                ("PIP_CACHE_DIR", "/tmp/sandbox-cache/pip"),
                                ("CUDA_CACHE_PATH", "/tmp/sandbox-cache/cuda"),
@@ -143,10 +146,11 @@ class SandboxSpecTest(unittest.TestCase):
             class Completed:
                 returncode = 0
                 stderr = ""
+                stdout = "sha256:testimage|"
 
             with patch("subprocess.run", return_value=Completed()) as run:
                 docker.start()
-            command = run.call_args.args[0]
+            command = run.call_args_list[0].args[0]
             ui = command.index("--ulimit")
             self.assertEqual(command[ui : ui + 2], ["--ulimit", "core=0:0"])
 
@@ -165,11 +169,12 @@ class SandboxSpecTest(unittest.TestCase):
             class Completed:
                 returncode = 0
                 stderr = ""
+                stdout = "sha256:testimage|"
 
             with patch.dict(os.environ, {"HF_TOKEN": "hf-secret-for-test", "GITHUB_TOKEN": "gh-secret-for-test"}):
                 with patch("subprocess.run", return_value=Completed()) as run:
                     docker.start()
-            command = run.call_args.args[0]
+            command = run.call_args_list[0].args[0]
             self.assertIn("--network=bridge", command)
             self.assertIn("--add-host", command)
             self.assertIn("host.docker.internal:host-gateway", command)
@@ -203,6 +208,7 @@ class SandboxSpecTest(unittest.TestCase):
             class Completed:
                 returncode = 0
                 stderr = ""
+                stdout = "sha256:testimage|"
 
             with patch.dict(
                 os.environ,
@@ -213,8 +219,8 @@ class SandboxSpecTest(unittest.TestCase):
             ):
                 with patch("subprocess.run", return_value=Completed()) as run:
                     docker.start()
-            command = run.call_args.args[0]
-            run_env = run.call_args.kwargs["env"]
+            command = run.call_args_list[0].args[0]
+            run_env = run.call_args_list[0].kwargs["env"]
             self.assertIn("AT_PROXY_HTTPS", command)
             self.assertIn("AT_PROXY_ALL", command)
             self.assertNotIn("HTTPS_PROXY", command)
@@ -254,10 +260,11 @@ class SandboxSpecTest(unittest.TestCase):
             class Completed:
                 returncode = 0
                 stderr = ""
+                stdout = "sha256:testimage|"
 
             with patch("subprocess.run", return_value=Completed()) as run:
                 docker.start()
-            command = run.call_args.args[0]
+            command = run.call_args_list[0].args[0]
             self.assertIn("--add-host", command)
             self.assertIn("host.docker.internal:10.10.0.1", command)
             self.assertNotIn("host.docker.internal:host-gateway", command)
@@ -962,7 +969,7 @@ class ExecutorTest(unittest.TestCase):
                 return_value=sp.CompletedProcess([], 0, stdout="", stderr=""),
             ) as run:
                 executor.run(["python3", "train.py"], timeout_seconds=30)
-            cmd = run.call_args.args[0]
+            cmd = run.call_args_list[0].args[0]
             ti = cmd.index("timeout")
             self.assertEqual(cmd[ti : ti + 4], ["timeout", "--signal=TERM", "--kill-after=5", "30"])
             self.assertEqual(cmd[-2:], ["python3", "train.py"])  # agent argv runs under timeout
@@ -1004,7 +1011,7 @@ class ExecutorTest(unittest.TestCase):
             ) as run:
                 executor.cleanup_user_processes()
             self.assertEqual(
-                run.call_args.args[0],
+                run.call_args_list[0].args[0],
                 ["docker", "exec", "--user", "agent", "cont1", "pkill", "-KILL", "-u", "agent"],
             )
 

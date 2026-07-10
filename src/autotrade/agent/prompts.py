@@ -76,7 +76,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - Shell 命令自身失败会以 `exit_code`、`stderr`、`stdout_path` / `stderr_path` 返回；Tool 层拒绝才会返回 `error_type`、`reason` 和 `retry_hint`。不要用 `2>/dev/null` 隐藏错误，stderr 是审计输入。
 
 ## 正式产物格式（modification_check 按此校验）
-- `main.py`：必须定义唯一正式入口 `main(ctx) -> None`，由 Environment 每个回放分钟调用一次。
+- `main.py`：必须定义唯一正式入口 `main(ctx) -> None`，由 Environment 在每个计划决策 tick 调用一次（盘中间距见事实 `intraday_decision_minutes`，竞价/盘外 tick 恒为决策 tick；详见下方「回放与交易环境规则」）。
 - `candidate.py`：推荐用于横截面筛选与开仓逻辑，可读取 `ctx.asof_dir`（逐 tick 时点视图）和 `ctx.snapshot_dir`（冻结研究基准），可调用 `ctx.nl(code, prompt="...")` 做单股文本分析，或 `ctx.nl(prompt="...")` 做事件/主题/行业/宏观文本检索；由 `main` 在选定时点调用。
 - `trading.py`：推荐用于按 `ts_code` 管理持仓的交易/做T/平仓函数（`def 名字(ctx, ts_code): ...`）；由 `main` 每个 tick 调用。Agent 可修改或新增。
 - `nl_prompt.md`：可选，保存策略复用的 NL 提示片段；也可以直接在 `main.py` 或 `candidate.py` 中传入 prompt。
@@ -315,6 +315,7 @@ META_LEARNING_INSTRUCTION = """\
 ## 运行环境、联网与代理
 - run manifest 是实验参数事实源；runtime env 是 Python 包、CLI 工具、网络和安装策略事实源。Prompt 与 manifest 冲突时，以 manifest 为准。
 - `data_summary.json` 是可见数据的轻量索引，只保留文件规模、行数、列数、关键列和日期覆盖。需要完整 schema 或更细字段时，先查 snapshot manifest 或 Parquet metadata；需要抽样或聚合大表时，再用 DuckDB、pyarrow 或 pandas 按列/日期过滤读取。对 `events.parquet`、`text_index.parquet`、`intraday_1min.parquet` 等大表，不要在未知规模时直接 `pd.read_parquet()` 全量读取。
+- 单位口径：只有 `daily.parquet` 经过统一单位归一（金额=元、成交量/股本=股、比例=小数；manifest `unit_conversions` 列出转换）。`events`/`macro`/`fundamentals` 是异构 union，**保留各源表原始单位**（manifest 域 meta 标 `units="source"`）——同名字段跨域单位可能不同（如 daily `amount` 是元，`moneyflow` 金额是万元，宏观金额多为亿元），不要把 daily 的单位合同外推到其他域；跨域统一口径时先显式换算。
 - Prompt 只描述稳定协议，不承载当前数据事实。当前行数、关键列、日期覆盖和完整 schema 以本 run 动态生成的 `data_summary.json`、`run_manifest.json`、snapshot `manifest.json` 和 parquet metadata 为准；未来数据变动后由 Pipeline 重新生成。
 - 后续普通 Fold 不允许联网或安装新包。元学习 Fold 是唯一可配置联网的阶段；当前实验事实允许联网时，可在工作区内用 `git`、`pip`、`npm`、`hf` 下载公开资料、代码或模型。只放在 `workspace` 的临时安装不会继承。若希望后续 Fold 使用新增依赖，可参考 `/mnt/agent/workspace/sandbox_environment.example.json`，并写入 `/mnt/agent/workspace/sandbox_environment.json`，由 Pipeline 基于该文件构建派生 Sandbox 镜像。
 - 网络可用性、代理别名和凭据变量名以当前实验事实为准；不要依赖额外 Prompt 片段推断运行时配置。

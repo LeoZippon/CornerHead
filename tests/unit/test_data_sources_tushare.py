@@ -925,37 +925,33 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertIn("--start-date 20260201 --end-date 20260601", " ".join(commands[0]))
 
-    def test_cron_lock_waits_and_reports_live_locks(self):
+    def test_cron_lock_blocks_while_held_and_releases_on_exit(self):
+        # flock is per open-file-description: a second acquire in the same
+        # process must block exactly like a second process would.
         runtime = self.root / ".runtime" / "tushare"
-        lock = runtime / "locks" / "tushare_update.lock"
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        lock.write_text("pid=1\nstarted_at=2099-01-01T00:00:00+00:00\n", encoding="utf-8")
+        with patch.object(cron_update, "RUNTIME_ROOT", runtime):
+            held = cron_update.acquire_lock("tushare_update", wait_seconds=0)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "lock is held"):
+                    cron_update.acquire_lock("tushare_update", wait_seconds=0)
+            finally:
+                held.release()
+            reacquired = cron_update.acquire_lock("tushare_update", wait_seconds=0)
+            reacquired.release()
+
+    def test_cron_lock_file_from_dead_process_never_blocks(self):
+        # A leftover lock FILE (crash, kill -9, PID reuse) carries no kernel
+        # flock, so the next run acquires immediately - no stale-lock heuristics.
+        runtime = self.root / ".runtime" / "tushare"
+        lock_file = runtime / "locks" / "tushare_update.lock"
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file.write_text("pid=999999999\nstarted_at=2020-01-01T00:00:00+00:00\n", encoding="utf-8")
 
         with patch.object(cron_update, "RUNTIME_ROOT", runtime):
-            with self.assertRaisesRegex(RuntimeError, "lock exists"):
-                cron_update.acquire_lock("tushare_update", wait_seconds=0, stale_seconds=21600)
-
-    def test_cron_lock_removes_stale_dead_pid_lock(self):
-        runtime = self.root / ".runtime" / "tushare"
-        lock = runtime / "locks" / "tushare_update.lock"
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        lock.write_text("pid=999999999\nstarted_at=2020-01-01T00:00:00+00:00\n", encoding="utf-8")
-
-        with patch.object(cron_update, "RUNTIME_ROOT", runtime), patch.object(cron_update, "DISPATCH_LOG_PATH", self.root / "dispatch.log"):
-            acquired = cron_update.acquire_lock("tushare_update", wait_seconds=0, stale_seconds=21600)
-        self.assertTrue(acquired.exists())
-        acquired.unlink()
-
-    def test_cron_lock_does_not_remove_live_pid_lock_by_age(self):
-        runtime = self.root / ".runtime" / "tushare"
-        lock = runtime / "locks" / "tushare_update.lock"
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        lock.write_text("pid=1\nstarted_at=2020-01-01T00:00:00+00:00\n", encoding="utf-8")
-
-        with patch.object(cron_update, "RUNTIME_ROOT", runtime), patch.object(cron_update, "pid_is_alive", return_value=True):
-            with self.assertRaisesRegex(RuntimeError, "lock exists"):
-                cron_update.acquire_lock("tushare_update", wait_seconds=0, stale_seconds=1)
-        self.assertTrue(lock.exists())
+            acquired = cron_update.acquire_lock("tushare_update", wait_seconds=0)
+            self.assertTrue(acquired.path.exists())
+            self.assertIn(f"pid={cron_update.os.getpid()}", acquired.path.read_text(encoding="utf-8"))
+            acquired.release()
 
     def test_cron_multi_command_jobs_fail_fast(self):
         ctx = cron_update.RunContext(

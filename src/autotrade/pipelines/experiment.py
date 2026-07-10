@@ -32,7 +32,7 @@ from autotrade.environment.identity import agent_visible_ref as _agent_visible_r
 from autotrade.environment.llm.proxy import LLMProxy
 from autotrade.environment.managed_proxy import ManagedProxySession
 from autotrade.environment.runtime import AgentTraceWriter, RunManifest, new_id, sanitize_for_log, utc_now_iso
-from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree
+from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree, resolve_image_identity
 from autotrade.environment.style_analysis import write_style_rollup
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import PHASE_FROZEN, BacktestTool, ModificationCheckTool, ToolContext
@@ -912,6 +912,11 @@ class ExperimentPipeline:
         }
         if completed.returncode == 0:
             self._active_sandbox_spec = replace(self._active_sandbox_spec, image=image_tag)
+            # Content-addressable identity of the freshly built image: the tag
+            # alone cannot prove which bits later folds ran on.
+            image_id, repo_digests = resolve_image_identity(image_tag)
+            result["image_id"] = image_id
+            result["image_repo_digests"] = repo_digests
             result["pruned_images"] = self._gc_derived_sandbox_images(keep_image=image_tag)
         manifest.update(sandbox_image_update=result)
         if completed.returncode != 0:

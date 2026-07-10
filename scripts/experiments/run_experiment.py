@@ -62,8 +62,10 @@ def _resolve_period_args(args: argparse.Namespace, parser: argparse.ArgumentPars
     return first_test_period, last_test_period, heldout_first_period, heldout_last_period
 
 
-def main() -> int:
-    repo_root = Path(__file__).resolve().parents[2]
+def build_parser(repo_root: Path) -> argparse.ArgumentParser:
+    """The full experiment CLI parser. A function so the defaults-drift test can
+    compare argparse defaults against the HITL ``PARAM_DEFAULTS`` (the two
+    surfaces mirror each other dest-for-dest)."""
     parser = argparse.ArgumentParser(description="Run the rolling single-agent experiment pipeline.")
     parser.add_argument("--experiment-id", required=True)
     add_path_arguments(parser, repo_root)
@@ -113,6 +115,12 @@ def main() -> int:
     add_meta_directive_arguments(parser, verbose_help=True)
     add_web_search_arguments(parser, verbose_help=True)
     add_meta_sandbox_arguments(parser, verbose_help=True, disable_rebuild_help=EXPERIMENT_META_REBUILD_HELP)
+    return parser
+
+
+def main() -> int:
+    repo_root = Path(__file__).resolve().parents[2]
+    parser = build_parser(repo_root)
     args = parser.parse_args()
     meta_learning_directive = resolve_meta_learning_directive(parser, args)
     first_test_period, last_test_period, heldout_first_period, heldout_last_period = _resolve_period_args(args, parser)

@@ -29,16 +29,18 @@ import os
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Mapping
 
+from autotrade.agent.compact import ContextCompactionConfig
 from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
+from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.snapshot import SnapshotConfig
 
-from .config import ExperimentConfig, FrozenArtifact
+from .config import AcceptanceRules, ExperimentConfig, FrozenArtifact
 from .folds import build_fold_schedule, heldout_periods
 
 HITL_DIR_NAME = "hitl"
@@ -55,6 +57,11 @@ CONTROL_REQUESTS = (None, "pause", "stop")
 # Creation parameters mirror the run_experiment.py CLI dests one-to-one so the
 # same assembly builders can be reused; HITL-only knobs are appended at the end.
 # None means "no default: required" for the four period labels + experiment_id.
+#
+# Keys that are 1:1 domain-dataclass fields take their defaults FROM the
+# dataclass (single source; see the overlay below the literal): only keys with
+# no domain owner (paths, model names, HITL knobs) stay literal here. A drift
+# test pins both this dict and the CLI argparse defaults to the dataclasses.
 PARAM_DEFAULTS: dict[str, object] = {
     "experiment_id": None,
     "raw_dir": "data/raw",
@@ -142,6 +149,37 @@ PARAM_DEFAULTS: dict[str, object] = {
     "analysis_model": "deepseek-v4-pro",
     "analysis_max_tokens": 6000,
 }
+# Single-source overlay: every PARAM_DEFAULTS key that names an ExperimentConfig
+# field takes the dataclass default; broker/acceptance/compaction keys map to
+# their own dataclasses. The literals above stay readable, this keeps them honest.
+PARAM_DEFAULTS.update(
+    {
+        f.name: f.default
+        for f in fields(ExperimentConfig)
+        if f.name in PARAM_DEFAULTS and f.default is not MISSING
+    }
+)
+_BROKER_DEFAULTS = BrokerProfile()
+_ACCEPTANCE_DEFAULTS = AcceptanceRules()
+_COMPACT_DEFAULTS = ContextCompactionConfig()
+PARAM_DEFAULTS.update(
+    {
+        **{
+            key: getattr(_BROKER_DEFAULTS, key)
+            for key in (
+                "stock_initial_cash", "credit_initial_cash", "commission_bps", "slippage_bps",
+                "max_total_holdings", "max_single_name_weight", "fin_rate_annual", "slo_rate_annual",
+            )
+        },
+        "min_return": _ACCEPTANCE_DEFAULTS.min_return,
+        "min_sharpe": _ACCEPTANCE_DEFAULTS.min_sharpe,
+        "max_drawdown": _ACCEPTANCE_DEFAULTS.max_drawdown,
+        "compact_token_threshold": _COMPACT_DEFAULTS.token_threshold,
+        "compact_keep_recent_messages": _COMPACT_DEFAULTS.keep_recent_messages,
+        "compact_max_tokens": _COMPACT_DEFAULTS.max_response_tokens,
+        "compact_max_calls": _COMPACT_DEFAULTS.max_calls,
+    }
+)
 _REQUIRED_PARAMS = (
     "experiment_id",
     "first_test_period",

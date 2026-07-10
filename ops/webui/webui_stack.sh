@@ -103,12 +103,29 @@ sync_static() {
 
 install_cron() {
     local self="$REPO/ops/webui/webui_stack.sh"
-    local block
+    local block current
     block="$CRON_BEGIN
 */2 * * * * $self ensure >> $LOG_DIR/keepalive.log 2>&1
 @reboot sleep 30 && $self ensure >> $LOG_DIR/keepalive.log 2>&1
 $CRON_END"
-    ( crontab -l 2>/dev/null | sed "/^${CRON_BEGIN}\$/,/^${CRON_END}\$/d"; echo "$block" ) | crontab -
+    # Fail fast on a real crontab read error: treating it as an empty table
+    # would wipe every unrelated job. Only a genuine "no crontab" reads as empty.
+    if ! current="$(crontab -l 2>/tmp/webui_crontab_err.$$)"; then
+        if grep -qi "no crontab for" /tmp/webui_crontab_err.$$; then
+            current=""
+        else
+            echo "FAILED: crontab -l error: $(cat /tmp/webui_crontab_err.$$)" >&2
+            rm -f /tmp/webui_crontab_err.$$
+            exit 1
+        fi
+    fi
+    rm -f /tmp/webui_crontab_err.$$
+    if [ -n "$current" ]; then
+        mkdir -p "$LOG_DIR"
+        printf '%s\n' "$current" > "$LOG_DIR/crontab-$(date +%Y%m%d-%H%M%S).bak"
+    fi
+    ( printf '%s\n' "$current" | sed "/^${CRON_BEGIN}\$/,/^${CRON_END}\$/d"; echo "$block" ) | crontab -
+    crontab -l | grep -qF "$CRON_BEGIN" || { echo "FAILED: managed block missing after install" >&2; exit 1; }
     echo "keepalive cron installed (every 2 min + @reboot):"
     crontab -l | sed -n "/^${CRON_BEGIN}\$/,/^${CRON_END}\$/p"
 }

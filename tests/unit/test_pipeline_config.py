@@ -1,11 +1,15 @@
-"""Numeric validation of pipeline config records (acceptance rules, budgets)."""
+"""Numeric validation of pipeline config records (acceptance rules, budgets)
+and default-value drift guards across the config surfaces."""
 
 import math
 import tempfile
 import unittest
+from dataclasses import MISSING, fields
 from pathlib import Path
 
+from autotrade.environment.broker import BrokerProfile
 from autotrade.pipelines.config import AcceptanceRules, ExperimentConfig
+from autotrade.pipelines.interactive import PARAM_DEFAULTS
 
 
 def make_config(tmp: Path, **overrides: object) -> ExperimentConfig:
@@ -66,6 +70,48 @@ class ExperimentConfigValidationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(Path(tmp))
             self.assertEqual(config.first_test_period, "2022Q1")
+
+
+class DefaultsDriftTest(unittest.TestCase):
+    """The three default surfaces (domain dataclasses, HITL PARAM_DEFAULTS,
+    run_experiment CLI) must agree; the dataclasses are the source of truth."""
+
+    def test_param_defaults_match_domain_dataclasses(self):
+        for field_obj in fields(ExperimentConfig):
+            if field_obj.name in PARAM_DEFAULTS and field_obj.default is not MISSING:
+                self.assertEqual(PARAM_DEFAULTS[field_obj.name], field_obj.default, field_obj.name)
+        profile = BrokerProfile()
+        for key in (
+            "stock_initial_cash", "credit_initial_cash", "commission_bps", "slippage_bps",
+            "max_total_holdings", "max_single_name_weight", "fin_rate_annual", "slo_rate_annual",
+        ):
+            self.assertEqual(PARAM_DEFAULTS[key], getattr(profile, key), key)
+        rules = AcceptanceRules()
+        for key in ("min_return", "min_sharpe", "max_drawdown"):
+            self.assertEqual(PARAM_DEFAULTS[key], getattr(rules, key), key)
+
+    def test_cli_defaults_match_param_defaults(self):
+        from scripts.experiments.run_experiment import build_parser
+
+        repo_root = Path(__file__).resolve().parents[2]
+        parser = build_parser(repo_root)
+        skip = {
+            # Legacy quarter conveniences and repo-root-resolved path defaults
+            # (PARAM_DEFAULTS keeps them repo-relative by design).
+            "first_test_quarter", "last_test_quarter",
+            "raw_dir", "fundamental_events_root", "fundamental_events_status",
+            "experiments_root", "work_root", "template_dir",
+        }
+        mismatches = {}
+        for action in parser._actions:
+            if action.dest not in PARAM_DEFAULTS or action.dest in skip:
+                continue
+            cli_default = tuple(action.default) if isinstance(action.default, list) else action.default
+            expected = PARAM_DEFAULTS[action.dest]
+            expected = tuple(expected) if isinstance(expected, list) else expected
+            if cli_default != expected:
+                mismatches[action.dest] = (cli_default, expected)
+        self.assertEqual(mismatches, {})
 
 
 if __name__ == "__main__":

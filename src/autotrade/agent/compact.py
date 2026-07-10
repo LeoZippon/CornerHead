@@ -22,6 +22,16 @@ from autotrade.environment.nl.extraction import ExtractionError, extract_json_ob
 from autotrade.environment.runtime import sanitize_for_log
 
 
+COMPACT_SYSTEM_PROMPT = (
+    "You are an anchored context compaction sub-agent. Return exactly one JSON "
+    "object matching the requested schema. Do not call tools. Do not use "
+    "markdown or commentary. Preserve exact file paths, commands, error "
+    "strings, artifact ids, user constraints, and next steps. Avoid vague "
+    "phrases and omit obsolete details. Do not mention that messages were "
+    "compacted."
+)
+
+
 @dataclass(frozen=True)
 class ContextCompactionConfig:
     token_threshold: int = 200_000
@@ -190,17 +200,7 @@ class ContextCompactor:
             "messages_since_previous_summary": sanitize_for_log(_strip_internal_fields(messages_since_summary)),
         }
         return [
-            {
-                "role": "system",
-                "content": (
-                    "You are an anchored context compaction sub-agent. Return exactly one JSON "
-                    "object matching the requested schema. Do not call tools. Do not use "
-                    "markdown or commentary. Preserve exact file paths, commands, error "
-                    "strings, artifact ids, user constraints, and next steps. Avoid vague "
-                    "phrases and omit obsolete details. Do not mention that messages were "
-                    "compacted."
-                ),
-            },
+            {"role": "system", "content": COMPACT_SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(compact_input, ensure_ascii=False, default=str)},
         ]
 

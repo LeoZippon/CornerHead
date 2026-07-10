@@ -193,6 +193,8 @@ available_at <= visibility_cutoff
 
 实现：`src/autotrade/environment/features/units.py`；raw 侧单位见 `data_documentation.md` §1.2。
 
+**适用范围：仅 daily 域（执行关键字段与日线字段）**。快照构建只对 `daily.parquet`（决策快照与回放槽）做单位归一：
+
 | 类型 | 标准单位 |
 |---|---|
 | 金额 | 元 |
@@ -200,7 +202,9 @@ available_at <= visibility_cutoff
 | 比例、收益、换手 | 小数，例如 5% 记为 `0.05` |
 | 利率和费率 | 优先小数；确需 bps 时字段名必须带 `_bps` |
 
-原始单位、转换规则和转换前字段必须写入 manifest。单位不明的字段不能进入模型可见数据；依赖单位不明字段生成的交易意图必须被校验拒绝。
+**events/macro/fundamentals/text 域保留 TuShare 源单位**（异构 union，逐来源表解释）：同名字段跨域不同单位是常态——例如 daily `amount` 是元，`moneyflow` 金额是万元，宏观金额多为亿元。域 meta 与快照 manifest 标注 `units`（daily=`unit_contract` 附转换清单；其余域=`source`），源单位速查表见 `data_documentation.md` §1.2。Agent 不得把 daily 的单位合同外推到其他域的同名字段；需要跨域统一口径时应显式换算成派生列。
+
+daily 域的原始单位、转换规则和转换前字段必须写入 manifest。单位不明的字段不能进入模型可见数据；依赖单位不明字段生成的交易意图必须被校验拒绝。
 
 **特殊口径修正**
 
@@ -757,6 +761,8 @@ substep 的声明预算 `B` 同时定义三件事：
 若跨分钟 action ready 后已无后续成交 bar，按常规路径记录 `main_actions_unfilled/no_fill_bar_ahead`，不会静默顺延；若 action 生成于普通 off-session，或 `ready_at` 落在盘外、午休、09:25–09:30 等交易所不接受申报的时间段，也记录未提交/未成交，不会由宿主自动顺延到开盘、午后或下一交易日。盘前/午间想准备订单，应先写 `ctx.state_dir` 计划，再在后续显式竞价 tick 或交易分钟 tick 中读取计划并调用 broker action。若要改变尚未 ready 的计划，应改写策略状态，让 ready 后的提交条件不再成立。轻量撤单扫描也应放入小预算 substep（如 0.5 分钟），以统一统计耗时和撤单提交时点。
 
 `ctx.state_dir` 是宿主管理的跨 tick 可见目录，Broker 仍是持仓真相源。进入 substep 时，宿主把当前可见状态拷贝进暂存目录作为种子；块内读取仍看旧可见值，块内写入在 `ready_at` 后合并，路径冲突时后生成者胜出。该机制按路径实现，能捕获 pandas/pyarrow parquet 等原生写入，不依赖 Shell 路径静态解析。
+
+**可强制性边界（有意接受的设计限制）**：驱动器在进程内 monkeypatch 文件原语，直接 `io.open`/`os.open` 访问受管状态路径会被 `PermissionError` 拒绝；但驱动进程跨 tick 常驻（每次回放启动一次、逐 tick RPC），策略把状态放进模块级全局变量即可绕过 `ready_at` 延迟——任何文件/RPC 层协议都无法阻止内存态。因此延迟可见性是**建模约定 + 文件层防误用**，不是安全边界；真正的硬约束是逐决策墙钟 cap 与 substep 实测墙钟 fail-fast。`.state` 每次回测重建、不冻结、不跨 Fold 继承，该缺口不构成任何 PIT 或跨运行泄漏，只涉及 Agent 在自己回测内对自报算力延迟的博弈；为此引入宿主 RPC 状态层被评估后否决（无法关闭内存绕过、徒增协议复杂度）。
 
 状态和产物约束：
 

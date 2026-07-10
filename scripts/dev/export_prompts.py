@@ -19,6 +19,7 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
+from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
 from autotrade.agent.prompts import (
     DEFAULT_ANTI_OVERFIT_PROMPT,
     DEFAULT_CONVERGENCE_PROMPT,
@@ -28,7 +29,9 @@ from autotrade.agent.prompts import (
     build_meta_learning_prompt,
     build_system_prompt,
 )
+from autotrade.environment.explore import EXPLORE_SYSTEM_PROMPT
 from autotrade.environment.nl.engine import FINAL_AFTER_TOOL_BUDGET, SUB_AGENT_SYSTEM_PROMPT
+from autotrade.pipelines.fold_analysis import FOLD_ANALYSIS_SYSTEM_PROMPT
 
 SAMPLE_FOLD = {
     "fold_id": "fold_2022Q1",
@@ -272,6 +275,9 @@ def render() -> str:
         ),
         ("NL Sub Agent 系统提示词（SUB_AGENT_SYSTEM_PROMPT）", SUB_AGENT_SYSTEM_PROMPT),
         ("NL Sub Agent 工具预算耗尽提示（FINAL_AFTER_TOOL_BUDGET）", FINAL_AFTER_TOOL_BUDGET),
+        ("Explore Sub Agent 系统提示词（EXPLORE_SYSTEM_PROMPT）", EXPLORE_SYSTEM_PROMPT),
+        ("Context Compaction 系统提示词（COMPACT_SYSTEM_PROMPT）", COMPACT_SYSTEM_PROMPT),
+        ("Fold 分析系统提示词（FOLD_ANALYSIS_SYSTEM_PROMPT，HITL 控制台）", FOLD_ANALYSIS_SYSTEM_PROMPT),
     ]
     lines = [
         "# Prompt 模板审计快照",

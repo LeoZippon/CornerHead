@@ -4,7 +4,10 @@
 # Behind restricted networks pre-pull the base via a registry mirror, pass
 # --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple, and add
 # --network=host so the build's curl (DuckDB CLI release) uses the host network.
-FROM python:3.11-slim
+# The base is pinned by digest so the same Dockerfile always builds from the
+# same bits (a floating tag can silently change between builds). To bump:
+#   docker pull python:3.11-slim && docker image inspect python:3.11-slim --format '{{join .RepoDigests ","}}'
+FROM python:3.11-slim@sha256:b27df5841f3355e9473f9a516d38a6783b6c8dfeacaf2d14a240f443b368ddb6
 
 ARG PIP_INDEX_URL=https://pypi.org/simple
 
@@ -47,6 +50,7 @@ RUN if ! command -v hf >/dev/null 2>&1 && command -v huggingface-cli >/dev/null 
 RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 --max-time 600 \
         https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip \
         -o /tmp/duckdb_cli.zip \
+    && echo "efd0fccdb1a28d9ec7a6ebfcde59900068b8ba43a846c9b553c0fd2bbe4acf43  /tmp/duckdb_cli.zip" | sha256sum -c - \
     && python -c "import zipfile; zipfile.ZipFile('/tmp/duckdb_cli.zip').extractall('/usr/local/bin')" \
     && chmod +x /usr/local/bin/duckdb \
     && rm /tmp/duckdb_cli.zip \

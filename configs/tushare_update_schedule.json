@@ -8,7 +8,6 @@
   "default_raw_dir": "data/raw",
   "default_pit_root": "data/pit",
   "default_lock_wait_seconds": 900,
-  "default_lock_stale_seconds": 21600,
   "default_update_args": [
     "--min-interval-seconds",
     "0.22",

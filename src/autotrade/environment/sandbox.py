@@ -542,6 +542,22 @@ def _chmod_tree(root: Path, *, file_mode: int, dir_mode: int) -> None:
     root.chmod(dir_mode if root.is_dir() else file_mode)
 
 
+def resolve_image_identity(image: str) -> tuple[str, list[str]]:
+    """(image id, repo digests) for a tag — the content-addressable identity of
+    the bits that actually run. Fails fast: an uninspectable image right after
+    a successful run/build is an environment inconsistency worth surfacing."""
+    completed = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}|{{join .RepoDigests \",\"}}", image],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"docker image inspect failed for {image!r}: {completed.stderr.strip()}")
+    image_id, _, digests = completed.stdout.strip().partition("|")
+    return image_id, [digest for digest in digests.split(",") if digest]
+
+
 class DockerSandbox:
     """Container lifecycle for one Fold run (docs/environment_design.md §2.1).
 
@@ -557,6 +573,8 @@ class DockerSandbox:
         self.gpu_indices: list[int] = []
         self.active_env_passthrough: list[str] = []
         self.active_env_aliases: list[dict[str, str]] = []
+        self.image_id = ""
+        self.image_repo_digests: list[str] = []
 
     def start(self) -> str:
         paths = self.local.paths
@@ -627,6 +645,7 @@ class DockerSandbox:
         completed = subprocess.run(command, capture_output=True, text=True, timeout=120, env=run_env)
         if completed.returncode != 0:
             raise RuntimeError(f"failed to start sandbox container: {completed.stderr.strip()}")
+        self.image_id, self.image_repo_digests = resolve_image_identity(self.spec.image)
         return self.container
 
     def _resolve_gpu_indices(self) -> list[int]:
@@ -647,6 +666,11 @@ class DockerSandbox:
         return {
             "container": self.container,
             "image": self.spec.image,
+            # Content-addressable identity of what actually ran: a tag is
+            # mutable, so the manifest also records the resolved image id and
+            # any repo digests (empty for local-only builds).
+            "image_id": getattr(self, "image_id", ""),
+            "image_repo_digests": list(getattr(self, "image_repo_digests", ())),
             "network": self.spec.network,
             "requested_gpu": self.spec.gpu,
             "gpu_count": self.spec.gpu_count,

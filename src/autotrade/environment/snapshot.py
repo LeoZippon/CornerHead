@@ -7,10 +7,12 @@ Builds the six domain files plus universe and manifest for one decision time:
 
 Every row satisfies ``available_at <= decision_time``. Datasets whose raw rows
 carry an ``available_at`` column (events/macro/text/minute) are filtered on it;
-the daily core uses the dataset contracts. Numeric fields are normalized to the
-unit contract (CNY, shares, decimals) and every conversion is recorded in the
-manifest. Replay slots (valid/test) are built separately and are NOT
-PIT-filtered: they are the replay regions read only by backtest_tool.
+the daily core uses the dataset contracts. The unit contract (CNY, shares,
+decimals) covers the DAILY domain only — every conversion is recorded in the
+manifest; events/macro/fundamentals/text keep TuShare per-source units and
+their domain meta carries ``units="source"`` (env docs §1.4). Replay slots
+(valid/test) are built separately and are NOT PIT-filtered: they are the
+replay regions read only by backtest_tool.
 """
 
 from __future__ import annotations
@@ -232,7 +234,11 @@ class SnapshotBuilder:
         profiles["fundamentals.parquet"] = _write_with_profile(
             output_dir / "fundamentals.parquet", fundamentals, build_seconds=time.perf_counter() - started
         )
-        domains["fundamentals"] = {"rows": int(len(fundamentals)), "datasets": list(config.fundamental_datasets)}
+        domains["fundamentals"] = {
+            "rows": int(len(fundamentals)),
+            "datasets": list(config.fundamental_datasets),
+            "units": "source",
+        }
 
         started = time.perf_counter()
         events, events_meta = self._build_available_at_domain(config.events_datasets, decision_time, events_window_start)
@@ -580,6 +586,7 @@ class SnapshotBuilder:
             "coverage_end": visible_dates[-1],
             "trade_dates": visible_dates,
             "visible_trade_dates_by_dataset": visible_by_dataset,
+            "units": "unit_contract",  # the only domain the unit contract covers
             "unit_conversions": conversions,
             "availability_rule": "per-dataset daily contracts; joins include only partitions visible at the decision time",
         }
@@ -681,7 +688,10 @@ class SnapshotBuilder:
             rows.insert(0, "dataset", dataset)
             frames.append(rows)
         merged = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
-        meta = {"rows": int(len(merged)), "datasets": list(datasets), "availability_rules": rules}
+        # units="source": heterogeneous unions keep TuShare per-source units —
+        # the daily-domain unit contract does NOT extend to same-named fields
+        # here (env docs §1.4; raw unit table in data docs §1.2).
+        meta = {"rows": int(len(merged)), "datasets": list(datasets), "units": "source", "availability_rules": rules}
         return merged, meta
 
     def _read_dataset_window(

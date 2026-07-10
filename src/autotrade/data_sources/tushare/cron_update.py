@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -23,7 +24,6 @@ RUNTIME_ROOT = Path(".runtime/tushare")
 STATE_PATH = RUNTIME_ROOT / "cron_state.json"
 DISPATCH_LOG_PATH = Path("logs/tushare_cron_dispatch.log")
 DEFAULT_LOCK_WAIT_SECONDS = 900
-DEFAULT_LOCK_STALE_SECONDS = 21600
 
 
 @dataclass
@@ -399,62 +399,44 @@ def stable_hash(value: object) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def pid_is_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+@dataclass
+class FileLock:
+    """A held kernel flock; the file itself is never deleted (unlinking a
+    flock-backed lock file races a concurrent opener onto a dead inode)."""
 
+    path: Path
+    fd: int
 
-def lock_is_stale(lock: Path, stale_seconds: int) -> bool:
-    try:
-        lines = lock.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        return False
-    values = dict(line.split("=", 1) for line in lines if "=" in line)
-    pid_text = values.get("pid", "")
-    if pid_text.isdigit():
-        return not pid_is_alive(int(pid_text))
-    started_at = values.get("started_at", "")
-    if started_at:
+    def release(self) -> None:
         try:
-            started = datetime.fromisoformat(started_at)
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=timezone.utc)
-            if (datetime.now(timezone.utc) - started).total_seconds() > stale_seconds:
-                return True
-        except ValueError:
-            return False
-    return False
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
 
 
-def acquire_lock(lock_name: str, wait_seconds: int, stale_seconds: int) -> Path:
+def acquire_lock(lock_name: str, wait_seconds: int) -> FileLock:
+    """Exclusive kernel flock: released automatically when the holder exits,
+    so a crashed/killed run can never leave a permanently stale lock (the old
+    PID-file scheme broke on PID reuse). pid/started_at are diagnostics only."""
     lock = RUNTIME_ROOT / "locks" / f"{lock_name}.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR)
     deadline = time.monotonic() + max(0, wait_seconds)
     while True:
         try:
-            fd = os.open(lock, flags)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
-        except FileExistsError as exc:
-            if lock_is_stale(lock, stale_seconds):
-                try:
-                    lock.unlink()
-                    append_dispatch(f"{utc_now()} removed_stale_lock path={lock}")
-                    continue
-                except FileNotFoundError:
-                    continue
+        except BlockingIOError:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise RuntimeError(f"lock exists after waiting {wait_seconds}s, another run may be active: {lock}") from exc
+                os.close(fd)
+                raise RuntimeError(
+                    f"lock is held after waiting {wait_seconds}s, another run may be active: {lock}"
+                ) from None
             time.sleep(min(15.0, remaining))
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(f"pid={os.getpid()}\nstarted_at={utc_now()}\n")
-    return lock
+    os.ftruncate(fd, 0)
+    os.write(fd, f"pid={os.getpid()}\nstarted_at={utc_now()}\n".encode("utf-8"))
+    return FileLock(lock, fd)
 
 
 def utc_now() -> str:
@@ -546,7 +528,6 @@ def main() -> int:
         lock = acquire_lock(
             "tushare_update",
             int(ctx.job.get("lock_wait_seconds", ctx.config.get("default_lock_wait_seconds", DEFAULT_LOCK_WAIT_SECONDS))),
-            int(ctx.job.get("lock_stale_seconds", ctx.config.get("default_lock_stale_seconds", DEFAULT_LOCK_STALE_SECONDS))),
         )
     except RuntimeError as exc:
         state[ctx.job_name] = {
@@ -593,10 +574,7 @@ def main() -> int:
         print(message)
         return returncode
     finally:
-        try:
-            lock.unlink()
-        except FileNotFoundError:
-            pass
+        lock.release()
 
 
 if __name__ == "__main__":

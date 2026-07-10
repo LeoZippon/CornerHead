@@ -365,6 +365,8 @@ MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
           console API：uvicorn 绑定 Unix socket .runtime/webui/console.sock（0700 目录，仅 lzp 可达）；实验 worker 为独立分离进程
 ```
 
+控制台服务依赖（FastAPI/Uvicorn）经可选依赖组安装：`pip install -e '.[webui]'`（裸 `pip install -e .` 不含 Web 服务依赖）。
+
 **设计原则**
 
 - 公网面只有前端 sshd；nginx、控制台 API、反向隧道监听端口全部绑定回环。
