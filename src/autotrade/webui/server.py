@@ -20,7 +20,7 @@ from starlette.background import BackgroundTask
 from autotrade.pipelines.fold_analysis import analysis_paths
 from autotrade.pipelines.hitl_state import ANALYSIS_DIR_NAME, HITL_DIR_NAME, STATUS_NAME, read_json, read_status
 
-from . import equity, registry
+from . import equity, registry, steps
 from .analysis import AnalysisService
 from .manager import ExperimentManager, ManagerError, MAX_RUNNING_EXPERIMENTS
 from .params_schema import parameter_schema
@@ -184,6 +184,32 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             zip_path,
             media_type="application/zip",
             filename=filename,
+            background=BackgroundTask(zip_path.unlink, missing_ok=True),
+        )
+
+    # ---- step tree ---------------------------------------------------------------
+    @app.get("/api/experiments/{experiment_id}/steps")
+    def get_step_tree(experiment_id: str) -> dict[str, object]:
+        return steps.step_tree_view(_experiment_dir(experiment_id))
+
+    @app.get("/api/experiments/{experiment_id}/steps/{node_id}/source.zip")
+    def get_step_node_zip(experiment_id: str, node_id: str) -> FileResponse:
+        experiment_dir = _experiment_dir(experiment_id)
+        try:
+            node_dir = steps.node_export_dir(experiment_dir, node_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        handle = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        handle.close()
+        zip_path = Path(handle.name)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for file in sorted(node_dir.rglob("*")):
+                if file.is_file():
+                    archive.write(file, file.relative_to(node_dir))
+        return FileResponse(
+            zip_path,
+            media_type="application/zip",
+            filename=f"{experiment_id}__{node_id}.zip",
             background=BackgroundTask(zip_path.unlink, missing_ok=True),
         )
 

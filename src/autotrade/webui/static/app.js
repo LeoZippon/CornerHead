@@ -1004,6 +1004,7 @@ async function renderDetailPage(experimentId, selectedKey) {
       charts,
     ));
   }
+  container.append(stepTreePanel(detail));
   const layout = el("div", { class: "detail section-gap" });
   const listHost = sessionListPanel(detail, selectedKey);
   const rightHost = sessionDetailPanel(detail, selectedKey);
@@ -1681,6 +1682,179 @@ function rollbackPanel(detail, session) {
   }
   panel.append(bar);
   return panel;
+}
+
+/* ---------------- Step 产物树 ---------------- */
+
+/* Cross-fold lineage of validated step artifacts. Branches appear when the
+   Agent used step_rollback, or a fold session restarted from a user-set
+   parent override (control.parent_overrides). */
+function stepTreePanel(detail) {
+  const host = el("div", {});
+  api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/steps`)
+    .then((payload) => {
+      if ((payload.nodes || []).length) host.append(stepTreeSection(detail, payload));
+    })
+    .catch(() => { /* no tree for this experiment */ });
+  return host;
+}
+
+function stepTreeSection(detail, payload) {
+  const ids = new Set(payload.nodes.map((node) => node.node_id));
+  const byParent = new Map();
+  for (const node of payload.nodes) {
+    const key = node.parent_node_id && ids.has(node.parent_node_id) ? node.parent_node_id : "";
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(node);
+  }
+  const rows = el("div", { class: "step-tree" });
+  const walk = (parentKey, depth) => {
+    for (const node of byParent.get(parentKey) || []) {
+      rows.append(stepTreeRow(detail, payload, node, depth));
+      walk(node.node_id, depth + 1);
+    }
+  };
+  walk("", 0);
+  const validated = payload.nodes.filter((node) => node.complete_validation).length;
+  const failed = payload.nodes.length - validated;
+  return el("div", { class: "panel section-gap" },
+    el("h4", {}, "Step 产物树"),
+    el("div", { class: "hint" },
+      `${validated} 个已验证节点${failed ? `、${failed} 个失败尝试` : ""}；`
+      + "每个已验证节点保存该版本完整源代码与验证明细。悬停查看指标，点击节点下载源码或从该节点回滚。"),
+    rows,
+  );
+}
+
+function stepTreeRow(detail, payload, node, depth) {
+  const metrics = node.metrics || {};
+  const failed = node.status === "failed";
+  const badges = [];
+  if (node.is_current) badges.push(el("span", { class: "badge state-running_session" }, "当前位置"));
+  for (const key of node.frozen_for || []) badges.push(el("span", { class: "badge state-completed" }, `冻结 ${key}`));
+  if (failed) badges.push(el("span", { class: "badge state-failed" }, "失败"));
+  const label = `${node.fold_id || node.fold_ref || "?"} · ${node.result_name || node.node_id}`;
+  return el("div", {
+    class: `step-node${failed ? " failed" : ""}${node.has_snapshot ? " clickable" : ""}`,
+    style: `padding-left:${12 + depth * 22}px`,
+    onclick: node.has_snapshot ? () => openStepNodeModal(detail, payload, node) : null,
+  },
+    el("span", { class: "step-conn" }, depth ? "└ " : "•"),
+    el("span", { class: "step-label" }, label),
+    Number.isFinite(metrics.total_return)
+      ? el("span", { class: `step-metric ${numClass(metrics.total_return)}` }, fmtPct(metrics.total_return)) : null,
+    Number.isFinite(metrics.sharpe)
+      ? el("span", { class: "step-metric" }, `Sharpe ${Number(metrics.sharpe).toFixed(2)}`) : null,
+    ...badges,
+    el("span", { class: "step-time" }, fmtTsTime(node.created_at)),
+    stepHoverCard(node),
+  );
+}
+
+function stepHoverCard(node) {
+  const m = node.metrics || {};
+  const line = (k, v) => el("div", { class: "step-hover-line" }, el("span", { class: "hint" }, `${k}：`), v);
+  return el("div", { class: "step-hover" },
+    line("节点", node.node_id),
+    line("验证收益", fmtPct(m.total_return)),
+    line("多 / 空拆解", `${fmtPct(m.long_return)} / ${fmtPct(m.short_return)}`),
+    line("Sharpe", m.sharpe === undefined || m.sharpe === null ? "—" : Number(m.sharpe).toFixed(2)),
+    line("最大回撤", fmtPct(m.max_drawdown)),
+    line("记录于", fmtTs(node.created_at)),
+    (node.frozen_for || []).length ? line("冻结用于", node.frozen_for.join("、")) : null,
+    node.status === "failed" ? line("失败原因", node.error || "—") : null,
+  );
+}
+
+function openStepNodeModal(detail, payload, node) {
+  const m = node.metrics || {};
+  const zipUrl = `/api/experiments/${encodeURIComponent(detail.experiment_id)}/steps/${encodeURIComponent(node.node_id)}/source.zip`;
+  const body = el("div", {},
+    el("table", { class: "kv" },
+      kvRow("节点", node.node_id),
+      kvRow("Fold", `${node.epoch_id || "—"} / ${node.fold_id || node.fold_ref || "—"}`),
+      kvRow("验证收益", el("span", { class: numClass(m.total_return) }, fmtPct(m.total_return))),
+      kvRow("多 / 空拆解", `${fmtPct(m.long_return)} / ${fmtPct(m.short_return)}`),
+      kvRow("Sharpe", m.sharpe === undefined || m.sharpe === null ? "—" : Number(m.sharpe).toFixed(2)),
+      kvRow("最大回撤", fmtPct(m.max_drawdown)),
+      kvRow("记录时间", fmtTs(node.created_at)),
+      kvRow("附件", (node.attachments || []).join("、") || "—"),
+      kvRow("产物 hash", el("code", {}, String(node.artifact_hash || "—"))),
+    ),
+    el("p", { class: "hint" },
+      "「下载源码 + 结果」包含该版本完整 output/ 源代码、models/ 参数与该次验证的 detailed_return.json / style_analysis.json / orders.parquet。"),
+  );
+  const buttons = [
+    el("button", { class: "btn", onclick: closeModal }, "关闭"),
+    el("a", { class: "btn", href: zipUrl }, "下载源码 + 结果"),
+  ];
+  if (detail.kind === "hitl") {
+    buttons.push(el("button", {
+      class: "btn primary",
+      onclick: () => openStepParentOverrideModal(detail, payload, node),
+    }, "从此节点回滚…"));
+  }
+  showModal("Step 节点详情", body, buttons);
+}
+
+/* User-side step rollback: make this node the parent of a fold session
+   (pending fold: takes effect at its next start; completed fold: combine with
+   rerun, which stays restricted to the latest completed fold). */
+function openStepParentOverrideModal(detail, payload, node) {
+  const sessions = payload.fold_sessions || [];
+  if (!sessions.length) { toast("该实验没有 Fold 会话", true); return; }
+  const select = el("select", { class: "input" },
+    ...sessions.map((session) => el("option", { value: session.key }, session.key)));
+  const own = sessions.find((session) => session.epoch_id === node.epoch_id && session.fold_id === node.fold_id);
+  if (own) select.value = own.key;
+  const send = (action, sessionKey, directive) =>
+    api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`, {
+      method: "POST",
+      body: JSON.stringify({ action, session_key: sessionKey, directive }),
+    });
+  const body = el("div", {},
+    el("p", {}, `把 ${node.node_id} 设为所选 Fold 会话的父产物起点（替代默认的冻结继承链）。`),
+    el("p", { class: "hint" },
+      "尚未运行的 Fold：下次启动该会话时生效（step 模式下批准后）。已完成的 Fold：用「设置并重跑」"
+      + "（仅允许重跑最新完成的 Fold，且需先停止 worker）。设置持续有效：重新设置即覆盖，「清除」即恢复默认继承链。"),
+    el("label", { class: "hint" }, "目标 Fold 会话"),
+    select,
+  );
+  showModal("从此节点回滚 / 设为起点", body, [
+    el("button", { class: "btn", onclick: closeModal }, "取消"),
+    el("button", {
+      class: "btn",
+      onclick: async () => {
+        try {
+          await send("set_parent_override", select.value, "");
+          toast(`已清除 ${select.value} 的起点覆盖`);
+          closeModal();
+        } catch (error) { toast(error.message, true); }
+      },
+    }, "清除该会话覆盖"),
+    el("button", {
+      class: "btn primary",
+      onclick: async () => {
+        try {
+          await send("set_parent_override", select.value, node.node_id);
+          toast(`已把 ${select.value} 的起点设为该节点`);
+          closeModal();
+        } catch (error) { toast(error.message, true); }
+      },
+    }, "仅设置起点"),
+    el("button", {
+      class: "btn danger",
+      onclick: async () => {
+        try {
+          await send("set_parent_override", select.value, node.node_id);
+          await send("rerun_fold", select.value, null);
+          toast("已设置起点并启动重跑（等待批准）");
+          closeModal();
+          route();
+        } catch (error) { toast(error.message, true); }
+      },
+    }, "设置并重跑"),
+  ]);
 }
 
 function foldResultPanel(detail, session) {

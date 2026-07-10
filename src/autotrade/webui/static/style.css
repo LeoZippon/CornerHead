@@ -404,6 +404,25 @@ details.advanced .form-grid { margin-top: 0.55rem; }
 .loading { color: var(--muted); padding: 1.4rem; text-align: center; }
 
 /* ---------------- responsive breakpoints ---------------- */
+
+/* ---- step tree ---- */
+.step-tree { margin-top: 0.6rem; font-size: 0.86rem; max-height: 420px; overflow-y: auto; }
+.step-node { position: relative; display: flex; align-items: center; gap: 0.55rem; padding: 0.28rem 0.6rem; border-radius: 6px; }
+.step-node.clickable { cursor: pointer; }
+.step-node.clickable:hover { background: var(--chip-bg); }
+.step-node.failed { color: var(--muted); }
+.step-node.failed .step-label { text-decoration: line-through; }
+.step-conn { color: var(--muted); flex: none; }
+.step-label { font-family: var(--mono, ui-monospace, monospace); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.step-metric { flex: none; color: var(--muted); }
+.step-time { flex: none; margin-left: auto; color: var(--muted); font-size: 0.78rem; }
+.step-hover { display: none; position: absolute; left: 32px; top: calc(100% + 2px); z-index: 40; min-width: 300px; max-width: 460px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,0.18);
+  padding: 0.6rem 0.8rem; font-size: 0.82rem; }
+.step-node:hover .step-hover { display: block; }
+.step-hover-line { display: flex; gap: 0.4rem; padding: 0.08rem 0; }
+.step-hover-line .hint { margin: 0; flex: none; }
+
 @media (max-width: 1080px) {
   .detail { grid-template-columns: 1fr; }
   .session-list { max-height: 38vh; }

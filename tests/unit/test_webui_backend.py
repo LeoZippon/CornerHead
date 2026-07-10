@@ -391,6 +391,96 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(cleared.json()["control"]["gpu_counts"], {})
 
+    def _build_step_tree(self, experiment_id: str) -> str:
+        from autotrade.environment.identity import agent_visible_ref
+        from autotrade.environment.step_tree import StepTree
+
+        experiment_dir = self.experiments_root / experiment_id
+        strategy_dir = experiment_dir / "strategy_artifacts" / "epoch_001" / "strategy_epoch_001_fold_2022Q1"
+        detail = experiment_dir / "detail_fixture.json"
+        detail.write_text("{}", encoding="utf-8")
+        tree = StepTree(experiment_dir / "steps")
+        fold_ref = agent_visible_ref("fold_2022Q1", prefix="fold_ref")
+        node_id = tree.record_step(
+            strategy_dir,
+            epoch_id="epoch_001",
+            fold_id=fold_ref,
+            result_name="valid_000",
+            artifact_hash=artifact_hash(strategy_dir),
+            metrics={"total_return": 0.10, "sharpe": 1.0, "max_drawdown": 0.05,
+                     "long_return": 0.08, "short_return": 0.02},
+            complete_validation=True,
+            model_artifact_hash=model_artifact_hash(strategy_dir / ".missing_models"),
+            attachments={"detailed_return.json": detail},
+        )
+        tree.record_failed_attempt(
+            epoch_id="epoch_001", fold_id=fold_ref, result_name="failed_x", error="boom"
+        )
+        return node_id
+
+    def test_step_tree_view_deopaques_folds_and_marks_frozen(self) -> None:
+        node_id = self._build_step_tree("exp_hitl")
+        payload = self.client.get("/api/experiments/exp_hitl/steps").json()
+        self.assertEqual(payload["current_node_id"], node_id)
+        nodes = {node["node_id"]: node for node in payload["nodes"]}
+        self.assertEqual(len(nodes), 2)
+        good = nodes[node_id]
+        # The agent-opaque fold_ref maps back to the real fold id for the researcher.
+        self.assertEqual(good["fold_id"], "fold_2022Q1")
+        self.assertTrue(good["has_snapshot"])
+        self.assertTrue(good["is_current"])
+        self.assertEqual(good["frozen_for"], ["epoch_001/fold_2022Q1"])
+        self.assertEqual(good["attachments"], ["detailed_return.json"])
+        failed = next(node for node in payload["nodes"] if node["status"] == "failed")
+        self.assertFalse(failed["has_snapshot"])
+        self.assertEqual(failed["frozen_for"], [])
+        self.assertEqual(
+            [session["key"] for session in payload["fold_sessions"]],
+            ["epoch_001/fold_2022Q1", "epoch_001/fold_2022Q2"],
+        )
+        # Experiments without a tree return an empty payload, not an error.
+        empty = self.client.get("/api/experiments/exp_legacy/steps").json()
+        self.assertEqual(empty["nodes"], [])
+
+    def test_step_node_zip_contains_source_and_results(self) -> None:
+        node_id = self._build_step_tree("exp_hitl")
+        response = self.client.get(f"/api/experiments/exp_hitl/steps/{node_id}/source.zip")
+        self.assertEqual(response.status_code, 200, response.text)
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            names = set(archive.namelist())
+        self.assertIn("output/main.py", names)
+        self.assertIn("detailed_return.json", names)
+        failed_id = f"epoch_001__{node_id.split('__')[1]}__failed_x"
+        missing = self.client.get(f"/api/experiments/exp_hitl/steps/{failed_id}/source.zip")
+        self.assertEqual(missing.status_code, 404)
+        unknown = self.client.get("/api/experiments/exp_hitl/steps/nope/source.zip")
+        self.assertEqual(unknown.status_code, 404)
+
+    def test_set_parent_override_control(self) -> None:
+        node_id = self._build_step_tree("exp_hitl")
+        ok = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_parent_override", "session_key": "epoch_001/fold_2022Q2", "directive": node_id},
+        )
+        self.assertEqual(ok.status_code, 200, ok.text)
+        self.assertEqual(ok.json()["control"]["parent_overrides"], {"epoch_001/fold_2022Q2": node_id})
+        # Unknown node and non-fold sessions are rejected.
+        bad_node = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_parent_override", "session_key": "epoch_001/fold_2022Q2", "directive": "nope"},
+        )
+        self.assertEqual(bad_node.status_code, 400)
+        bad_session = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_parent_override", "session_key": "heldout", "directive": node_id},
+        )
+        self.assertEqual(bad_session.status_code, 400)
+        cleared = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_parent_override", "session_key": "epoch_001/fold_2022Q2", "directive": ""},
+        )
+        self.assertEqual(cleared.json()["control"]["parent_overrides"], {})
+
     def test_rollback_drops_later_records_and_archives_artifacts(self) -> None:
         experiment_dir = self.experiments_root / "exp_hitl"
         # Give fold_2022Q2 a record + frozen dir so there is something to drop.

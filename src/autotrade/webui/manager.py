@@ -262,6 +262,15 @@ class ExperimentManager:
                 control.gpu_counts[session_key] = count
             else:
                 control.gpu_counts.pop(session_key, None)
+        elif action == "set_parent_override":
+            if not session_key:
+                raise ManagerError("set_parent_override requires session_key")
+            node_id = str(directive or "").strip()
+            if node_id:
+                self._validate_parent_override(experiment_dir, session_key, node_id)
+                control.parent_overrides[session_key] = node_id
+            else:
+                control.parent_overrides.pop(session_key, None)
         elif action == "skip_to_heldout":
             from .registry import read_ledger_records, latest_fold_records
 
@@ -404,6 +413,9 @@ class ExperimentManager:
         for key in list(control.gpu_counts):
             if key in dropped_session_keys:
                 control.gpu_counts.pop(key, None)
+        for key in list(control.parent_overrides):
+            if key in dropped_session_keys:
+                control.parent_overrides.pop(key, None)
         return {
             "rolled_back_to": session_key,
             "dropped_records": len(dropped_records),
@@ -428,6 +440,24 @@ class ExperimentManager:
             raise ManagerError("该实验还没有已完成的 Fold 可重跑")
         if session_key != recorded_keys[-1]:
             raise ManagerError(f"只能重跑最新完成的 Fold（{recorded_keys[-1]}）——更早的 Fold 已被后续继承")
+
+    def _validate_parent_override(self, experiment_dir: Path, session_key: str, node_id: str) -> None:
+        """The override target must be a fold session and the node a restorable snapshot.
+
+        Which fold may consume it is enforced where it matters: an already-run
+        fold only picks the override up through rerun_fold (itself restricted to
+        the latest fold), an unrun fold at its next start."""
+        from .steps import node_export_dir
+
+        schedule = read_json(experiment_dir / HITL_DIR_NAME / "schedule.json")
+        sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
+        fold_keys = [str(s.get("key")) for s in sessions if s.get("kind") == "fold"]
+        if session_key not in fold_keys:
+            raise ManagerError(f"{session_key!r} is not a fold session")
+        try:
+            node_export_dir(experiment_dir, node_id)
+        except ValueError as exc:
+            raise ManagerError(str(exc)) from exc
 
     # ---- deletion ------------------------------------------------------------
     def delete_experiment(self, experiment_id: str) -> dict[str, object]:

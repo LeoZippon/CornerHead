@@ -238,6 +238,10 @@ class ControlState:
     # session_key -> GPU count for that fold's sandbox (set at the approval
     # gate; absent = the experiment's SandboxSpec default).
     gpu_counts: dict[str, int] = field(default_factory=dict)
+    # session_key -> step-tree node_id: that fold session starts from the node
+    # snapshot as its parent artifact instead of the inherited frozen chain
+    # (user-side step rollback; consumed at session start, persists until cleared).
+    parent_overrides: dict[str, str] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -250,6 +254,7 @@ class ControlState:
             "rerun_sessions": dict(self.rerun_sessions),
             "skip_to_heldout": self.skip_to_heldout,
             "gpu_counts": dict(self.gpu_counts),
+            "parent_overrides": dict(self.parent_overrides),
             "updated_at": utc_now_iso(),
         }
 
@@ -265,6 +270,7 @@ def read_control(path: Path) -> ControlState:
     directives = payload.get("directives")
     overrides = payload.get("prompt_overrides")
     reruns = payload.get("rerun_sessions")
+    parents = payload.get("parent_overrides")
     return ControlState(
         mode=mode,
         request=request,
@@ -274,6 +280,7 @@ def read_control(path: Path) -> ControlState:
         rerun_sessions={str(k): str(v) for k, v in reruns.items()} if isinstance(reruns, dict) else {},
         skip_to_heldout=bool(payload.get("skip_to_heldout")),
         gpu_counts=_int_map(payload.get("gpu_counts")),
+        parent_overrides={str(k): str(v) for k, v in parents.items()} if isinstance(parents, dict) else {},
     )
 
 

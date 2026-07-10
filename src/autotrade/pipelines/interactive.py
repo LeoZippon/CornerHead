@@ -35,6 +35,7 @@ from typing import Callable, Mapping
 from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 from autotrade.environment.snapshot import SnapshotConfig
+from autotrade.environment.step_tree import StepTree
 
 from .config import ExperimentConfig, FrozenArtifact
 from .folds import build_fold_schedule, heldout_periods
@@ -266,15 +267,20 @@ class InteractiveExperimentRunner:
                         self._require_no_orphan_artifact(epoch_id, fold.fold_id)
                     directive = self._gate(key, phase="fold", epoch_id=epoch_id, fold_id=fold.fold_id)
                     control = read_control(self.control_path)
+                    # User-side step rollback: a control-plane override replaces the
+                    # inherited frozen chain with a validated step-tree node snapshot.
+                    override_node = control.parent_overrides.get(key)
+                    session_parent = self._parent_from_step_node(override_node) if override_node else parent
                     self.status.set(
                         state="running_session", phase="fold", session_key=key,
                         epoch_id=epoch_id, fold_id=fold.fold_id, run_id=None, trace_path=None,
                         session_started_at=utc_now_iso(), fold_deadline_at=None,
+                        parent_override=override_node,
                     )
                     outcome = self.pipeline.run_fold(
                         fold,
                         epoch_id=epoch_id,
-                        parent=parent,
+                        parent=session_parent,
                         taste_prompt=taste_prompt,
                         fold_directive=directive,
                         system_prompt_override=control.prompt_overrides.get(key, ""),
@@ -423,6 +429,24 @@ class InteractiveExperimentRunner:
             artifact_hash=expected_hash,
             model_path=model_path if model_path and model_path.is_dir() else None,
             model_artifact_hash=expected_model_hash,
+        )
+
+    def _parent_from_step_node(self, node_id: str) -> FrozenArtifact:
+        """Build the session parent from a validated step-tree node snapshot."""
+        tree = StepTree(Path(self.config.experiment_dir) / "steps")
+        node = tree.get_node(node_id)  # ValueError on unknown ids — fail fast
+        if node.get("status") == "failed" or not node.get("complete_validation"):
+            raise RuntimeError(f"parent override {node_id} is not a validated node with a snapshot")
+        model_hash = node.get("model_artifact_hash")
+        if not model_hash:
+            raise RuntimeError(f"parent override {node_id} carries no model artifact hash")
+        models_dir = tree.node_models_dir(node_id)
+        return self._verified_artifact(
+            artifact_id=f"stepnode_{node_id}",
+            path=tree.node_output_dir(node_id),
+            expected_hash=str(node.get("artifact_hash")),
+            model_path=models_dir if models_dir.is_dir() else None,
+            expected_model_hash=str(model_hash),
         )
 
     def _require_no_orphan_artifact(self, epoch_id: str, fold_id: str) -> None:

@@ -222,6 +222,41 @@ class InteractiveRunnerTest(unittest.TestCase):
         self._runner(pipeline).run(TRADING_DAYS)
         self.assertEqual(pipeline.gpu_counts_seen, [2, None])
 
+    def test_parent_override_uses_step_node_snapshot(self) -> None:
+        from autotrade.environment.step_tree import StepTree
+
+        from .test_artifacts import write_artifact
+
+        pipeline = FakePipeline(self.config)
+        source = write_artifact(self.root / "node_artifact")
+        tree = StepTree(self.config.experiment_dir / "steps")
+        node_id = tree.record_step(
+            source,
+            epoch_id="epoch_001",
+            fold_id="fold_ref_abc123",
+            result_name="valid_003",
+            artifact_hash=artifact_hash(source),
+            metrics={"total_return": 0.02},
+            complete_validation=True,
+            model_artifact_hash=model_artifact_hash(source / ".missing_models"),
+        )
+        self._control(mode="auto", parent_overrides={fold_session_key("epoch_001", "fold_2022Q2"): node_id})
+        self._runner(pipeline).run(TRADING_DAYS)
+        fold_calls = [call for call in pipeline.calls if call[0] == "fold"]
+        # Fold 1 keeps the default chain; fold 2 starts from the node snapshot.
+        self.assertIsNone(fold_calls[0][5])
+        self.assertEqual(fold_calls[1][5], f"stepnode_{node_id}")
+
+    def test_parent_override_rejects_failed_node(self) -> None:
+        from autotrade.environment.step_tree import StepTree
+
+        pipeline = FakePipeline(self.config)
+        tree = StepTree(self.config.experiment_dir / "steps")
+        failed = tree.record_failed_attempt(fold_id="fold_ref_abc123", result_name="failed_1", error="boom")
+        self._control(mode="auto", parent_overrides={fold_session_key("epoch_001", "fold_2022Q1"): failed})
+        with self.assertRaisesRegex(RuntimeError, "not a validated node"):
+            self._runner(pipeline).run(TRADING_DAYS)
+
     def test_inherited_artifact_seeds_first_fold_parent(self) -> None:
         from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
 
@@ -549,11 +584,12 @@ class ControlFileTest(unittest.TestCase):
             path = Path(tmp) / "control.json"
             write_control(path, ControlState(
                 mode="auto", request="pause", approved_sessions=("a",), directives={"a": "d"},
-                prompt_overrides={"a": "P"}, rerun_sessions={"a": "r1"},
+                prompt_overrides={"a": "P"}, rerun_sessions={"a": "r1"}, parent_overrides={"a": "n1"},
             ))
             state = read_control(path)
             self.assertEqual((state.mode, state.request, state.approved_sessions, state.directives), ("auto", "pause", ("a",), {"a": "d"}))
             self.assertEqual((state.prompt_overrides, state.rerun_sessions), ({"a": "P"}, {"a": "r1"}))
+            self.assertEqual(state.parent_overrides, {"a": "n1"})
             path.write_text(json.dumps({"mode": "bogus", "request": "bogus"}), encoding="utf-8")
             state = read_control(path)
             self.assertEqual((state.mode, state.request), ("step", None))
