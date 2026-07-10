@@ -1,3 +1,12 @@
+2026-07-10 Step 树 GPT 审计裁决与修复（feat/step-tree-rollback，feb8739）
+
+- 5 项审计意见逐项对码核验：2 项确认修复、2 项核实后否决、1 项文档补齐。full suite 607 OK。
+- 确认 #1 重跑节点 ID 冲突（真实缺陷，且早于本特性——rerun_fold 自身即触发）：result_name（valid_NNN）每个 run 从 000 重排，同一 Fold 重跑（rerun_fold / rollback_fold 后重启）首次完整验证即撞已有 node_id，record_step 在回放成功后抛 ValueError → Agent 只见 internal tool failure、树停止累积。修复：node_id 纳入 run 段（epoch__fold_ref__run__result；run_id 本就 Agent 可见且无日历信息）。
+- 确认 #2 回滚泄漏未来验证信息（真实泄漏）：rollback_fold 只改账本/归档冻结产物，实验级 steps 树保留被丢弃 Fold 的节点（未来区间上验证过的完整策略+指标），_install_step_tree 原样交给重跑 Fold 的沙箱。修复：回滚同步修剪树（被丢弃会话节点+后代连快照移入同一 rollback 归档，tree.json 备份，current 指向被剪节点时置空）；`set_parent_override` 增加 past-only 守卫（更晚 Fold 节点不得设为更早会话起点，本会话允许=从节点重跑场景）。
+- 否决 #3 include_models=false 破坏谱系：每个节点记录自身 model hash，父指针语义=搜索谱系；代码/参数不配对的风险已写入工具契约警告，保留研究自由度。
+- 否决 #4 恢复缺事务性：与全管线产物安装同构（copy_artifact 均为删后拷），失败恢复路径=重新调用（全部已验证态永在只读树内），树位置仅在双 hash 校验通过后移动；已在工具 docstring 明示，不为单一工具引入特例事务。
+- #5 文档：pipeline_design §5（回滚剪树、past-only）、parameters_reference §9 同步（随在途文档 pass 待提交）。
+
 2026-07-10 Step 树分支回滚：Agent 工具 + 控制台面板（feat/step-tree-rollback，dfa9400 + d3a2e2f）
 
 - 动机：Step 树存储层早已树形完备（逐节点全量快照 + `set_position`），但 Agent 没有受认可的恢复/重定位通道，新节点父指针恒为最新节点——树在结构上只能是线性链。本批打通两侧：Agent 侧 `step_rollback` 工具，用户侧控制台 Step 树面板 + 父产物覆盖。
