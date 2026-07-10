@@ -505,7 +505,7 @@ class ExperimentManager:
         from autotrade.environment.identity import agent_visible_ref
         from autotrade.environment.step_tree import StepTree
 
-        from .steps import node_export_dir
+        from .steps import node_export_dir, node_layout
 
         schedule = read_json(experiment_dir / HITL_DIR_NAME / "schedule.json")
         sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
@@ -516,6 +516,8 @@ class ExperimentManager:
             node_export_dir(experiment_dir, node_id)
         except ValueError as exc:
             raise ManagerError(str(exc)) from exc
+        if node_layout(experiment_dir / "steps", node_id) != "split":
+            raise ManagerError("旧格式节点仅支持查看与下载，无法设为父产物起点")
         node = StepTree(experiment_dir / "steps").get_node(node_id)
         ref_to_fold = {agent_visible_ref(key.partition("/")[2], prefix="fold_ref"): key.partition("/")[2] for key in fold_keys}
         node_fold = ref_to_fold.get(str(node.get("fold_id")))

@@ -458,6 +458,36 @@ class WebuiBackendTest(unittest.TestCase):
         unknown = self.client.get("/api/experiments/exp_hitl/steps/nope/source.zip")
         self.assertEqual(unknown.status_code, 404)
 
+    def _make_node_legacy(self, experiment_id: str, node_id: str) -> None:
+        """Rewrite a node dir into the pre-2026-07-10 flat layout (files at root)."""
+        import shutil
+
+        node_dir = self.experiments_root / experiment_id / "steps" / node_id
+        output = node_dir / "output"
+        for child in list(output.iterdir()):
+            shutil.move(str(child), str(node_dir / child.name))
+        output.rmdir()
+        shutil.rmtree(node_dir / "models", ignore_errors=True)
+
+    def test_legacy_flat_nodes_stay_downloadable_but_not_restorable(self) -> None:
+        node_id = self._build_step_tree("exp_hitl", with_failed=False)
+        self._make_node_legacy("exp_hitl", node_id)
+        payload = self.client.get("/api/experiments/exp_hitl/steps").json()
+        node = next(n for n in payload["nodes"] if n["node_id"] == node_id)
+        self.assertTrue(node["has_snapshot"])
+        self.assertFalse(node["restorable"])
+        response = self.client.get(f"/api/experiments/exp_hitl/steps/{node_id}/source.zip")
+        self.assertEqual(response.status_code, 200, response.text)
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            names = set(archive.namelist())
+        self.assertIn("main.py", names)  # flat layout exported verbatim
+        refused = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_parent_override", "session_key": "epoch_001/fold_2022Q1", "directive": node_id},
+        )
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("旧格式", refused.json()["detail"])
+
     def test_set_parent_override_control(self) -> None:
         node_id = self._build_step_tree("exp_hitl")
         ok = self.client.post(

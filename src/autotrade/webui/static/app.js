@@ -1688,7 +1688,9 @@ function rollbackPanel(detail, session) {
 
 /* Cross-fold lineage of validated step artifacts. Branches appear when the
    Agent used step_rollback, or a fold session restarted from a user-set
-   parent override (control.parent_overrides). */
+   parent override. Built for large trees: collapsible subtrees, text filter,
+   one shared viewport-clamped tooltip (never clipped by the scroll box),
+   inline download on every node with a snapshot. */
 function stepTreePanel(detail) {
   const host = el("div", {});
   api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/steps`)
@@ -1700,62 +1702,157 @@ function stepTreePanel(detail) {
 }
 
 function stepTreeSection(detail, payload) {
-  const ids = new Set(payload.nodes.map((node) => node.node_id));
+  const nodes = payload.nodes;
+  const ids = new Set(nodes.map((node) => node.node_id));
   const byParent = new Map();
-  for (const node of payload.nodes) {
+  for (const node of nodes) {
     const key = node.parent_node_id && ids.has(node.parent_node_id) ? node.parent_node_id : "";
     if (!byParent.has(key)) byParent.set(key, []);
     byParent.get(key).push(node);
   }
-  const rows = el("div", { class: "step-tree" });
-  const walk = (parentKey, depth) => {
-    for (const node of byParent.get(parentKey) || []) {
-      rows.append(stepTreeRow(detail, payload, node, depth));
-      walk(node.node_id, depth + 1);
+  const state = { collapsed: new Set(), filter: "" };
+  const rows = el("div", { class: "step-tree", onscroll: hideStepTip });
+  const summary = el("span", { class: "hint", style: "margin-left:auto" });
+  const validated = nodes.filter((node) => node.complete_validation).length;
+
+  const haystack = (node) => [
+    node.node_id, node.fold_id, node.fold_ref, node.result_name, node.epoch_id,
+    ...(node.frozen_for || []),
+  ].filter(Boolean).join(" ").toLowerCase();
+
+  const render = () => {
+    hideStepTip();
+    rows.innerHTML = "";
+    const query = state.filter.trim().toLowerCase();
+    let visible = new Set(nodes.map((node) => node.node_id));
+    if (query) {
+      // Matches plus their ancestors, so hits keep their lineage context.
+      const parentOf = new Map(nodes.map((node) => [node.node_id, node.parent_node_id]));
+      visible = new Set();
+      for (const node of nodes) {
+        if (!haystack(node).includes(query)) continue;
+        let cursor = node.node_id;
+        while (cursor && ids.has(cursor) && !visible.has(cursor)) {
+          visible.add(cursor);
+          cursor = parentOf.get(cursor);
+        }
+      }
     }
+    const walk = (parentKey, depth) => {
+      for (const node of byParent.get(parentKey) || []) {
+        if (!visible.has(node.node_id)) continue;
+        const children = (byParent.get(node.node_id) || []).filter((child) => visible.has(child.node_id));
+        // A filter overrides manual collapse: hits must never be hidden.
+        const collapsed = !query && state.collapsed.has(node.node_id);
+        rows.append(stepTreeRow(detail, payload, node, depth, {
+          childCount: children.length,
+          collapsed,
+          toggle: () => {
+            if (state.collapsed.has(node.node_id)) state.collapsed.delete(node.node_id);
+            else state.collapsed.add(node.node_id);
+            render();
+          },
+        }));
+        if (!collapsed) walk(node.node_id, depth + 1);
+      }
+    };
+    walk("", 0);
+    if (!rows.children.length) rows.append(el("div", { class: "empty" }, "没有命中的节点"));
+    const failed = nodes.length - validated;
+    summary.textContent = query
+      ? `命中 ${visible.size} / ${nodes.length} 节点`
+      : `${validated} 已验证${failed ? ` · ${failed} 失败` : ""} · 共 ${nodes.length} 节点`;
   };
-  walk("", 0);
-  const validated = payload.nodes.filter((node) => node.complete_validation).length;
-  const failed = payload.nodes.length - validated;
+
+  const filterInput = el("input", {
+    class: "input step-filter", type: "search", placeholder: "筛选 Fold / 节点 / 结果名…",
+    oninput: (event) => { state.filter = event.target.value; render(); },
+  });
+  const toolbar = el("div", { class: "step-toolbar" },
+    filterInput,
+    el("button", { class: "btn small", onclick: () => { state.collapsed = new Set(); render(); } }, "全部展开"),
+    el("button", {
+      class: "btn small",
+      onclick: () => {
+        state.collapsed = new Set(nodes.filter((node) => (byParent.get(node.node_id) || []).length).map((node) => node.node_id));
+        render();
+      },
+    }, "全部折叠"),
+    summary,
+  );
+  render();
   return el("div", { class: "panel section-gap" },
     el("h4", {}, "Step 产物树"),
     el("div", { class: "hint" },
-      `${validated} 个已验证节点${failed ? `、${failed} 个失败尝试` : ""}；`
-      + "每个已验证节点保存该版本完整源代码与验证明细。悬停查看指标，点击节点下载源码或从该节点回滚。"),
+      "跨 Fold 的已验证策略谱系：每个节点保存该版本完整源代码与验证明细。悬停看指标详情，点行看完整信息，行内直接下载；HITL 实验可从节点回滚。"),
+    toolbar,
     rows,
   );
 }
 
-function stepTreeRow(detail, payload, node, depth) {
+function stepTreeRow(detail, payload, node, depth, { childCount, collapsed, toggle }) {
   const metrics = node.metrics || {};
   const failed = node.status === "failed";
+  const zipUrl = `/api/experiments/${encodeURIComponent(detail.experiment_id)}/steps/${encodeURIComponent(node.node_id)}/source.zip`;
   const badges = [];
   if (node.is_current) badges.push(el("span", { class: "badge state-running_session" }, "当前位置"));
   for (const key of node.frozen_for || []) badges.push(el("span", { class: "badge state-completed" }, `冻结 ${key}`));
   if (failed) badges.push(el("span", { class: "badge state-failed" }, "失败"));
-  const label = `${node.fold_id || node.fold_ref || "?"} · ${node.result_name || node.node_id}`;
-  return el("div", {
-    class: `step-node${failed ? " failed" : ""}${node.has_snapshot ? " clickable" : ""}`,
-    style: `padding-left:${12 + depth * 22}px`,
-    onclick: node.has_snapshot ? () => openStepNodeModal(detail, payload, node) : null,
+  if (node.has_snapshot && !node.restorable) badges.push(el("span", { class: "badge kind" }, "旧格式"));
+  const actions = el("span", { class: "step-actions" });
+  if (node.has_snapshot) {
+    actions.append(el("a", {
+      class: "btn small", href: zipUrl, title: "下载该版本完整源代码与验证明细",
+      onclick: (event) => event.stopPropagation(),
+    }, "下载"));
+  }
+  if (node.restorable && detail.kind === "hitl") {
+    actions.append(el("button", {
+      class: "btn small",
+      onclick: (event) => { event.stopPropagation(); hideStepTip(); openStepParentOverrideModal(detail, payload, node); },
+    }, "回滚…"));
+  }
+  const row = el("div", {
+    class: `step-node${failed ? " failed" : ""}`,
+    style: `padding-left:${8 + depth * 20}px`,
+    onclick: () => { hideStepTip(); openStepNodeModal(detail, payload, node); },
+    onmouseenter: (event) => showStepTip(node, event.currentTarget),
+    onmouseleave: hideStepTip,
   },
-    el("span", { class: "step-conn" }, depth ? "└ " : "•"),
-    el("span", { class: "step-label" }, label),
+    childCount
+      ? el("button", {
+          class: "step-toggle", title: collapsed ? `展开 ${childCount} 个子节点` : "折叠子树",
+          onclick: (event) => { event.stopPropagation(); hideStepTip(); toggle(); },
+        }, collapsed ? "▸" : "▾")
+      : el("span", { class: "step-toggle leaf" }, "·"),
+    el("span", { class: "step-label" }, `${node.fold_id || node.fold_ref || "?"} · ${node.result_name || node.node_id}`),
+    collapsed ? el("span", { class: "step-chip" }, `+${childCount}`) : null,
     Number.isFinite(metrics.total_return)
-      ? el("span", { class: `step-metric ${numClass(metrics.total_return)}` }, fmtPct(metrics.total_return)) : null,
+      ? el("span", { class: `step-chip ${numClass(metrics.total_return)}` }, fmtPct(metrics.total_return)) : null,
     Number.isFinite(metrics.sharpe)
-      ? el("span", { class: "step-metric" }, `Sharpe ${Number(metrics.sharpe).toFixed(2)}`) : null,
+      ? el("span", { class: "step-chip" }, `S ${Number(metrics.sharpe).toFixed(2)}`) : null,
     ...badges,
-    el("span", { class: "step-time" }, fmtTsTime(node.created_at)),
-    stepHoverCard(node),
+    el("span", { class: "step-time" }, fmtTs(node.created_at)),
+    actions,
   );
+  return row;
 }
 
-function stepHoverCard(node) {
+/* One shared fixed-position tooltip: immune to the tree's overflow clipping
+   and cheaper than a hidden card per row on large trees. pointer-events:none
+   so it never steals hover from the rows underneath. */
+function showStepTip(node, row) {
+  let tip = document.getElementById("step-tip");
+  if (!tip) {
+    tip = el("div", { id: "step-tip" });
+    document.body.append(tip);
+  }
   const m = node.metrics || {};
-  const line = (k, v) => el("div", { class: "step-hover-line" }, el("span", { class: "hint" }, `${k}：`), v);
-  return el("div", { class: "step-hover" },
-    line("节点", node.node_id),
+  const line = (k, v) => el("div", { class: "step-tip-line" }, el("span", { class: "k" }, `${k}：`), String(v));
+  tip.innerHTML = "";
+  tip.append(
+    el("div", { class: "step-tip-title" }, node.node_id),
+    line("Fold", `${node.epoch_id || "—"} / ${node.fold_id || node.fold_ref || "—"}`),
     line("验证收益", fmtPct(m.total_return)),
     line("多 / 空拆解", `${fmtPct(m.long_return)} / ${fmtPct(m.short_return)}`),
     line("Sharpe", m.sharpe === undefined || m.sharpe === null ? "—" : Number(m.sharpe).toFixed(2)),
@@ -1763,7 +1860,20 @@ function stepHoverCard(node) {
     line("记录于", fmtTs(node.created_at)),
     (node.frozen_for || []).length ? line("冻结用于", node.frozen_for.join("、")) : null,
     node.status === "failed" ? line("失败原因", node.error || "—") : null,
+    node.has_snapshot ? null : line("快照", "无（失败尝试不留产物）"),
   );
+  tip.style.display = "block";
+  const rect = row.getBoundingClientRect();
+  const margin = 8;
+  tip.style.left = `${Math.max(margin, Math.min(rect.left + 24, window.innerWidth - tip.offsetWidth - margin))}px`;
+  let top = rect.bottom + 4;
+  if (top + tip.offsetHeight > window.innerHeight - margin) top = rect.top - tip.offsetHeight - 4;
+  tip.style.top = `${Math.max(margin, top)}px`;
+}
+
+function hideStepTip() {
+  const tip = document.getElementById("step-tip");
+  if (tip) tip.style.display = "none";
 }
 
 function openStepNodeModal(detail, payload, node) {
@@ -1778,17 +1888,22 @@ function openStepNodeModal(detail, payload, node) {
       kvRow("Sharpe", m.sharpe === undefined || m.sharpe === null ? "—" : Number(m.sharpe).toFixed(2)),
       kvRow("最大回撤", fmtPct(m.max_drawdown)),
       kvRow("记录时间", fmtTs(node.created_at)),
+      (node.frozen_for || []).length ? kvRow("冻结用于", node.frozen_for.join("、")) : null,
+      node.status === "failed" ? kvRow("失败原因", node.error || "—") : null,
       kvRow("附件", (node.attachments || []).join("、") || "—"),
       kvRow("产物 hash", el("code", {}, String(node.artifact_hash || "—"))),
+      kvRow("模型 hash", el("code", {}, String(node.model_artifact_hash || "—"))),
     ),
-    el("p", { class: "hint" },
-      "「下载源码 + 结果」包含该版本完整 output/ 源代码、models/ 参数与该次验证的 detailed_return.json / style_analysis.json / orders.parquet。"),
+    node.has_snapshot
+      ? el("p", { class: "hint" },
+          node.restorable
+            ? "「下载源码 + 结果」包含该版本完整 output/ 源代码、models/ 参数与该次验证的明细结果文件。"
+            : "旧格式节点：可下载完整源代码与验证明细（打包为节点目录原样），不支持设为回滚起点。")
+      : el("p", { class: "hint" }, "失败尝试不保存产物快照，仅记录失败原因供避坑。"),
   );
-  const buttons = [
-    el("button", { class: "btn", onclick: closeModal }, "关闭"),
-    el("a", { class: "btn", href: zipUrl }, "下载源码 + 结果"),
-  ];
-  if (detail.kind === "hitl") {
+  const buttons = [el("button", { class: "btn", onclick: closeModal }, "关闭")];
+  if (node.has_snapshot) buttons.push(el("a", { class: "btn", href: zipUrl }, "下载源码 + 结果"));
+  if (node.restorable && detail.kind === "hitl") {
     buttons.push(el("button", {
       class: "btn primary",
       onclick: () => openStepParentOverrideModal(detail, payload, node),
@@ -1815,7 +1930,7 @@ function openStepParentOverrideModal(detail, payload, node) {
   const body = el("div", {},
     el("p", {}, `把 ${node.node_id} 设为所选 Fold 会话的父产物起点（替代默认的冻结继承链）。`),
     el("p", { class: "hint" },
-      "尚未运行的 Fold：下次启动该会话时生效（step 模式下批准后）。已完成的 Fold：用「设置并重跑」"
+      "只能选不晚于该节点所属会话的目标（更晚节点携带未来验证信息会被拒绝）。尚未运行的 Fold：下次启动该会话时生效（step 模式下批准后）。已完成的 Fold：用「设置并重跑」"
       + "（仅允许重跑最新完成的 Fold，且需先停止 worker）。设置持续有效：重新设置即覆盖，「清除」即恢复默认继承链。"),
     el("label", { class: "hint" }, "目标 Fold 会话"),
     select,
