@@ -869,13 +869,98 @@ class ToolFlowTest(unittest.TestCase):
             self.assertEqual(len(nodes), 2)
             self.assertEqual(nodes[1]["parent_node_id"], nodes[0]["node_id"])
             self.assertEqual(tree.current_node_id, nodes[1]["node_id"])
-            self.assertTrue((ctx.paths.steps / nodes[0]["node_id"] / "main.py").exists())
+            # Full source snapshot plus the detailed validation results per node.
+            node_dir = ctx.paths.steps / str(nodes[0]["node_id"])
+            self.assertTrue((node_dir / "output" / "main.py").exists())
+            self.assertTrue((node_dir / "models").is_dir())
+            self.assertTrue((node_dir / "detailed_return.json").exists())
+            self.assertTrue((node_dir / "style_analysis.json").exists())
+            self.assertTrue((node_dir / "orders.parquet").exists())
             # The fold id is opaqued in the agent-readable step tree so the calendar
             # period (e.g. 2022Q1 = the held-out test quarter) cannot leak.
             node_id = str(nodes[0]["node_id"])
             self.assertTrue(node_id.startswith("epoch_001__fold_ref_"), node_id)
             self.assertIn("__valid_", node_id)
             self.assertNotIn("2022Q1", node_id)
+
+    def test_step_rollback_restores_snapshot_and_branches(self):
+        from autotrade.environment.step_tree import StepTree
+        from autotrade.environment.tools import StepRollbackTool
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            ctx.manifest.update(step_tree_enabled=True)
+            first = BacktestTool(ctx).run(mode="valid")
+            self.assertEqual(first["status"], "ok")
+            node1 = StepTree(ctx.paths.steps).current_node_id
+            hash1 = artifact_hash(ctx.paths.agent_output)
+
+            main_py = ctx.paths.agent_output / "main.py"
+            main_py.write_text(main_py.read_text(encoding="utf-8") + "\n# variant a\n", encoding="utf-8")
+            second = BacktestTool(ctx).run(mode="valid")
+            self.assertEqual(second["status"], "ok")
+            node2 = StepTree(ctx.paths.steps).current_node_id
+            self.assertNotEqual(node1, node2)
+
+            result = StepRollbackTool(ctx).run(node1)
+            self.assertEqual(result["restored_node_id"], node1)
+            self.assertEqual(result["artifact_hash"], hash1)
+            self.assertEqual(artifact_hash(ctx.paths.agent_output), hash1)
+            self.assertEqual(StepTree(ctx.paths.steps).current_node_id, node1)
+
+            # The next validated backtest branches from the restored node, not node2.
+            main_py.write_text(main_py.read_text(encoding="utf-8") + "\n# variant b\n", encoding="utf-8")
+            third = BacktestTool(ctx).run(mode="valid")
+            self.assertEqual(third["status"], "ok")
+            reloaded = StepTree(ctx.paths.steps)
+            nodes = {n["node_id"]: n for n in reloaded.nodes()}
+            self.assertEqual(nodes[reloaded.current_node_id]["parent_node_id"], node1)
+            self.assertEqual(nodes[node2]["parent_node_id"], node1)
+            rollback_events = [
+                event for event in ctx.trace.read_events()
+                if event["event_type"] == "tool" and event.get("tool") == "step_rollback_tool"
+            ]
+            self.assertEqual(len(rollback_events), 1)
+
+    def test_step_rollback_models_toggle(self):
+        from autotrade.environment.step_tree import StepTree
+        from autotrade.environment.tools import StepRollbackTool
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            ctx.manifest.update(step_tree_enabled=True)
+            BacktestTool(ctx).run(mode="valid")
+            node1 = StepTree(ctx.paths.steps).current_node_id
+            marker = ctx.paths.model_artifacts / "weights.json"
+            marker.write_text('{"w": 1}', encoding="utf-8")
+
+            StepRollbackTool(ctx).run(node1, include_models=False)
+            self.assertTrue(marker.exists())
+
+            StepRollbackTool(ctx).run(node1)
+            # include_models=True restores the node's (empty) models snapshot.
+            self.assertFalse(marker.exists())
+
+    def test_step_rollback_guards(self):
+        from autotrade.environment.step_tree import StepTree
+        from autotrade.environment.tools import StepRollbackTool
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            tool = StepRollbackTool(ctx)
+            with self.assertRaisesRegex(ToolError, "disabled"):
+                tool.run("any_node")
+            ctx.manifest.update(step_tree_enabled=True)
+            with self.assertRaisesRegex(ToolError, "unknown step tree node"):
+                tool.run("missing_node")
+            failed = StepTree(ctx.paths.steps).record_failed_attempt(
+                fold_id="fold_ref_x", result_name="failed_1", error="boom"
+            )
+            with self.assertRaisesRegex(ToolError, "failed attempt"):
+                tool.run(failed)
+            ctx.write_locked = True
+            with self.assertRaisesRegex(ToolError, "locked"):
+                tool.run(failed)
 
     def test_artifact_rejects_runtime_cache_files(self):
         with tempfile.TemporaryDirectory() as tmp:

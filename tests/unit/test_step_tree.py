@@ -40,7 +40,7 @@ class StepTreeTest(unittest.TestCase):
             nodes = {n["node_id"]: n for n in reloaded.nodes()}
             self.assertIsNone(nodes[node1]["parent_node_id"])
             self.assertEqual(nodes[node2]["parent_node_id"], node1)
-            self.assertTrue((tmp / "steps" / node1 / "main.py").exists())
+            self.assertTrue((tmp / "steps" / node1 / "output" / "main.py").exists())
             self.assertEqual(reloaded.position_for_hash(digest), node2)
             rendered = reloaded.render_ascii()
             self.assertIn(node1, rendered)
@@ -119,14 +119,30 @@ class StepTreeTest(unittest.TestCase):
             tree = StepTree(tmp / "steps")
             tree.record_step(
                 artifact, fold_id="fold_2022Q1", result_name="valid_000",
-                artifact_hash=artifact_hash(artifact), metrics={"total_return": 0.01},
+                artifact_hash=artifact_hash(artifact), metrics={"total_return": 0.01, "sharpe": 1.5},
                 complete_validation=True,
             )
             tree.record_failed_attempt(fold_id="fold_2022Q1", result_name="failed_abc", error="boom")
             rendered = (tmp / "steps" / "tree.txt").read_text(encoding="utf-8")
             self.assertIn("valid_000", rendered)
+            self.assertIn("ret=0.0100", rendered)
+            self.assertIn("sharpe=1.5000", rendered)
             self.assertIn("[failed]", rendered)
             self.assertIn("<- current", rendered)
+
+    def test_attachments_must_not_shadow_snapshot_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            artifact = write_artifact(tmp / "artifact")
+            payload = tmp / "detail.json"
+            payload.write_text("{}", encoding="utf-8")
+            tree = StepTree(tmp / "steps")
+            with self.assertRaisesRegex(ValueError, "shadow"):
+                tree.record_step(
+                    artifact, fold_id="fold_2022Q1", result_name="valid_000",
+                    artifact_hash=artifact_hash(artifact), metrics={},
+                    complete_validation=True, attachments={"output/x.json": payload},
+                )
 
     def test_failed_attempt_error_is_redacted_on_disk(self):
         with tempfile.TemporaryDirectory() as tmp:

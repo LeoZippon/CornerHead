@@ -420,6 +420,8 @@ class BacktestTool:
                 attachments={
                     "detailed_return.json": result_dir / "detailed_return.json",
                     "style_analysis.json": result_dir / "style_analysis.json",
+                    # Full order log so rollback decisions can compare trades, not just curves.
+                    **({"orders.parquet": orders_path} if orders_path is not None else {}),
                 },
             )
         return summary

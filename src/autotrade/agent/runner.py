@@ -29,6 +29,7 @@ from autotrade.environment.tools import (
     FinishFoldTool,
     ModificationCheckTool,
     SandboxShellTool,
+    StepRollbackTool,
     StructuredSearchTool,
     ToolContext,
     ToolError,
@@ -168,6 +169,7 @@ class AgentSessionRunner:
         self.web_fetch = AgentWebFetchTool(ctx)
         self.modification_check = ModificationCheckTool(ctx)
         self.backtest = BacktestTool(ctx)
+        self.step_rollback = StepRollbackTool(ctx)
         self.finish_fold = FinishFoldTool(ctx)
         self.search = StructuredSearchTool(ctx)
         self.action_specs = self._build_action_specs()
@@ -346,6 +348,7 @@ class AgentSessionRunner:
             self.search.read_spec,
             self.modification_check.spec,
             self.backtest.spec,
+            self.step_rollback.spec,
             self.finish_fold.spec,
             self.web_search.spec if self.web_search is not None else build_web_search_spec(self.web_search_engines),
             self.web_fetch.spec,
@@ -411,6 +414,7 @@ class AgentSessionRunner:
             "read": self._do_read,
             "modification_check": self._do_modification_check,
             "backtest": self._do_backtest,
+            "step_rollback": self._do_step_rollback,
             "finish_fold": self._do_finish_fold,
             "web_search": self._do_web_search,
             "web_fetch": self._do_web_fetch,
@@ -443,6 +447,12 @@ class AgentSessionRunner:
 
     def _do_modification_check(self, args: dict[str, object]) -> dict[str, object]:
         return {"observation": "modification_check", **self.modification_check.run()}
+
+    def _do_step_rollback(self, args: dict[str, object]) -> dict[str, object]:
+        return {
+            "observation": "step_rollback",
+            **self.step_rollback.run(str(args["node_id"]), include_models=bool(args["include_models"])),
+        }
 
     def _do_backtest(self, args: dict[str, object]) -> dict[str, object]:
         if self._backtest_count >= self.config.max_backtests_per_fold:

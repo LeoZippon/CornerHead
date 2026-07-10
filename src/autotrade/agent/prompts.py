@@ -258,10 +258,16 @@ STEP_TREE_SECTION = """\
 # Step 产物树（历史搜索谱系）
 `/mnt/artifacts/steps/tree.json` 记录本 Experiment 中所有通过验证回测的 Step 产物谱系：\
 每个节点含 `node_id`、`parent_node_id`、`fold_id`、验证指标和产物 hash，`current_node_id` 是你当前工作副本的起点（父产物所在节点）。\
-`/mnt/artifacts/steps/tree.txt` 是同一棵树的可读渲染（含收益、当前位置标记和 `[failed]` 死路标记），先读它快速了解全局。\
-各成功节点目录（`steps/<node_id>/`）保存对应版本的完整 `output` 产物，并附带该次验证的 `detailed_return.json` 与 `strategy_metadata.json`，可用 shell 阅读比较。\
+`/mnt/artifacts/steps/tree.txt` 是同一棵树的可读渲染（含收益/Sharpe、当前位置标记和 `[failed]` 死路标记），先读它快速了解全局。\
+各成功节点目录保存该版本的完整源代码与详细验证结果：`steps/<node_id>/output/`（完整策略代码）、`steps/<node_id>/models/`（配套模型参数），\
+以及节点根目录下该次验证的 `detailed_return.json`、`style_analysis.json` 和 `orders.parquet`（有成交时），可用 shell 阅读比较后再决定是否回滚。\
 标记 `[failed]` 的节点是已失败的验证尝试（无产物快照），用于提示哪些方向已是死路。\
-利用它了解哪些方向已被尝试过、效果如何，避免重复已失败的路径；该目录只读，新增节点由回测流程自动记录。\
+利用它了解哪些方向已被尝试过、效果如何，避免重复已失败的路径；该目录只读，新增节点由回测流程自动记录。
+`step_rollback(node_id, include_models=true)` 把 `output/`（默认含 `models/`）恢复为指定成功节点的快照，并把树位置移到该节点：\
+之后通过验证的回测会记录为该节点的子节点，形成真实分支谱系。未验证的工作副本修改会被覆盖（所有已验证版本都在树里，无需手工备份）；\
+修改约束仍相对本 Fold 父产物度量，恢复远端分支可能超出 diff 预算导致后续回测被拒。\
+当你判断当前方向不如某个历史节点时（对比各节点 `detailed_return.json`/`orders.parquet` 后），主动回滚比继续修补更省预算；\
+收尾阶段若当前改动未通过验证，也可用它恢复到本 Fold 内已验证的节点再 `finish_fold`。\
 """
 
 META_LEARNING_INSTRUCTION = """\
@@ -288,7 +294,7 @@ META_LEARNING_INSTRUCTION = """\
 |---|---|---|---|
 | `/mnt/artifacts/steps/tree.txt` | 只读 | Step 实验树可读视图，首轮可能为空 | 了解验证谱系、当前位置和失败方向 |
 | `/mnt/artifacts/steps/tree.json` | 只读 | Step 实验树结构化记录 | 复核节点父指针、Fold、指标和产物 hash |
-| `/mnt/artifacts/steps/<node_id>/` | 只读 | 历史成功 Step 的 `output` 快照、可选 `models/`、验证明细 | 对比已验证方向和产物差异 |
+| `/mnt/artifacts/steps/<node_id>/` | 只读 | 历史成功 Step 的 `output/` 与 `models/` 快照、验证明细（`detailed_return.json`/`style_analysis.json`/`orders.parquet`） | 对比已验证方向和产物差异 |
 | `/mnt/agent/workspace/development_history.json` | 只读 | 紧凑 development 记录 | 快速读取 Fold 结果和上一轮结论 |
 | `/mnt/agent/workspace/experiment_ledger_full.jsonl` | 只读 | Agent 可见 development 账本，不含 held-out、测试调度和测试结果 | 需要细节时逐条复核 |
 | `/mnt/agent/workspace/meta_learning_memory.jsonl` | 只读 | 此前元学习会话 trace 拼接 | 继承上一轮 Taste、检索和正则化思路 |

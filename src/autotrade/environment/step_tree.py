@@ -2,17 +2,20 @@
 
 Every successful formal validation backtest snapshots the current ``output/``
 directory plus optional ``models/`` directory into
-``/mnt/artifacts/steps/<node_id>/`` and appends a node
+``/mnt/artifacts/steps/<node_id>/{output,models}/`` (validation attachments
+such as ``detailed_return.json`` sit at the node root) and appends a node
 (with a parent pointer) to ``steps/tree.json``. The tree accumulates across
 Folds of one Experiment: the Pipeline hands it to the next Fold's sandbox and
 positions ``current_node_id`` at the parent artifact, so the Agent can read
-where it stands in the search history. The feature is toggleable for ablations
+where it stands in the search history and branch from any validated node via
+the ``step_rollback`` tool. The feature is toggleable for ablations
 (``step_tree_enabled``).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -20,6 +23,10 @@ from autotrade.environment.artifacts import combined_artifact_hash, copy_artifac
 from autotrade.environment.runtime import sanitize_for_log, utc_now_iso
 
 TREE_FILE = "tree.json"
+# Node subdirectories reserved for the snapshot itself; attachments must not
+# shadow them (attachment files live at the node root next to these).
+NODE_OUTPUT_DIR = "output"
+NODE_MODELS_DIR = "models"
 
 
 class StepTree:
@@ -51,14 +58,16 @@ class StepTree:
         if any(node["node_id"] == node_id for node in self.data["nodes"]):
             raise ValueError(f"step tree node already exists: {node_id}")
         node_dir = self.root / node_id
-        copy_artifact(artifact_root, node_dir)
+        copy_artifact(artifact_root, node_dir / NODE_OUTPUT_DIR)
         if model_artifact_root is not None:
-            copy_model_artifacts(model_artifact_root, node_dir / "models")
+            copy_model_artifacts(model_artifact_root, node_dir / NODE_MODELS_DIR)
         copied_attachments: dict[str, str] = {}
         for relpath, source in (attachments or {}).items():
             rel = Path(relpath)
             if rel.is_absolute() or ".." in rel.parts:
                 raise ValueError(f"invalid step attachment path: {relpath}")
+            if rel.parts[0] in (NODE_OUTPUT_DIR, NODE_MODELS_DIR):
+                raise ValueError(f"step attachment must not shadow the snapshot dirs: {relpath}")
             target = node_dir / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
@@ -144,11 +153,21 @@ class StepTree:
     def save(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         safe_data = sanitize_for_log(self.data)
-        self.tree_path.write_text(
-            json.dumps(safe_data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
+        # Write through a NEW inode (tmp + rename): the fold-level tree is a
+        # hardlinked copy of the experiment-level tree, so an in-place write
+        # would mutate the experiment copy mid-fold and an aborted fold could
+        # leave it referencing node snapshots that were never copied back.
+        self._write_atomic(
+            self.tree_path, json.dumps(safe_data, ensure_ascii=False, indent=2, sort_keys=True)
         )
         # Always refresh the human/Agent-readable rendering alongside the JSON.
-        (self.root / "tree.txt").write_text(self.render_ascii() + "\n", encoding="utf-8")
+        self._write_atomic(self.root / "tree.txt", self.render_ascii() + "\n")
+
+    @staticmethod
+    def _write_atomic(path: Path, content: str) -> None:
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(path)
 
     # ---- read views ----
 
@@ -158,6 +177,18 @@ class StepTree:
 
     def nodes(self) -> list[dict[str, object]]:
         return list(self.data["nodes"])
+
+    def get_node(self, node_id: str) -> dict[str, object]:
+        for node in self.data["nodes"]:
+            if node["node_id"] == node_id:
+                return node
+        raise ValueError(f"unknown step tree node: {node_id}")
+
+    def node_output_dir(self, node_id: str) -> Path:
+        return self.root / node_id / NODE_OUTPUT_DIR
+
+    def node_models_dir(self, node_id: str) -> Path:
+        return self.root / node_id / NODE_MODELS_DIR
 
     def render_ascii(self) -> str:
         """Human/Agent-readable tree with the current position marked."""
@@ -172,9 +203,14 @@ class StepTree:
                 # Mark only genuine failed attempts (record_failed_attempt sets
                 # status="failed"); a partial/debug validation node is not a failure.
                 failed_text = " [failed]" if node.get("status") == "failed" else ""
-                ret = node.get("metrics", {}).get("total_return")
-                ret_text = f" ret={ret:.4f}" if isinstance(ret, (int, float)) else ""
-                lines.append(f"{'  ' * depth}- {node['node_id']}{ret_text}{failed_text}{marker}")
+                metrics = node.get("metrics", {})
+                parts = []
+                for key, label in (("total_return", "ret"), ("sharpe", "sharpe")):
+                    value = metrics.get(key)
+                    if isinstance(value, (int, float)):
+                        parts.append(f"{label}={value:.4f}")
+                metrics_text = f" {' '.join(parts)}" if parts else ""
+                lines.append(f"{'  ' * depth}- {node['node_id']}{metrics_text}{failed_text}{marker}")
                 walk(str(node["node_id"]), depth + 1)
 
         walk(None, 0)

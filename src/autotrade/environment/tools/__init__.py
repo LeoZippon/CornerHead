@@ -18,6 +18,7 @@ __all__ = [
     "PHASE_TRAIN_VALID",
     "SandboxShellTool",
     "ShellResult",
+    "StepRollbackTool",
     "StructuredSearchTool",
     "ToolContext",
     "ToolError",
@@ -53,6 +54,10 @@ def __getattr__(name: str):
         from .shell import ShellResult
 
         return ShellResult
+    if name == "StepRollbackTool":
+        from .step_rollback import StepRollbackTool
+
+        return StepRollbackTool
     if name == "StructuredSearchTool":
         from .search import StructuredSearchTool
 
