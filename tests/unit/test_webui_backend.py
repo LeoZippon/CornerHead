@@ -110,6 +110,13 @@ class WebuiBackendTest(unittest.TestCase):
                                           "long_return": 0.08, "short_return": 0.02},
                     "test_result": {"total_return": 0.20, "sharpe": 1.5, "max_drawdown": 0.04,
                                     "long_return": 0.15, "short_return": 0.05},
+                    "selected_step_id": "step_001",
+                    "steps": [
+                        {"step_id": "step_000",
+                         "validation_result_ref": str(experiment_dir / "artifacts" / "run_001" / "results" / "valid_000")},
+                        {"step_id": "step_001",
+                         "validation_result_ref": str(experiment_dir / "artifacts" / "run_001" / "results" / "valid_001")},
+                    ],
                 },
                 {
                     "record_type": "heldout",
@@ -182,6 +189,9 @@ class WebuiBackendTest(unittest.TestCase):
         fields = {field["key"]: field for group in schema["groups"] for field in group["fields"]}
         self.assertEqual(fields["epochs"]["default"], PARAM_DEFAULTS["epochs"])
         self.assertEqual(fields["model"]["default"], PARAM_DEFAULTS["model"])
+        self.assertEqual(fields["gpu_count"]["default"], 1)
+        self.assertEqual(fields["gpu_count"]["min"], 1)
+        self.assertEqual(fields["gpu_count"]["max"], 4)
         for hidden in (
             "experiments_root", "work_root", "raw_dir", "fundamental_events_root",
             "fundamental_events_status", "template_dir", "local_dev",
@@ -373,13 +383,13 @@ class WebuiBackendTest(unittest.TestCase):
         write_control(bare / "hitl" / "control.json", ControlState())
         refused = self.client.post("/api/experiments/exp_bare/control", json={"action": "skip_to_heldout"})
         self.assertEqual(refused.status_code, 400)
-        # GPU counts: validated int in 1..16, empty clears.
+        # GPU counts: validated int in 1..4, empty clears.
         ok = self.client.post(
             "/api/experiments/exp_hitl/control",
             json={"action": "set_gpu_count", "session_key": "epoch_001/fold_2022Q2", "directive": "2"},
         )
         self.assertEqual(ok.json()["control"]["gpu_counts"], {"epoch_001/fold_2022Q2": 2})
-        for bad in ("abc", "0", "99"):
+        for bad in ("abc", "0", "5", "99"):
             response = self.client.post(
                 "/api/experiments/exp_hitl/control",
                 json={"action": "set_gpu_count", "session_key": "epoch_001/fold_2022Q2", "directive": bad},
@@ -528,6 +538,35 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(cleared.json()["control"]["parent_overrides"], {})
 
+    def test_launching_stub_bridges_spawn_to_first_worker_status(self) -> None:
+        from types import SimpleNamespace
+
+        from autotrade.webui.registry import experiment_state
+
+        experiment_dir = self.experiments_root / "exp_hitl"
+        status_path = experiment_dir / "hitl" / "status.json"
+        write_json_atomic(status_path, {"pid": 999_999_999, "state": "stopped",
+                                        "total_sessions": 4, "completed_sessions": 2})
+        manager = ExperimentManager(self.repo_root, self.experiments_root)
+        with patch("autotrade.webui.manager.subprocess.Popen", return_value=SimpleNamespace(pid=4242)):
+            spawn = manager.start_worker("exp_hitl")
+        self.assertEqual(spawn["spawned_pid"], 4242)
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        # The stub bridges the interpreter/import window and keeps progress visible.
+        self.assertEqual(status["state"], "launching")
+        self.assertIn("launched_at", status)
+        self.assertEqual(status["completed_sessions"], 2)
+        self.assertEqual(experiment_state(experiment_dir)["state"], "launching")
+        # While launching: no double spawn, no resume, no delete.
+        with self.assertRaisesRegex(ManagerError, "启动中"):
+            manager.start_worker("exp_hitl")
+        with self.assertRaisesRegex(ManagerError, "live worker"):
+            manager.delete_experiment("exp_hitl")
+        self.assertIn("exp_hitl", manager.running_experiments())
+        # A stale stub (worker never wrote status) degrades to interrupted.
+        write_json_atomic(status_path, {"state": "launching", "launched_at": "2020-01-01T00:00:00+00:00"})
+        self.assertEqual(experiment_state(experiment_dir)["state"], "interrupted")
+
     def test_rollback_drops_later_records_and_archives_artifacts(self) -> None:
         experiment_dir = self.experiments_root / "exp_hitl"
         q1_node = self._build_step_tree("exp_hitl", with_failed=False)
@@ -629,21 +668,18 @@ class WebuiBackendTest(unittest.TestCase):
         payload = self.client.get("/api/experiments/exp_hitl/equity").json()
         by_key = {series["key"]: series for series in payload["series"]}
         valid = by_key["valid"]
-        self.assertEqual(valid["dates"], ["20220104", "20220105", "20220106"])
-        # Cumulative + drawdown are server-computed; the SPA only plots.
-        self.assertAlmostEqual(valid["cum"][0], 0.01)                       # 1.01M / 1M - 1
-        self.assertAlmostEqual(valid["cum"][1], 0.0, places=6)              # back to 1M
-        self.assertAlmostEqual(valid["cum"][2], 0.02, places=6)             # 1.01 × (1/1.01) × 1.02 - 1
-        self.assertAlmostEqual(valid["drawdown"][1], 1.0 / 1.01 - 1.0, places=6)
-        self.assertAlmostEqual(valid["drawdown"][2], 0.0)
+        # ONLY the selected step's window feeds the validation curve: earlier
+        # overlapping attempt windows (valid_000, a rejected version) must not
+        # blend in, or the curve contradicts the ledger's headline metric.
+        self.assertEqual(valid["dates"], ["20220106"])
+        self.assertAlmostEqual(valid["cum"][0], 0.02, places=6)             # 1.02M / 1M - 1
         self.assertEqual(valid["final"], valid["cum"][-1])
         self.assertAlmostEqual(by_key["test"]["cum"][0], -0.01)
         benchmark = payload["benchmark"]
-        self.assertEqual(benchmark["dates"], ["20220104", "20220106"])
-        self.assertAlmostEqual(benchmark["cum"][1], 1.005 * 0.998 - 1.0, places=6)
+        self.assertEqual(benchmark["dates"], ["20220106"])
         fold = self.client.get("/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/equity").json()
-        self.assertEqual(len(fold["valid"]["series"][0]["dates"]), 3)
-        self.assertEqual(fold["valid"]["benchmark"]["dates"], ["20220104", "20220106"])
+        self.assertEqual(fold["valid"]["series"][0]["dates"], ["20220106"])
+        self.assertEqual(fold["valid"]["benchmark"]["dates"], ["20220106"])
         self.assertEqual(fold["test"]["benchmark"]["dates"], [])  # no rollup for the test chain
         self.assertEqual(len(fold["test"]["series"][0]["dates"]), 1)
 

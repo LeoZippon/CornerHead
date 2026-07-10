@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
@@ -69,6 +70,9 @@ def clamped_trading_days(repo_root: Path) -> list[str] | None:
         return None
 
 ACTIVE_STATES = ("starting", "running_session", "waiting_user", "paused")
+# Manager-written stub state between spawn and the worker's first status write
+# (interpreter start + imports take seconds). Stale = the worker never came up.
+LAUNCH_GRACE_SECONDS = 180.0
 # Fold-record fields whose content is test-period evidence (guarded view).
 TEST_FIELDS = ("test_result",)
 
@@ -139,9 +143,23 @@ def experiment_state(experiment_dir: Path) -> dict[str, object]:
         return {"kind": "hitl", "state": "created", "worker_alive": False}
     state = str(status.get("state") or "unknown")
     alive = status_pid_alive(status)
-    if state in ACTIVE_STATES and not alive:
+    if state == "launching" and not alive:
+        if _age_seconds(status.get("launched_at")) > LAUNCH_GRACE_SECONDS:
+            state = "interrupted"
+    elif state in ACTIVE_STATES and not alive:
         state = "interrupted"
     return {"kind": "hitl", "state": state, "worker_alive": alive, "status": status}
+
+
+def _age_seconds(stamp: object) -> float:
+    """Age of an ISO timestamp; unparseable stamps read as infinitely old."""
+    try:
+        then = datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return float("inf")
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds()
 
 
 def summarize_experiment(experiment_dir: Path) -> dict[str, object]:

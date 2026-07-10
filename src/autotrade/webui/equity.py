@@ -41,18 +41,50 @@ def _window_returns(window_dir: Path) -> tuple[tuple[str, float], ...]:
         return ()
 
 
-def run_series(experiment_dir: Path, run_id: str | None, prefix: str) -> list[tuple[str, float]]:
-    """Daily returns chained across a run's result windows named ``prefix*``."""
+def run_series(
+    experiment_dir: Path, run_id: str | None, prefix: str, window: str | None = None
+) -> list[tuple[str, float]]:
+    """Daily returns of a run's result windows.
+
+    ``window`` selects ONE named window. Validation callers must pass the
+    fold's recorded window (see ``fold_valid_window``): a fold session leaves
+    many overlapping ``valid_*`` attempt windows from different strategy
+    versions, and merging them yields a curve no real backtest produced.
+    Test/held-out runs write one window per run, so the prefix glob is exact.
+    """
     if not run_id:
         return []
     results_root = experiment_dir / "artifacts" / str(run_id) / "results"
     if not results_root.is_dir():
         return []
+    if window is not None:
+        window_dir = results_root / window
+        return _chain([list(_window_returns(window_dir))]) if window_dir.is_dir() else []
     merged: list[tuple[str, float]] = []
     for window_dir in sorted(results_root.iterdir()):
         if window_dir.is_dir() and window_dir.name.startswith(prefix):
             merged.extend(_window_returns(window_dir))
     return _chain([merged])
+
+
+def fold_valid_window(record: dict[str, object]) -> str | None:
+    """Result-window name behind the fold's RECORDED validation metrics.
+
+    The selected (frozen) step's window when one exists; otherwise the last
+    step that carries a validation result (matches the record's headline
+    metrics for no_update folds). None = no complete validation this fold.
+    """
+    steps = [
+        step for step in (record.get("steps") or [])
+        if isinstance(step, dict) and step.get("validation_result_ref")
+    ]
+    if not steps:
+        return None
+    selected = str(record.get("selected_step_id") or "")
+    for step in steps:
+        if str(step.get("step_id")) == selected:
+            return Path(str(step["validation_result_ref"])).name
+    return Path(str(steps[-1]["validation_result_ref"])).name
 
 
 def _rollup_benchmark(experiment_dir: Path, run_id: str | None, prefix: str) -> dict[str, float]:
@@ -129,7 +161,10 @@ def fold_equity_payload(
     run_id = str(record.get("run_id") or "")
     payload: dict[str, object] = {}
     for prefix in ("valid", "test"):
-        strategy = run_series(experiment_dir, run_id, prefix)
+        window = fold_valid_window(record) if prefix == "valid" else None
+        strategy = run_series(experiment_dir, run_id, prefix, window=window)
+        if prefix == "valid" and window is None:
+            strategy = []  # no recorded validation window: never blend attempts
         bench = _rollup_benchmark(experiment_dir, run_id, prefix)
         payload[prefix] = {
             "series": [_curve_entry(prefix, SERIES_LABELS[prefix], strategy)],
@@ -154,7 +189,11 @@ def experiment_equity_payload(experiments_root: Path, experiment_id: str) -> dic
     heldout_runs = sorted({str(r.get("run_id") or "") for r in heldout if r.get("run_id")})
 
     chains = {
-        "valid": _chain([run_series(experiment_dir, str(r.get("run_id") or ""), "valid") for r in folds]),
+        "valid": _chain([
+            run_series(experiment_dir, str(r.get("run_id") or ""), "valid", window=window)
+            for r in folds
+            if (window := fold_valid_window(r)) is not None
+        ]),
         "test": _chain([run_series(experiment_dir, str(r.get("run_id") or ""), "test") for r in folds]),
         "heldout": _chain([run_series(experiment_dir, run_id, "heldout") for run_id in heldout_runs]),
     }

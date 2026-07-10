@@ -134,6 +134,8 @@ main { max-width: 1380px; margin: 1.6rem auto; padding: 0 clamp(14px, 3vw, 34px)
   font-size: 0.84rem; font-weight: 600; white-space: nowrap;
 }
 .badge.state-running_session, .badge.state-starting { background: var(--accent-soft); color: var(--run); }
+.badge.state-launching { background: var(--accent-soft); color: var(--run); animation: launch-pulse 1.2s ease-in-out infinite; }
+@keyframes launch-pulse { 50% { opacity: 0.45; } }
 .badge.state-waiting_user, .badge.state-paused { background: var(--warn-soft); color: var(--warn); }
 .badge.state-completed { background: var(--ok-soft); color: var(--ok); }
 .badge.state-stopped, .badge.state-created, .badge.state-legacy { background: var(--chip-bg); color: var(--muted); }
@@ -213,6 +215,20 @@ textarea.prompt-editor { min-height: 55vh; font-size: 0.845rem; }
 .session-item .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-item .ret { font-variant-numeric: tabular-nums; font-size: 0.875rem; }
 .epoch-head { margin: 0.7rem 4px 4px; font-size: 0.845rem; color: var(--muted); font-weight: 600; }
+.session-item.phase-head {
+  width: 100%; min-height: 2.35rem; box-sizing: border-box;
+  margin: 0.75rem 0 0; padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--input-bg); color: var(--text); font-size: 0.875rem; font-weight: 650;
+}
+.session-item.phase-head:hover { background: var(--hover-bg); }
+.session-item.phase-head.selected {
+  border-color: var(--accent); background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.session-item.phase-head .label { order: 1; }
+.session-item.phase-head .dot { order: 2; margin-left: auto; }
+.session-item.phase-head .ret { order: 3; }
 
 .control-bar { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
 .control-bar .spacer { flex: 1; }
@@ -347,6 +363,7 @@ details.test-audit summary { cursor: pointer; color: var(--warn); font-weight: 6
 .form-group { margin: 1.05rem 0 4px; }
 .form-group > h4 { margin: 0 0 0.6rem; font-size: 0.94rem; color: var(--accent); }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem 1.4rem; }
+.field-wide { grid-column: 1 / -1; }
 .field label { display: block; font-size: 0.905rem; font-weight: 600; margin-bottom: 3px; }
 .field .help { font-size: 0.845rem; color: var(--muted); margin-top: 3px; line-height: 1.45; }
 .help.derived-hint { color: var(--accent); }
@@ -366,6 +383,18 @@ details.test-audit summary { cursor: pointer; color: var(--warn); font-weight: 6
 .field input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .number-input { position: relative; }
 .number-input input { padding-right: 2rem; }
+.gpu-field .number-input { max-width: 12rem; }
+.gpu-status {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.4rem;
+  margin-top: 0.55rem;
+}
+.gpu-status-item {
+  min-width: 0; padding: 0.45rem 0.55rem; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--input-bg); display: flex; align-items: baseline; justify-content: space-between; gap: 0.45rem;
+  font-size: 0.79rem; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.gpu-status-item strong { color: var(--text); font-size: 0.8rem; white-space: nowrap; }
+.gpu-status-item span { min-width: 0; text-align: right; }
 .number-input .spin-col {
   position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
   display: flex; flex-direction: column; gap: 2px;
@@ -385,6 +414,7 @@ button.spin:active { background: var(--accent-soft); }
 }
 input[type="checkbox"] { accent-color: var(--accent); }
 .field.checkbox { display: flex; gap: 0.6rem; align-items: flex-start; }
+.form-grid > .field.checkbox { padding-top: 1.45rem; }
 .field.checkbox input { margin-top: 0.3rem; width: 1.06rem; height: 1.06rem; }
 .check-group { display: flex; gap: 1.1rem; flex-wrap: wrap; padding: 0.3rem 0; }
 .check-item { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.94rem; font-weight: 500; cursor: pointer; }
@@ -438,6 +468,8 @@ details.advanced .form-grid { margin-top: 0.55rem; }
 @media (max-width: 760px) {
   .grid { grid-template-columns: 1fr; }
   .form-grid { grid-template-columns: 1fr; }
+  .form-grid > .field.checkbox { padding-top: 0; }
+  .gpu-status { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .page-head { flex-direction: column; align-items: flex-start; }
   .tiles { grid-template-columns: repeat(2, 1fr); }
   /* tables scroll sideways instead of overflowing the panel */

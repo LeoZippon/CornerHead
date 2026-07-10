@@ -69,7 +69,9 @@ class ExperimentManager:
             if not entry.is_dir():
                 continue
             state = experiment_state(entry)
-            if state.get("worker_alive") and state.get("state") in ACTIVE_STATES:
+            if state.get("state") == "launching" or (
+                state.get("worker_alive") and state.get("state") in ACTIVE_STATES
+            ):
                 running.append(entry.name)
         return running
 
@@ -95,6 +97,13 @@ class ExperimentManager:
         merged.setdefault("work_root", str(self.repo_root / ".runtime" / "sandboxes" / experiment_id))
         merged = {key: value for key, value in merged.items() if value is not None}
         options = resolve_options(merged, self.repo_root)  # fail-fast validation before any mkdir
+        if not bool(options.local_dev):
+            from autotrade.environment.gpu import GpuUnavailableError, select_gpus
+
+            try:
+                select_gpus(int(options.gpu_count), require_name="L20")
+            except GpuUnavailableError as exc:
+                raise ManagerError(f"当前 GPU 无法满足实验默认分配：{exc}") from exc
         hitl_dir = experiment_dir / HITL_DIR_NAME
         hitl_dir.mkdir(parents=True)
         inherit_from = str(merged.get("inherit_from") or "").strip()
@@ -169,6 +178,8 @@ class ExperimentManager:
             raise ManagerError(f"experiment {experiment_id!r} is legacy/read-only; it cannot be started")
         if state.get("worker_alive"):
             raise ManagerError(f"experiment {experiment_id!r} already has a live worker")
+        if state.get("state") == "launching":
+            raise ManagerError(f"experiment {experiment_id!r} 的 worker 正在启动中，请稍候")
         if state.get("state") == "completed":
             raise ManagerError(f"experiment {experiment_id!r} is already completed")
         running = self.running_experiments()
@@ -183,6 +194,15 @@ class ExperimentManager:
         if control.request == "stop":
             control.request = None
             write_control(control_path, control)
+        # "launching" stub: bridges spawn -> the worker's first status write
+        # (seconds of interpreter/imports during which the UI would otherwise
+        # show "created"), and lets the guards above refuse a double spawn.
+        # Written under _mutate strictly BEFORE the process exists, so the
+        # worker remains the only concurrent status writer.
+        status_path = experiment_dir / HITL_DIR_NAME / STATUS_NAME
+        old_status = read_status(status_path)
+        progress = {key: old_status[key] for key in ("total_sessions", "completed_sessions") if key in old_status}
+        write_json_atomic(status_path, {**progress, "state": "launching", "launched_at": utc_now_iso()})
         self.log_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.log_dir / f"{experiment_id}.log"
         with log_path.open("ab") as log:
@@ -257,8 +277,8 @@ class ExperimentManager:
                     count = int(str(directive).strip())
                 except ValueError as exc:
                     raise ManagerError("GPU 数量必须是正整数") from exc
-                if not 1 <= count <= 16:
-                    raise ManagerError("GPU 数量须在 1..16 之间")
+                if not 1 <= count <= 4:
+                    raise ManagerError("GPU 数量须在 1..4 之间")
                 control.gpu_counts[session_key] = count
             else:
                 control.gpu_counts.pop(session_key, None)
@@ -535,7 +555,7 @@ class ExperimentManager:
     def _delete_experiment(self, experiment_id: str) -> dict[str, object]:
         experiment_dir = resolve_experiment_dir(self.experiments_root, experiment_id)
         state = experiment_state(experiment_dir)
-        if state.get("worker_alive"):
+        if state.get("worker_alive") or state.get("state") == "launching":
             raise ManagerError(
                 f"experiment {experiment_id!r} has a live worker; stop or terminate it before deleting"
             )

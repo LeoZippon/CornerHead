@@ -12,7 +12,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
@@ -169,16 +169,20 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         handle = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
         handle.close()
         zip_path = Path(handle.name)
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            root = Path(str(strategy_dir))
-            for file in sorted(root.rglob("*")):
-                if file.is_file():
-                    archive.write(file, Path("output") / file.relative_to(root))
-            if model_dir and Path(str(model_dir)).is_dir():
-                model_root = Path(str(model_dir))
-                for file in sorted(model_root.rglob("*")):
+        try:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                root = Path(str(strategy_dir))
+                for file in sorted(root.rglob("*")):
                     if file.is_file():
-                        archive.write(file, Path("models") / file.relative_to(model_root))
+                        archive.write(file, Path("output") / file.relative_to(root))
+                if model_dir and Path(str(model_dir)).is_dir():
+                    model_root = Path(str(model_dir))
+                    for file in sorted(model_root.rglob("*")):
+                        if file.is_file():
+                            archive.write(file, Path("models") / file.relative_to(model_root))
+        except Exception:
+            zip_path.unlink(missing_ok=True)  # archive failed: never orphan the temp file
+            raise
         filename = f"{experiment_id}__{epoch_id}__{fold_id}.zip"
         return FileResponse(
             zip_path,
@@ -202,10 +206,14 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         handle = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
         handle.close()
         zip_path = Path(handle.name)
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            for file in sorted(node_dir.rglob("*")):
-                if file.is_file():
-                    archive.write(file, file.relative_to(node_dir))
+        try:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for file in sorted(node_dir.rglob("*")):
+                    if file.is_file():
+                        archive.write(file, file.relative_to(node_dir))
+        except Exception:
+            zip_path.unlink(missing_ok=True)  # archive failed: never orphan the temp file
+            raise
         return FileResponse(
             zip_path,
             media_type="application/zip",
@@ -344,8 +352,13 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         experiment_id: str,
         run_id: str | None = Query(None),
         offset: int = Query(0, ge=0),
+        last_event_id: str | None = Header(None, alias="Last-Event-ID"),
     ) -> StreamingResponse:
         experiment_dir = _experiment_dir(experiment_id)
+        # Browser auto-reconnect echoes the last SSE id (byte offset), so a
+        # dropped stream resumes near the tail instead of replaying from 0.
+        if last_event_id and last_event_id.isdigit():
+            offset = max(offset, int(last_event_id))
         return StreamingResponse(
             stream_trace(experiment_dir, run_id, offset=offset),
             media_type="text/event-stream",

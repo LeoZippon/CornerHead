@@ -70,13 +70,15 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "initial_control_mode", "group": "运行控制", "label": "初始运行模式", "type": "choice",
      "choices": ["step", "auto"],
      "help": "step：每个会话（元学习/Fold/Held-out）开始前等待人工批准并可注入指令；auto：全自动连续执行，可随时暂停。"},
-    {"key": "analysis_enabled", "group": "运行控制", "label": "Fold 完成后自动生成策略分析", "type": "bool",
-     "help": "每个 Fold 结束后用预定义模板调用 LLM 生成自然语言策略分析（仅基于验证期证据）。"},
     {"key": "analysis_model", "group": "运行控制", "label": "策略分析模型", "type": "choice",
      "choices": list(MODEL_CHOICES),
      "help": "生成 Fold 策略分析所用的 DeepSeek 模型。"},
     {"key": "analysis_max_tokens", "group": "运行控制", "label": "策略分析输出 token 上限", "type": "int",
      "help": "单次分析调用的输出 token 基础配额（思考 token 计入）；遇 finish_reason=length 自动以 2 倍重试一次。"},
+    {"key": "analysis_enabled", "group": "运行控制", "label": "Fold 完成后自动生成策略分析", "type": "bool",
+     "help": "每个 Fold 结束后用预定义模板调用 LLM 生成自然语言策略分析（仅基于验证期证据）。"},
+    {"key": "gpu_count", "group": "运行控制", "label": "默认 GPU 数量", "type": "int", "min": 1, "max": 4,
+     "help": "每个元学习、Fold 和 Held-out Sandbox 默认分配的 GPU 数量（1–4）；运行时按空闲显存自动选择 L20，逐 Fold 设置可覆盖此默认值。"},
     # meta_learning_directive 有意不进创建表单：进入实验详情页后在元学习会话
     # 的指令面板填写（逐 Epoch 可覆盖），避免创建时与详情页两处重复输入。
     # 预算与验收

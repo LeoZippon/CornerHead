@@ -6,7 +6,7 @@ const $modalRoot = document.getElementById("modal-root");
 const $toastRoot = document.getElementById("toast-root");
 
 const STATE_LABELS = {
-  starting: "启动中", running_session: "运行中", waiting_user: "等待批准", paused: "已暂停",
+  launching: "启动中", starting: "初始化", running_session: "运行中", waiting_user: "等待批准", paused: "已暂停",
   completed: "已完成", stopped: "已停止", failed: "失败", interrupted: "已中断",
   created: "未启动", legacy: "历史实验", unreadable: "不可解析", unknown: "未知",
 };
@@ -800,6 +800,7 @@ function fieldGrid(fields, inputs) {
 
 function fieldNode(field, inputs) {
   const wrap = el("div", { class: "field" });
+  if (field.key === "gpu_count") wrap.classList.add("field-wide", "gpu-field");
   const labelText = field.required ? `${field.label} *` : field.label;
   if (field.type === "bool") {
     const input = el("input", { type: "checkbox" });
@@ -838,6 +839,8 @@ function fieldNode(field, inputs) {
   } else {
     input = el("input", { type: field.type === "int" || field.type === "float" ? "number" : "text" });
     if (field.type === "float") input.setAttribute("step", "any");
+    if (field.min !== undefined) input.setAttribute("min", String(field.min));
+    if (field.max !== undefined) input.setAttribute("max", String(field.max));
     input.value = field.default ?? "";
     if (field.optional) input.placeholder = "留空使用默认";
     if (field.type === "int") {
@@ -853,6 +856,22 @@ function fieldNode(field, inputs) {
         ));
       inputs.set(field.key, { field, input });
       wrap.append(host, el("div", { class: "help" }, field.help || ""));
+      if (field.key === "gpu_count") {
+        const gpuStatus = el("div", { class: "gpu-status" }, el("span", { class: "help" }, "正在读取当前 GPU 状态…"));
+        wrap.append(gpuStatus);
+        api("/api/gpus").then((payload) => {
+          const gpus = payload.gpus || [];
+          if (!gpus.length) {
+            gpuStatus.replaceChildren(el("span", { class: "help" }, `当前无可用 GPU 信息${payload.error ? `：${payload.error}` : ""}`));
+            return;
+          }
+          gpuStatus.replaceChildren(...gpus.map((gpu) => el("div", { class: "gpu-status-item" },
+            el("strong", {}, `GPU ${gpu.index}`),
+            el("span", {}, `空闲 ${(gpu.memory_free_mib / 1024).toFixed(1)} / ${(gpu.memory_total_mib / 1024).toFixed(1)} GiB`),
+          )));
+          input.max = String(Math.min(Number(field.max || 4), gpus.length));
+        }).catch((error) => { gpuStatus.replaceChildren(el("span", { class: "help" }, `GPU 状态读取失败：${error.message}`)); });
+      }
       return wrap;
     }
   }
@@ -1006,11 +1025,16 @@ async function renderDetailPage(experimentId, selectedKey) {
   }
   container.append(stepTreePanel(detail));
   const layout = el("div", { class: "detail section-gap" });
+  // Panels read the global detailView (held-out equity/style card): set it
+  // BEFORE building them, or the first render of a detail page silently
+  // skips those blocks (and could chart the previous experiment's data).
+  detailView = { experimentId, detail, listHost: null, rightHost: null, selectedKey };
   const listHost = sessionListPanel(detail, selectedKey);
   const rightHost = sessionDetailPanel(detail, selectedKey);
+  detailView.listHost = listHost;
+  detailView.rightHost = rightHost;
   layout.append(listHost, rightHost);
   container.append(layout);
-  detailView = { experimentId, detail, listHost, rightHost, selectedKey };
   $main.innerHTML = "";
   $main.append(container);
   pollTimer = setInterval(async () => {
@@ -1106,7 +1130,7 @@ function sessionListPanel(detail, selectedKey) {
     const dotClass = isDone ? "done" : isWaiting ? "waiting" : isCurrent ? "running" : "pending";
     const validReturn = session.record && session.record.validation_result ? session.record.validation_result.total_return : null;
     const item = el("div", {
-      class: `session-item${session.key === selectedKey ? " selected" : ""}`,
+      class: `session-item${session.kind === "heldout" ? " phase-head" : ""}${session.key === selectedKey ? " selected" : ""}`,
       "data-key": session.key,
       onclick: () => { location.hash = `#/exp/${encodeURIComponent(detail.experiment_id)}/${sessionKeyToUrl(session.key)}`; },
     },
@@ -1239,6 +1263,7 @@ function directivePanel(detail, session, waiting) {
    "auto" selector then picks that many GPUs by free memory at start. */
 function gpuAllocationRow(detail, session, send) {
   const current = ((detail.control || {}).gpu_counts || {})[session.key];
+  const experimentDefault = Number((detail.params || {}).gpu_count || 1);
   const wrap = el("div", { class: "section-gap" },
     el("h4", { class: "subsection-title" }, "本 Fold GPU 分配"));
   const statusHost = el("div", { class: "hint" }, "GPU 状态加载中…");
@@ -1267,8 +1292,8 @@ function gpuAllocationRow(detail, session, send) {
       ...gpus.map((gpu) => kvRow(`GPU ${gpu.index} · ${gpu.name}`,
         `空闲 ${(gpu.memory_free_mib / 1024).toFixed(1)}G / 共 ${(gpu.memory_total_mib / 1024).toFixed(1)}G`)),
     ));
-    select.append(el("option", { value: "" }, "默认（1 块，按空闲显存自动挑选）"));
-    for (let n = 1; n <= gpus.length; n += 1) select.append(el("option", { value: String(n) }, `${n} 块`));
+    select.append(el("option", { value: "" }, `实验默认（${experimentDefault} 块，按空闲显存自动挑选）`));
+    for (let n = 1; n <= Math.min(4, gpus.length); n += 1) select.append(el("option", { value: String(n) }, `${n} 块`));
     if (current) select.value = String(current);
   }).catch((error) => { statusHost.textContent = `GPU 状态加载失败：${error.message}`; });
   return wrap;
@@ -2086,7 +2111,11 @@ function styleCard(expId, runId, prefix) {
         host.append(el("div", { class: "hint" }, "该窗口没有可估值的持仓，无风格暴露可计算。"));
       }
     })
-    .catch((error) => { host.append(el("div", { class: "hint" }, `风格分析加载失败：${error.message}`)); });
+    .catch((error) => {
+      const missing = /没有已落盘|404/.test(error.message);
+      host.append(el("div", { class: "hint" },
+        missing ? "该运行未落盘风格归因数据，无风格分析可展示。" : `风格分析加载失败：${error.message}`));
+    });
   return host;
 }
 
@@ -2265,7 +2294,7 @@ function analysisPanel(experimentId, epochId, foldId) {
       await api(base, { method: "POST" });
       toast("分析已开始生成，稍后自动刷新");
       regenButton.disabled = true;
-      setTimeout(load, 20_000);
+      liveTimers.push(setTimeout(load, 20_000));
     } catch (error) { toast(error.message, true); }
   });
   async function load() {
@@ -2280,7 +2309,7 @@ function analysisPanel(experimentId, epochId, foldId) {
     regenButton.textContent = payload.available ? "重新生成" : "生成分析";
     if (payload.pending) {
       body.append(el("div", { class: "prep-indicator" }, el("span", { class: "spinner" }), el("span", {}, "分析生成中…")));
-      setTimeout(load, 8000);
+      liveTimers.push(setTimeout(load, 8000));
     } else if (payload.content) {
       const meta = payload.meta || {};
       if (meta.model) {
