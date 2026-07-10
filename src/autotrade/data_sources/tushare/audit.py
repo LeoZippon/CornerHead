@@ -1725,15 +1725,56 @@ def selected_integrated_text_datasets(args: argparse.Namespace) -> list[str]:
         raise RuntimeError(f"unknown text datasets: {invalid}")
     return datasets
 
-def audit_text_dataset(raw_dir: Path, spec: TextDataset, expected_paths: set[Path], add) -> None:
-    files = sorted((raw_dir / spec.api_name).rglob("*.parquet"))
-    meta_files = sorted((raw_dir / spec.api_name).rglob("*.meta.json"))
+from dataclasses import dataclass as _dataclass
+
+
+@_dataclass(frozen=True)
+class DomainAuditProfile:
+    """Shared partition-inventory + key/PIT auditor knobs for one raw domain.
+
+    The four domain auditors (text/macro/event/board) were hand-written copies
+    of the same shape and had drifted (uneven pagination-probe exclusion,
+    text-only empty early-return, event-only zero_rows_ok). The profile encodes
+    exactly what genuinely differs; the emitted check names and details keys
+    stay the per-domain status-JSON contract the nightly consumers read.
+    """
+
+    domain: str                    # check-name suffix: <api>_<domain>_partitions/_keys
+    exact_limit_rows: frozenset    # row counts that look like a page-limit truncation
+    exact_limit_key: str           # details key name for that count
+    apply_pagination_probe: bool   # exclude partitions with a recorded pagination probe
+    empty_error_mode: str          # "with_expected" | "always" | "early_return"
+    include_strategy: bool
+    key_columns: tuple
+    key_extra_columns: tuple       # extra columns joined into the keys read
+    keys_intersect_available: bool  # text: audit only key columns present in schema
+    blank_mode: str                # "per_key_field" | "available_at_total" | "available_at_rows"
+    pit_rules: object
+    partitions_message: str
+    keys_message: str
+    partition_prefix: str | None = None  # event: strategy partition glob + ignored tracking
+    zero_rows_ok: bool | None = None     # event: emitted and gates the zero-rows warning
+    availability_required: bool = True   # board static_once: availability is not an error
+
+
+def audit_domain_dataset(raw_dir: Path, spec, expected_paths: set[Path], add, profile: DomainAuditProfile) -> None:
+    dataset_dir = raw_dir / spec.api_name
+    ignored_parquet: list[str] = []
+    ignored_meta: list[str] = []
+    if profile.partition_prefix is not None:
+        files = sorted(dataset_dir.rglob(f"{profile.partition_prefix}=*.parquet"))
+        meta_files = sorted(dataset_dir.rglob(f"{profile.partition_prefix}=*.parquet.meta.json"))
+        ignored_parquet = sorted(str(path.resolve()) for path in dataset_dir.rglob("*.parquet") if path not in files)
+        ignored_meta = sorted(str(path.resolve()) for path in dataset_dir.rglob("*.meta.json") if path not in meta_files)
+    else:
+        files = sorted(dataset_dir.rglob("*.parquet"))
+        meta_files = sorted(dataset_dir.rglob("*.meta.json"))
     file_set = {path.resolve() for path in files}
     expected_set = {path.resolve() for path in expected_paths}
     missing_expected = sorted(str(path) for path in expected_set - file_set)
     extra_files = sorted(str(path) for path in file_set - expected_set)
-    if not files:
-        add("error", f"{spec.api_name}_text_partitions", f"{spec.api_name} text dataset is missing", {
+    if profile.empty_error_mode == "early_return" and not files:
+        add("error", f"{spec.api_name}_{profile.domain}_partitions", f"{spec.api_name} {profile.domain} dataset is missing", {
             "strategy": spec.strategy,
             "expected_files": len(expected_set),
             "missing_expected_files": len(missing_expected),
@@ -1746,31 +1787,85 @@ def audit_text_dataset(raw_dir: Path, spec: TextDataset, expected_paths: set[Pat
     orphan_meta = sorted(meta_set - parquet_meta)
     row_counts = {str(path): parquet_rows(path) for path in files}
     zero_files = [path for path, rows in row_counts.items() if rows == 0]
-    exact_limit_files = [path for path, rows in row_counts.items() if rows in {5000, 6000, 7000, 8000, 10000}]
-    has_error = bool(missing_meta or orphan_meta or missing_expected)
-    add("error" if has_error else "warning" if exact_limit_files else "info", f"{spec.api_name}_text_partitions", f"{spec.api_name} text partition inventory", {
+    exact_limit_files = [
+        path
+        for path, rows in row_counts.items()
+        if rows in profile.exact_limit_rows
+        and not (profile.apply_pagination_probe and has_pagination_probe(Path(path)))
+    ]
+    has_error = bool(missing_expected or missing_meta or orphan_meta)
+    if profile.empty_error_mode == "always":
+        has_error = has_error or not files
+    elif profile.empty_error_mode == "with_expected":
+        has_error = has_error or (not files and expected_set)
+    has_warning = bool(exact_limit_files)
+    if profile.zero_rows_ok is not None:
+        has_warning = has_warning or bool(zero_files and not profile.zero_rows_ok) or bool(ignored_parquet or ignored_meta)
+    details: dict[str, Any] = {}
+    if profile.include_strategy:
+        details["strategy"] = spec.strategy
+    if profile.partition_prefix is not None:
+        details["partition_prefix"] = profile.partition_prefix
+    details.update({
         "files": len(files),
         "expected_files": len(expected_set),
         "missing_expected_files": len(missing_expected),
         "extra_files": len(extra_files),
+    })
+    if profile.partition_prefix is not None:
+        details["ignored_non_strategy_parquet_files"] = len(ignored_parquet)
+        details["ignored_non_strategy_meta_files"] = len(ignored_meta)
+    details.update({
         "meta_files": len(meta_files),
         "rows": int(sum(row_counts.values())),
         "zero_row_partitions": len(zero_files),
+    })
+    if profile.zero_rows_ok is not None:
+        details["zero_rows_ok"] = profile.zero_rows_ok
+    details.update({
         "missing_meta": len(missing_meta),
         "orphan_meta": len(orphan_meta),
-        "exact_common_limit_row_count_partitions": len(exact_limit_files),
+        profile.exact_limit_key: len(exact_limit_files),
         "missing_sample": missing_expected[:10],
         "extra_sample": extra_files[:10],
+    })
+    if profile.partition_prefix is not None:
+        details["ignored_non_strategy_parquet_sample"] = ignored_parquet[:10]
+        details["ignored_non_strategy_meta_sample"] = ignored_meta[:10]
+    details.update({
         "zero_sample": zero_files[:10],
         "exact_limit_sample": exact_limit_files[:10],
     })
-    key_details = audit_text_keys(files, spec)
-    severity = "error" if key_details["missing_key_column_files"] or key_details["missing_available_at_files"] or key_details["unparseable_available_at_rows"] else "warning" if key_details["duplicate_key_rows"] or key_details["blank_time_fields"] else "info"
-    add(severity, f"{spec.api_name}_text_keys", f"{spec.api_name} text key and PIT checks", key_details)
+    add(
+        "error" if has_error else "warning" if has_warning else "info",
+        f"{spec.api_name}_{profile.domain}_partitions",
+        f"{spec.api_name} {profile.partitions_message}",
+        details,
+    )
+    key_details = audit_domain_keys(files, profile)
+    if profile.blank_mode == "per_key_field":
+        has_blank = any(int(value) for value in key_details["blank_key_fields"].values())
+    elif profile.blank_mode == "available_at_total":
+        has_blank = bool(key_details["blank_time_fields"])
+    else:
+        has_blank = bool(key_details["blank_available_at_rows"])
+    availability_error = bool(key_details["missing_available_at_files"] or key_details["unparseable_available_at_rows"])
+    has_key_error = bool(key_details["missing_key_column_files"]) or (profile.availability_required and availability_error)
+    has_key_warning = bool(key_details["duplicate_key_rows"]) or (
+        has_blank if profile.availability_required or profile.blank_mode != "available_at_rows" else False
+    )
+    add(
+        "error" if has_key_error else "warning" if has_key_warning else "info",
+        f"{spec.api_name}_{profile.domain}_keys",
+        f"{spec.api_name} {profile.keys_message}",
+        key_details,
+    )
 
-def audit_text_keys(files: list[Path], spec: TextDataset) -> dict[str, Any]:
+
+def audit_domain_keys(files: list[Path], profile: DomainAuditProfile) -> dict[str, Any]:
     duplicate_key_rows = 0
-    blank_time_fields = 0
+    blank_key_fields: dict[str, int] = {}
+    blank_available_at = 0
     unparseable_available_at_rows = 0
     missing_key_column_files: list[str] = []
     missing_available_at_files: list[str] = []
@@ -1778,37 +1873,74 @@ def audit_text_keys(files: list[Path], spec: TextDataset) -> dict[str, Any]:
         if parquet_rows(path) == 0:
             continue
         schema = pq.ParquetFile(path).schema_arrow.names
-        available_keys = [col for col in spec.key_columns if col in schema]
-        missing = [col for col in spec.key_columns if col not in schema]
+        missing = [col for col in profile.key_columns if col not in schema]
         if missing:
             missing_key_column_files.append(str(path))
             continue
-        columns = list(dict.fromkeys(available_keys + ["available_at", spec.time_column, spec.date_column]))
-        columns = [col for col in columns if col and col in schema]
-        df = pd.read_parquet(path, columns=columns)
-        if available_keys:
-            duplicate_key_rows += int(df.duplicated(available_keys).sum())
+        keys = (
+            [col for col in profile.key_columns if col in schema]
+            if profile.keys_intersect_available
+            else list(profile.key_columns)
+        )
+        columns = list(dict.fromkeys(keys + list(profile.key_extra_columns)))
+        df = pd.read_parquet(path, columns=[col for col in columns if col and col in schema])
+        if keys:
+            duplicate_key_rows += int(df.duplicated(keys).sum())
+            if profile.blank_mode == "per_key_field":
+                for col in keys:
+                    blank_key_fields[col] = blank_key_fields.get(col, 0) + blank_count(df[col])
         if "available_at" not in df.columns:
             missing_available_at_files.append(str(path))
-        else:
-            available = df["available_at"].astype(str).str.strip()
-            blank_time_fields += blank_count(df["available_at"])
-            nonblank = available[available.ne("") & available.ne("nan") & available.ne("None")]
-            if not nonblank.empty:
-                parsed = pd.to_datetime(nonblank, errors="coerce", utc=True, format="mixed")
-                unparseable_available_at_rows += int(parsed.isna().sum())
-    return {
+            continue
+        available = df["available_at"].astype(str).str.strip()
+        if profile.blank_mode == "available_at_total":
+            blank_available_at += blank_count(df["available_at"])
+        blank = available.eq("") | available.eq("nan") | available.eq("None")
+        if profile.blank_mode == "available_at_rows":
+            blank_available_at += int(blank.sum())
+        nonblank = available[~blank]
+        if not nonblank.empty:
+            parsed = pd.to_datetime(nonblank, errors="coerce", utc=True, format="mixed")
+            unparseable_available_at_rows += int(parsed.isna().sum())
+    details: dict[str, Any] = {
         "files_checked": len(files),
-        "key_columns": list(spec.key_columns),
+        "key_columns": list(profile.key_columns),
         "duplicate_key_rows": duplicate_key_rows,
-        "blank_time_fields": blank_time_fields,
+    }
+    if profile.blank_mode == "per_key_field":
+        details["blank_key_fields"] = blank_key_fields
+    elif profile.blank_mode == "available_at_total":
+        details["blank_time_fields"] = blank_available_at
+    else:
+        details["blank_available_at_rows"] = blank_available_at
+    details.update({
         "unparseable_available_at_rows": unparseable_available_at_rows,
         "missing_key_column_files": len(missing_key_column_files),
         "missing_available_at_files": len(missing_available_at_files),
         "missing_key_column_sample": missing_key_column_files[:10],
         "missing_available_at_sample": missing_available_at_files[:10],
-        "pit_rules": text_pit_rules().get(spec.api_name, {}),
-    }
+        "pit_rules": profile.pit_rules,
+    })
+    return details
+
+
+def audit_text_dataset(raw_dir: Path, spec: TextDataset, expected_paths: set[Path], add) -> None:
+    audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
+        domain="text",
+        exact_limit_rows=frozenset({5000, 6000, 7000, 8000, 10000}),
+        exact_limit_key="exact_common_limit_row_count_partitions",
+        apply_pagination_probe=False,
+        empty_error_mode="early_return",
+        include_strategy=False,
+        key_columns=tuple(spec.key_columns),
+        key_extra_columns=("available_at", spec.time_column, spec.date_column),
+        keys_intersect_available=True,
+        blank_mode="available_at_total",
+        pit_rules=text_pit_rules().get(spec.api_name, {}),
+        partitions_message="text partition inventory",
+        keys_message="text key and PIT checks",
+    ))
+
 
 def text_pit_rules() -> dict[str, dict[str, str]]:
     return {
@@ -1929,82 +2061,22 @@ def macro_unit_rules() -> dict[str, str]:
     }
 
 def audit_macro_dataset(raw_dir: Path, spec: MacroDataset, expected_paths: set[Path], add) -> None:
-    files = sorted((raw_dir / spec.api_name).rglob("*.parquet"))
-    meta_files = sorted((raw_dir / spec.api_name).rglob("*.meta.json"))
-    file_set = {path.resolve() for path in files}
-    expected_set = {path.resolve() for path in expected_paths}
-    missing_expected = sorted(str(path) for path in expected_set - file_set)
-    extra_files = sorted(str(path) for path in file_set - expected_set)
-    parquet_meta = {str(path.with_suffix(path.suffix + ".meta.json")) for path in files}
-    meta_set = {str(path) for path in meta_files}
-    missing_meta = sorted(parquet_meta - meta_set)
-    orphan_meta = sorted(meta_set - parquet_meta)
-    row_counts = {str(path): parquet_rows(path) for path in files}
-    zero_files = [path for path, rows in row_counts.items() if rows == 0]
-    exact_limit_files = [path for path, rows in row_counts.items() if rows in {1000, 3000, 5000, 8000, 10000}]
-    has_error = bool(missing_expected or missing_meta or orphan_meta or (not files and expected_set))
-    add("error" if has_error else "warning" if exact_limit_files else "info", f"{spec.api_name}_macro_partitions", f"{spec.api_name} macro/global partition inventory", {
-        "strategy": spec.strategy,
-        "files": len(files),
-        "expected_files": len(expected_set),
-        "missing_expected_files": len(missing_expected),
-        "extra_files": len(extra_files),
-        "meta_files": len(meta_files),
-        "rows": int(sum(row_counts.values())),
-        "zero_row_partitions": len(zero_files),
-        "missing_meta": len(missing_meta),
-        "orphan_meta": len(orphan_meta),
-        "exact_common_limit_row_count_partitions": len(exact_limit_files),
-        "missing_sample": missing_expected[:10],
-        "extra_sample": extra_files[:10],
-        "zero_sample": zero_files[:10],
-        "exact_limit_sample": exact_limit_files[:10],
-    })
-    key_details = audit_macro_keys(files, spec)
-    has_blank_keys = any(int(value) for value in key_details["blank_key_fields"].values())
-    severity = "error" if key_details["missing_key_column_files"] or key_details["missing_available_at_files"] or key_details["unparseable_available_at_rows"] else "warning" if key_details["duplicate_key_rows"] or has_blank_keys else "info"
-    add(severity, f"{spec.api_name}_macro_keys", f"{spec.api_name} key, PIT, and duplicate checks", key_details)
+    audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
+        domain="macro",
+        exact_limit_rows=frozenset({1000, 3000, 5000, 8000, 10000}),
+        exact_limit_key="exact_common_limit_row_count_partitions",
+        apply_pagination_probe=False,
+        empty_error_mode="with_expected",
+        include_strategy=True,
+        key_columns=tuple(spec.key_columns),
+        key_extra_columns=("available_at", "available_at_rule"),
+        keys_intersect_available=False,
+        blank_mode="per_key_field",
+        pit_rules=macro_pit_rules(),
+        partitions_message="macro/global partition inventory",
+        keys_message="key, PIT, and duplicate checks",
+    ))
 
-def audit_macro_keys(files: list[Path], spec: MacroDataset) -> dict[str, Any]:
-    duplicate_key_rows = 0
-    blank_key_fields: dict[str, int] = {}
-    unparseable_available_at_rows = 0
-    missing_key_column_files: list[str] = []
-    missing_available_at_files: list[str] = []
-    for path in files:
-        if parquet_rows(path) == 0:
-            continue
-        schema = pq.ParquetFile(path).schema_arrow.names
-        missing = [col for col in spec.key_columns if col not in schema]
-        if missing:
-            missing_key_column_files.append(str(path))
-            continue
-        columns = list(dict.fromkeys(list(spec.key_columns) + ["available_at", "available_at_rule"]))
-        df = pd.read_parquet(path, columns=[col for col in columns if col in schema])
-        if spec.key_columns:
-            duplicate_key_rows += int(df.duplicated(list(spec.key_columns)).sum())
-            for col in spec.key_columns:
-                blank_key_fields[col] = blank_key_fields.get(col, 0) + blank_count(df[col])
-        if "available_at" not in df.columns:
-            missing_available_at_files.append(str(path))
-        else:
-            available = df["available_at"].astype(str).str.strip()
-            nonblank = available[available.ne("") & available.ne("nan") & available.ne("None")]
-            if not nonblank.empty:
-                parsed = pd.to_datetime(nonblank, errors="coerce", utc=True, format="mixed")
-                unparseable_available_at_rows += int(parsed.isna().sum())
-    return {
-        "files_checked": len(files),
-        "key_columns": list(spec.key_columns),
-        "duplicate_key_rows": duplicate_key_rows,
-        "blank_key_fields": blank_key_fields,
-        "unparseable_available_at_rows": unparseable_available_at_rows,
-        "missing_key_column_files": len(missing_key_column_files),
-        "missing_available_at_files": len(missing_available_at_files),
-        "missing_key_column_sample": missing_key_column_files[:10],
-        "missing_available_at_sample": missing_available_at_files[:10],
-        "pit_rules": macro_pit_rules(),
-    }
 
 def audit_macro_completeness(raw_dir: Path, args: argparse.Namespace, add) -> None:
     datasets = selected_audit_macro_datasets(args)
@@ -2120,94 +2192,24 @@ def event_partition_prefix(spec: EventDataset) -> str:
     raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {spec.api_name}")
 
 def audit_event_dataset(raw_dir: Path, spec: EventDataset, expected_paths: set[Path], add) -> None:
-    dataset_dir = raw_dir / spec.api_name
-    partition_prefix = event_partition_prefix(spec)
-    files = sorted(dataset_dir.rglob(f"{partition_prefix}=*.parquet"))
-    meta_files = sorted(dataset_dir.rglob(f"{partition_prefix}=*.parquet.meta.json"))
-    ignored_parquet = sorted(str(path.resolve()) for path in dataset_dir.rglob("*.parquet") if path not in files)
-    ignored_meta = sorted(str(path.resolve()) for path in dataset_dir.rglob("*.meta.json") if path not in meta_files)
-    file_set = {path.resolve() for path in files}
-    expected_set = {path.resolve() for path in expected_paths}
-    missing_expected = sorted(str(path) for path in expected_set - file_set)
-    extra_files = sorted(str(path) for path in file_set - expected_set)
-    parquet_meta = {str(path.with_suffix(path.suffix + ".meta.json")) for path in files}
-    meta_set = {str(path) for path in meta_files}
-    missing_meta = sorted(parquet_meta - meta_set)
-    orphan_meta = sorted(meta_set - parquet_meta)
-    row_counts = {str(path): parquet_rows(path) for path in files}
-    zero_files = [path for path, rows in row_counts.items() if rows == 0]
-    exact_limit_files = [path for path, rows in row_counts.items() if rows in {spec.page_limit, 5000, 6000, 10000} and not has_pagination_probe(Path(path))]
-    has_error = bool(missing_expected or missing_meta or orphan_meta or not files)
-    has_zero_warning = bool(zero_files and not spec.zero_rows_ok)
-    has_ignored_warning = bool(ignored_parquet or ignored_meta)
-    add("error" if has_error else "warning" if has_zero_warning or exact_limit_files or has_ignored_warning else "info", f"{spec.api_name}_event_partitions", f"{spec.api_name} event/flow partition inventory", {
-        "strategy": spec.strategy,
-        "partition_prefix": partition_prefix,
-        "files": len(files),
-        "expected_files": len(expected_set),
-        "missing_expected_files": len(missing_expected),
-        "extra_files": len(extra_files),
-        "ignored_non_strategy_parquet_files": len(ignored_parquet),
-        "ignored_non_strategy_meta_files": len(ignored_meta),
-        "meta_files": len(meta_files),
-        "rows": int(sum(row_counts.values())),
-        "zero_row_partitions": len(zero_files),
-        "zero_rows_ok": spec.zero_rows_ok,
-        "missing_meta": len(missing_meta),
-        "orphan_meta": len(orphan_meta),
-        "exact_common_limit_row_count_partitions": len(exact_limit_files),
-        "missing_sample": missing_expected[:10],
-        "extra_sample": extra_files[:10],
-        "ignored_non_strategy_parquet_sample": ignored_parquet[:10],
-        "ignored_non_strategy_meta_sample": ignored_meta[:10],
-        "zero_sample": zero_files[:10],
-        "exact_limit_sample": exact_limit_files[:10],
-    })
-    key_details = audit_event_keys(files, spec)
-    has_blank_keys = any(int(value) for value in key_details["blank_key_fields"].values())
-    severity = "error" if key_details["missing_key_column_files"] or key_details["missing_available_at_files"] or key_details["unparseable_available_at_rows"] else "warning" if key_details["duplicate_key_rows"] or has_blank_keys else "info"
-    add(severity, f"{spec.api_name}_event_keys", f"{spec.api_name} key, duplicate, and PIT checks", key_details)
+    audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
+        domain="event",
+        exact_limit_rows=frozenset({spec.page_limit, 5000, 6000, 10000}),
+        exact_limit_key="exact_common_limit_row_count_partitions",
+        apply_pagination_probe=True,
+        empty_error_mode="always",
+        include_strategy=True,
+        key_columns=tuple(spec.key_columns),
+        key_extra_columns=("available_at", "available_at_rule"),
+        keys_intersect_available=False,
+        blank_mode="per_key_field",
+        pit_rules=event_pit_rules().get(spec.api_name, ""),
+        partitions_message="event/flow partition inventory",
+        keys_message="key, duplicate, and PIT checks",
+        partition_prefix=event_partition_prefix(spec),
+        zero_rows_ok=spec.zero_rows_ok,
+    ))
 
-def audit_event_keys(files: list[Path], spec: EventDataset) -> dict[str, Any]:
-    duplicate_key_rows = 0
-    blank_key_fields: dict[str, int] = {}
-    unparseable_available_at_rows = 0
-    missing_key_column_files: list[str] = []
-    missing_available_at_files: list[str] = []
-    for path in files:
-        if parquet_rows(path) == 0:
-            continue
-        schema = pq.ParquetFile(path).schema_arrow.names
-        missing = [col for col in spec.key_columns if col not in schema]
-        if missing:
-            missing_key_column_files.append(str(path))
-            continue
-        columns = list(dict.fromkeys(list(spec.key_columns) + ["available_at", "available_at_rule"]))
-        df = pd.read_parquet(path, columns=[col for col in columns if col in schema])
-        if spec.key_columns:
-            duplicate_key_rows += int(df.duplicated(list(spec.key_columns)).sum())
-            for col in spec.key_columns:
-                blank_key_fields[col] = blank_key_fields.get(col, 0) + blank_count(df[col])
-        if "available_at" not in df.columns:
-            missing_available_at_files.append(str(path))
-        else:
-            available = df["available_at"].astype(str).str.strip()
-            nonblank = available[available.ne("") & available.ne("nan") & available.ne("None")]
-            if not nonblank.empty:
-                parsed = pd.to_datetime(nonblank, errors="coerce", utc=True, format="mixed")
-                unparseable_available_at_rows += int(parsed.isna().sum())
-    return {
-        "files_checked": len(files),
-        "key_columns": list(spec.key_columns),
-        "duplicate_key_rows": duplicate_key_rows,
-        "blank_key_fields": blank_key_fields,
-        "unparseable_available_at_rows": unparseable_available_at_rows,
-        "missing_key_column_files": len(missing_key_column_files),
-        "missing_available_at_files": len(missing_available_at_files),
-        "missing_key_column_sample": missing_key_column_files[:10],
-        "missing_available_at_sample": missing_available_at_files[:10],
-        "pit_rules": event_pit_rules().get(spec.api_name, ""),
-    }
 
 def audit_share_float_complete_union(raw_dir: Path, add) -> None:
     union_path = raw_dir / "share_float_complete" / "share_float_complete.parquet"
@@ -2377,87 +2379,23 @@ def expected_board_paths(raw_dir: Path, spec: BoardTradingDataset, start_date: s
     raise RuntimeError(f"unsupported board-trading strategy {spec.strategy} for {spec.api_name}")
 
 def audit_board_dataset(raw_dir: Path, spec: BoardTradingDataset, expected_paths: set[Path], add) -> None:
-    files = sorted((raw_dir / spec.api_name).rglob("*.parquet"))
-    meta_files = sorted((raw_dir / spec.api_name).rglob("*.meta.json"))
-    file_set = {path.resolve() for path in files}
-    expected_set = {path.resolve() for path in expected_paths}
-    missing_expected = sorted(str(path) for path in expected_set - file_set)
-    extra_files = sorted(str(path) for path in file_set - expected_set)
-    parquet_meta = {str(path.with_suffix(path.suffix + ".meta.json")) for path in files}
-    meta_set = {str(path) for path in meta_files}
-    missing_meta = sorted(parquet_meta - meta_set)
-    orphan_meta = sorted(meta_set - parquet_meta)
-    row_counts = {str(path): parquet_rows(path) for path in files}
-    zero_files = [path for path, rows in row_counts.items() if rows == 0]
-    exact_limit_files = [
-        path
-        for path, rows in row_counts.items()
-        if rows == spec.page_limit and not has_pagination_probe(Path(path))
-    ]
-    has_error = bool(missing_expected or missing_meta or orphan_meta or not files)
-    add("error" if has_error else "warning" if exact_limit_files else "info", f"{spec.api_name}_board_partitions", f"{spec.api_name} board-trading partition inventory", {
-        "strategy": spec.strategy,
-        "files": len(files),
-        "expected_files": len(expected_set),
-        "missing_expected_files": len(missing_expected),
-        "extra_files": len(extra_files),
-        "meta_files": len(meta_files),
-        "rows": int(sum(row_counts.values())),
-        "zero_row_partitions": len(zero_files),
-        "missing_meta": len(missing_meta),
-        "orphan_meta": len(orphan_meta),
-        "exact_page_limit_row_count_partitions": len(exact_limit_files),
-        "missing_sample": missing_expected[:10],
-        "extra_sample": extra_files[:10],
-        "zero_sample": zero_files[:10],
-        "exact_limit_sample": exact_limit_files[:10],
-    })
-    key_details = audit_board_keys(files, spec)
-    dynamic = spec.strategy != "static_once"
-    has_key_error = bool(key_details["missing_key_column_files"] or (dynamic and (key_details["missing_available_at_files"] or key_details["unparseable_available_at_rows"])))
-    has_key_warning = bool(key_details["duplicate_key_rows"] or (dynamic and key_details["blank_available_at_rows"]))
-    add("error" if has_key_error else "warning" if has_key_warning else "info", f"{spec.api_name}_board_keys", f"{spec.api_name} board-trading key and PIT checks", key_details)
+    audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
+        domain="board",
+        exact_limit_rows=frozenset({spec.page_limit}),
+        exact_limit_key="exact_page_limit_row_count_partitions",
+        apply_pagination_probe=True,
+        empty_error_mode="always",
+        include_strategy=True,
+        key_columns=tuple(spec.key_columns),
+        key_extra_columns=("available_at", "available_at_rule", spec.date_column, spec.time_column),
+        keys_intersect_available=False,
+        blank_mode="available_at_rows",
+        pit_rules=board_pit_rules().get(spec.api_name, {}),
+        partitions_message="board-trading partition inventory",
+        keys_message="board-trading key and PIT checks",
+        availability_required=spec.strategy != "static_once",
+    ))
 
-def audit_board_keys(files: list[Path], spec: BoardTradingDataset) -> dict[str, Any]:
-    duplicate_key_rows = 0
-    blank_available_at_rows = 0
-    unparseable_available_at_rows = 0
-    missing_key_column_files: list[str] = []
-    missing_available_at_files: list[str] = []
-    for path in files:
-        if parquet_rows(path) == 0:
-            continue
-        schema = pq.ParquetFile(path).schema_arrow.names
-        missing = [col for col in spec.key_columns if col not in schema]
-        if missing:
-            missing_key_column_files.append(str(path))
-            continue
-        columns = list(dict.fromkeys(list(spec.key_columns) + ["available_at", "available_at_rule", spec.date_column, spec.time_column]))
-        columns = [col for col in columns if col and col in schema]
-        df = pd.read_parquet(path, columns=columns)
-        duplicate_key_rows += int(df.duplicated(list(spec.key_columns)).sum())
-        if "available_at" not in df.columns:
-            missing_available_at_files.append(str(path))
-            continue
-        available = df["available_at"].astype(str).str.strip()
-        blank = available.eq("") | available.eq("nan") | available.eq("None")
-        blank_available_at_rows += int(blank.sum())
-        nonblank = available[~blank]
-        if not nonblank.empty:
-            parsed = pd.to_datetime(nonblank, errors="coerce", utc=True, format="mixed")
-            unparseable_available_at_rows += int(parsed.isna().sum())
-    return {
-        "files_checked": len(files),
-        "key_columns": list(spec.key_columns),
-        "duplicate_key_rows": duplicate_key_rows,
-        "blank_available_at_rows": blank_available_at_rows,
-        "unparseable_available_at_rows": unparseable_available_at_rows,
-        "missing_key_column_files": len(missing_key_column_files),
-        "missing_available_at_files": len(missing_available_at_files),
-        "missing_key_column_sample": missing_key_column_files[:10],
-        "missing_available_at_sample": missing_available_at_files[:10],
-        "pit_rules": board_pit_rules().get(spec.api_name, {}),
-    }
 
 def board_pit_rules() -> dict[str, dict[str, str]]:
     return {
