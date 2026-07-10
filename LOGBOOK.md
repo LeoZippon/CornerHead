@@ -1,3 +1,10 @@
+2026-07-10 Step 树分支回滚：Agent 工具 + 控制台面板（feat/step-tree-rollback，dfa9400 + d3a2e2f）
+
+- 动机：Step 树存储层早已树形完备（逐节点全量快照 + `set_position`），但 Agent 没有受认可的恢复/重定位通道，新节点父指针恒为最新节点——树在结构上只能是线性链。本批打通两侧：Agent 侧 `step_rollback` 工具，用户侧控制台 Step 树面板 + 父产物覆盖。
+- Agent 工具 `step_rollback(node_id, include_models=true)`（dfa9400）：把 `output/`（默认含 `models/`）恢复为指定已验证节点快照、按节点记录 hash 校验、`set_position` 移树位置——之后通过验证的回测真实分支。失败节点/未启用树/写锁均拒绝；修改约束仍相对本 Fold 父产物度量（恢复远端分支可能超 diff 预算，reject-don't-clamp 一致语义）。节点目录重构为 `steps/<node_id>/{output/,models/}` + 根级验证附件（旧平铺布局会把 output 内 `models/` 目录与模型产物静默合并、附件可能遮蔽同名 output 文件）；附件新增 `orders.parquet`（回滚决策可对比成交而非只看曲线）；`tree.json/tree.txt` 改为新 inode 原子写（fold 副本与实验副本硬链接共 inode，中止的 fold 原地写会让实验树引用从未回拷的节点快照）；`tree.txt` 渲染增加 Sharpe。提示词 STEP_TREE_SECTION 同步（含收尾阶段恢复已验证节点再 finish_fold 的指引），PROMPTS.md 重导出。
+- 控制台（d3a2e2f）：新 `webui/steps.py` 把 Agent 侧不透明 `fold_ref_*` 反映射回真实 Fold（schedule+ledger 重算 ref）、按冻结 hash 标注各 Fold 出厂节点；`GET /steps` + `GET /steps/<node>/source.zip`（完整 output/models 源码 + 验证明细）。详情页 Step 产物树面板：悬停指标卡（收益/多空/Sharpe/回撤/冻结用途）、失败节点置灰、当前位置/冻结徽标、点击下载或「从此节点回滚」。用户侧回滚固定在会话门控（绝不 mid-session 强改工作副本）：新控制动作 `set_parent_override`（session_key→node_id，空值清除），worker 在该 Fold 启动时以节点快照为父产物（hash 校验，账本父 id 带 `stepnode_` 前缀可审计）；未运行 Fold 下次启动生效，已完成 Fold 配「设置并重跑」；`rollback_fold` 清除被丢弃会话的覆盖。
+- 验证：full suite 605 OK（新增 9 测试：工具恢复+分支+守卫、控制往返、worker 覆盖生效/拒绝失败节点、webui 视图/zip/控制校验）；前端 `node --check` 通过；实机烟测：console 重启后 `GET /api/experiments/test2/steps` 正确反映射 fold_202512（test2 旧布局节点 has_snapshot=false 优雅降级，无下载/回滚入口——符合测试期不兼容旧产物方针）；静态资源已 `webui_stack.sh sync` 到前端并重启 console/tunnel（端到端 ok）。驱动未变，无需重建沙箱镜像。
+
 2026-07-10 架构梳理重构：职责归位与边界拆分（refactor/architecture-cleanup，5 commits）
 
 - 依四路 Opus 子代理逐子系统架构评审（environment 核心 / tushare 数据层 / pipelines+agent / tools+nl+webui）+ 人工裁决后全量实施；核心结论：分层本就干净（无向上引用），问题集中在"职责放错家"与四份手写重复。全程行为保持：每批 full suite 596 OK，PROMPTS.md 导出字节不变。

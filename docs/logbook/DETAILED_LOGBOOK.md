@@ -16852,3 +16852,25 @@ Validation:
 - `git diff --check` -> clean.
 
 This was documentation-only work; no experiment, inference, training, data-processing, GPU, or memory-intensive job was run, so resource probes were not required.
+
+## 2026-07-10 Step-tree branching rollback: agent tool + console panel
+
+Task: make the step tree an actual search tree. Storage was already tree-shaped (full per-node output/models snapshots, parent pointers, set_position), but nothing could restore a snapshot or reposition, so lineage was linear by construction. Branch `feat/step-tree-rollback` (stacked on refactor/architecture-cleanup after the user's doc-reconcile commit 6097070), commits `dfa9400` (agent side) + `d3a2e2f` (console side) + logbook commit. Not pushed.
+
+Agent side (dfa9400):
+- New trusted tool `environment/tools/step_rollback.py`: restores output/ (+ models/ unless include_models=false) from steps/<node_id>/, verifies restored hashes against the node record (corruption fail-fast), then StepTree.set_position(node_id). Registered in runner spec/handler maps (lock-step test covers it). Rejections: unknown node (retry_hint points at tree.txt), failed nodes (no snapshot), tree disabled, write-locked.
+- Node layout: steps/<node_id>/{output/,models/} + attachments at node root. Old flat layout silently merged an output-level models/ dir into model artifacts and let attachments shadow same-named output files; record_step now also rejects attachment paths under output/ or models/.
+- backtest.py attaches orders.parquet (when present) next to detailed_return.json/style_analysis.json — node-level full source + detailed results per user requirement.
+- StepTree.save() writes tree.json/tree.txt via tmp+rename (new inode). Rationale: link_copytree hardlinks the fold-level tree to the experiment-level tree; Path.write_text truncates the shared inode in place, so an aborted fold could leave the experiment tree referencing never-copied-back node dirs.
+- Prompt STEP_TREE_SECTION documents the layout, the tool, the constraint caveat (diff budget still vs fold parent), and the wrap-up recipe (restore a validated node then finish_fold). PROMPTS.md re-exported.
+
+Console side (d3a2e2f):
+- webui/steps.py: step_tree_view() recomputes agent_visible_ref for every fold id from schedule.json + ledger and maps fold_ref_* back to real fold ids; frozen markers via (artifact_hash, model_hash) match against latest fold records; node_export_dir() validates node ids for the zip route (no raw path joins).
+- server.py: GET /api/experiments/{id}/steps and GET .../steps/{node_id}/source.zip (zips the whole node dir: output/, models/, detailed_return.json, style_analysis.json, orders.parquet).
+- hitl_state.ControlState gains parent_overrides {session_key: node_id}; manager action set_parent_override validates fold session + restorable node, empty clears; rollback_fold drops overrides of dropped sessions.
+- interactive.py: at fold session start, control.parent_overrides.get(key) -> _parent_from_step_node() builds a hash-verified FrozenArtifact from the node snapshot (artifact_id stepnode_<node_id>, auditable in the fold ledger record); status.json carries parent_override for visibility. Mid-session forced rollback deliberately rejected (agent context/disk divergence).
+- app.js/style.css: step-tree panel on the detail page (also read-only experiments): DOM tree with hover metric cards, failed nodes dimmed/struck, current-position + frozen badges, node modal with metrics table, source.zip download, and the parent-override modal (target fold selector; set / set+rerun / clear).
+
+Validation: full suite 605 OK (9 new tests across test_tools_flow / test_step_tree / test_interactive_pipeline / test_webui_backend); node --check on app.js; live smoke test on the deployed console after webui_stack.sh sync + restart: /api/experiments/test2/steps de-opaques fold_202512, old-layout test2 nodes degrade to has_snapshot=false (no download/rollback affordance) per the testing-phase no-compat directive; frontend end-to-end ok. No sandbox image rebuild needed (driver untouched).
+
+Doc deltas (environment_design tool table + steps layout, agent_design workflow bullets, pipeline_design §5 step-level rollback, parameters_reference §9 row) are in the working tree, left uncommitted to ride with the researcher's in-flight documentation reconciliation pass.
