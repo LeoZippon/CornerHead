@@ -8,6 +8,12 @@ Unvalidated working-copy edits are overwritten by design: every validated
 state already lives in the tree. Modification constraints keep being measured
 against this Fold's parent artifact, so restoring a distant branch may exceed
 the diff budget and the next backtest will reject it (reject-don't-clamp).
+
+The restore is not transactional — deliberately, matching every other artifact
+install in the pipeline (copy_artifact is delete-then-copy). A failure mid-way
+leaves the working copy inconsistent but nothing is lost: all validated states
+stay in the read-only tree and re-invoking the tool is the recovery path; the
+tree position only moves after both copies hash-verified.
 """
 
 from __future__ import annotations

@@ -51,6 +51,25 @@ class StepTreeTest(unittest.TestCase):
                     artifact_hash=digest, metrics={}, complete_validation=True,
                 )
 
+    def test_run_id_prevents_rerun_node_collisions(self):
+        # result_name restarts at valid_000 in every run; a fold re-executed
+        # (rerun_fold / post-rollback) must not collide with its earlier run.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            artifact = write_artifact(tmp / "artifact")
+            digest = artifact_hash(artifact)
+            tree = StepTree(tmp / "steps")
+            kwargs = dict(
+                epoch_id="epoch_001", fold_id="fold_ref_ab", result_name="valid_000",
+                artifact_hash=digest, metrics={}, complete_validation=True,
+            )
+            node1 = tree.record_step(artifact, run_id="run_x", **kwargs)
+            node2 = tree.record_step(artifact, run_id="run_y", **kwargs)
+            self.assertNotEqual(node1, node2)
+            self.assertEqual(node1, "epoch_001__fold_ref_ab__run_x__valid_000")
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                tree.record_step(artifact, run_id="run_y", **kwargs)
+
     def test_epoch_id_prevents_cross_epoch_node_collisions(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

@@ -53,8 +53,13 @@ class StepTree:
         model_artifact_hash: str | None = None,
         model_artifact_root: Path | None = None,
         attachments: dict[str, Path] | None = None,
+        run_id: str | None = None,
     ) -> str:
-        node_id = f"{epoch_id}__{fold_id}__{result_name}" if epoch_id else f"{fold_id}__{result_name}"
+        # result_name (valid_NNN) is only unique within one run's results dir;
+        # the same fold re-executed (rerun_fold / post-rollback) starts again at
+        # valid_000, so the run id must be part of the node identity.
+        parts = [part for part in (epoch_id, fold_id, run_id, result_name) if part]
+        node_id = "__".join(parts)
         if any(node["node_id"] == node_id for node in self.data["nodes"]):
             raise ValueError(f"step tree node already exists: {node_id}")
         node_dir = self.root / node_id

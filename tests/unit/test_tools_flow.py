@@ -883,6 +883,33 @@ class ToolFlowTest(unittest.TestCase):
             self.assertIn("__valid_", node_id)
             self.assertNotIn("2022Q1", node_id)
 
+    def test_fold_rerun_records_new_nodes_without_id_collision(self):
+        from autotrade.environment.sandbox import link_copytree
+        from autotrade.environment.step_tree import StepTree
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _, ctx1 = build_sandbox(tmp / "first")
+            ctx1.manifest.update(step_tree_enabled=True)
+            self.assertEqual(BacktestTool(ctx1).run(mode="valid")["status"], "ok")
+            node1 = StepTree(ctx1.paths.steps).current_node_id
+            self.assertIn("__run_x__valid_000", node1)
+
+            # Simulate a rerun of the SAME fold: fresh sandbox/run, same
+            # epoch/fold ids, tree handed over exactly like _install_step_tree.
+            _, ctx2 = build_sandbox(tmp / "second")
+            link_copytree(ctx1.paths.steps, ctx2.paths.steps)
+            ctx2.manifest.update(step_tree_enabled=True, run_id="run_y")
+            summary = BacktestTool(ctx2).run(mode="valid")
+            self.assertEqual(summary["status"], "ok")
+            tree = StepTree(ctx2.paths.steps)
+            nodes = {n["node_id"]: n for n in tree.nodes()}
+            self.assertEqual(len(nodes), 2)
+            node2 = tree.current_node_id
+            self.assertIn("__run_y__valid_000", node2)
+            # The rerun's first node chains onto the previous run's frontier.
+            self.assertEqual(nodes[node2]["parent_node_id"], node1)
+
     def test_step_rollback_restores_snapshot_and_branches(self):
         from autotrade.environment.step_tree import StepTree
         from autotrade.environment.tools import StepRollbackTool

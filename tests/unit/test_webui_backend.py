@@ -391,7 +391,8 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(cleared.json()["control"]["gpu_counts"], {})
 
-    def _build_step_tree(self, experiment_id: str) -> str:
+    def _build_step_tree(self, experiment_id: str, *, fold_id: str = "fold_2022Q1",
+                         result_name: str = "valid_000", with_failed: bool = True) -> str:
         from autotrade.environment.identity import agent_visible_ref
         from autotrade.environment.step_tree import StepTree
 
@@ -400,12 +401,12 @@ class WebuiBackendTest(unittest.TestCase):
         detail = experiment_dir / "detail_fixture.json"
         detail.write_text("{}", encoding="utf-8")
         tree = StepTree(experiment_dir / "steps")
-        fold_ref = agent_visible_ref("fold_2022Q1", prefix="fold_ref")
+        fold_ref = agent_visible_ref(fold_id, prefix="fold_ref")
         node_id = tree.record_step(
             strategy_dir,
             epoch_id="epoch_001",
             fold_id=fold_ref,
-            result_name="valid_000",
+            result_name=result_name,
             artifact_hash=artifact_hash(strategy_dir),
             metrics={"total_return": 0.10, "sharpe": 1.0, "max_drawdown": 0.05,
                      "long_return": 0.08, "short_return": 0.02},
@@ -413,9 +414,10 @@ class WebuiBackendTest(unittest.TestCase):
             model_artifact_hash=model_artifact_hash(strategy_dir / ".missing_models"),
             attachments={"detailed_return.json": detail},
         )
-        tree.record_failed_attempt(
-            epoch_id="epoch_001", fold_id=fold_ref, result_name="failed_x", error="boom"
-        )
+        if with_failed:
+            tree.record_failed_attempt(
+                epoch_id="epoch_001", fold_id=fold_ref, result_name="failed_x", error="boom"
+            )
         return node_id
 
     def test_step_tree_view_deopaques_folds_and_marks_frozen(self) -> None:
@@ -475,6 +477,21 @@ class WebuiBackendTest(unittest.TestCase):
             json={"action": "set_parent_override", "session_key": "heldout", "directive": node_id},
         )
         self.assertEqual(bad_session.status_code, 400)
+        # Past-only: a later fold's node must not become an earlier fold's parent.
+        q2_node = self._build_step_tree("exp_hitl", fold_id="fold_2022Q2", result_name="valid_001",
+                                        with_failed=False)
+        leak = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_parent_override", "session_key": "epoch_001/fold_2022Q1", "directive": q2_node},
+        )
+        self.assertEqual(leak.status_code, 400)
+        self.assertIn("泄漏", leak.json()["detail"])
+        # The node's own session stays allowed (rerun-from-node).
+        own = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_parent_override", "session_key": "epoch_001/fold_2022Q2", "directive": q2_node},
+        )
+        self.assertEqual(own.status_code, 200, own.text)
         cleared = self.client.post(
             "/api/experiments/exp_hitl/control",
             json={"action": "set_parent_override", "session_key": "epoch_001/fold_2022Q2", "directive": ""},
@@ -483,6 +500,9 @@ class WebuiBackendTest(unittest.TestCase):
 
     def test_rollback_drops_later_records_and_archives_artifacts(self) -> None:
         experiment_dir = self.experiments_root / "exp_hitl"
+        q1_node = self._build_step_tree("exp_hitl", with_failed=False)
+        q2_node = self._build_step_tree("exp_hitl", fold_id="fold_2022Q2", result_name="valid_001",
+                                        with_failed=False)
         # Give fold_2022Q2 a record + frozen dir so there is something to drop.
         q2_dir = experiment_dir / "strategy_artifacts" / "epoch_001" / "strategy_epoch_001_fold_2022Q2"
         q2_dir.mkdir(parents=True)
@@ -525,6 +545,15 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertFalse(q2_dir.exists())
         archives = list((experiment_dir / "strategy_artifacts" / "_archive").glob("rollback_*/strategy_epoch_001_fold_2022Q2"))
         self.assertEqual(len(archives), 1)
+        # Step tree pruned: the dropped fold's node (future validation evidence
+        # relative to the new frontier) is archived; the kept fold's node stays.
+        self.assertEqual(payload["pruned_step_nodes"], 1)
+        tree = json.loads((experiment_dir / "steps" / "tree.json").read_text(encoding="utf-8"))
+        self.assertEqual([node["node_id"] for node in tree["nodes"]], [q1_node])
+        self.assertIsNone(tree["current_node_id"])  # pointed at the pruned node
+        archived_steps = list((experiment_dir / "strategy_artifacts" / "_archive").glob(f"rollback_*/steps/{q2_node}"))
+        self.assertEqual(len(archived_steps), 1)
+        self.assertTrue((experiment_dir / "steps" / q1_node).is_dir())
         control = payload["control"]
         self.assertNotIn("epoch_001/fold_2022Q2", control["approved_sessions"])
         self.assertNotIn("heldout", control["approved_sessions"])

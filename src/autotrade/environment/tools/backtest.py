@@ -411,6 +411,7 @@ class BacktestTool:
                 # Opaque the fold id so the step-tree node names the Agent reads
                 # (steps/tree.txt|tree.json) never leak the held-out calendar period.
                 fold_id=agent_visible_ref(manifest.require("fold_id"), prefix="fold_ref"),
+                run_id=str(manifest.require("run_id")),
                 result_name=result_dir.name,
                 artifact_hash=artifact.artifact_hash,
                 model_artifact_hash=model_artifacts.artifact_hash,

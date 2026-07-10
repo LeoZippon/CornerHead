@@ -395,6 +395,8 @@ class ExperimentManager:
                 shutil.move(str(path), str(dest))
                 archived.append(str(path))
 
+        pruned_nodes = self._prune_step_tree(experiment_dir, dropped_fold_keys, archive_root)
+
         backup = ledger_path.with_name(f"experiment_ledger.rollback_{stamp}.jsonl")
         shutil.copy2(ledger_path, backup)
         tmp = ledger_path.with_name(f".{ledger_path.name}.rollback.tmp")
@@ -421,7 +423,56 @@ class ExperimentManager:
             "dropped_records": len(dropped_records),
             "archived_dirs": archived,
             "ledger_backup": str(backup),
+            "pruned_step_nodes": pruned_nodes,
         }
+
+    def _prune_step_tree(self, experiment_dir: Path, dropped_fold_keys: set[str], archive_root: Path) -> int:
+        """Step-tree symmetry for fold rollback.
+
+        Nodes recorded by the dropped fold sessions carry validation metrics and
+        full strategy snapshots from periods that are FUTURE relative to the new
+        frontier; the next fold's sandbox receives the experiment tree verbatim,
+        so leaving them in place would hand the re-run Agent future-validated
+        strategies. Dropped nodes (plus descendants) move into the rollback
+        archive next to the frozen artifacts; tree.json is backed up there too."""
+        from autotrade.environment.identity import agent_visible_ref
+        from autotrade.environment.step_tree import StepTree, TREE_FILE
+
+        steps_root = experiment_dir / "steps"
+        if not (steps_root / TREE_FILE).exists():
+            return 0
+        dropped_pairs = set()
+        for key in dropped_fold_keys:
+            epoch_id, _, fold_id = key.partition("/")
+            dropped_pairs.add((epoch_id, agent_visible_ref(fold_id, prefix="fold_ref")))
+        tree = StepTree(steps_root)
+        dropped_ids = {
+            str(node["node_id"])
+            for node in tree.nodes()
+            if (str(node.get("epoch_id")), str(node.get("fold_id"))) in dropped_pairs
+        }
+        if not dropped_ids:
+            return 0
+        changed = True
+        while changed:  # descendants of a dropped node are dropped too
+            changed = False
+            for node in tree.nodes():
+                if node["node_id"] not in dropped_ids and node.get("parent_node_id") in dropped_ids:
+                    dropped_ids.add(str(node["node_id"]))
+                    changed = True
+        archive_steps = archive_root / "steps"
+        archive_steps.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(steps_root / TREE_FILE, archive_steps / TREE_FILE)
+        for node_id in sorted(dropped_ids):
+            node_dir = steps_root / node_id
+            if node_dir.is_dir():
+                shutil.move(str(node_dir), str(archive_steps / node_id))
+        tree.data["nodes"] = [node for node in tree.nodes() if str(node["node_id"]) not in dropped_ids]
+        if tree.data.get("current_node_id") in dropped_ids:
+            # The next fold start repositions by parent hash (_install_step_tree).
+            tree.data["current_node_id"] = None
+        tree.save()
+        return len(dropped_ids)
 
     def _validate_rerun_target(self, experiment_dir: Path, session_key: str) -> None:
         """Only the LATEST recorded fold may be re-run: earlier folds already
@@ -444,9 +495,16 @@ class ExperimentManager:
     def _validate_parent_override(self, experiment_dir: Path, session_key: str, node_id: str) -> None:
         """The override target must be a fold session and the node a restorable snapshot.
 
-        Which fold may consume it is enforced where it matters: an already-run
-        fold only picks the override up through rerun_fold (itself restricted to
-        the latest fold), an unrun fold at its next start."""
+        Past-only: a node recorded by a LATER fold session embodies strategies
+        validated on periods after the target session's window; allowing it as
+        the parent would leak future-fitted strategies backwards. The node's own
+        session (rerun-from-node) and earlier sessions are allowed. Which fold
+        may consume it is enforced where it matters: an already-run fold only
+        picks the override up through rerun_fold (itself restricted to the
+        latest fold), an unrun fold at its next start."""
+        from autotrade.environment.identity import agent_visible_ref
+        from autotrade.environment.step_tree import StepTree
+
         from .steps import node_export_dir
 
         schedule = read_json(experiment_dir / HITL_DIR_NAME / "schedule.json")
@@ -458,6 +516,14 @@ class ExperimentManager:
             node_export_dir(experiment_dir, node_id)
         except ValueError as exc:
             raise ManagerError(str(exc)) from exc
+        node = StepTree(experiment_dir / "steps").get_node(node_id)
+        ref_to_fold = {agent_visible_ref(key.partition("/")[2], prefix="fold_ref"): key.partition("/")[2] for key in fold_keys}
+        node_fold = ref_to_fold.get(str(node.get("fold_id")))
+        node_key = f"{node.get('epoch_id')}/{node_fold}" if node_fold else None
+        if node_key not in fold_keys:
+            raise ManagerError(f"无法定位节点 {node_id} 所属的 Fold 会话，拒绝设为起点")
+        if fold_keys.index(node_key) > fold_keys.index(session_key):
+            raise ManagerError("不能把更晚 Fold 会话的节点设为更早会话的起点（未来验证信息泄漏）")
 
     # ---- deletion ------------------------------------------------------------
     def delete_experiment(self, experiment_id: str) -> dict[str, object]:
