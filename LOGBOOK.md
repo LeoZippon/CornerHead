@@ -1,3 +1,13 @@
+2026-07-09 第五轮审计裁决与全量修复（fix/audit5-remediation，5 commits）
+
+- 对 GPT 第五轮审计（check.md，22 项 P0–P2）先做 5 路并行代码核实（逐项 file:line 证据），再按三原则裁决：16 项采纳（多数缩水实施）、6 项拒绝（#6 盘后北交资格系既定设计、#19 分红 pay_date 系已记档残差、#22 状态 RPC 关不住内存绕过、#12d 部分成交维持实证推迟；三模式拆分/读路径全量哈希/NL 可终止进程以轻量替代覆盖）。
+- 批次 A 回放正确性（8c3aa92）：指标 Day-0 基准（首日亏损与初始峰值进 Sharpe/回撤，堵住「首日 -30% 回撤=0 过验收」）；09:25 只暴露开盘时段首 bar（晚开票缺席，堵前视）；撮合前 open/撮合后 close 双阶段持仓重估（保证金准入不再用昨收）；收盘竞价与合成 bar（新 `synthetic=True` 标记）单一价撮合（堵合成 15:00 bar 携带早盘低价的追溯成交）；清算完整性显式报告（`liquidation_complete`/`unliquidated_positions`/`remaining_liabilities`，不入验收）；universe 只发布 as-of 名（缺记录=null 不回填当前名）、过滤后删 `delist_date`（未来信息）、缺 namechange 即 raise。
+- 批次 B 校验门（c7f8f12）：验收指标非有限硬拒 + AcceptanceRules/ExperimentConfig/BrokerProfile 构造期范围校验（负滑点双向获利、倒置维保线等直接报错）；正式 JSON `allow_nan=False`；快照按启用域检查审计 status（daily/分钟/基本面硬失败，events/macro/text 降级 manifest `data_quality_warnings`——实测 macro/events 现存 error 属审计校准噪声，不应阻断实验）；margin_secs 逐日数据缺当日集合 fail-closed 拒 `margin_secs_data_missing`（不再沿用陈旧集合）。
+- 批次 C 证据链（b265c37）：Order 记录补 `submitted_at`/`limit_price`/逐单 `fee`/`stamp_duty`，撤单保留为 `status="cancelled"`（对齐 live 按 status 过滤 ORDER）；Broker 落盘逐日 (date, account, ts_code, side) 日终持仓 `positions_eod.parquet`，style 归因改读它（强平/送股/对冲腿如实反映，删除成交单重建逻辑）；CLI 报告基准改读账本冻结 benchmark 块（删 raw 路径与三个 CLI flag）；运行中途抛错追加 `attempt_failed` 账本记录（异常/traceback，可重跑）；provider 日志按天+进程分文件 + `call_id` 关联 + payload 只存一次；`write_parquet` 补 `parquet_sha256` + sidecar 原子写 + 审计抽样哈希校验。
+- 批次 D 运行时（c8312ef）：决策绝对 deadline 下传 NL——每轮 provider 超时钳制剩余墙钟（钳制时禁重试，`complete_tools` 新增 `max_retries` 覆盖），最坏超程从整个多轮 NL 任务缩到一次有界 HTTP 调用；文本检索改 DuckDB `regexp_matches`（RE2 线性时间，灾难回溯结构性不可能；列裁剪+LIMIT，删 1.6GB 常驻 Series+dict 正文副本），pattern 上限 256、不支持特性返回可修复错误（fail-fast，不再静默转字面量）。
+- 批次 E ops/收敛（8da5125）：两个 crontab 安装器只认真正的 "no crontab"（其他读错误中止）+ 装前备份 + 装后验证；数据任务锁改内核 `flock`（进程退出自动释放，删 PID 复用死锁与陈旧锁启发式）；manifest 记录 docker image ID/RepoDigests、基础镜像钉 digest、DuckDB zip SHA-256 校验；pyproject 补 duckdb 依赖与 `[webui]` 可选组；PROMPTS.md 补导出 Explore/压缩/Fold 分析三提示词；PARAM_DEFAULTS 从域 dataclass 派生 + CLI/HITL 默认值漂移测试；单位合同显式限定 daily 域（域 meta 标 `units`，提示词加跨域单位警示）；env docs 记录 substep 延迟模型可强制性边界（内存绕过）与 RPC 方案否决理由。
+- 验证：full suite 572→597 OK（+25 回归测试）；每批独立 commit；PROMPTS.md 随批重导出；`git diff --check` clean；五份 living docs + parameters_reference 同步。
+
 2026-07-09 Barra-lite 行业 rollup 完整性与设计文档收口（fix/broker-fill-realism）
 
 - 修复逐窗口展示只保留前 8 个行业时，跨窗口 rollup 会永久丢失其余行业暴露的问题：sidecar 额外保留完整日度累计量，展示仍保持前 8；旧 sidecar 读取路径保持可用。

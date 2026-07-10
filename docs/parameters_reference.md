@@ -71,8 +71,10 @@
 |---|---:|---|
 | `min_return` | 0.0 | 冻结所需最低验证总收益 |
 | `min_sharpe` | 0.0 | 冻结所需最低验证 Sharpe |
-| `max_drawdown` | 0.25 | 冻结允许的最大验证回撤 |
+| `max_drawdown` | 0.25 | 冻结允许的最大验证回撤（构造时校验有限且在 [0,1]） |
 | `require_complete_validation` | True（恒定） | 冻结候选只取完整验证回测；CLI 不提供放宽入口 |
+
+非有限指标（NaN/inf）是硬拒绝；日收益/Sharpe/回撤以初始权益为 Day-0 基准计算（`pipeline_design.md` §2.2、`environment_design.md` §3.7）。
 
 **修改约束（ModificationConstraints；`pipeline_design.md` §2.1、`agent_design.md` §4.1）**
 
@@ -117,7 +119,8 @@
 | `nl_max_calls_per_decision_day` | 10 | 每回测 NL 配额 = 该值 × 决策天数 |
 | `nl_max_calls_per_backtest` | None | 可选进一步收紧（取 min） |
 | `nl_failure_policy` | `return_error_with_audit` | NL 失败时对策略的返回策略 |
-| NL 单次调用超时（派生） | `0.8 ×` 单决策上限 | 为决策 tick 的其余计算留余量（`tools/backtest.py`） |
+| NL 单次调用超时（派生） | `0.8 ×` 单决策上限 | 为决策 tick 的其余计算留余量（`tools/backtest.py`）；每轮再钳制到本决策剩余墙钟（被钳制时禁用 provider 重试），deadline 耗尽的 NL 请求直接失败 |
+| NL 检索 pattern 上限（常量） | 256 字符 | `text_retrieve` 模式长度上限；RE2/grep 语义（线性时间，不支持反向引用/环视），越界或不支持返回可修复工具错误（`nl/engine.py`） |
 
 有意不设固定回测总上限：总耗时上界 = 交易日数 × 单日上限（`environment_design.md` §3.7）。
 
@@ -210,6 +213,7 @@
 | 分钟线强刷 | 最近 1 个自然日 | 每晚补最近窗口 |
 | 交易日历前瞻 | `end_date + 7` 天 | 供次日盘前判断 |
 | 宏观/全球窗口下界 | `20200101` | range 型数据保留窗口起点 |
+| 数据任务锁 `lock_wait_seconds` | 900 s | `cron_update` 内核 `flock` 排它锁等待上限；持有者退出即自动释放（无陈旧锁启发式），锁文件内 pid/started_at 仅诊断用 |
 | `revision_monitor.sentinel_sample_size` | 12 | 修正哨兵每日抽样分区数 |
 | `revision_monitor.sentinel_datasets` | daily / adj_factor / daily_basic / stk_limit / suspend_d / limit_list_d | 哨兵监控数据集（单一配置来源） |
 
@@ -239,7 +243,7 @@
 
 | 参数 | 默认 | 定义位置与作用 |
 |---|---:|---|
-| 报告 benchmark | `000300.SH` | `pipelines/reporting.py`；缺基准数据时 summary 标 warning（`pipeline_design.md` §4.2） |
+| 报告 benchmark | `000300.SH` | `pipelines/reporting.py`；取账本记录中回放时冻结的 `benchmark` 块（不读 raw），有成绩周期缺块时 summary 标 warning（`pipeline_design.md` §4.2） |
 | 深圳开盘竞价校正倍率 | `00*.SZ` ×0.76、`30*.SZ` ×0.58 | `environment/features/`（auction 校正）；仅开盘竞价近似输入（`environment_design.md` §1.4） |
 | 财务事件可见时点 | 公告日 18:00 | `features/fundamental_events.py`；公告日优先 `f_ann_date` 再 `ann_date`（`environment_design.md` §1.3） |
 | 元学习 `web_search` 引擎 | Tavily + Semantic Scholar | run manifest `web_search_engines`；三视角非空检索后才可 `done`（`pipeline_design.md` §3.1） |

@@ -16788,3 +16788,29 @@ Implementation: per-window style analysis now stores untruncated day-summed tilt
 Documentation: expanded the Snapshot source inventory; clarified frozen-input attribution and complete rollup data; tightened frozen artifact manifest wording; separated audit evidence from freeze/test acceptance gates; and reformatted the Pipeline overview without changing behavior.
 
 Validation: `~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_style_analysis` -> 5 OK; `~/miniconda3/envs/quant/bin/python -m py_compile src/autotrade/environment/style_analysis.py tests/unit/test_style_analysis.py` -> OK; `git diff --check` -> clean. This was a lightweight unit-test/documentation pass, so no GPU or system-memory probe was required.
+
+## 2026-07-09 Fifth external audit: verification, ruling, and full remediation
+
+Task: verify GPT's fifth full audit (check.md, 22 findings P0-P2) against the code, rule each item against the three project principles (streamlined architecture / max Agent freedom / realistic simulation), and implement everything adopted.
+
+Branch: `fix/audit5-remediation` (off `fix/broker-fill-realism`), five commits:
+`8c3aa92` (batch A replay correctness), `c7f8f12` (batch B validation gates), `b265c37` (batch C run evidence), `c8312ef` (batch D runtime robustness), `8da5125` (batch E ops/doc convergence). Not pushed.
+
+Verification: five parallel read-only subagent sweeps produced file:line evidence per claim before any ruling. Notable verification outcomes: acceptance-gate Day-0 blindness confirmed at `backtest_engine.py:304-317` with the webui path already correct (`style_analysis.daily_returns_from_curve`); 09:25 leak confirmed as first-bar-of-day-regardless-of-time (`main_ctx_engine.py:791`); afterhours BSE eligibility confirmed as documented+tested design (audit claim rejected); universe name leak confirmed empirically (000004.SZ name="国华退" vs name_asof="*ST国华" in a live snapshot; namechange coverage measured 100% at 2024-01-01, enabling as-of-only publication); macro/event domain audit "error" statuses confirmed as calibration noise (index_daily expected_files=7 vs 49 backfill partitions), justifying warn-only gating for research domains.
+
+Rulings (rejected items): #6 afterhours BSE (by design per 2026-07-06 rule revision; B-shares/malformed codes unreachable in data and fail-safe on missing_price); #19 dividend pay_date lag (documented accepted residual, second-order vs 5bps slippage; re-trigger criteria stand); #22 host RPC state layer (in-process io.open already blocked by driver monkeypatch; persistent driver process makes in-memory globals bypass ANY file/RPC protocol; no PIT/cross-run leakage — documented the enforceability boundary in env docs instead); #12d partial-fill DEALs (standing empirical deferral); #4's three replay modes, #13's hot-read hash verification, #8's killable NL worker processes (lightweight equivalents implemented instead).
+
+Key implementation notes beyond the concise log:
+- Two-phase marks live in `SimBroker.match_bar` (open before matching for admission, close after for ctx.account); EOD interest/forced-close schedule unchanged. Test sizes the bail-balance rejection via a collateral gap-down (credit cash 25k, 1000x20 collateral, open 6.0 -> fin_buy 1000x10 rejected).
+- Single-price matching applies to close-auction orders AND any synthetic bar (flag column `synthetic=True` from `_synthetic_daily_minutes`); day range stays visible in ctx.bars at 15:00 (legitimately known post-close).
+- `positions_eod.parquet` written per replay from `SimBroker.positions_eod_records()` (replace-by-date; engine refreshes after exit-day close_all); `style_analysis` consumes it and `_positions_from_fills`/`_group_fills`/`_ACTION_SIGN` were deleted.
+- Reporting: `build_experiment_report(ledger, out)` reads each record's frozen `benchmark` block; `_attach_benchmark_returns`/`_infer_raw_dir`/`_load_benchmark_frame`/`_benchmark_period_return` deleted along with `--benchmark-code/--benchmark-raw-dir/--no-benchmark`.
+- DuckDB retrieval: `TextRetriever` title/code match via registered-frame `regexp_matches`, body grep via `read_parquet([shards]) ... LIMIT` with snippet substr in-query; snippet cache replaces the resident `_bodies` dict. Pattern gate `_validate_pattern` (256 chars, RE2 compile check via duckdb). Verified duckdb 1.1.3 supports list-param `read_parquet(?)` and rejects backrefs.
+- NL deadline: `MainPolicyRunner._request` sets `nl_service.deadline_at = deadline`; `_StrategyNLService.run` fails exhausted requests pre-provider; `NLSubAgentEngine._call` clamps per-round timeout to remaining and passes `max_retries=0` when clamped (new optional param on `LLMProxy.complete_tools`).
+- flock migration removed `pid_is_alive`/`lock_is_stale`/`DEFAULT_LOCK_STALE_SECONDS` and the `default_lock_stale_seconds` config key; lock file is never unlinked (unlink races a concurrent opener onto a dead inode).
+- Image identity: `resolve_image_identity()` (docker image inspect, fail-fast) recorded in `allocation_record` and `sandbox_image_update`; base image pinned to `python:3.11-slim@sha256:b27df584...`; DuckDB CLI zip pinned to sha256 `efd0fccd...` (fetched and hashed from the official release).
+- PARAM_DEFAULTS single-sourcing overlays dataclass defaults after the literal dict; `run_experiment.build_parser()` extracted; `DefaultsDriftTest` pins CLI<->PARAM_DEFAULTS<->dataclasses.
+
+Resource checks: pre-run `free -h` showed ~301Gi available; work was CPU-light (unit tests only, ~100s per full-suite run), no GPU workload.
+
+Validation: full suite grew 572 -> 597 tests, all OK after each batch; `git diff --check` clean per commit; PROMPTS.md re-exported in batches A/B/D/E; living docs updated in the same commits (environment_design §1.4/§3.x/§7, data_documentation §3.1 gates + sidecar contract, pipeline_design §2.2/§4.1/§4.2, deployment_documentation webui extra, parameters_reference §2/§3/§7/§8).
