@@ -44,7 +44,7 @@ from autotrade.environment.broker import (
 from autotrade.environment.executor import DockerExecutor
 from autotrade.environment.main_ctx_engine import MainPolicyRunner, run_main_ctx_replay
 from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, SandboxSpec, link_copytree
-from autotrade.pipelines.interactive import write_json_atomic
+from autotrade.environment.runtime import write_json_atomic
 
 
 def _profile_kwargs(record: dict[str, object]) -> dict[str, object]:

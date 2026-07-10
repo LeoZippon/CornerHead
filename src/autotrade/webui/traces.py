@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import AsyncIterator
 
-from autotrade.pipelines.interactive import HITL_DIR_NAME, STATUS_NAME, read_status, status_pid_alive
+from autotrade.pipelines.hitl_state import HITL_DIR_NAME, STATUS_NAME, read_status, status_pid_alive
 
 DEFAULT_PAGE_BYTES = 512 * 1024
 STREAM_POLL_SECONDS = 1.0

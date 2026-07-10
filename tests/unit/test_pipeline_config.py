@@ -9,7 +9,7 @@ from pathlib import Path
 
 from autotrade.environment.broker import BrokerProfile
 from autotrade.pipelines.config import AcceptanceRules, ExperimentConfig
-from autotrade.pipelines.interactive import PARAM_DEFAULTS
+from autotrade.pipelines.hitl_state import PARAM_DEFAULTS
 
 
 def make_config(tmp: Path, **overrides: object) -> ExperimentConfig:

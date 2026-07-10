@@ -20,7 +20,7 @@ import uuid
 from pathlib import Path
 
 from autotrade.environment.runtime import utc_now_iso
-from autotrade.pipelines.interactive import (
+from autotrade.pipelines.hitl_state import (
     CONTROL_NAME,
     HITL_DIR_NAME,
     PARAMS_NAME,
@@ -116,10 +116,10 @@ class ExperimentManager:
         self-contained even if the source is later deleted."""
         from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
 
-        from .registry import _read_ledger_records, latest_fold_records
+        from .registry import read_ledger_records, latest_fold_records
 
         source_dir = resolve_experiment_dir(self.experiments_root, source_id)
-        folds = list(latest_fold_records(_read_ledger_records(source_dir)).values())
+        folds = list(latest_fold_records(read_ledger_records(source_dir)).values())
         folds.sort(key=lambda r: (str(r.get("epoch_id")), str(r.get("test_period") or r.get("fold_id"))))
         if not folds:
             raise ManagerError(f"源实验 {source_id!r} 没有已完成的 Fold，无法继承其 Agent Output")
@@ -263,9 +263,9 @@ class ExperimentManager:
             else:
                 control.gpu_counts.pop(session_key, None)
         elif action == "skip_to_heldout":
-            from .registry import _read_ledger_records, latest_fold_records
+            from .registry import read_ledger_records, latest_fold_records
 
-            if not latest_fold_records(_read_ledger_records(experiment_dir)):
+            if not latest_fold_records(read_ledger_records(experiment_dir)):
                 raise ManagerError("尚无已完成的 Fold，无法提前进入 Held-out")
             control.skip_to_heldout = True
             control.request = None
@@ -321,7 +321,7 @@ class ExperimentManager:
         _freeze), and backs up the original ledger next to it. The target
         fold's own records — including earlier re-runs — are kept verbatim.
         """
-        from .registry import _read_ledger_records, latest_fold_records
+        from .registry import read_ledger_records, latest_fold_records
 
         schedule = read_json(experiment_dir / HITL_DIR_NAME / "schedule.json")
         sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
@@ -329,7 +329,7 @@ class ExperimentManager:
         if session_key not in fold_keys:
             raise ManagerError(f"{session_key!r} is not a fold session")
         target_epoch, target_fold = session_key.split("/", 1)
-        if (target_epoch, target_fold) not in latest_fold_records(_read_ledger_records(experiment_dir)):
+        if (target_epoch, target_fold) not in latest_fold_records(read_ledger_records(experiment_dir)):
             raise ManagerError("目标 Fold 还没有账本记录，无法回滚到它")
         dropped_fold_keys = set(fold_keys[fold_keys.index(session_key) + 1 :])
 
@@ -415,14 +415,14 @@ class ExperimentManager:
         """Only the LATEST recorded fold may be re-run: earlier folds already
         fed their frozen artifacts into successors, so re-running them would
         break the parent chain the later records were built on."""
-        from .registry import latest_fold_records, _read_ledger_records
+        from .registry import latest_fold_records, read_ledger_records
 
         schedule = read_json(experiment_dir / HITL_DIR_NAME / "schedule.json")
         sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
         fold_keys = [str(s.get("key")) for s in sessions if s.get("kind") == "fold"]
         if session_key not in fold_keys:
             raise ManagerError(f"{session_key!r} is not a fold session")
-        recorded = latest_fold_records(_read_ledger_records(experiment_dir))
+        recorded = latest_fold_records(read_ledger_records(experiment_dir))
         recorded_keys = [key for key in fold_keys if tuple(key.split("/", 1)) in recorded]
         if not recorded_keys:
             raise ManagerError("该实验还没有已完成的 Fold 可重跑")

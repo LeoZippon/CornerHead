@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Mapping
 
 from autotrade.pipelines.fold_analysis import analysis_paths
-from autotrade.pipelines.interactive import (
+from autotrade.pipelines.hitl_state import (
     ANALYSIS_DIR_NAME,
     CONTROL_NAME,
     HITL_DIR_NAME,
@@ -29,12 +29,51 @@ from autotrade.pipelines.interactive import (
     status_pid_alive,
 )
 
+
+# Datasets whose partition coverage bounds the selectable backtest periods: the
+# replay needs minute bars, so their intersection with the daily lake is the
+# honest "data exists" window (issue: pre-coverage periods fail at runtime).
+COVERAGE_DATASETS = ("daily", "stk_mins_1min_by_date")
+
+
+def dataset_coverage(raw_dir: Path, dataset: str) -> tuple[str, str] | None:
+    root = raw_dir / dataset
+    if not root.is_dir():
+        return None
+    dates = [
+        entry.name[len("trade_date="):-len(".parquet")]
+        for entry in root.glob("trade_date=*.parquet")
+    ]
+    dates = [d for d in dates if len(d) == 8 and d.isdigit()]
+    if not dates:
+        return None
+    return min(dates), max(dates)
+
+
+def clamped_trading_days(repo_root: Path) -> list[str] | None:
+    """SSE trading days clamped to the datasets' actual partition coverage, so
+    the period pickers cannot offer periods without downloaded data. None when
+    no calendar is available (dev/test roots): the pickers degrade to text."""
+    try:
+        from autotrade.pipelines.folds import load_sse_trading_days
+
+        raw_dir = repo_root / "data" / "raw"
+        days = load_sse_trading_days(raw_dir)
+        coverages = [c for c in (dataset_coverage(raw_dir, name) for name in COVERAGE_DATASETS) if c]
+        if coverages:
+            low = max(c[0] for c in coverages)
+            high = min(c[1] for c in coverages)
+            days = [day for day in days if low <= day <= high]
+        return days
+    except Exception:  # noqa: BLE001 - schema must stay served without a calendar
+        return None
+
 ACTIVE_STATES = ("starting", "running_session", "waiting_user", "paused")
 # Fold-record fields whose content is test-period evidence (guarded view).
 TEST_FIELDS = ("test_result",)
 
 
-def _read_ledger_records(experiment_dir: Path) -> list[dict[str, object]]:
+def read_ledger_records(experiment_dir: Path) -> list[dict[str, object]]:
     path = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
     if not path.exists():
         return []
@@ -113,7 +152,7 @@ def summarize_experiment(experiment_dir: Path) -> dict[str, object]:
     try:
         state = experiment_state(experiment_dir)
         summary.update(state)
-        records = _read_ledger_records(experiment_dir)
+        records = read_ledger_records(experiment_dir)
         folds = list(latest_fold_records(records).values())
         folds.sort(key=lambda record: (str(record.get("epoch_id")), str(record.get("test_period") or record.get("fold_id"))))
         heldout = latest_heldout_records(records)
@@ -212,7 +251,7 @@ def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, o
     experiment_dir = resolve_experiment_dir(experiments_root, experiment_id)
     detail = summarize_experiment(experiment_dir)
     hitl_dir = experiment_dir / HITL_DIR_NAME
-    records = _read_ledger_records(experiment_dir)
+    records = read_ledger_records(experiment_dir)
     fold_map = latest_fold_records(records)
     meta_map = {
         str(record.get("epoch_id")): record for record in records if record.get("record_type") == "meta_learning"
@@ -274,7 +313,7 @@ def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, o
 
 def fold_detail(experiments_root: Path, experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
     experiment_dir = resolve_experiment_dir(experiments_root, experiment_id)
-    records = _read_ledger_records(experiment_dir)
+    records = read_ledger_records(experiment_dir)
     record = latest_fold_records(records).get((epoch_id, fold_id))
     if record is None:
         raise KeyError(f"no fold record for {epoch_id}/{fold_id}")
@@ -346,7 +385,7 @@ def fold_orders(
     import pandas as pd
 
     experiment_dir = resolve_experiment_dir(experiments_root, experiment_id)
-    records = _read_ledger_records(experiment_dir)
+    records = read_ledger_records(experiment_dir)
     record = latest_fold_records(records).get((epoch_id, fold_id))
     if record is None:
         raise KeyError(f"no fold record for {epoch_id}/{fold_id}")
@@ -411,7 +450,7 @@ def fold_orders_csv(
     import pandas as pd
 
     experiment_dir = resolve_experiment_dir(experiments_root, experiment_id)
-    record = latest_fold_records(_read_ledger_records(experiment_dir)).get((epoch_id, fold_id))
+    record = latest_fold_records(read_ledger_records(experiment_dir)).get((epoch_id, fold_id))
     if record is None:
         raise KeyError(f"no fold record for {epoch_id}/{fold_id}")
     if not _RESULT_NAME.match(result or ""):

@@ -24,15 +24,14 @@ from autotrade.pipelines.fold_analysis import (
     guarded_record_view,
     read_strategy_files,
 )
-from autotrade.pipelines.interactive import (
+from autotrade.environment.runtime import write_json_atomic
+from autotrade.pipelines.hitl_state import (
     CONTROL_NAME,
     HELDOUT_SESSION_KEY,
+    PARAM_DEFAULTS,
     SCHEDULE_NAME,
     STATUS_NAME,
     ControlState,
-    ExperimentStopped,
-    InteractiveExperimentRunner,
-    PARAM_DEFAULTS,
     StatusReporter,
     fold_session_key,
     meta_session_key,
@@ -40,8 +39,8 @@ from autotrade.pipelines.interactive import (
     read_status,
     resolve_options,
     write_control,
-    write_json_atomic,
 )
+from autotrade.pipelines.interactive import ExperimentStopped, InteractiveExperimentRunner
 
 
 def _weekday_trading_days(first: str, last: str) -> list[str]:
@@ -507,7 +506,7 @@ class StatusPidTest(unittest.TestCase):
     def test_zombie_worker_counts_as_dead(self) -> None:
         import subprocess
 
-        from autotrade.pipelines.interactive import status_pid_alive
+        from autotrade.pipelines.hitl_state import status_pid_alive
 
         # An exited-but-unreaped child (state Z) must not read as alive: the
         # console judges worker liveness purely from the recorded pid.
@@ -530,7 +529,7 @@ class StatusPidTest(unittest.TestCase):
     def test_recycled_pid_counts_as_dead(self) -> None:
         import os
 
-        from autotrade.pipelines.interactive import proc_start_ticks, status_pid_alive
+        from autotrade.pipelines.hitl_state import proc_start_ticks, status_pid_alive
 
         # A recorded start time that does not match the live process means the
         # pid number was recycled (e.g. after a reboot): the dead worker must

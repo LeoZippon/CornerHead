@@ -18,7 +18,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
-from autotrade.pipelines.interactive import PARAM_DEFAULTS, ControlState, write_control, write_json_atomic
+from autotrade.environment.runtime import write_json_atomic
+from autotrade.pipelines.hitl_state import PARAM_DEFAULTS, ControlState, write_control
 from autotrade.webui.manager import ExperimentManager, ManagerError
 from autotrade.webui.server import create_app
 from autotrade.webui.traces import read_trace_page
@@ -502,7 +503,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(missing_confirm.status_code, 400)
         # Simulate a live worker on the HITL experiment (our own pid is alive;
         # liveness requires the recorded kernel start ticks to match).
-        from autotrade.pipelines.interactive import proc_start_ticks
+        from autotrade.pipelines.hitl_state import proc_start_ticks
 
         write_json_atomic(
             self.experiments_root / "exp_hitl" / "hitl" / "status.json",
@@ -557,14 +558,14 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
 
     def test_dataset_coverage_reads_partition_bounds(self) -> None:
-        from autotrade.webui.server import _dataset_coverage
+        from autotrade.webui.registry import dataset_coverage
 
         raw = self.repo_root / "data" / "raw"
         (raw / "daily").mkdir(parents=True)
         for day in ("20200102", "20240105"):
             (raw / "daily" / f"trade_date={day}.parquet").write_bytes(b"")
-        self.assertEqual(_dataset_coverage(raw, "daily"), ("20200102", "20240105"))
-        self.assertIsNone(_dataset_coverage(raw, "stk_mins_1min_by_date"))
+        self.assertEqual(dataset_coverage(raw, "daily"), ("20200102", "20240105"))
+        self.assertIsNone(dataset_coverage(raw, "stk_mins_1min_by_date"))
 
     def test_summary_carries_per_period_heldout_returns(self) -> None:
         payload = self.client.get("/api/experiments").json()

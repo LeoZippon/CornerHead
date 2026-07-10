@@ -1,6 +1,6 @@
 """Creation-form parameter schema for the HITL console.
 
-Field keys mirror ``autotrade.pipelines.interactive.PARAM_DEFAULTS`` (which in
+Field keys mirror ``autotrade.pipelines.hitl_state.PARAM_DEFAULTS`` (which in
 turn mirror the run_experiment.py CLI dests); defaults are read from there so
 this schema can never drift from the worker. Descriptions follow
 docs/parameters_reference.md.
@@ -24,7 +24,7 @@ import bisect
 import pandas as pd
 
 from autotrade.pipelines.folds import MIN_REGION_TRADE_DAYS, period_bounds
-from autotrade.pipelines.interactive import PARAM_DEFAULTS
+from autotrade.pipelines.hitl_state import PARAM_DEFAULTS
 
 SERVER_MANAGED_KEYS = ("experiments_root", "work_root")
 HIDDEN_KEYS = (

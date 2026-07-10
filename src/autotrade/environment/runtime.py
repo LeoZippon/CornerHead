@@ -256,8 +256,8 @@ class RunManifest:
 
     def save(self) -> None:
         if self.host_path is not None:
-            _write_json_atomic(self.host_path, sanitize_for_log(self.data))
-        _write_json_atomic(self.path, _agent_visible_manifest(self.data))
+            write_json_atomic(self.host_path, sanitize_for_log(self.data))
+        write_json_atomic(self.path, _agent_visible_manifest(self.data))
 
     def update(self, **fields: object) -> None:
         with self._lock:
@@ -290,7 +290,7 @@ def _default_host_manifest_path(public_path: Path) -> Path:
     return public_path.with_name("host_run_manifest.json")
 
 
-def _write_json_atomic(path: Path, payload: object) -> None:
+def write_json_atomic(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Unique temp name: concurrent writers must never share a temp file, or
     # interleaved chunks get os.replace'd into place.

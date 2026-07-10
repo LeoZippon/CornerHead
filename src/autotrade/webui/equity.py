@@ -120,10 +120,10 @@ def _benchmark_entry(bench: dict[str, float], dates: list[str]) -> dict[str, obj
 def fold_equity_payload(
     experiments_root: Path, experiment_id: str, epoch_id: str, fold_id: str
 ) -> dict[str, object]:
-    from .registry import _read_ledger_records, latest_fold_records, resolve_experiment_dir
+    from .registry import read_ledger_records, latest_fold_records, resolve_experiment_dir
 
     experiment_dir = resolve_experiment_dir(experiments_root, experiment_id)
-    record = latest_fold_records(_read_ledger_records(experiment_dir)).get((epoch_id, fold_id))
+    record = latest_fold_records(read_ledger_records(experiment_dir)).get((epoch_id, fold_id))
     if record is None:
         raise KeyError(f"fold {epoch_id}/{fold_id} has no ledger record")
     run_id = str(record.get("run_id") or "")
@@ -140,14 +140,14 @@ def fold_equity_payload(
 
 def experiment_equity_payload(experiments_root: Path, experiment_id: str) -> dict[str, object]:
     from .registry import (
-        _read_ledger_records,
+        read_ledger_records,
         latest_fold_records,
         latest_heldout_records,
         resolve_experiment_dir,
     )
 
     experiment_dir = resolve_experiment_dir(experiments_root, experiment_id)
-    records = _read_ledger_records(experiment_dir)
+    records = read_ledger_records(experiment_dir)
     folds = list(latest_fold_records(records).values())
     folds.sort(key=lambda r: (str(r.get("epoch_id")), str(r.get("test_period") or r.get("fold_id"))))
     heldout = latest_heldout_records(records)

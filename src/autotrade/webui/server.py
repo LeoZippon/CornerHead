@@ -9,7 +9,6 @@ non-local binds should only be used behind a trusted reverse proxy.
 from __future__ import annotations
 
 import tempfile
-import threading
 import zipfile
 from pathlib import Path
 
@@ -18,95 +17,17 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Str
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
-from autotrade.pipelines.fold_analysis import analysis_paths, analyze_fold
-from autotrade.pipelines.interactive import ANALYSIS_DIR_NAME, HITL_DIR_NAME, PARAMS_NAME, STATUS_NAME, read_json, read_status
+from autotrade.pipelines.fold_analysis import analysis_paths
+from autotrade.pipelines.hitl_state import ANALYSIS_DIR_NAME, HITL_DIR_NAME, STATUS_NAME, read_json, read_status
 
 from . import equity, registry
+from .analysis import AnalysisService
 from .manager import ExperimentManager, ManagerError, MAX_RUNNING_EXPERIMENTS
 from .params_schema import parameter_schema
+from .prompt_preview import build_prompt_preview
 from .traces import read_trace_page, resolve_trace_path, stream_trace, trace_stats
 
-# Datasets whose partition coverage bounds the selectable backtest periods: the
-# replay needs minute bars, so their intersection with the daily lake is the
-# honest "data exists" window (issue: pre-coverage periods fail at runtime).
-_COVERAGE_DATASETS = ("daily", "stk_mins_1min_by_date")
-
-
-def _dataset_coverage(raw_dir: Path, dataset: str) -> tuple[str, str] | None:
-    root = raw_dir / dataset
-    if not root.is_dir():
-        return None
-    dates = [
-        entry.name[len("trade_date="):-len(".parquet")]
-        for entry in root.glob("trade_date=*.parquet")
-    ]
-    dates = [d for d in dates if len(d) == 8 and d.isdigit()]
-    if not dates:
-        return None
-    return min(dates), max(dates)
-
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-
-
-class AnalysisService:
-    """Background (re)generation of fold analyses, one at a time per fold."""
-
-    def __init__(self, repo_root: Path) -> None:
-        self.repo_root = Path(repo_root)
-        self._pending: set[tuple[str, str, str]] = set()
-        self._lock = threading.Lock()
-
-    def pending(self, experiment_id: str, epoch_id: str, fold_id: str) -> bool:
-        with self._lock:
-            return (experiment_id, epoch_id, fold_id) in self._pending
-
-    def regenerate(self, experiments_root: Path, experiment_id: str, epoch_id: str, fold_id: str) -> None:
-        key = (experiment_id, epoch_id, fold_id)
-        with self._lock:
-            if key in self._pending:
-                raise ManagerError("analysis for this fold is already being generated")
-            self._pending.add(key)
-        try:
-            experiment_dir = registry.resolve_experiment_dir(experiments_root, experiment_id)
-            detail = registry.fold_detail(experiments_root, experiment_id, epoch_id, fold_id)
-            strategy_dir = detail.get("strategy_dir")
-            if not strategy_dir or not Path(str(strategy_dir)).is_dir():
-                raise ManagerError("fold has no frozen strategy artifact on disk")
-            params = read_json(experiment_dir / HITL_DIR_NAME / PARAMS_NAME)
-            model = str(params.get("analysis_model") or "deepseek-v4-pro")
-            max_tokens = int(params.get("analysis_max_tokens") or 6000)
-            record = dict(detail["record"])
-            model_dir = record.get("frozen_model_artifact_path")
-        except Exception:
-            with self._lock:
-                self._pending.discard(key)
-            raise
-
-        def _run() -> None:
-            try:
-                from autotrade.environment.llm import DeepSeekProxy
-
-                proxy = DeepSeekProxy.from_env(
-                    model=model,
-                    env_file=str(self.repo_root / ".env"),
-                    thinking_enabled=True,
-                    reasoning_effort="high",
-                )
-                analyze_fold(
-                    proxy,
-                    ledger_record=record,
-                    strategy_dir=Path(str(strategy_dir)),
-                    model_dir=Path(str(model_dir)) if model_dir else None,
-                    out_dir=experiment_dir / HITL_DIR_NAME / ANALYSIS_DIR_NAME,
-                    max_tokens=max_tokens,
-                )
-            except Exception:  # noqa: BLE001 - failure lands in the sidecar json
-                pass
-            finally:
-                with self._lock:
-                    self._pending.discard(key)
-
-        threading.Thread(target=_run, name=f"analysis-{experiment_id}-{fold_id}", daemon=True).start()
 
 
 def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI:
@@ -117,24 +38,10 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     trading_days_cache: dict[str, list[str] | None] = {}
 
     def _trading_days() -> list[str]:
-        # Loaded once per process; without a calendar (dev/test roots) the
-        # period pickers degrade to text inputs instead of failing the schema.
-        # The calendar is clamped to the datasets' actual partition coverage so
-        # the pickers cannot offer periods without downloaded/processed data.
+        # Loaded once per process (registry.clamped_trading_days does the
+        # coverage clamping; None = no calendar, pickers degrade to text).
         if "days" not in trading_days_cache:
-            try:
-                from autotrade.pipelines.folds import load_sse_trading_days
-
-                raw_dir = repo_root / "data" / "raw"
-                days = load_sse_trading_days(raw_dir)
-                coverages = [c for c in (_dataset_coverage(raw_dir, name) for name in _COVERAGE_DATASETS) if c]
-                if coverages:
-                    low = max(c[0] for c in coverages)
-                    high = min(c[1] for c in coverages)
-                    days = [day for day in days if low <= day <= high]
-                trading_days_cache["days"] = days
-            except Exception:  # noqa: BLE001 - schema must stay served
-                trading_days_cache["days"] = None
+            trading_days_cache["days"] = registry.clamped_trading_days(repo_root)
         return trading_days_cache["days"] or []
 
     def _experiment_dir(experiment_id: str) -> Path:
@@ -165,7 +72,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             for entry in root.iterdir()
             if entry.is_dir()
             and not entry.name.startswith(".")
-            and registry.latest_fold_records(registry._read_ledger_records(entry))
+            and registry.latest_fold_records(registry.read_ledger_records(entry))
         )
 
     @app.get("/api/parameter-schema")
@@ -363,79 +270,18 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     # ---- prompt preview -------------------------------------------------------------
     @app.post("/api/experiments/{experiment_id}/prompt-preview")
     def post_prompt_preview(experiment_id: str, payload: dict = Body(...)) -> dict[str, object]:
-        """Assemble the session's system prompt for pre-approval review.
-
-        The runtime-generated 当前实验事实 JSON block (built from the live run
-        manifest/runtime_env/data_summary) cannot exist before the sandbox is
-        prepared, so the preview renders the documented fallback (fold info +
-        acceptance rules verbatim); every other section — role, environment,
-        taste, researcher directive, actions, contract, prohibitions — is the
-        exact text the Agent will receive.
-        """
+        """Assemble the session's system prompt for pre-approval review."""
         experiment_dir = _experiment_dir(experiment_id)
-        session_key = str(payload.get("session_key") or "")
-        directive = str(payload.get("directive") or "")
-        hitl_dir = experiment_dir / HITL_DIR_NAME
-        schedule = read_json(hitl_dir / "schedule.json")
-        sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
-        entry = next((s for s in sessions if s.get("key") == session_key), None)
-        if entry is None:
-            raise HTTPException(status_code=404, detail=f"unknown session: {session_key}")
-        kind = str(entry.get("kind"))
-        if kind == "heldout":
-            raise HTTPException(status_code=400, detail="held-out runs have no agent session or system prompt")
-        params = read_json(hitl_dir / PARAMS_NAME)
-        from autotrade.pipelines.interactive import PARAM_DEFAULTS
-        from autotrade.agent.prompts import build_meta_learning_prompt, build_system_prompt
-
-        def param(key: str):
-            return params.get(key, PARAM_DEFAULTS.get(key))
-
-        if kind == "meta_learning":
-            prompt = build_meta_learning_prompt(
-                experiment_directive=directive.strip() or str(param("meta_learning_directive") or ""),
+        try:
+            return build_prompt_preview(
+                experiment_dir,
+                str(payload.get("session_key") or ""),
+                str(payload.get("directive") or ""),
             )
-        else:
-            epoch_id = str(entry.get("epoch_id") or "epoch_001")
-            try:
-                epoch_index = int(epoch_id.rsplit("_", 1)[-1])
-            except ValueError:
-                epoch_index = 1
-            taste = ""
-            for record in registry._read_ledger_records(experiment_dir):
-                if record.get("record_type") == "meta_learning" and str(record.get("epoch_id")) == epoch_id:
-                    taste_path = record.get("taste_path")
-                    if taste_path and Path(str(taste_path)).exists():
-                        taste = Path(str(taste_path)).read_text(encoding="utf-8").strip()
-            # The runtime facts block redacts the test schedule from the agent;
-            # keep the preview's fallback consistent (no test_period).
-            fold_info = {
-                key: entry.get(key)
-                for key in ("fold_id", "input_window", "validation_period", "valid_decision_time")
-                if entry.get(key) is not None
-            }
-            prompt = build_system_prompt(
-                fold_info=fold_info,
-                acceptance_rules={
-                    "min_return": param("min_return"),
-                    "min_sharpe": param("min_sharpe"),
-                    "max_drawdown": param("max_drawdown"),
-                    "require_complete_validation": True,
-                },
-                phase="convergence" if epoch_index >= int(param("convergence_start_epoch") or 3) else "exploration",
-                step_tree_enabled=not bool(param("disable_step_tree")),
-                taste_prompt=taste,
-                fold_directive=directive,
-            )
-        return {
-            "kind": kind,
-            "prompt": prompt,
-            "note": (
-                "预览包含 Agent 将收到的全部静态段（角色/环境/Taste/研究者指令/动作/提交合同/禁止行为）。"
-                "运行时「当前实验事实」JSON 由沙箱准备完成后的 run manifest 等生成，此处以 Fold 信息与验收规则原文代替；"
-                "该块只是事实索引，不含额外指令。"
-            ),
-        }
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0] if exc.args else exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # ---- traces --------------------------------------------------------------------
     @app.get("/api/experiments/{experiment_id}/trace/stats")
