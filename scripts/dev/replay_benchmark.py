@@ -34,7 +34,7 @@ add_repo_src(__file__)
 
 import pandas as pd
 
-from autotrade.environment.backtest_engine import compute_return_stats
+from autotrade.environment.replay_stats import compute_return_stats
 from autotrade.environment.broker import (
     BrokerProfile,
     load_corporate_actions_by_date,

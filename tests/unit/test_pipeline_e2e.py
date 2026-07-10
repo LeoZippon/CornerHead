@@ -178,7 +178,7 @@ class LedgerTest(unittest.TestCase):
 
 class ImportSmokeNamesTest(unittest.TestCase):
     def test_import_names_only_high_confidence(self):
-        from autotrade.pipelines.experiment import _python_import_names
+        from autotrade.environment.sandbox_images import _python_import_names
 
         # Aliases and simple names emit a smoke import (version/extras stripped).
         self.assertEqual(_python_import_names(["numpy==2.1.3", "torch"]), ["numpy", "torch"])
@@ -1196,16 +1196,26 @@ class PipelineEndToEndTest(unittest.TestCase):
                 stdout="build ok",
                 stderr="",
             )
-            with patch("autotrade.pipelines.experiment.subprocess.run", return_value=completed) as mocked_run:
-                result = pipeline._maybe_rebuild_sandbox_image(
+            from autotrade.environment.sandbox_images import maybe_rebuild_sandbox_image
+
+            with patch("autotrade.environment.sandbox_images.subprocess.run", return_value=completed) as mocked_run, patch(
+                "autotrade.environment.sandbox_images.resolve_image_identity", return_value=("sha256:fake", [])
+            ):
+                result, active_spec = maybe_rebuild_sandbox_image(
                     request_path,
+                    base_spec=pipeline._active_sandbox_spec,
+                    experiment_id=config.experiment_id,
                     epoch_id="epoch_001",
-                    run_id="run_meta",
+                    experiment_dir=config.experiment_dir,
                     manifest=manifest,
+                    use_docker=config.use_docker,
+                    rebuild_enabled=config.meta_sandbox_rebuild_enabled,
+                    timeout_seconds=config.meta_sandbox_rebuild_timeout_seconds,
+                    image_keep=config.meta_sandbox_image_keep,
                 )
 
             self.assertEqual(result["status"], "ok")
-            self.assertTrue(str(pipeline._active_sandbox_spec.image).startswith("autotrade-sandbox:exp_e2e-epoch_001-"))
+            self.assertTrue(str(active_spec.image).startswith("autotrade-sandbox:exp_e2e-epoch_001-"))
             dockerfile = Path(str(result["dockerfile_ref"]))
             text = dockerfile.read_text(encoding="utf-8")
             self.assertIn("FROM autotrade-sandbox:latest", text)
@@ -1263,8 +1273,10 @@ class PipelineEndToEndTest(unittest.TestCase):
                     return subprocess.CompletedProcess(cmd, 0, stdout=listing, stderr="")
                 return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-            with patch("autotrade.pipelines.experiment.subprocess.run", side_effect=fake_run):
-                pruned = pipeline._gc_derived_sandbox_images(keep_image=keep_image)
+            from autotrade.environment.sandbox_images import _gc_derived_sandbox_images
+
+            with patch("autotrade.environment.sandbox_images.subprocess.run", side_effect=fake_run):
+                pruned = _gc_derived_sandbox_images(config.experiment_id, keep=1, keep_image=keep_image)
             # keep the newest 1, drop the older same-experiment tail; never the active
             # image, never another experiment's images.
             self.assertEqual(
@@ -1296,7 +1308,7 @@ class PipelineEndToEndTest(unittest.TestCase):
                 raise RuntimeError("meta-learning sandbox image rebuild failed: broken")
 
             pipeline.meta_learner = meta_learner
-            with patch.object(pipeline, "_maybe_rebuild_sandbox_image", side_effect=fail_rebuild):
+            with patch("autotrade.pipelines.experiment.maybe_rebuild_sandbox_image", side_effect=fail_rebuild):
                 with self.assertRaisesRegex(RuntimeError, "sandbox image rebuild failed"):
                     pipeline.run_meta_learning(epoch_id="epoch_001", parent=None)
 
@@ -1325,12 +1337,20 @@ class PipelineEndToEndTest(unittest.TestCase):
                 {"kind": "meta_learning", "experiment_id": "exp_e2e"},
             )
 
+            from autotrade.environment.sandbox_images import maybe_rebuild_sandbox_image
+
             with self.assertRaisesRegex(RuntimeError, "sandbox environment request rejected"):
-                pipeline._maybe_rebuild_sandbox_image(
+                maybe_rebuild_sandbox_image(
                     request_path,
+                    base_spec=pipeline._active_sandbox_spec,
+                    experiment_id=config.experiment_id,
                     epoch_id="epoch_001",
-                    run_id="run_meta",
+                    experiment_dir=config.experiment_dir,
                     manifest=manifest,
+                    use_docker=config.use_docker,
+                    rebuild_enabled=config.meta_sandbox_rebuild_enabled,
+                    timeout_seconds=config.meta_sandbox_rebuild_timeout_seconds,
+                    image_keep=config.meta_sandbox_image_keep,
                 )
 
             stored = json.loads((tmp / "artifacts" / "run_manifest.json").read_text(encoding="utf-8"))

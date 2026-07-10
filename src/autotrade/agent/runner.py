@@ -48,7 +48,8 @@ from .compact import (
     is_llm_compaction_message,
     safe_error_summary,
 )
-from .prompts import WRAP_UP_PROMPT, build_experiment_facts, build_meta_learning_prompt, build_system_prompt
+from .experiment_facts import build_experiment_facts
+from .prompts import WRAP_UP_PROMPT, build_meta_learning_prompt, build_system_prompt
 
 SESSION_MODES = ("fold", "meta_learning")
 TERMINAL_ACTIONS = {"done", "finish_fold"}

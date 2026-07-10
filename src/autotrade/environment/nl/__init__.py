@@ -1,5 +1,6 @@
-from .engine import NLSubAgentConfig, NLSubAgentEngine, NLSubAgentResult, TextRetrieveTool, TextRetriever
+from .engine import NLSubAgentConfig, NLSubAgentEngine, NLSubAgentResult, TextRetrieveTool
 from .extraction import ExtractionError, extract_json_object
+from .retrieval import TextRetriever
 
 __all__ = [
     "ExtractionError",

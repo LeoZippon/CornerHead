@@ -15,6 +15,7 @@ positions at any minute, not only at the fold decision time.
 from __future__ import annotations
 
 import json
+import os
 import select
 import sys
 import threading
@@ -28,25 +29,99 @@ from pathlib import Path
 
 import pandas as pd
 
-from autotrade.environment.backtest_engine import (
-    BacktestError,
-    MarketData,
-    MinuteMarketData,
-    ReplayResult,
-    _empty_minute_rows,
-    _executor_pathsep_join,
-    _jsonable,
-    _minute_rows_with_daily_fallback,
-    _minute_sort,
-    _serve_nl_requests,
-    hide_snapshot_slots_from_agent,
-)
-from autotrade.environment.broker import SimBroker, optype, prtype
+from autotrade.environment.broker import MarketData, SimBroker, optype, prtype
 from autotrade.environment.broker_core import afterhours_available
 from autotrade.environment.data.contracts import sim_datetime
+from autotrade.environment.replay_market import (
+    MinuteMarketData,
+    empty_minute_rows,
+    minute_rows_with_daily_fallback,
+    minute_sort,
+)
+from autotrade.environment.replay_stats import ReplayResult
 from autotrade.environment.runtime import sanitize_for_log
+from autotrade.environment.sandbox import hide_snapshot_slots_from_agent
 from autotrade.environment.state_staging import StateStager
 from autotrade.environment.timeview import Timeview
+
+
+class BacktestError(RuntimeError):
+    """A formal backtest step failed; the error is explicit, never silent."""
+
+
+def _serve_nl_requests(
+    requests_path: Path,
+    responses_path: Path,
+    served: set[str],
+    nl_service,
+    offset: int = 0,
+) -> int:
+    """Serve NL requests appended past ``offset``; return the new byte offset.
+
+    Only the bytes after ``offset`` are read, and only whole lines are consumed:
+    a partial trailing line (a request still being flushed) is left in place for
+    the next call, so the incremental read never loses or splits a request. The
+    ``served`` set stays a dedup backstop.
+    """
+    if not requests_path.exists():
+        return offset
+    with requests_path.open("rb") as handle:
+        handle.seek(offset)
+        chunk = handle.read()
+    head, sep, _partial = chunk.rpartition(b"\n")
+    if not sep:
+        return offset  # no complete line appended yet
+    new_offset = offset + len(head) + len(sep)
+    for raw in head.splitlines():
+        line = raw.decode("utf-8", "replace").strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        request_id = str(request.get("request_id", ""))
+        if not request_id or request_id in served:
+            continue
+        served.add(request_id)
+        if nl_service is None:
+            response = {"request_id": request_id, "status": "error", "error": "nl proxy is not configured"}
+        else:
+            try:
+                result = nl_service.run(
+                    str(request.get("ts_code", "")),
+                    prompt=str(request.get("prompt", "") or ""),
+                    kwargs=dict(request.get("kwargs") or {}),
+                    request=dict(request),
+                )
+                response = {"request_id": request_id, "status": "ok", "result": result}
+            except Exception as exc:  # noqa: BLE001 - strategy sees a fixable tool error
+                error = sanitize_for_log(f"{type(exc).__name__}: {exc}")
+                response = {"request_id": request_id, "status": "error", "error": error}
+        with responses_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(response, ensure_ascii=False, default=str) + "\n")
+    return new_offset
+
+
+def _jsonable(value):
+    if isinstance(value, pd.Series):
+        return {str(k): _jsonable(v) for k, v in value.to_dict().items()}
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(v) for v in value]
+    if pd.isna(value):
+        return None
+    if hasattr(value, "item"):
+        try:
+            return _jsonable(value.item())
+        except Exception:  # noqa: BLE001 - keep JSON conversion best-effort
+            pass
+    return value
+
+
+def _executor_pathsep_join(executor, paths: list[Path]) -> str:
+    return os.pathsep.join(executor.map_path(path) for path in paths if path.exists())
 
 _ACTION_ALIASES = {
     "long": "buy",
@@ -469,8 +544,8 @@ def run_main_ctx_replay(
             on_progress(str(trade_date), day_idx, total_days, now - replay_start, len(broker.orders))
             last_progress_idx, last_progress_time = day_idx, now
         if trade_date != exit_date:
-            minute_seed = minute_market.rows_for_date(trade_date) if minute_market is not None else _empty_minute_rows()
-            minute_rows = _minute_rows_with_daily_fallback(replay_daily, trade_date, minute_seed)
+            minute_seed = minute_market.rows_for_date(trade_date) if minute_market is not None else empty_minute_rows()
+            minute_rows = minute_rows_with_daily_fallback(replay_daily, trade_date, minute_seed)
             if not minute_rows.empty:
                 plan = _day_tick_plan(
                     minute_rows, auction_enabled, auction_preopen_time, auction_decision_time,
@@ -781,7 +856,7 @@ def _day_tick_plan(
     close prints and its orders settle immediately at the official close for
     board-eligible codes (no activation bar; see ``_execute_afterhours_action``).
     """
-    real_keys = sorted({str(key) for key in minute_rows["minute_key"]}, key=_minute_sort)
+    real_keys = sorted({str(key) for key in minute_rows["minute_key"]}, key=minute_sort)
     if not real_keys:
         return []
     groups = {str(key): group for key, group in minute_rows.groupby(minute_rows["minute_key"].astype(str), sort=False)}
@@ -790,18 +865,18 @@ def _day_tick_plan(
     # Off-session grid frame: the session starts at the earliest pre-open tick and
     # ends at the last real bar; ticks outside [open, close] are research-only.
     session_open = preopen_time if (auction_enabled and preopen_time) else (decision_time if auction_enabled else real_keys[0])
-    open_min, close_min = _minute_sort(session_open), _minute_sort(real_keys[-1])
+    open_min, close_min = minute_sort(session_open), minute_sort(real_keys[-1])
     # Pre-open off-session ticks are research/state only. Actual auction order
     # entry starts at the explicit pre-open auction tick below.
     for key in _offsession_keys(0, open_min, offsession_tick_minutes):
-        plan.append(_Tick(key, _empty_minute_rows(), None, False, False, True))
+        plan.append(_Tick(key, empty_minute_rows(), None, False, False, True))
     if auction_enabled:
         # The 09:25 tick may expose only the matched OPENING print, so the per-code
         # "first bar" is restricted to opening bars (<= 09:31). A code whose first
         # bar arrives later (intraday resumption, late first trade) has no matched
         # open: it stays absent from the 09:25 view until its real bar — exposing
         # its later first price here would be look-ahead.
-        opening = minute_rows[minute_rows["minute_sort"] <= _minute_sort("09:31")]
+        opening = minute_rows[minute_rows["minute_sort"] <= minute_sort("09:31")]
         first = opening.sort_values("minute_sort", kind="stable").drop_duplicates("ts_code", keep="first").copy()
         open_group = first.assign(high=first["open"], low=first["open"], close=first["open"])
         for column in ("vol", "amount"):
@@ -810,7 +885,7 @@ def _day_tick_plan(
         if preopen_time:
             # 09:15 blind pre-open order clears in the 09:30 opening call auction (single
             # price, no slippage): is_auction=True.
-            plan.append(_Tick(preopen_time, _empty_minute_rows(), 0, False, True))
+            plan.append(_Tick(preopen_time, empty_minute_rows(), 0, False, True))
         # 09:25 sees the matched open and fills at the first CONTINUOUS bar (09:31), so it
         # is a continuous taker fill (slippage applies): is_auction=False. Only the open/
         # close call auctions are slippage-free.
@@ -828,15 +903,15 @@ def _day_tick_plan(
             activate_index = index + lag
             plan.append(_Tick(key, groups[key], activate_index if activate_index < n else None, True, False))
     session_end = close_min
-    if afterhours_time and _minute_sort(str(afterhours_time)) > close_min:
+    if afterhours_time and minute_sort(str(afterhours_time)) > close_min:
         # After-hours fixed-price tick: the close prints are visible (ctx.bars =
         # the final bar group) and orders settle at the close, immediately.
         plan.append(_Tick(str(afterhours_time), groups[real_keys[-1]], None, False, False, is_afterhours=True))
-        session_end = _minute_sort(str(afterhours_time))
+        session_end = minute_sort(str(afterhours_time))
     # Post-close off-session ticks: research/state only, orders never fill.
     after_start = ((session_end // offsession_tick_minutes) + 1) * offsession_tick_minutes if offsession_tick_minutes > 0 else 0
     for key in _offsession_keys(after_start, 24 * 60, offsession_tick_minutes):
-        plan.append(_Tick(key, _empty_minute_rows(), None, False, False, True))
+        plan.append(_Tick(key, empty_minute_rows(), None, False, False, True))
     return plan
 
 
@@ -1432,7 +1507,13 @@ def _pending_view(
             account = str(action.get("account") or "")
             op_type = action.get("op_type")
             action_name = _action_name(action)
-            if account not in {"stock", "credit"} or op_type is None:
+            if action_name == "close":
+                # Single authority: the same _resolve_close that submission uses
+                # decides the pending view's account/op (the driver sends no hint).
+                resolved = _resolve_close(broker, action, str(action.get("ts_code", "")))
+                if resolved is not None:
+                    account, op_type = broker.account_op_for_action(resolved[0])
+            elif account not in {"stock", "credit"} or op_type is None:
                 try:
                     account, op_type = broker.account_op_for_action(action_name)
                 except ValueError:

@@ -343,11 +343,11 @@ class NLBudgetTest(unittest.TestCase):
         return snap
 
     def test_nl_call_budget_returns_budget_exhausted_past_cap(self):
-        from autotrade.environment.tools.backtest import _StrategyNLService
+        from autotrade.environment.nl.service import StrategyNLService
 
         with tempfile.TemporaryDirectory() as tmp:
             snap = self._make_snapshot(Path(tmp))
-            service = _StrategyNLService(
+            service = StrategyNLService(
                 proxy=None,
                 snapshot_dir=snap,
                 log_dir=Path(tmp) / "log",

@@ -8,10 +8,8 @@ strategy content; it only accepts, freezes, falls back, and records.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
-import shlex
 import subprocess
 import traceback
 from dataclasses import replace
@@ -32,7 +30,12 @@ from autotrade.environment.identity import agent_visible_ref as _agent_visible_r
 from autotrade.environment.llm.proxy import LLMProxy
 from autotrade.environment.managed_proxy import ManagedProxySession
 from autotrade.environment.runtime import AgentTraceWriter, RunManifest, new_id, sanitize_for_log, utc_now_iso
-from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree, resolve_image_identity
+from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree
+from autotrade.environment.sandbox_images import (
+    SANDBOX_ENVIRONMENT_REQUEST_NAME,
+    maybe_rebuild_sandbox_image,
+    write_sandbox_environment_example,
+)
 from autotrade.environment.style_analysis import write_style_rollup
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import PHASE_FROZEN, BacktestTool, ModificationCheckTool, ToolContext
@@ -48,23 +51,6 @@ from .config import (
 )
 from .folds import FoldSpec, build_fold_schedule, heldout_periods
 from .ledger import ExperimentLedger
-
-
-SANDBOX_ENVIRONMENT_REQUEST_NAME = "sandbox_environment.json"
-SANDBOX_ENVIRONMENT_EXAMPLE_NAME = "sandbox_environment.example.json"
-_SANDBOX_ENVIRONMENT_EXAMPLE = {
-    "python_packages": [],
-    "apt_packages": [],
-    "npm_packages": [],
-    "reason": (
-        "Copy this example to sandbox_environment.json only when later ordinary Folds "
-        "need stable new dependencies."
-    ),
-    "notes": (
-        "Do not include shell commands, URLs, tokens, cache paths, local files, "
-        "or temporary exploration artifacts."
-    ),
-}
 
 
 class ExperimentPipeline:
@@ -179,7 +165,7 @@ class ExperimentPipeline:
         sandbox = LocalSandbox(Path(self.config.work_root) / run_id)
         sandbox.prepare_layout()
         if kind == "meta_learning":
-            _write_sandbox_environment_example(sandbox.paths.workspace)
+            write_sandbox_environment_example(sandbox.paths.workspace)
         spec = (
             self.config.meta_learning_sandbox_spec
             if kind == "meta_learning" and self.config.meta_learning_sandbox_spec is not None
@@ -471,60 +457,51 @@ class ExperimentPipeline:
         style_rollup_error = self._write_style_rollups(paths.results, "valid", "test")
         if self.config.step_tree_enabled and paths.steps.exists():
             link_copytree(paths.steps, self.config.experiment_dir / "steps")
-        # Collect artifacts, then ALWAYS append the fold ledger entry — even if
-        # collection fails — so a frozen strategy is never left without a ledger
-        # record (which previously left the experiment unresumable). With the
-        # order-safe collector, a raised collect error means the frozen
-        # output/models could not be saved, so re-raise after the record is durable.
-        collect_error: Exception | None = None
-        collected: Path | None = None
-        try:
-            collected = sandbox.collect_artifacts(self.config.experiment_dir / "artifacts" / run_id)
-        except Exception as exc:  # noqa: BLE001 - recorded below, then re-raised
-            collect_error = exc
-        finalize_error = collect_error or test_eval_error
-        run_manifest_ref = (
-            str(collected / "run_manifest.json") if collected is not None else str(paths.run_manifest)
-        )
         steps = self._step_summaries(manifest, selected)
-        self.ledger.append(
-            {
-                "record_type": "fold",
-                "experiment_id": self.config.experiment_id,
-                "epoch_id": epoch_id,
-                "fold_id": fold.fold_id,
-                "run_id": run_id,
-                **fold.to_record(),
-                "parent_strategy_artifact_id": parent.artifact_id if parent else None,
-                "fold_directive": fold_directive.strip() or None,
-                "system_prompt_overridden": bool(system_prompt_override.strip()),
-                "rerun_id": rerun_id,
-                "finish_reason": session_summary.get("finish_status"),
-                "fold_status": fold_status,
-                "accept_reasons": accept_reasons,
-                "selected_step_id": self._step_id_for(manifest, selected) if selected else None,
-                "steps": steps,
-                "frozen_strategy_artifact_id": frozen.artifact_id,
-                "frozen_strategy_artifact_hash": frozen.artifact_hash,
-                "frozen_model_artifact_hash": frozen.model_artifact_hash,
-                "frozen_combined_artifact_hash": combined_artifact_hash(
-                    frozen.artifact_hash, frozen.model_artifact_hash
-                ),
-                "frozen_strategy_artifact_path": str(frozen.path),
-                "frozen_model_artifact_path": str(frozen.model_path) if frozen.model_path else None,
-                "validation_result": _metrics(selected),
-                "test_result": _metrics(test_summary),
-                "state_changed_during_test": False,
-                "run_manifest_ref": run_manifest_ref,
-                "snapshot_ids": {key: ref["snapshot_id"] for key, ref in manifest.data["snapshots"].items()},
-                "style_rollup_error": style_rollup_error,
-                "finalize_error": (
-                    f"{type(finalize_error).__name__}: {finalize_error}" if finalize_error is not None else None
-                ),
+
+        def fold_record(collected: Path | None, collect_error: Exception | None) -> dict[str, object]:
+            # A frozen strategy must never be left without a durable record;
+            # a recorded (not raised) test_eval_error keeps the fold usable.
+            finalize_error = collect_error or test_eval_error
+            run_manifest_ref = (
+                str(collected / "run_manifest.json") if collected is not None else str(paths.run_manifest)
+            )
+            return {
+                    "record_type": "fold",
+                    "experiment_id": self.config.experiment_id,
+                    "epoch_id": epoch_id,
+                    "fold_id": fold.fold_id,
+                    "run_id": run_id,
+                    **fold.to_record(),
+                    "parent_strategy_artifact_id": parent.artifact_id if parent else None,
+                    "fold_directive": fold_directive.strip() or None,
+                    "system_prompt_overridden": bool(system_prompt_override.strip()),
+                    "rerun_id": rerun_id,
+                    "finish_reason": session_summary.get("finish_status"),
+                    "fold_status": fold_status,
+                    "accept_reasons": accept_reasons,
+                    "selected_step_id": self._step_id_for(manifest, selected) if selected else None,
+                    "steps": steps,
+                    "frozen_strategy_artifact_id": frozen.artifact_id,
+                    "frozen_strategy_artifact_hash": frozen.artifact_hash,
+                    "frozen_model_artifact_hash": frozen.model_artifact_hash,
+                    "frozen_combined_artifact_hash": combined_artifact_hash(
+                        frozen.artifact_hash, frozen.model_artifact_hash
+                    ),
+                    "frozen_strategy_artifact_path": str(frozen.path),
+                    "frozen_model_artifact_path": str(frozen.model_path) if frozen.model_path else None,
+                    "validation_result": _metrics(selected),
+                    "test_result": _metrics(test_summary),
+                    "state_changed_during_test": False,
+                    "run_manifest_ref": run_manifest_ref,
+                    "snapshot_ids": {key: ref["snapshot_id"] for key, ref in manifest.data["snapshots"].items()},
+                    "style_rollup_error": style_rollup_error,
+                    "finalize_error": (
+                        f"{type(finalize_error).__name__}: {finalize_error}" if finalize_error is not None else None
+                    ),
             }
-        )
-        if collect_error is not None:
-            raise collect_error
+
+        self._finalize_run(sandbox, run_id, record_builder=fold_record)
         return FoldOutcome(
             fold_id=fold.fold_id,
             run_id=run_id,
@@ -755,212 +732,65 @@ class ExperimentPipeline:
             status = "rejected_kept_parent"
         sandbox_image_error: RuntimeError | None = None
         try:
-            sandbox_image_update = self._maybe_rebuild_sandbox_image(
+            sandbox_image_update, self._active_sandbox_spec = maybe_rebuild_sandbox_image(
                 paths.workspace / SANDBOX_ENVIRONMENT_REQUEST_NAME,
+                base_spec=self._active_sandbox_spec,
+                experiment_id=self.config.experiment_id,
                 epoch_id=epoch_id,
-                run_id=run_id,
+                experiment_dir=self.config.experiment_dir,
                 manifest=manifest,
+                use_docker=self.config.use_docker,
+                rebuild_enabled=self.config.meta_sandbox_rebuild_enabled,
+                timeout_seconds=self.config.meta_sandbox_rebuild_timeout_seconds,
+                image_keep=self.config.meta_sandbox_image_keep,
             )
         except RuntimeError as exc:
             sandbox_image_update = manifest.get("sandbox_image_update")
             sandbox_image_error = exc
-        # Fail-fast, but with a durable audit record: collect artifacts, then ALWAYS
-        # append the ledger entry (even if the build or collection failed), then
-        # re-raise the hard failure. This keeps a complete record of every
-        # meta-learning outcome instead of losing it when finalization throws.
-        collect_error: Exception | None = None
-        collected: Path | None = None
-        try:
-            collected = sandbox.collect_artifacts(self.config.experiment_dir / "artifacts" / run_id)
-        except Exception as exc:  # noqa: BLE001 - recorded below, then re-raised
-            collect_error = exc
         meta_dir = self.config.experiment_dir / "meta_learning" / epoch_id
         meta_dir.mkdir(parents=True, exist_ok=True)
         if taste:
             (meta_dir / "taste.md").write_text(taste + "\n", encoding="utf-8")
-        agent_trace_ref = (collected / "agent_trace.jsonl") if collected is not None else paths.agent_trace
-        finalize_error = collect_error or sandbox_image_error
-        self.ledger.append(
-            {
-                "record_type": "meta_learning",
-                "experiment_id": self.config.experiment_id,
-                "epoch_id": epoch_id,
-                "fold_id": fold_id,
-                "run_id": run_id,
-                "status": status,
-                "modification_check": {
-                    k: check.get(k)
-                    for k in (
-                        "allowed_to_backtest",
-                        "reasons",
-                        "artifact_hash",
-                        "model_artifact_hash",
-                        "combined_artifact_hash",
-                    )
-                },
-                "frozen_strategy_artifact_id": frozen.artifact_id if frozen else None,
-                "frozen_strategy_artifact_hash": frozen.artifact_hash if frozen else None,
-                "frozen_model_artifact_hash": frozen.model_artifact_hash if frozen else None,
-                "taste_path": str(meta_dir / "taste.md") if taste else None,
-                "taste_chars": len(taste),
-                "agent_session_summary": session_summary if isinstance(session_summary, dict) else None,
-                "agent_trace_ref": str(agent_trace_ref) if agent_trace_ref.exists() else None,
-                "meta_learning_directive": manifest.get("meta_learning_directive"),
-                "web_search_engines": manifest.get("web_search_engines"),
-                "sandbox_image_update": sandbox_image_update,
-                "finalize_error": (
-                    f"{type(finalize_error).__name__}: {finalize_error}" if finalize_error is not None else None
-                ),
+
+        def meta_record(collected: Path | None, collect_error: Exception | None) -> dict[str, object]:
+            agent_trace_ref = (collected / "agent_trace.jsonl") if collected is not None else paths.agent_trace
+            finalize_error = collect_error or sandbox_image_error
+            return {
+                    "record_type": "meta_learning",
+                    "experiment_id": self.config.experiment_id,
+                    "epoch_id": epoch_id,
+                    "fold_id": fold_id,
+                    "run_id": run_id,
+                    "status": status,
+                    "modification_check": {
+                        k: check.get(k)
+                        for k in (
+                            "allowed_to_backtest",
+                            "reasons",
+                            "artifact_hash",
+                            "model_artifact_hash",
+                            "combined_artifact_hash",
+                        )
+                    },
+                    "frozen_strategy_artifact_id": frozen.artifact_id if frozen else None,
+                    "frozen_strategy_artifact_hash": frozen.artifact_hash if frozen else None,
+                    "frozen_model_artifact_hash": frozen.model_artifact_hash if frozen else None,
+                    "taste_path": str(meta_dir / "taste.md") if taste else None,
+                    "taste_chars": len(taste),
+                    "agent_session_summary": session_summary if isinstance(session_summary, dict) else None,
+                    "agent_trace_ref": str(agent_trace_ref) if agent_trace_ref.exists() else None,
+                    "meta_learning_directive": manifest.get("meta_learning_directive"),
+                    "web_search_engines": manifest.get("web_search_engines"),
+                    "sandbox_image_update": sandbox_image_update,
+                    "finalize_error": (
+                        f"{type(finalize_error).__name__}: {finalize_error}" if finalize_error is not None else None
+                    ),
             }
-        )
-        # Record is durable; now fail-fast on the real error (collection first).
-        if collect_error is not None:
-            raise collect_error
-        if sandbox_image_error is not None:
-            raise sandbox_image_error
+
+        # Collection failure outranks the image-rebuild failure; both re-raise
+        # only after the meta record is durable.
+        self._finalize_run(sandbox, run_id, record_builder=meta_record, raise_after=sandbox_image_error)
         return frozen, taste
-
-    def _maybe_rebuild_sandbox_image(
-        self,
-        request_path: Path,
-        *,
-        epoch_id: str,
-        run_id: str,
-        manifest: RunManifest,
-    ) -> dict[str, object] | None:
-        if not request_path.exists():
-            return None
-        try:
-            request = _load_sandbox_environment_request(request_path)
-        except ValueError as exc:
-            result = {"status": "rejected", "reason": str(exc), "request_ref": f"/mnt/agent/workspace/{request_path.name}"}
-            manifest.update(sandbox_image_update=result)
-            raise RuntimeError(f"meta-learning sandbox environment request rejected: {exc}") from exc
-        if not _environment_request_has_packages(request):
-            result = {"status": "skipped_empty", "request_ref": f"/mnt/agent/workspace/{request_path.name}"}
-            manifest.update(sandbox_image_update=result)
-            return result
-        if not self.config.use_docker:
-            result = {"status": "skipped_local_dev", "request_ref": f"/mnt/agent/workspace/{request_path.name}"}
-            manifest.update(sandbox_image_update=result)
-            return result
-        if not self.config.meta_sandbox_rebuild_enabled:
-            result = {"status": "disabled", "request_ref": f"/mnt/agent/workspace/{request_path.name}"}
-            manifest.update(sandbox_image_update=result)
-            return result
-
-        build_dir = self.config.experiment_dir / "sandbox_images" / epoch_id
-        build_dir.mkdir(parents=True, exist_ok=True)
-        request_hash = _sandbox_environment_hash(request)
-        image = f"{_docker_tag_component(self.config.experiment_id)}-{epoch_id}-{request_hash[:12]}"
-        image_tag = f"autotrade-sandbox:{image}"
-        dockerfile = build_dir / "Dockerfile"
-        try:
-            dockerfile_text = _render_sandbox_extension_dockerfile(self._active_sandbox_spec.image, request)
-        except ValueError as exc:
-            result = {
-                "status": "rejected",
-                "reason": str(exc),
-                "request_ref": f"/mnt/agent/workspace/{request_path.name}",
-                "base_image": self._active_sandbox_spec.image,
-                "request_hash": request_hash,
-            }
-            manifest.update(sandbox_image_update=result)
-            raise RuntimeError(f"meta-learning sandbox image rebuild rejected: {exc}") from exc
-        dockerfile.write_text(dockerfile_text, encoding="utf-8")
-        request_copy = build_dir / "sandbox_environment.json"
-        request_copy.write_text(json.dumps(request, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-        command = ["docker", "build", "-t", image_tag, "-f", str(dockerfile), str(build_dir)]
-        started_at = utc_now_iso()
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=self.config.meta_sandbox_rebuild_timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as exc:
-            result = {
-                "status": "timeout",
-                "request_ref": f"/mnt/agent/workspace/{request_path.name}",
-                "host_request_ref": str(request_copy),
-                "dockerfile_ref": str(dockerfile),
-                "base_image": self._active_sandbox_spec.image,
-                "image": image_tag,
-                "request_hash": request_hash,
-                "started_at": started_at,
-                "finished_at": utc_now_iso(),
-                "timeout_seconds": self.config.meta_sandbox_rebuild_timeout_seconds,
-                "stdout_tail": str(exc.stdout or "")[-4000:],
-                "stderr_tail": str(exc.stderr or "")[-4000:],
-            }
-            manifest.update(sandbox_image_update=result)
-            raise RuntimeError(f"meta-learning sandbox image rebuild timed out: {image_tag}") from exc
-        result: dict[str, object] = {
-            "status": "ok" if completed.returncode == 0 else "failed",
-            "request_ref": f"/mnt/agent/workspace/{request_path.name}",
-            "host_request_ref": str(request_copy),
-            "dockerfile_ref": str(dockerfile),
-            "base_image": self._active_sandbox_spec.image,
-            "image": image_tag,
-            "request_hash": request_hash,
-            "started_at": started_at,
-            "finished_at": utc_now_iso(),
-            "returncode": completed.returncode,
-            "stdout_tail": str(completed.stdout)[-4000:],
-            "stderr_tail": str(completed.stderr)[-4000:],
-        }
-        if completed.returncode == 0:
-            self._active_sandbox_spec = replace(self._active_sandbox_spec, image=image_tag)
-            # Content-addressable identity of the freshly built image: the tag
-            # alone cannot prove which bits later folds ran on.
-            image_id, repo_digests = resolve_image_identity(image_tag)
-            result["image_id"] = image_id
-            result["image_repo_digests"] = repo_digests
-            result["pruned_images"] = self._gc_derived_sandbox_images(keep_image=image_tag)
-        manifest.update(sandbox_image_update=result)
-        if completed.returncode != 0:
-            raise RuntimeError(f"meta-learning sandbox image rebuild failed: {image_tag}")
-        return result
-
-    def _gc_derived_sandbox_images(self, *, keep_image: str) -> list[str]:
-        """Best-effort prune of stale derived images for this experiment, keeping the
-        most recent ``meta_sandbox_image_keep`` (and always the active one). Docker
-        image GC must never fail a build, so all errors are swallowed."""
-        keep = self.config.meta_sandbox_image_keep
-        if keep <= 0:
-            return []
-        prefix = f"autotrade-sandbox:{_docker_tag_component(self.config.experiment_id)}-"
-        try:
-            listed = subprocess.run(
-                ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}",
-                 "autotrade-sandbox"],
-                capture_output=True, text=True, timeout=30,
-            )
-            if listed.returncode != 0:
-                return []
-            rows: list[tuple[str, str]] = []
-            for line in listed.stdout.splitlines():
-                if not line.startswith(prefix):
-                    continue
-                tag, _, created = line.partition("\t")
-                rows.append((tag, created))
-            # Sort newest first by Docker's CreatedAt (lexicographic on the
-            # "YYYY-MM-DD HH:MM:SS …" prefix is chronological) rather than trusting
-            # `docker images` default order; keep the newest, drop the older tail,
-            # never removing the just-built active image.
-            rows.sort(key=lambda row: row[1], reverse=True)
-            stale = [tag for tag, _ in rows[keep:] if tag != keep_image]
-            pruned: list[str] = []
-            for tag in stale:
-                removed = subprocess.run(
-                    ["docker", "image", "rm", tag], capture_output=True, text=True, timeout=30
-                )
-                if removed.returncode == 0:
-                    pruned.append(tag)
-            return pruned
-        except (OSError, subprocess.SubprocessError):
-            return []
 
     @staticmethod
     def _validate_meta_learning_session(summary: object) -> None:
@@ -1136,37 +966,58 @@ class ExperimentPipeline:
             if model_artifact_hash(paths.model_artifacts) != final.model_artifact_hash:
                 raise RuntimeError("held-out run modified the frozen model artifacts")
             style_rollup_error = self._write_style_rollups(paths.results, "heldout")
-            # Collect artifacts, then ALWAYS append the held-out ledger entry — even
-            # if collection fails — then re-raise the collection failure (C1).
-            collect_error: Exception | None = None
-            try:
-                sandbox.collect_artifacts(self.config.experiment_dir / "artifacts" / run_id)
-            except Exception as exc:  # noqa: BLE001 - recorded below, then re-raised
-                collect_error = exc
-            self.ledger.append(
-                {
-                    "record_type": "heldout",
-                    "experiment_id": self.config.experiment_id,
-                    "epoch_id": epoch_id,
-                    "fold_id": fold_id,
-                    "run_id": run_id,
-                    "period": {"start": period["start"], "end": period["end"]},
-                    "strategy_artifact_id": final.artifact_id,
-                    "strategy_artifact_hash": final.artifact_hash,
-                    "model_artifact_hash": final.model_artifact_hash,
-                    "test_result": _metrics(summary),
-                    "style_rollup_error": style_rollup_error,
-                    "finalize_error": (
-                        f"{type(collect_error).__name__}: {collect_error}" if collect_error is not None else None
-                    ),
+            def heldout_record(collected: Path | None, collect_error: Exception | None) -> dict[str, object]:
+                return {
+                        "record_type": "heldout",
+                        "experiment_id": self.config.experiment_id,
+                        "epoch_id": epoch_id,
+                        "fold_id": fold_id,
+                        "run_id": run_id,
+                        "period": {"start": period["start"], "end": period["end"]},
+                        "strategy_artifact_id": final.artifact_id,
+                        "strategy_artifact_hash": final.artifact_hash,
+                        "model_artifact_hash": final.model_artifact_hash,
+                        "test_result": _metrics(summary),
+                        "style_rollup_error": style_rollup_error,
+                        "finalize_error": (
+                            f"{type(collect_error).__name__}: {collect_error}" if collect_error is not None else None
+                        ),
                 }
-            )
-            if collect_error is not None:
-                raise collect_error
+
+            self._finalize_run(sandbox, run_id, record_builder=heldout_record)
             summaries.append(summary)
         return summaries
 
     # ---- internals ----
+
+    def _finalize_run(
+        self,
+        sandbox,
+        run_id: str,
+        *,
+        record_builder,
+        raise_after: Exception | None = None,
+    ):
+        """Collect artifacts, ALWAYS append the ledger record, then fail-fast.
+
+        The ordering is the durability invariant shared by fold / meta-learning /
+        held-out finalization: a finished run's record must survive even when
+        artifact collection (or an earlier finalize step, passed as
+        ``raise_after``) failed. ``record_builder(collected, collect_error)``
+        returns the kind-specific ledger dict. A collection error outranks
+        ``raise_after``; both re-raise only after the record is durable."""
+        collect_error: Exception | None = None
+        collected: Path | None = None
+        try:
+            collected = sandbox.collect_artifacts(self.config.experiment_dir / "artifacts" / run_id)
+        except Exception as exc:  # noqa: BLE001 - recorded below, then re-raised
+            collect_error = exc
+        self.ledger.append(record_builder(collected, collect_error))
+        if collect_error is not None:
+            raise collect_error
+        if raise_after is not None:
+            raise raise_after
+        return collected
 
     def _record_attempt_failure(self, *, epoch_id: str, fold_id: str, run_id: str, exc: Exception) -> None:
         """Append a permanent ``attempt_failed`` ledger record when a run throws
@@ -1406,170 +1257,6 @@ def _check_has_changes(check: dict[str, object]) -> bool:
             int(model_delta.get("changed_file_count") or 0) > 0,
         ]
     )
-
-
-def _write_sandbox_environment_example(workspace: Path) -> Path:
-    path = workspace / SANDBOX_ENVIRONMENT_EXAMPLE_NAME
-    path.write_text(
-        json.dumps(_SANDBOX_ENVIRONMENT_EXAMPLE, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    return path
-
-
-_PYTHON_PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-\[\],<>=!~:+]*$")
-_SYSTEM_PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]*$")
-_NPM_PACKAGE_RE = re.compile(
-    r"^(?:@[A-Za-z0-9][A-Za-z0-9_.-]*/)?[A-Za-z0-9][A-Za-z0-9_.-]*(?:@[A-Za-z0-9][A-Za-z0-9_.+~^-]*)?$"
-)
-_DOCKER_IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,200}$")
-
-
-def _load_sandbox_environment_request(path: Path) -> dict[str, object]:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"sandbox_environment.json is not valid JSON: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise ValueError("sandbox_environment.json must be a JSON object")
-    allowed = {"python_packages", "apt_packages", "npm_packages", "reason", "notes"}
-    unknown = sorted(set(raw) - allowed)
-    if unknown:
-        raise ValueError(f"sandbox_environment.json contains unsupported fields: {unknown}")
-    request = {
-        "python_packages": _validated_package_list(
-            raw.get("python_packages"), field="python_packages", pattern=_PYTHON_PACKAGE_RE, max_items=40
-        ),
-        "apt_packages": _validated_package_list(
-            raw.get("apt_packages"), field="apt_packages", pattern=_SYSTEM_PACKAGE_RE, max_items=30
-        ),
-        "npm_packages": _validated_package_list(
-            raw.get("npm_packages"), field="npm_packages", pattern=_NPM_PACKAGE_RE, max_items=30
-        ),
-    }
-    for key in ("reason", "notes"):
-        value = raw.get(key)
-        if value is not None:
-            if not isinstance(value, str):
-                raise ValueError(f"{key} must be a string")
-            request[key] = value[:2000]
-    return request
-
-
-def _validated_package_list(
-    value: object,
-    *,
-    field: str,
-    pattern: re.Pattern[str],
-    max_items: int,
-) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError(f"{field} must be a list")
-    packages: list[str] = []
-    for item in value:
-        if not isinstance(item, str) or not item.strip():
-            raise ValueError(f"{field} entries must be non-empty strings")
-        package = item.strip()
-        if package.startswith("-") or not pattern.match(package):
-            raise ValueError(f"unsupported {field} entry: {package!r}")
-        if package not in packages:
-            packages.append(package)
-    if len(packages) > max_items:
-        raise ValueError(f"{field} has {len(packages)} entries > {max_items}")
-    return packages
-
-
-def _environment_request_has_packages(request: dict[str, object]) -> bool:
-    return any(request.get(key) for key in ("python_packages", "apt_packages", "npm_packages"))
-
-
-def _sandbox_environment_hash(request: dict[str, object]) -> str:
-    payload = json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _docker_tag_component(value: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-")
-    return (cleaned or "experiment")[:48].lower()
-
-
-def _render_sandbox_extension_dockerfile(base_image: str, request: dict[str, object]) -> str:
-    if not _DOCKER_IMAGE_RE.match(base_image):
-        raise ValueError(f"unsupported base sandbox image: {base_image!r}")
-    lines = [
-        "# Generated by AutoTrade Pipeline from meta-learning sandbox_environment.json.",
-        f"FROM {base_image}",
-        "ARG PIP_INDEX_URL=https://pypi.org/simple",
-        "USER root",
-    ]
-    apt_packages = [shlex.quote(item) for item in request.get("apt_packages", [])]
-    if apt_packages:
-        lines.append(
-            "RUN apt-get update && apt-get install -y --no-install-recommends "
-            + " ".join(apt_packages)
-            + " && rm -rf /var/lib/apt/lists/*"
-        )
-    python_specs = list(request.get("python_packages", []))
-    python_packages = [shlex.quote(item) for item in python_specs]
-    if python_packages:
-        lines.append(
-            'RUN python -m pip install --no-cache-dir -i "${PIP_INDEX_URL}" '
-            + " ".join(python_packages)
-        )
-        # Verification layer: a build that installs a package but cannot import it
-        # is a silent transfer failure for later Folds. Fail the build here so
-        # "image built" implies "importable", not just "installable".
-        imports = _python_import_names(python_specs)
-        if imports:
-            stmt = "; ".join(f"import {name}" for name in imports)
-            lines.append(f'RUN python -c {shlex.quote(stmt)}')
-    npm_packages = [shlex.quote(item) for item in request.get("npm_packages", [])]
-    if npm_packages:
-        lines.append("RUN npm install -g --no-fund --no-audit " + " ".join(npm_packages))
-    lines.extend(["WORKDIR /mnt/agent", ""])
-    return "\n".join(lines)
-
-
-# PyPI distribution name -> import module name for the cases where they diverge.
-_IMPORT_NAME_ALIASES = {
-    "scikit-learn": "sklearn",
-    "opencv-python": "cv2",
-    "opencv-contrib-python": "cv2",
-    "umap-learn": "umap",
-    "pillow": "PIL",
-    "pyyaml": "yaml",
-    "beautifulsoup4": "bs4",
-    "python-dateutil": "dateutil",
-    "msgpack-python": "msgpack",
-    "faiss-cpu": "faiss",
-    "faiss-gpu": "faiss",
-}
-
-
-def _python_import_names(specs: list[str]) -> list[str]:
-    """Top-level import names for declared python_packages, for a build-time smoke
-    test. Only emit a name we are confident about: a known alias, or a simple
-    distribution name with no '-'/'.' (where dist == import). For a hyphenated/dotted
-    name that is not aliased the import module is unguessable (e.g. umap-learn->umap,
-    opencv-contrib-python->cv2), so we SKIP its smoke import rather than reject a
-    validly-installed package; the build still verifies pip install succeeded."""
-    names: list[str] = []
-    for spec in specs:
-        dist = re.split(r"[<>=!~;\[\s]", str(spec).strip(), maxsplit=1)[0].strip()
-        if not dist:
-            continue
-        lower = dist.lower()
-        if lower in _IMPORT_NAME_ALIASES:
-            module = _IMPORT_NAME_ALIASES[lower]
-        elif "-" in lower or "." in lower:
-            continue  # ambiguous import name — rely on pip install success
-        else:
-            module = lower
-        if module and module.isidentifier() and module not in names:
-            names.append(module)
-    return names
 
 
 def _compact_fold_history(record: dict[str, object]) -> dict[str, object]:

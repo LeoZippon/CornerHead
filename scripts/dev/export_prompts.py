@@ -20,12 +20,12 @@ from _bootstrap import add_repo_src
 add_repo_src(__file__)
 
 from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
+from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import (
     DEFAULT_ANTI_OVERFIT_PROMPT,
     DEFAULT_CONVERGENCE_PROMPT,
     PROTOCOL_INSTRUCTION,
     WRAP_UP_PROMPT,
-    build_experiment_facts,
     build_meta_learning_prompt,
     build_system_prompt,
 )

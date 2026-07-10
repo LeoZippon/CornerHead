@@ -669,27 +669,13 @@ class _Broker:
                 )
             if holders:
                 record["account"] = holders[0]
-        if record.get("account"):
-            record["op_type"] = self._close_op_type(code, str(record["account"]))
+        # No op_type hint for close: the host engine's _resolve_close is the
+        # single authority for the cover/sell_repay/credit_sell/sell decision
+        # (a driver-side copy of that rule would be a drift hazard).
         order_id = self._new_order_id()
         record["order_id"] = order_id
         self._actions.append(record)
         return order_id
-
-    def _close_op_type(self, code, account):
-        if account == "stock":
-            return 24
-        qty = self._pos.get(("credit", str(code)), 0)
-        if qty < 0:
-            return 29
-        for contract in self._debt_contracts:
-            if (
-                str(contract.get("compact_type") or "") == "fin"
-                and str(contract.get("ts_code") or "") == str(code)
-                and float(contract.get("real_compact_balance") or 0.0) > 0.0
-            ):
-                return 31
-        return 34
 
     def cancel(self, order_id, reason=None, **kwargs):
         """Cancel a still-pending order returned by ``ctx.broker.pending()``.

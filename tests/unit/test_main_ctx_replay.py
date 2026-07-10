@@ -8,10 +8,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from autotrade.environment.backtest_engine import BacktestError, MinuteMarketData, compute_return_stats
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.executor import LocalExecutor
-from autotrade.environment.main_ctx_engine import MainPolicyRunner, _day_tick_plan, run_main_ctx_replay
+from autotrade.environment.main_ctx_engine import BacktestError, MainPolicyRunner, _day_tick_plan, run_main_ctx_replay
+from autotrade.environment.replay_market import MinuteMarketData
+from autotrade.environment.replay_stats import compute_return_stats
 from autotrade.environment.sandbox import LocalSandbox
 
 

@@ -25,16 +25,15 @@ from autotrade.environment.artifacts import (
     load_strategy_artifact,
     model_artifact_hash,
 )
-from autotrade.environment.backtest_engine import BacktestError, compute_return_stats
+from autotrade.environment.replay_stats import compute_return_stats
 from autotrade.environment.broker import (
     BrokerProfile,
     load_corporate_actions_by_date,
     load_shortable_by_date,
     load_shortable_codes,
 )
-from autotrade.environment.main_ctx_engine import MainPolicyRunner, run_main_ctx_replay
-from autotrade.environment.nl.context import CompanyContextStore
-from autotrade.environment.nl.engine import NLSubAgentConfig, NLSubAgentEngine, TextRetriever
+from autotrade.environment.main_ctx_engine import BacktestError, MainPolicyRunner, run_main_ctx_replay
+from autotrade.environment.nl.service import StrategyNLService, cleanup_nl_rpc_files, prepare_nl_rpc_files
 from autotrade.environment.identity import agent_visible_ref
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.snapshot import load_snapshot_manifest
@@ -232,10 +231,10 @@ class BacktestTool:
             if per_day_cap is None and valid_per_day_cap is not None:
                 per_day_cap = valid_per_day_cap * _FINAL_EVAL_WALL_CAP_MULTIPLIER
         tmp_nl_dir = self.ctx.paths.workspace / f".{new_id('nl_tool')}"
-        requests_host, responses_host = _prepare_nl_rpc_files(self.ctx.paths.agent)
+        requests_host, responses_host = prepare_nl_rpc_files(self.ctx.paths.agent)
 
         timeview_enabled = bool(manifest.get("timeview_enabled", manifest.get("rolling_asof_enabled", True)))
-        nl_service = _StrategyNLService(
+        nl_service = StrategyNLService(
             proxy=self.ctx.effective_nl_proxy,
             snapshot_dir=snapshot_dir,
             log_dir=tmp_nl_dir,
@@ -312,7 +311,7 @@ class BacktestTool:
         finally:
             if tmp_nl_dir.exists():
                 shutil.rmtree(tmp_nl_dir, ignore_errors=True)
-            _cleanup_nl_rpc_files(requests_host, responses_host)
+            cleanup_nl_rpc_files(requests_host, responses_host)
 
         order_records = replay.broker.get_trade_detail_data(
             account_type="STOCK", data_type="ORDER"
@@ -533,186 +532,6 @@ class BacktestTool:
                 error=error,
                 artifact_hash=failed_hash,
             )
-
-
-class _StrategyNLService:
-    def __init__(
-        self,
-        *,
-        proxy,
-        snapshot_dir: Path,
-        log_dir: Path,
-        failure_policy: str,
-        per_call_timeout_seconds: float,
-        max_calls: int | None = None,
-        replay_dir: Path | None = None,
-    ) -> None:
-        self.proxy = proxy
-        self.snapshot_dir = snapshot_dir
-        self.log_dir = log_dir
-        self.failure_policy = failure_policy
-        self.per_call_timeout_seconds = per_call_timeout_seconds
-        self.max_calls = max_calls
-        self.calls = 0
-        self.nl_wall_seconds = 0.0  # cumulative LLM-service wall, reported as a replay phase
-        # Set per tick by the replay engine; rolls ctx.nl() text on the same nodes as
-        # the Timeview. None (Timeview off / no replay) keeps the frozen PIT corpus.
-        self.current_when = None
-        # Absolute monotonic deadline of the decision currently being served
-        # (set by MainPolicyRunner). NL provider calls are clamped to it.
-        self.deadline_at: float | None = None
-        # Per-ts_code company context is constant for the frozen snapshot, so load the
-        # universe/fundamentals parquet once and memoize rather than re-reading both on
-        # every nl() call.
-        self.company_context_store = CompanyContextStore(snapshot_dir)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.retriever = TextRetriever(
-            snapshot_dir / "text_index.parquet",
-            snapshot_dir / "text_library",
-            replay_index_path=(replay_dir / "text_index.parquet") if replay_dir is not None else None,
-            replay_library_dir=(replay_dir / "text_library") if replay_dir is not None else None,
-        )
-
-    def run(
-        self,
-        ts_code: str,
-        *,
-        prompt: str,
-        kwargs: dict[str, object],
-        request: dict[str, object],
-    ) -> dict[str, object]:
-        ts_code = str(ts_code or "").strip()
-        scope = "stock" if ts_code else "general"
-        self.calls += 1
-        # Bind the retriever to the requesting tick's sim clock so announcements/news
-        # become visible to ctx.nl() only once their refresh node has completed.
-        self.retriever.as_of = self.current_when
-        if self.max_calls is not None and self.calls > self.max_calls:
-            # Hard backstop on API spend; strategy code sees an audited error and
-            # degrades (the prompt asks it to keep NL frequency low to begin with).
-            result = _error_result(
-                ts_code, state="budget_exhausted", error=f"nl call budget exhausted (max {self.max_calls})"
-            )
-            self._write_result(request, result)
-            return result
-        if self.proxy is None:
-            if self.failure_policy == "return_error_with_audit":
-                result = _error_result(ts_code, state="failed_with_policy", error="nl proxy is not configured")
-                self._write_result(request, result)
-                return result
-            raise BacktestError("strategy called nl() but no LLM proxy is configured")
-        if self.deadline_at is not None and self.deadline_at - time.monotonic() <= 1.0:
-            # The decision's wall cap is already spent: fail the request without
-            # starting a provider round (the runner will kill the decision at
-            # its next deadline check regardless).
-            result = _error_result(
-                ts_code, state="timeout", error="decision wall-clock deadline exhausted before the NL task"
-            )
-            self._write_result(request, result)
-            if self.failure_policy == "fail":
-                raise BacktestError(f"nl() deadline exhausted for {ts_code or 'general'}")
-            return result
-        engine = NLSubAgentEngine(
-            self.proxy,
-            self.retriever,
-            company_contexts={ts_code: self.company_context_store.context(ts_code)} if ts_code else {},
-        )
-        config = NLSubAgentConfig(
-            per_call_timeout_seconds=self.per_call_timeout_seconds,
-            failure_policy=self.failure_policy,
-            deadline_at=self.deadline_at,
-        )
-        _nl_t0 = time.monotonic()
-        result = engine.run(ts_code=ts_code, prompt=prompt, request_kwargs=kwargs, config=config)
-        self.nl_wall_seconds += time.monotonic() - _nl_t0
-        record = result.to_record()
-        self._write_result(request, record)
-        _append_jsonl(
-            self.log_dir / "search_requests.jsonl",
-            [{"ts_code": ts_code, "scope": scope, **r} for r in result.tool_calls],
-        )
-        _append_jsonl(
-            self.log_dir / "evidence.jsonl",
-            [{"ts_code": ts_code, "scope": scope, **e} for e in result.evidence],
-        )
-        _append_jsonl(self.log_dir / "nl_llm_calls.jsonl", result.llm_calls)
-        if result.state in {"failed", "timeout"} and self.failure_policy == "fail":
-            raise BacktestError(f"nl() failed for {ts_code}: {result.error}")
-        return record
-
-    def _write_result(
-        self,
-        request: dict[str, object],
-        result: dict[str, object],
-    ) -> None:
-        _append_jsonl(
-            self.log_dir / "nl_requests.jsonl",
-            {"request": request, "result": result},
-        )
-
-
-def _append_jsonl(path: Path, records: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    items = records if isinstance(records, list) else [records]
-    with path.open("a", encoding="utf-8") as handle:
-        for record in items:
-            handle.write(json.dumps(sanitize_for_log(record), ensure_ascii=False, default=str) + "\n")
-
-
-def _prepare_nl_rpc_files(agent_root: Path) -> tuple[Path, Path]:
-    runtime_dir = agent_root / ".runtime"
-    rpc_dir = runtime_dir / "nl_rpc"
-    if not runtime_dir.exists():
-        raise BacktestError("agent runtime directory is missing; prepare the sandbox layout before backtest")
-    runtime_dir.chmod(0o755)
-    rpc_dir.mkdir(parents=True, exist_ok=True)
-    rpc_dir.chmod(0o755)
-    requests_host = rpc_dir / f"{new_id('nl_requests')}.jsonl"
-    responses_host = rpc_dir / f"{new_id('nl_responses')}.jsonl"
-    requests_host.write_text("", encoding="utf-8")
-    responses_host.write_text("", encoding="utf-8")
-    # The sandbox agent may append requests, but only the host may write
-    # responses. Locked parent dirs prevent delete/replace attacks.
-    requests_host.chmod(0o622)
-    responses_host.chmod(0o644)
-    rpc_dir.chmod(0o555)
-    runtime_dir.chmod(0o555)
-    return requests_host, responses_host
-
-
-def _cleanup_nl_rpc_files(requests_host: Path, responses_host: Path) -> None:
-    rpc_dir = requests_host.parent
-    runtime_dir = rpc_dir.parent
-    if runtime_dir.exists():
-        runtime_dir.chmod(0o755)
-    if rpc_dir.exists():
-        rpc_dir.chmod(0o755)
-    requests_host.unlink(missing_ok=True)
-    responses_host.unlink(missing_ok=True)
-    if rpc_dir.exists():
-        try:
-            rpc_dir.rmdir()
-        except OSError:
-            rpc_dir.chmod(0o555)
-    if runtime_dir.exists():
-        runtime_dir.chmod(0o555)
-
-
-def _error_result(ts_code: str, *, state: str, error: str) -> dict[str, object]:
-    code = str(ts_code or "").strip()
-    return {
-        "task_id": "",
-        "ts_code": code,
-        "scope": "stock" if code else "general",
-        "status": "error",
-        "state": state,
-        "content": "",
-        "error": error,
-        "rounds": 0,
-        "tool_calls": [],
-        "evidence": [],
-        "company_context": {},
-    }
 
 
 def _profile_kwargs(record: dict[str, object]) -> dict[str, object]:

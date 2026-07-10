@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from autotrade.agent.prompts import build_experiment_facts, build_meta_learning_prompt, build_system_prompt
+from autotrade.agent.experiment_facts import build_experiment_facts
+from autotrade.agent.prompts import build_meta_learning_prompt, build_system_prompt
 from autotrade.environment.artifacts import artifact_hash
 from autotrade.environment.runtime import RunManifest
 from autotrade.environment.step_tree import StepTree

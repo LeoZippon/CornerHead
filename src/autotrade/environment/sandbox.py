@@ -14,8 +14,10 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -540,6 +542,27 @@ def _chmod_tree(root: Path, *, file_mode: int, dir_mode: int) -> None:
         except OSError:
             pass
     root.chmod(dir_mode if root.is_dir() else file_mode)
+
+
+@contextmanager
+def hide_snapshot_slots_from_agent(paths: SandboxPaths):
+    """Temporarily hide replay/exploration/artifact slots from strategy code.
+
+    Docker runs candidate code as the non-root ``agent`` user. Making the slot
+    roots owner-only is enough to prevent traversal while keeping the current
+    `/mnt/snapshot` view and staged workspace inputs available.
+    """
+    slots: list[tuple[Path, int]] = []
+    for path in (paths.train, paths.valid, paths.test, paths.artifacts):
+        if path.exists():
+            slots.append((path, stat.S_IMODE(path.stat().st_mode)))
+    try:
+        for path, _mode in slots:
+            path.chmod(0o700)
+        yield
+    finally:
+        for path, mode in slots:
+            path.chmod(mode)
 
 
 def resolve_image_identity(image: str) -> tuple[str, list[str]]:
