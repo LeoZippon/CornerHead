@@ -1183,3 +1183,9 @@
 - 删除 `ctx.broker` 下单原语和 `SimBroker.passorder` 的 `valid_bars` 便捷参数；限价单改为当日有效，直到成交、策略显式 `cancel()` 或日终清扫。
 - Prompt、模板 README、环境文档和相关测试同步改为用 `pending().age_minutes` + `cancel()` 管理“N 分钟后撤单”，更贴近 QMT `passorder` 没有 TIF 参数的真实接口。
 - Validation: 非历史文件 grep 无 `valid_bars` / `remaining_bars` / `expired_unfilled` 残留；`~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine tests.unit.test_main_ctx_replay` -> 143 OK；`py_compile` OK；`git diff --check` clean。
+
+2026-07-10 Living documentation convergence audit
+
+- 串行逐行审读 Data、Environment、Agent、Pipeline、Deployment 和参数参考共 3,266 行；统一职责、PIT/回放、完整验证、QMT 原子传输、条件产物和配置入口表述，并把非必要默认值集中到参数参考。
+- 参数参考覆盖全部 `PARAM_DEFAULTS` 及 Snapshot、Experiment、Acceptance、Modification、Broker、Sandbox、Agent Session 和 Context Compaction 配置字段；明确仍存在的审计限制和代码级配置边界。
+- Validation: `~/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t .` -> 596 OK；Markdown 相对链接、表格结构和参数覆盖检查通过；`git diff --check` clean。

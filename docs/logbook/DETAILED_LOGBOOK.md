@@ -16835,3 +16835,20 @@ Key mechanics worth remembering:
 Resource checks: CPU-only test runs (~100 s per full suite); docker image rebuild logged under logs/sandbox_image_rebuild_*.log.
 
 Validation: full suite 596 OK after every batch; PROMPTS.md export byte-identical; git diff --check clean; four-domain audit output parity on real data; sandbox image rebuilt from the digest-pinned base with the SHA-256-verified DuckDB CLI.
+
+## 2026-07-10 Living documentation convergence audit
+
+Task: serially read and reconcile the six current documentation surfaces: Data, Environment, Agent, Pipeline, Deployment, and the derived parameter reference. Historical logbooks remained append-only records rather than design sources.
+
+Review scope: 3,266 current-document lines. The pass checked every section for code correspondence, missing operational or failure semantics, excessive implementation names, parameter duplication, language quality, and cross-document ownership. Corrections included Pipeline consuming rather than scheduling Data, complete validation allowing recorded Broker rejections, Shell capture truncation semantics, conditional result files, current QMT temporary-file plus atomic-publish requirements, and code-only versus CLI/HITL/API parameter exposure.
+
+Parameter audit: every key in `PARAM_DEFAULTS` and every field in `SnapshotConfig`, `ExperimentConfig`, `AcceptanceRules`, `ModificationConstraints`, `BrokerProfile`, `SandboxSpec`, `AgentSessionConfig`, and `ContextCompactionConfig` appears in the parameter reference. Data scheduling defaults, job-level lookbacks, lock overrides, request pacing, and entrypoint differences were also recorded. Known limitations remain explicit rather than being presented as implemented controls, including non-serialized news source/window knobs, host file-tool TOCTOU exposure, human visibility of development test summaries, and the not-yet-implemented QMT execution target.
+
+Validation:
+
+- `~/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t .` -> 596 tests, OK.
+- Targeted configuration, interactive Pipeline, WebUI, and reporting tests -> 61 tests, OK.
+- Markdown relative-link existence, table-column consistency, duplicate-heading, stale-phrase, and parameter-coverage checks -> OK.
+- `git diff --check` -> clean.
+
+This was documentation-only work; no experiment, inference, training, data-processing, GPU, or memory-intensive job was run, so resource probes were not required.
