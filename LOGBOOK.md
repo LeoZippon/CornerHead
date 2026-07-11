@@ -1,3 +1,9 @@
+2026-07-11 前端看不到 UI 更新：nginx 静态资源缓存修复（feat/step-tree-rollback）
+
+- 排查：三个静态文件在前端服务器与本地逐字节一致（sync 一直正常）；根因是 nginx 对 /static/ 与 /（index.html）都不带 Cache-Control，浏览器按启发式缓存长期不重验证 → 旧 app.js/style.css 一直生效。
+- 修复：前端 nginx 两个 location 增加 `Cache-Control: no-cache`（ETag 重验证，重复访问 304 几乎零成本），已 reload 并实测两路径均下发该头；repo 内模板 ops/webui/nginx-cornerhead.conf 同步，重新 provision 不回退。原配置已备份 /root/cornerhead.nginx.bak.*。
+- 用户侧需一次硬刷新（Ctrl/Cmd+Shift+R）摆脱既有缓存；此后普通刷新即可看到更新。
+
 2026-07-10 test5 故障双修 + 控制台细节 + Agent 决策链审计修复（feat/step-tree-rollback，fe9ec20）
 
 - test5 巡检（fold finalize 崩溃）确认两个系统缺陷并修复：① no_update 回退把父产物拷回 finish_fold 只读锁定的 output/ → unlink PermissionError（现在回退前 _chmod_tree 解锁，兼顾 Docker subuid 文件）；② 分析钩子 NameError ANALYSIS_DIR_NAME（hitl_state 拆分漏导入，该路径无单测覆盖）。
