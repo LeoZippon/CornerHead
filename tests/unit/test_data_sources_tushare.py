@@ -116,6 +116,16 @@ class ReferenceClient:
             rows = [["801010.SI" if field == "index_code" else "L1" if field == "level" else "sample" for field in result_fields]]
         elif api_name == "index_member_all":
             rows = [["801010.SI" if field == "l1_code" else "000001.SZ" if field == "ts_code" else "" for field in result_fields]]
+        elif api_name == "ths_index":
+            rows = [["885001.TI" if field == "ts_code" else "N" if field == "type" else "sample" for field in result_fields]]
+        elif api_name == "ths_member":
+            rows = [[params.get("ts_code", "") if field == "ts_code" else "000001.SZ" if field == "con_code" else "" for field in result_fields]]
+        elif api_name == "index_basic":
+            rows = [["000300.SH" if field == "ts_code" else "sample" for field in result_fields]]
+        elif api_name == "hs_const":
+            rows = [["000001.SZ" if field == "ts_code" else params.get("hs_type", "") if field == "hs_type" else "" for field in result_fields]]
+        elif api_name == "index_weight":
+            rows = [[params.get("index_code", "") if field == "index_code" else "000001.SZ" if field == "con_code" else "20260630" if field == "trade_date" else "1.0" for field in result_fields]]
         return common.ApiResult(result_fields, rows, common.stable_hash({"api_name": api_name, "params": params}))
 
 
@@ -1051,6 +1061,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn("namechange", called_apis)
         self.assertIn("index_classify", called_apis)
         self.assertIn("index_member_all", called_apis)
+        # New reference statics download on first run (files absent).
+        for api in ("ths_index", "ths_member", "index_basic", "hs_const", "index_weight"):
+            self.assertIn(api, called_apis)
 
     def test_reference_refresh_does_not_overwrite_existing_stock_company_on_empty_response(self):
         self._write_trade_cal("20200102")

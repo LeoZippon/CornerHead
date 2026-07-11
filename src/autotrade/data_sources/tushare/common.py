@@ -74,6 +74,11 @@ REFERENCE_DATASETS = [
     "namechange",
     "index_classify",
     "index_member_all",
+    "ths_index",
+    "ths_member",
+    "index_basic",
+    "hs_const",
+    "index_weight",
 ]
 
 DAILY_REQUIRED_DATASETS = ["daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d", "stk_auction_o", "stk_auction_c"]
@@ -353,6 +358,11 @@ INTEGRATED_DOC_REFS = {
     "us_tltr": "https://tushare.pro/document/2?doc_id=222",
     "index_daily": "https://tushare.pro/document/2?doc_id=95",
     "index_dailybasic": "https://tushare.pro/document/2?doc_id=128",
+    "ths_index": "https://tushare.pro/document/2?doc_id=259",
+    "ths_member": "https://tushare.pro/document/2?doc_id=261",
+    "index_basic": "https://tushare.pro/document/2?doc_id=94",
+    "hs_const": "https://tushare.pro/document/2?doc_id=104",
+    "index_weight": "https://tushare.pro/document/2?doc_id=96",
     "irm_qa_sh": "https://tushare.pro/document/2?doc_id=364",
     "irm_qa_sz": "https://tushare.pro/document/2?doc_id=365",
     "ths_daily": "https://tushare.pro/document/2?doc_id=260",

@@ -94,6 +94,8 @@ def download_reference(args: argparse.Namespace) -> int:
     download_namechange(client, raw_dir, should_force("namechange"))
     classify = download_index_classify(client, raw_dir, should_force("index_classify"))
     download_index_member_all(client, raw_dir, classify, should_force("index_member_all"))
+    download_ths_catalog(client, raw_dir, should_force("ths_index"))
+    download_index_reference(client, raw_dir, should_force("index_basic"))
     print(f"reference download finished under {raw_dir}")
     return 0
 
@@ -252,6 +254,50 @@ def download_index_member_all(client: TuShareClient, raw_dir: Path, classify: pd
             params=params,
             required_nonempty=False,
         )
+
+def download_ths_catalog(client: TuShareClient, raw_dir: Path, force: bool) -> None:
+    """THS concept/industry index catalog + per-index membership."""
+    path = raw_dir / "ths_index" / "catalog.parquet"
+    fields = "ts_code,name,count,exchange,list_date,type"
+    if not path.exists() or force:
+        result = client.query("ths_index", {"exchange": "A"}, fields)
+        write_reference_query_result(path, result, api_name="ths_index", params={"exchange": "A"}, required_nonempty=True)
+    catalog = pd.read_parquet(path)
+    member_fields = "ts_code,con_code,con_name"
+    # N = concept, I = industry; other types (S regional etc.) are noise for us.
+    codes = catalog.loc[catalog["type"].astype(str).isin(["N", "I"]), "ts_code"].dropna().astype(str)
+    for code in sorted(codes):
+        member_path = raw_dir / "ths_member" / f"ts_code={code}.parquet"
+        if member_path.exists() and not force:
+            continue
+        result = client.query("ths_member", {"ts_code": code}, member_fields)
+        write_reference_query_result(
+            member_path, result, api_name="ths_member", params={"ts_code": code}, required_nonempty=False
+        )
+
+
+def download_index_reference(client: TuShareClient, raw_dir: Path, force: bool) -> None:
+    """Index metadata catalog, HSGT-eligible constituents, and core-index weights."""
+    path = raw_dir / "index_basic" / "catalog.parquet"
+    fields = "ts_code,name,fullname,market,publisher,index_type,category,base_date,base_point,list_date,weight_rule,desc,exp_date"
+    if not path.exists() or force:
+        result = client.query("index_basic", {}, fields)
+        write_reference_query_result(path, result, api_name="index_basic", params={}, required_nonempty=True)
+    for hs_type in ("SH", "SZ"):
+        path = raw_dir / "hs_const" / f"hs_type={hs_type}.parquet"
+        if path.exists() and not force:
+            continue
+        result = client.query("hs_const", {"hs_type": hs_type}, "ts_code,hs_type,in_date,out_date,is_new")
+        write_reference_query_result(path, result, api_name="hs_const", params={"hs_type": hs_type}, required_nonempty=True)
+    for code in DEFAULT_CN_INDEX_CODES:
+        path = raw_dir / "index_weight" / f"index_code={code}.parquet"
+        if path.exists() and not force:
+            continue
+        result = client.query("index_weight", {"index_code": code}, "index_code,con_code,trade_date,weight")
+        write_reference_query_result(
+            path, result, api_name="index_weight", params={"index_code": code}, required_nonempty=False
+        )
+
 
 def download_daily(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
