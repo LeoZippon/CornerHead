@@ -22,7 +22,7 @@ from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.hitl_state import PARAM_DEFAULTS, ControlState, write_control
 from autotrade.webui.manager import ExperimentManager, ManagerError
 from autotrade.webui.server import create_app
-from autotrade.webui.traces import read_trace_page
+from autotrade.webui.traces import read_trace_page, read_trace_tail
 
 
 def _write_ledger(experiment_dir: Path, records: list[dict[str, object]]) -> None:
@@ -60,7 +60,7 @@ class WebuiBackendTest(unittest.TestCase):
                 "_created_at": "2026-07-06T00:00:00+00:00",
             },
         )
-        write_control(hitl / "control.json", ControlState(mode="step"))
+        write_control(hitl / "control.json", ControlState(mode="manual"))
         write_json_atomic(
             hitl / "status.json",
             {"pid": 999_999_999, "state": "running_session", "session_key": "epoch_001/fold_2022Q2"},
@@ -151,9 +151,9 @@ class WebuiBackendTest(unittest.TestCase):
             {"event_type": "llm_call", "seq": 0, "usage": {"total_tokens": 1000, "prompt_tokens": 800, "completion_tokens": 200}},
             {"event_type": "llm_call", "seq": 1, "usage": {"total_tokens": 2000, "prompt_tokens": 1500, "completion_tokens": 500}},
             {"event_type": "shell", "seq": 2},
-            {"event_type": "backtest_start", "seq": 3},
+            {"event_type": "backtest_start", "seq": 3, "ts": "2026-07-06T00:00:03+00:00"},
             {"event_type": "backtest", "seq": 4, "replay_wall_seconds": 88.5},
-            {"event_type": "backtest_start", "seq": 5},
+            {"event_type": "backtest_start", "seq": 5, "ts": "2026-07-06T00:00:05+00:00"},
         ]
         (trace_dir / "agent_trace.jsonl").write_text(
             "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
@@ -252,7 +252,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertIn("record", sessions["epoch_001/fold_2022Q1"])
         self.assertNotIn("record", sessions["epoch_001/fold_2022Q2"])
         self.assertTrue(sessions["epoch_001/fold_2022Q1"]["analysis_available"])
-        self.assertEqual(detail["control"]["mode"], "step")
+        self.assertEqual(detail["control"]["mode"], "manual")
         self.assertEqual(self.client.get("/api/experiments/nope").status_code, 404)
 
     # ---- guarded fold view --------------------------------------------------------
@@ -286,6 +286,32 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(page["events"], [])
         self.assertEqual(page["next_offset"], first["next_offset"])
 
+    def test_trace_tail_returns_recent_events_and_stream_offset(self) -> None:
+        response = self.client.get(
+            "/api/experiments/exp_hitl/trace", params={"run_id": "run_001", "tail_events": 2}
+        )
+        self.assertEqual(response.status_code, 200)
+        tail = response.json()
+        self.assertEqual([event["seq"] for event in tail["events"]], [4, 5])
+        self.assertTrue(tail["history_truncated"])
+        self.assertEqual(tail["next_offset"], Path(tail["trace_path"]).stat().st_size)
+
+        with Path(tail["trace_path"]).open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"event_type": "shell", "seq": 6}) + "\n")
+        page = read_trace_page(Path(tail["trace_path"]), offset=tail["next_offset"])
+        self.assertEqual([event["seq"] for event in page["events"]], [6])
+
+    def test_trace_tail_discards_partial_leading_and_trailing_lines(self) -> None:
+        path = self.experiments_root / "tail.jsonl"
+        path.write_text(
+            "".join(json.dumps({"seq": seq, "payload": "x" * 40}) + "\n" for seq in range(5))
+            + '{"seq": 5',
+            encoding="utf-8",
+        )
+        tail = read_trace_tail(path, max_events=2, max_bytes=180)
+        self.assertEqual([event["seq"] for event in tail["events"]], [3, 4])
+        self.assertLess(tail["next_offset"], path.stat().st_size)
+
     # ---- lifecycle -------------------------------------------------------------------
     def test_create_experiment_validates_and_writes_control_plane(self) -> None:
         with patch.object(ExperimentManager, "start_worker", return_value={"spawned_pid": 1}):
@@ -316,9 +342,9 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(unknown.status_code, 400)
         self.assertIn("unknown experiment parameters", unknown.json()["detail"])
 
-    def test_running_cap_blocks_fifth_experiment(self) -> None:
+    def test_running_cap_blocks_sixth_experiment(self) -> None:
         manager = ExperimentManager(self.repo_root, self.experiments_root)
-        with patch.object(ExperimentManager, "running_experiments", return_value=["a", "b", "c", "d"]):
+        with patch.object(ExperimentManager, "running_experiments", return_value=["a", "b", "c", "d", "e"]):
             with self.assertRaisesRegex(ManagerError, "cap reached"):
                 manager.start_worker("exp_hitl")
 
@@ -558,6 +584,36 @@ class WebuiBackendTest(unittest.TestCase):
             proc.kill()
             proc.wait()
 
+    def test_step_gate_controls(self) -> None:
+        on = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_step_gate", "session_key": "epoch_001/fold_2022Q2", "directive": "1"},
+        )
+        self.assertEqual(on.json()["control"]["step_gate"], {"epoch_001/fold_2022Q2": True})
+        # approve_step requires the worker to actually be holding at a step.
+        refused = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "approve_step", "session_key": "epoch_001/fold_2022Q2", "directive": "x"},
+        )
+        self.assertEqual(refused.status_code, 400)
+        write_json_atomic(
+            self.experiments_root / "exp_hitl" / "hitl" / "status.json",
+            {"pid": 999_999_999, "state": "waiting_step_user",
+             "session_key": "epoch_001/fold_2022Q2", "awaiting_step": 3},
+        )
+        ok = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "approve_step", "session_key": "epoch_001/fold_2022Q2", "directive": "关注回撤"},
+        )
+        control = ok.json()["control"]
+        self.assertEqual(control["step_go"], {"epoch_001/fold_2022Q2": 3})
+        self.assertEqual(control["step_directives"], {"epoch_001/fold_2022Q2#3": "关注回撤"})
+        off = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_step_gate", "session_key": "epoch_001/fold_2022Q2", "directive": ""},
+        )
+        self.assertEqual(off.json()["control"]["step_gate"], {})
+
     def test_launching_stub_bridges_spawn_to_first_worker_status(self) -> None:
         from types import SimpleNamespace
 
@@ -703,6 +759,26 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(fold["test"]["benchmark"]["dates"], [])  # no rollup for the test chain
         self.assertEqual(len(fold["test"]["series"][0]["dates"]), 1)
 
+    def test_equity_legacy_run_falls_back_to_raw_benchmark(self) -> None:
+        import pandas as pd
+
+        results = self.experiments_root / "exp_hitl" / "artifacts" / "run_001" / "results"
+        window = results / "valid_001"
+        window.mkdir(parents=True, exist_ok=True)
+        (window / "detailed_return.json").write_text(
+            json.dumps({"initial_cash": 1_000_000.0, "equity_curve": {"20220106": 1_020_000.0}}),
+            encoding="utf-8",
+        )
+        rollup = results / "style_valid.json"
+        rollup.unlink(missing_ok=True)
+        raw = self.repo_root / "data" / "raw" / "index_daily" / "ts_code=000300.SH"
+        raw.mkdir(parents=True)
+        pd.DataFrame([{"trade_date": "20220106", "pct_chg": 1.5}]).to_parquet(raw / "year=2022.parquet")
+
+        payload = self.client.get("/api/experiments/exp_hitl/equity").json()
+        self.assertEqual(payload["benchmark"]["dates"], ["20220106"])
+        self.assertAlmostEqual(payload["benchmark"]["final"], 0.015)
+
     def test_delete_requires_confirm_and_no_live_worker(self) -> None:
         missing_confirm = self.client.delete("/api/experiments/exp_legacy")
         self.assertEqual(missing_confirm.status_code, 400)
@@ -729,6 +805,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(stats["llm_completion_tokens"], 700)
         self.assertAlmostEqual(stats["backtest_wall_seconds"], 88.5)
         self.assertTrue(stats["in_backtest"])  # 2 starts, 1 terminal event
+        self.assertIsNotNone(stats["active_backtest_started_at"])
         self.assertEqual(stats["total_events"], 6)
 
     def test_trace_download_serves_raw_jsonl(self) -> None:

@@ -283,6 +283,7 @@ class ExperimentPipeline:
         system_prompt_override: str = "",
         rerun_id: str | None = None,
         sandbox_gpu_count: int | None = None,
+        step_gate_hook=None,
     ) -> FoldOutcome:
         run_id = new_id("run")
         try:
@@ -296,6 +297,7 @@ class ExperimentPipeline:
                 system_prompt_override=system_prompt_override,
                 rerun_id=rerun_id,
                 sandbox_gpu_count=sandbox_gpu_count,
+                step_gate_hook=step_gate_hook,
             )
         except Exception as exc:
             self._record_attempt_failure(epoch_id=epoch_id, fold_id=fold.fold_id, run_id=run_id, exc=exc)
@@ -313,6 +315,7 @@ class ExperimentPipeline:
         system_prompt_override: str = "",
         rerun_id: str | None = None,
         sandbox_gpu_count: int | None = None,
+        step_gate_hook=None,
     ) -> FoldOutcome:
         sandbox, docker = self._start_sandbox(run_id, gpu_count=sandbox_gpu_count)
         paths = sandbox.paths
@@ -435,6 +438,10 @@ class ExperimentPipeline:
             )
             self._bind_view(sandbox, docker, "valid_decision_input")
 
+            if step_gate_hook is not None:
+                # Step-level HITL: the runner calls this after every formal
+                # validation backtest (see AgentSessionRunner._do_backtest).
+                ctx.extra["step_gate_hook"] = step_gate_hook
             agent = self.agent_factory(ctx, fold, dict(manifest.data))
             session_summary = agent.run()
 

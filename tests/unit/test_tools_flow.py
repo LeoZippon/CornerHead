@@ -450,6 +450,7 @@ class ToolFlowTest(unittest.TestCase):
             self.assertTrue(any(e["event_type"] == "backtest_start" for e in events))
             terminals = [e for e in events if e["event_type"] == "backtest"]
             self.assertTrue(any(e.get("status") == "error" for e in terminals))  # bracket closed
+            self.assertGreater(float(terminals[-1]["replay_wall_seconds"]), 0.0)
 
     def test_main_runs_and_records_orders(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1452,6 +1453,42 @@ class AgentSessionRunnerTest(unittest.TestCase):
             llm_events = [e for e in ctx.trace.read_events() if e["event_type"] == "llm_call"]
             self.assertGreaterEqual(len(llm_events), 4)
             self.assertTrue(all("new_messages" in e and "content" in e for e in llm_events))
+
+    def test_step_gate_hook_holds_and_injects_directive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            calls: list[tuple[int, dict]] = []
+
+            def hook(step_index, summary):
+                calls.append((step_index, summary))
+                return "试试行业中性化残差"
+
+            ctx.extra["step_gate_hook"] = hook
+            proxy = ScriptedLLM([
+                tool_call_response(tool_call("backtest")),
+                tool_call_response(tool_call("finish_fold")),
+            ])
+            ctx.proxy = proxy
+            runner = AgentSessionRunner(
+                ctx,
+                proxy,
+                AgentSessionConfig(
+                    fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+                    per_call_timeout_seconds=60,
+                ),
+                fold_info={"fold_id": "fold_2022Q1"},
+                acceptance_rules={"min_return": 0.0},
+            )
+            summary = runner.run()
+            self.assertEqual(summary["finish_status"], "fold_finished")
+            # Hook fired once with the backtest result of the formal validation.
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], 1)
+            self.assertTrue(calls[0][1].get("complete_validation"))
+            # The directive reached the model inside the backtest observation.
+            rendered = json.dumps(proxy.calls[-1]["messages"], ensure_ascii=False, default=str)
+            self.assertIn("researcher_step_directive", rendered)
+            self.assertIn("行业中性化", rendered)
 
     def test_agent_and_nl_can_use_different_model_proxies(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -6,7 +6,8 @@ const $modalRoot = document.getElementById("modal-root");
 const $toastRoot = document.getElementById("toast-root");
 
 const STATE_LABELS = {
-  launching: "启动中", starting: "初始化", running_session: "运行中", waiting_user: "等待批准", paused: "已暂停",
+  launching: "启动中", starting: "初始化", running_session: "运行中", waiting_user: "等待批准",
+  waiting_step_user: "等待 Step 批准", paused: "已暂停",
   completed: "已完成", stopped: "已停止", failed: "失败", interrupted: "已中断",
   created: "未启动", legacy: "历史实验", unreadable: "不可解析", unknown: "未知",
 };
@@ -1201,7 +1202,7 @@ function sessionDetailPanel(detail, selectedKey) {
   if (detail.kind === "hitl" && (!done || waiting) && !running) {
     panel.append(directivePanel(detail, session, waiting));
   }
-  if (running) panel.append(liveTracePanel(detail, session));
+  if (running) panel.append(stepGatePanel(detail, session), liveTracePanel(detail, session));
   if (session.kind === "fold" && done) {
     panel.append(foldResultPanel(detail, session));
     // The LLM strategy review gets its own card, peer to the fold result.
@@ -1484,6 +1485,64 @@ function statsChipsRow(stats) {
     row.append(el("span", { class: "stat-chip" }, `Σ ${fmtTokens(stats.llm_total_tokens)}`));
   }
   return row;
+}
+
+/* Step-level HITL: toggle per-session gating and, when the worker is holding
+   at a step (state=waiting_step_user), show the step result and release it
+   with an optional per-step directive (injected into the tool observation). */
+function stepGatePanel(detail, session) {
+  if (session.kind !== "fold" || detail.kind !== "hitl") return el("span", {});
+  const control = detail.control || {};
+  const status = (detail.status || {});
+  const enabled = Boolean((control.step_gate || {})[session.key]);
+  const send = async (payload, message) => {
+    try {
+      await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`, {
+        method: "POST", body: JSON.stringify(payload),
+      });
+      toast(message);
+      route();
+    } catch (error) { toast(error.message, true); }
+  };
+  const panel = el("div", { class: "panel section-gap" },
+    el("h4", { class: "subsection-title" }, "逐 Step 门控"),
+    el("div", { class: "hint" },
+      "开启后，每次正式验证回测完成都会暂停会话等待批准；可在放行时注入 Step 级研究指令（等待时间不消耗 Fold 推理预算）。可随时开关。"),
+    el("div", { class: "control-bar" },
+      el("button", {
+        class: enabled ? "btn" : "btn primary",
+        onclick: () => send(
+          { action: "set_step_gate", session_key: session.key, directive: enabled ? "" : "1" },
+          enabled ? "已关闭逐 Step 门控" : "已开启逐 Step 门控",
+        ),
+      }, enabled ? "关闭门控" : "开启门控"),
+      enabled ? el("span", { class: "badge state-waiting_user" }, "门控已开启") : null,
+    ),
+  );
+  if (status.state === "waiting_step_user" && status.session_key === session.key) {
+    const summary = status.step_summary || {};
+    const textarea = el("textarea", { class: "directive",
+      placeholder: "可选：本 Step 结果的针对性指令（作为待检验假设注入下一轮对话）……" });
+    panel.append(
+      el("div", { class: "section-gap" }, statTilesRow([
+        { label: `Step ${status.awaiting_step ?? "?"} 验证收益`, value: fmtPct(summary.total_return), cls: signCls(summary.total_return) },
+        { label: "Sharpe", value: summary.sharpe === null || summary.sharpe === undefined ? "—" : Number(summary.sharpe).toFixed(2) },
+        { label: "最大回撤", value: fmtPct(summary.max_drawdown) },
+        { label: "完整验证", value: summary.complete_validation ? "是" : "否" },
+      ])),
+      textarea,
+      el("div", { class: "control-bar" },
+        el("button", {
+          class: "btn primary",
+          onclick: () => send(
+            { action: "approve_step", session_key: session.key, directive: textarea.value },
+            "已放行该 Step",
+          ),
+        }, "批准并继续"),
+      ),
+    );
+  }
+  return panel;
 }
 
 function liveTracePanel(detail, session) {

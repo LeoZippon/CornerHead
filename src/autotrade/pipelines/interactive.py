@@ -18,7 +18,7 @@ files (atomic replace, no locking needed):
   analysis/      post-fold LLM analysis (validation-only evidence)
 
 Pausing always lands at a session boundary: the worker finishes the session in
-flight, then blocks at the next gate. ``mode="step"`` additionally requires an
+flight, then blocks at the next gate. ``mode="manual"`` additionally requires an
 explicit per-session approval before each session starts.
 """
 
@@ -239,6 +239,7 @@ class InteractiveExperimentRunner:
                     break
                 else:
                     directive = self._gate(key, phase="meta_learning", epoch_id=epoch_id)
+                    control = read_control(self.control_path)
                     self.status.set(
                         state="running_session", phase="meta_learning", session_key=key,
                         epoch_id=epoch_id, fold_id=None, run_id=None, trace_path=None,
@@ -250,6 +251,7 @@ class InteractiveExperimentRunner:
                         previous_taste=taste_prompt,
                         visible_fold=folds[0] if folds else None,
                         directive_override=directive if directive.strip() else None,
+                        system_prompt_override=control.prompt_overrides.get(key, ""),
                     )
                 completed += 1
                 self.status.set(completed_sessions=completed)
@@ -291,6 +293,7 @@ class InteractiveExperimentRunner:
                         system_prompt_override=control.prompt_overrides.get(key, ""),
                         rerun_id=rerun_id if needs_rerun else None,
                         sandbox_gpu_count=control.gpu_counts.get(key),
+                        step_gate_hook=self._step_gate_hook(key),
                     )
                     parent = outcome.frozen
                     if needs_rerun:
@@ -333,7 +336,7 @@ class InteractiveExperimentRunner:
                     self.status.set(state="paused", phase=phase, session_key=key, epoch_id=epoch_id, fold_id=fold_id)
                 time.sleep(self.poll_seconds)
                 continue
-            if control.mode == "step" and key not in control.approved_sessions:
+            if control.mode == "manual" and key not in control.approved_sessions:
                 if announced_state != "waiting_user":
                     announced_state = "waiting_user"
                     self.status.set(
@@ -435,6 +438,42 @@ class InteractiveExperimentRunner:
             model_path=model_path if model_path and model_path.is_dir() else None,
             model_artifact_hash=expected_model_hash,
         )
+
+    def _step_gate_hook(self, key: str):
+        """Per-step HITL gate, evaluated live from control.json.
+
+        Called by the Agent runner after every formal validation backtest.
+        No-op while step gating is off for the session (it can be toggled
+        mid-fold); when on, holds the session (state=waiting_step_user) until
+        the researcher releases this step, then returns their directive (if
+        any) for injection into the tool observation. Wait time is credited
+        back to the fold deadline by the runner."""
+
+        def hook(step_index: int, summary: dict[str, object]) -> str:
+            control = read_control(self.control_path)
+            if not control.step_gate.get(key):
+                return ""
+            self.status.set(
+                state="waiting_step_user", session_key=key, awaiting_step=int(step_index),
+                step_summary={
+                    name: summary.get(name)
+                    for name in ("result_name", "total_return", "sharpe", "max_drawdown",
+                                 "complete_validation", "probe_note")
+                },
+            )
+            try:
+                while True:
+                    control = read_control(self.control_path)
+                    if control.request == "stop":
+                        raise ExperimentStopped(f"stop requested at step gate {key}#{step_index}")
+                    if not control.step_gate.get(key) or control.step_go.get(key, 0) >= int(step_index):
+                        break
+                    time.sleep(self.poll_seconds)
+            finally:
+                self.status.set(state="running_session", awaiting_step=None, step_summary=None)
+            return control.step_directives.get(f"{key}#{int(step_index)}", "")
+
+        return hook
 
     def _parent_from_step_node(self, node_id: str) -> FrozenArtifact:
         """Build the session parent from a validated step-tree node snapshot."""

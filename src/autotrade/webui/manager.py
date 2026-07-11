@@ -37,7 +37,7 @@ from autotrade.pipelines.hitl_state import (
 
 from .registry import ACTIVE_STATES, experiment_state, resolve_experiment_dir
 
-MAX_RUNNING_EXPERIMENTS = 4
+MAX_RUNNING_EXPERIMENTS = 5
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 _TERMINAL_RESUMABLE_STATES = ("stopped", "failed", "interrupted", "created")
 
@@ -246,8 +246,8 @@ class ExperimentManager:
         elif action == "stop":
             control.request = "stop"
         elif action == "set_mode":
-            if mode not in ("auto", "step"):
-                raise ManagerError("set_mode requires mode auto|step")
+            if mode not in ("auto", "manual"):
+                raise ManagerError("set_mode requires mode auto|manual")
             control.mode = mode
         elif action == "approve":
             if not session_key:
@@ -282,6 +282,27 @@ class ExperimentManager:
                 control.gpu_counts[session_key] = count
             else:
                 control.gpu_counts.pop(session_key, None)
+        elif action == "set_step_gate":
+            if not session_key:
+                raise ManagerError("set_step_gate requires session_key")
+            if directive and str(directive).strip() not in ("", "0", "false", "off"):
+                control.step_gate[session_key] = True
+            else:
+                control.step_gate.pop(session_key, None)
+        elif action == "approve_step":
+            # Release the session held at its current step gate; the optional
+            # directive is delivered inside that step's tool observation.
+            if not session_key:
+                raise ManagerError("approve_step requires session_key")
+            status = read_status(hitl_dir / STATUS_NAME)
+            if str(status.get("state")) != "waiting_step_user" or str(status.get("session_key")) != session_key:
+                raise ManagerError("该会话当前没有等待批准的 Step")
+            step_index = int(status.get("awaiting_step") or 0)
+            if step_index <= 0:
+                raise ManagerError("status.json 缺少 awaiting_step")
+            if directive and str(directive).strip():
+                control.step_directives[f"{session_key}#{step_index}"] = str(directive).strip()
+            control.step_go[session_key] = max(int(control.step_go.get(session_key, 0)), step_index)
         elif action == "set_parent_override":
             if not session_key:
                 raise ManagerError("set_parent_override requires session_key")

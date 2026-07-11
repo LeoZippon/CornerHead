@@ -97,8 +97,9 @@ class FakePipeline:
         )
 
     # -- pipeline surface ---------------------------------------------------
-    def run_meta_learning(self, *, epoch_id, parent, previous_taste="", visible_fold=None, directive_override=None):
-        self.calls.append(("meta", epoch_id, previous_taste, directive_override))
+    def run_meta_learning(self, *, epoch_id, parent, previous_taste="", visible_fold=None, directive_override=None,
+                          system_prompt_override=""):
+        self.calls.append(("meta", epoch_id, previous_taste, directive_override, system_prompt_override))
         taste = f"taste-{epoch_id}"
         meta_dir = Path(self.config.experiment_dir) / "meta_learning" / epoch_id
         meta_dir.mkdir(parents=True, exist_ok=True)
@@ -118,7 +119,7 @@ class FakePipeline:
         return parent, taste
 
     def run_fold(self, fold, *, epoch_id, parent, taste_prompt="", fold_directive="",
-                 system_prompt_override="", rerun_id=None, sandbox_gpu_count=None):
+                 system_prompt_override="", rerun_id=None, sandbox_gpu_count=None, step_gate_hook=None):
         self.calls.append(("fold", epoch_id, fold.fold_id, taste_prompt, fold_directive,
                            parent.artifact_id if parent else None, system_prompt_override, rerun_id))
         self.gpu_counts_seen = getattr(self, "gpu_counts_seen", []) + [sandbox_gpu_count]
@@ -269,6 +270,36 @@ class InteractiveRunnerTest(unittest.TestCase):
         self.assertIsNone(fold_calls[0][5])
         self.assertEqual(fold_calls[1][5], f"stepnode_{node_id}")
 
+    def test_step_gate_hook_waits_for_release_and_returns_directive(self) -> None:
+        pipeline = FakePipeline(self.config)
+        key = fold_session_key("epoch_001", "fold_2022Q1")
+        runner = self._runner(pipeline)
+        hook = runner._step_gate_hook(key)
+        # Gate off: immediate no-op.
+        self._control(mode="auto")
+        self.assertEqual(hook(1, {"total_return": 0.01}), "")
+        # Gate on: holds until step_go reaches the step, then hands the directive.
+        self._control(mode="auto", step_gate={key: True})
+
+        def release() -> None:
+            time.sleep(0.15)
+            self._control(mode="auto", step_gate={key: True}, step_go={key: 2},
+                          step_directives={f"{key}#2": "收紧持仓集中度"})
+
+        thread = threading.Thread(target=release)
+        thread.start()
+        try:
+            directive = hook(2, {"total_return": 0.02, "sharpe": 1.0})
+        finally:
+            thread.join()
+        self.assertEqual(directive, "收紧持仓集中度")
+        status = read_status(self.hitl_dir / STATUS_NAME)
+        self.assertEqual(status["state"], "running_session")
+        # Stop request raises out of the gate.
+        self._control(mode="auto", step_gate={key: True}, request="stop")
+        with self.assertRaises(ExperimentStopped):
+            hook(3, {})
+
     def test_parent_override_rejects_failed_node(self) -> None:
         from autotrade.environment.step_tree import StepTree
 
@@ -308,12 +339,13 @@ class InteractiveRunnerTest(unittest.TestCase):
     def test_step_mode_waits_for_approval_and_passes_directives(self) -> None:
         pipeline = FakePipeline(self.config)
         self._control(
-            mode="step",
+            mode="manual",
             approved_sessions=(meta_session_key("epoch_001"),),
             directives={
                 meta_session_key("epoch_001"): "meta directive",
                 fold_session_key("epoch_001", "fold_2022Q1"): "try industry-neutral momentum",
             },
+            prompt_overrides={meta_session_key("epoch_001"): "FULL META SYSTEM PROMPT"},
         )
         runner = self._runner(pipeline)
         result_box: dict[str, object] = {}
@@ -330,9 +362,10 @@ class InteractiveRunnerTest(unittest.TestCase):
             self.fail(f"first fold never reached waiting_user: {read_status(self.hitl_dir / STATUS_NAME)}")
         self.assertEqual([call[0] for call in pipeline.calls], ["meta"])
         self.assertEqual(pipeline.calls[0][3], "meta directive")
+        self.assertEqual(pipeline.calls[0][4], "FULL META SYSTEM PROMPT")
         # Approve everything else.
         self._control(
-            mode="step",
+            mode="manual",
             approved_sessions=(
                 meta_session_key("epoch_001"),
                 fold_session_key("epoch_001", "fold_2022Q1"),
@@ -554,7 +587,8 @@ class ResolveOptionsTest(unittest.TestCase):
         self.assertEqual(config.broker_profile.max_single_name_weight, 0.2)
         # Defaults untouched elsewhere.
         self.assertEqual(config.broker_profile.slippage_bps, 5.0)
-        self.assertEqual(config.backtest_max_seconds_per_decision, 300.0)
+        self.assertEqual(config.backtest_max_seconds_per_decision, 1800.0)
+        self.assertEqual(config.backtest_max_seconds_per_trading_day, 3600.0)
 
     def test_metadata_keys_are_ignored(self) -> None:
         options = resolve_options(
@@ -632,8 +666,10 @@ class ControlFileTest(unittest.TestCase):
             self.assertEqual(state.parent_overrides, {"a": "n1"})
             path.write_text(json.dumps({"mode": "bogus", "request": "bogus"}), encoding="utf-8")
             state = read_control(path)
-            self.assertEqual((state.mode, state.request), ("step", None))
-            self.assertEqual(read_control(Path(tmp) / "missing.json").mode, "step")
+            self.assertEqual((state.mode, state.request), ("manual", None))
+            self.assertEqual(read_control(Path(tmp) / "missing.json").mode, "manual")
+            path.write_text(json.dumps({"mode": "step"}), encoding="utf-8")
+            self.assertEqual(read_control(path).mode, "manual")
 
 
 class FoldAnalysisTest(unittest.TestCase):

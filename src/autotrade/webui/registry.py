@@ -69,7 +69,7 @@ def clamped_trading_days(repo_root: Path) -> list[str] | None:
     except Exception:  # noqa: BLE001 - schema must stay served without a calendar
         return None
 
-ACTIVE_STATES = ("starting", "running_session", "waiting_user", "paused")
+ACTIVE_STATES = ("starting", "running_session", "waiting_user", "waiting_step_user", "paused")
 # Manager-written stub state between spawn and the worker's first status write
 # (interpreter start + imports take seconds). Stale = the worker never came up.
 LAUNCH_GRACE_SECONDS = 180.0

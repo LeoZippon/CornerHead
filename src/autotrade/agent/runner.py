@@ -138,9 +138,13 @@ class AgentSessionRunner:
         self.compactor = ContextCompactor(compact_proxy, config.context_compaction) if compact_proxy is not None else None
         experiment_facts = self._experiment_facts()
         if mode == "meta_learning":
-            self.system_prompt = build_meta_learning_prompt(
-                experiment_directive=meta_learning_directive,
-                experiment_facts=experiment_facts,
+            self.system_prompt = (
+                system_prompt_override
+                if system_prompt_override.strip()
+                else build_meta_learning_prompt(
+                    experiment_directive=meta_learning_directive,
+                    experiment_facts=experiment_facts,
+                )
             )
         else:
             prompt_kwargs: dict[str, object] = {
@@ -470,7 +474,21 @@ class AgentSessionRunner:
         finally:
             # Exclude this independently-timed backtest from the reasoning deadline.
             self._excluded_backtest_seconds += time.monotonic() - started
-        return {"observation": "backtest", **result}
+        observation = {"observation": "backtest", **result}
+        # Step-level HITL: after a formal (non-probe) validation the researcher
+        # may hold the session at this step and inject guidance. The wait is
+        # credited back to the deadline like backtest wall-time; the directive
+        # reaches the model inside this tool observation, clearly labelled.
+        hook = self.ctx.extra.get("step_gate_hook")
+        if hook is not None and not (args or {}).get("replay_window"):
+            gate_started = time.monotonic()
+            directive = hook(self._backtest_count, dict(result))
+            self._excluded_backtest_seconds += time.monotonic() - gate_started
+            if directive and str(directive).strip():
+                observation["researcher_step_directive"] = (
+                    "研究者 Step 级指令（用户注入的待检验假设，不放宽任何硬约束）：" + str(directive).strip()
+                )
+        return observation
 
     def _do_finish_fold(self, args: dict[str, object]) -> dict[str, object]:
         return {"observation": "finish_fold", **self.finish_fold.run()}
