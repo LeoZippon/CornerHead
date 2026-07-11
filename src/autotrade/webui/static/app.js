@@ -335,8 +335,12 @@ function equityChart(payload, { width = 680, height = 240, ddH = 90, mini = fals
   const dates = [...new Set(seriesList.flatMap((s) => s.dates))].sort();
   if (mini) ddH = 0;
   const showDD = ddH > 0;
-  const padL = mini ? 44 : 52, padR = 12, padT = 8, padB = mini ? 26 : 32, gap = showDD ? 18 : 0;
-  const totalH = height + (showDD ? ddH + gap : 0);
+  const padL = mini ? 44 : 52, padR = 12, padT = 8, gap = showDD ? 16 : 0;
+  // With a drawdown subplot the shared date labels sit BELOW it, so the main
+  // plot needs only a slim bottom pad; standalone charts keep the label band.
+  const padB = showDD ? 12 : (mini ? 26 : 32);
+  const labelBand = showDD ? 24 : 0;
+  const totalH = height + (showDD ? ddH + gap : 0) + labelBand;
   const plotW = width - padL - padR, mainH = height - padT - padB;
   const xOf = (i) => padL + (dates.length === 1 ? plotW / 2 : (i / (dates.length - 1)) * plotW);
   const cums = seriesList.flatMap((s) => [...s.cum.values()]);
@@ -358,8 +362,9 @@ function equityChart(payload, { width = 680, height = 240, ddH = 90, mini = fals
   // x ticks (≤7), year shown on the first tick and on year changes
   const tickEvery = Math.max(1, Math.ceil(dates.length / (mini ? 4 : 7)));
   let prevYear = null;
-  // Date labels sit a clear step below the axis line (padB reserves the room).
-  const tickY = padT + mainH + (mini ? 17 : 20);
+  // Date labels: below the drawdown subplot when present (shared axis at the
+  // figure bottom), otherwise a clear step below the main axis line.
+  const tickY = showDD ? height + gap + ddH + 10 : padT + mainH + (mini ? 17 : 20);
   dates.forEach((d, i) => {
     if (i % tickEvery !== 0 && i !== dates.length - 1) return;
     const withYear = prevYear !== d.slice(0, 4);

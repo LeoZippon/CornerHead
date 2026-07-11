@@ -232,7 +232,8 @@ h4.subsection-title, .panel h4.subsection-title {
 .session-item.phase-head .dot { order: 2; margin-left: auto; }
 .session-item.phase-head .ret { order: 3; }
 
-.control-bar { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+.control-bar { display: flex; gap: 0.7rem; row-gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-top: 0.55rem; }
+.panel > .control-bar:first-child, .control-bar:first-child { margin-top: 0; }
 .control-bar .spacer { flex: 1; }
 .mode-note { font-size: 0.875rem; color: var(--muted); }
 .control-bar select, .zoom-select, .field select {
@@ -263,7 +264,7 @@ textarea.directive {
 .modal.prompt-modal textarea.prompt-editor {
   height: 70vh; min-height: 70vh; font-size: 0.845rem;
 }
-.hint { font-size: 0.875rem; color: var(--muted); margin-top: 0.45rem; }
+.hint { font-size: 0.875rem; color: var(--muted); margin-top: 0.45rem; line-height: 1.55; }
 .hint.warn { color: var(--warn); }
 
 /* live prep indicator */
