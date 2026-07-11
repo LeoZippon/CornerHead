@@ -1,3 +1,10 @@
+2026-07-11 扩容收尾：审计驱动的三轮数据修复 + 全域审计清零（feat/step-tree-rollback，f5ae22e/4d1e6b7/fef1942）
+
+- 审计裁决修复（f5ae22e）：①cron 空转——cn_evening_full 固定子集漏掉全部新 macro/event 数据集（注册表有行、调度不调）→ MACRO_REGIME_DEFAULT_DATASETS +8、--event-datasets +15、reference 强刷 +ths_index/index_basic；②真实回归——竞价 print 覆盖使未成交开盘竞价限价单永久单价化、连续时段永不成交 → 未清算开盘竞价单降级为普通限价单（真实未撮合集合竞价语义；收盘竞价单无后续时段、日终清扫作废）+ 回归测试；③去重/文档 id 冲突/冗余默认清理；terminate 信号竞态防护；ths_daily 补 Agent 可见。
+- 回填揭示的下载器缺陷（4d1e6b7）：month_loop 参数名硬编码 m（broker_recommend 要 month → MacroDataset.month_param）；date_year_by_ts_code 未知数据集静默回落 FX 代码（index_dailybasic 被拿汇率对查询）→ 显式宇宙映射 + 未映射 fail-fast。
+- **审计抓到真实数据丢失**（4d1e6b7 + fef1942）：ths/sw/ci_daily 年度区间拉取被服务端截断在恰 3000/4000 行且忽略 offset 分页 → 新 MacroDataset trade_date 策略逐交易日拉取，清除截断分区重回填（1823 日×3）；竞价回填含 16.6万/34.2万 组内完全重复行（源分页重叠）→ TradeDateDataset.dedup_exact + 1959 分区就地去重 + parquet_sha256 边车刷新。
+- 终态：base/event-flow/board-trading 审计 error=0（含全部新数据集）；macro 新数据集 error=0（存量 error 为既有校准噪声，维持 warn-only 方针）；顺带修复存量 index_daily 审计期望按 FX 代码计数的老校准 bug。full suite 615 OK。回填全部完成。parameters_reference 数据集清单行已同步。
+
 2026-07-11 TuShare 全量接口扩容：33 数据集 + 竞价撮合真值 + 终止加固（feat/step-tree-rollback，7 commits）
 
 - 全目录普查（Opus 检查器实测全部候选接口权限/字段/起始覆盖）+ 用户四项裁决（因子库不采、北向冻结跳过、MED 全纳、筹码只要汇总）后分 6 批落地，每批 full suite 613 绿：
