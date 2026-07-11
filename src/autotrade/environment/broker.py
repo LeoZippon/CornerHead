@@ -259,6 +259,9 @@ class MarketData:
         frame["ts_code"] = frame["ts_code"].astype(str)
         self._bars = frame.set_index(["trade_date", "ts_code"]).sort_index()
         self.trade_dates = sorted(frame["trade_date"].unique())
+        # Codes present anywhere in the replay region: orders outside this set
+        # (e.g. screened out of the research universe) reject at submission.
+        self.codes = frozenset(frame["ts_code"].unique())
 
     def bar(self, trade_date: str, ts_code: str) -> pd.Series | None:
         try:
@@ -767,6 +770,19 @@ class SimBroker:
         is_limit = pr_type == prtype.FIX
         if is_limit and not (price and float(price) > 0):
             raise ValueError("prType=11 (指定价) requires a positive price")
+        if str(order_code) not in self.market.codes:
+            # Fail fast instead of letting the order rest all day and void as
+            # day_end_unfilled: the code has NO data in this replay region —
+            # typically screened out of the experiment's research universe.
+            self.reject_submission(
+                ts_code=str(order_code),
+                action=action,
+                reason="code_not_in_universe",
+                amount=volume,
+                submitted_at=submitted_at,
+                order_id=order_id,
+            )
+            return order_id
         shares, amount_reject = self.validate_share_amount(volume, str(order_code))
         if amount_reject is not None:
             self.reject_submission(
@@ -941,12 +957,21 @@ class SimBroker:
                     order.auction_close = False
                 survivors.append(order)
                 continue
+            auction_price = self._auction_print(trade_date, order)
+            if order.is_auction and auction_price == 0.0:
+                # stk_auction explicitly reports no opening-auction trade for
+                # this code. Do not fabricate a fill from the 09:30 bar; the
+                # unmatched order enters continuous trading instead.
+                if not order.auction_close:
+                    order.is_auction = False
+                survivors.append(order)
+                continue
             if order.action == "short" and not order.uptick_checked:
                 # 融券卖出申报价不得低于最新成交价: checked once, when the order first
                 # reaches the exchange (its activation bar). An aggressive limit below
                 # the reference price would have been rejected at 申报.
                 order.uptick_checked = True
-                ref_price = self._auction_print(trade_date, order) or (
+                ref_price = auction_price if auction_price is not None else (
                     _close_price(bar) if order.auction_close else _open_price(bar)
                 )
                 if order.price is not None and ref_price is not None and order.price < ref_price:
@@ -962,7 +987,7 @@ class SimBroker:
                     continue
             price = _limit_fill_price(
                 order, bar, use_close=order.auction_close,
-                ref_override=self._auction_print(trade_date, order),
+                ref_override=auction_price,
             )
             if price is not None:
                 self.execute(
@@ -995,12 +1020,13 @@ class SimBroker:
         self._mark_positions_to_bars(minute_group, at_open=False)
 
     def _auction_print(self, trade_date: object, order: "WorkingOrder") -> float | None:
-        """The day's actual auction price for this order, if it is still an
-        auction order and the replay slot carries the print."""
-        if not order.is_auction:
+        """The day's actual OPENING-auction price for this order, if it is
+        still an auction order and the replay slot carries the print. Closing
+        auctions have no print source (stk_auction covers the open session
+        only) and clear at the final bar close."""
+        if not order.is_auction or order.auction_close:
             return None
-        session = "close" if order.auction_close else "open"
-        prints = self.auction_prints_by_date.get((str(trade_date), session))
+        prints = self.auction_prints_by_date.get((str(trade_date), "open"))
         if not prints:
             return None
         return prints.get(order.ts_code)
@@ -2223,25 +2249,49 @@ def load_shortable_by_date(replay_dir: str | Path) -> dict[str, frozenset[str]]:
 
 
 def load_auction_prints_by_date(replay_dir: str | Path) -> dict[tuple[str, str], dict[str, float]]:
-    """Actual call-auction prints from a replay slot, keyed by (trade_date, session).
+    """Exact opening clearing prices from ``stk_auction`` replay rows.
 
-    Environment-side fill truth for SimBroker's auction matching. Empty when the
-    slot predates the auction domain; the broker then keeps the bar-based
-    approximation — matching that slot's build-time world."""
+    Pre-coverage or missing rows retain the 09:30 bar-open fallback. Closing
+    auctions always clear against the final bar's official close and therefore
+    need no separate source table.
+    """
     path = Path(replay_dir) / "auction.parquet"
     if not path.exists():
         return {}
     prints = pd.read_parquet(path)
     if prints.empty:
         return {}
+    required = {"trade_date", "session", "ts_code", "price"}
+    missing = sorted(required.difference(prints.columns))
+    if missing:
+        raise ValueError(f"auction.parquet missing required columns: {missing}")
+    key_columns = ["trade_date", "session", "ts_code"]
+    duplicate_mask = prints.duplicated(key_columns, keep=False)
+    if duplicate_mask.any():
+        sample = prints.loc[duplicate_mask, key_columns].head(5).to_dict("records")
+        raise ValueError(f"auction.parquet has duplicate clearing-price keys: {sample}")
     grouped: dict[tuple[str, str], dict[str, float]] = {}
     for row in prints.to_dict("records"):
-        price = row.get("vwap")
-        if price is None or pd.isna(price):
-            price = row.get("close")
-        if price is None or pd.isna(price):
-            continue
-        key = (str(row.get("trade_date") or ""), str(row.get("session") or ""))
+        session = str(row.get("session") or "")
+        if session != "open":
+            raise ValueError(f"auction.parquet has invalid session: {session!r}")
+        price = row.get("price")
+        volume = pd.to_numeric(row.get("vol"), errors="coerce")
+        amount = pd.to_numeric(row.get("amount"), errors="coerce")
+        if price is None or pd.isna(price) or not math.isfinite(float(price)) or float(price) <= 0:
+            if pd.notna(volume) and pd.notna(amount) and float(volume) > 0 and float(amount) > 0:
+                price = float(amount) / float(volume)
+            elif (pd.isna(volume) or float(volume) == 0) and (pd.isna(amount) or float(amount) == 0):
+                # Explicit source row with no matched opening-auction trade.
+                # Zero is an internal sentinel consumed before fill pricing.
+                price = 0.0
+            else:
+                raise ValueError(
+                    f"auction.parquet has inconsistent opening result for "
+                    f"{row.get('trade_date')}/{row.get('ts_code')}: "
+                    f"price={price!r}, vol={volume!r}, amount={amount!r}"
+                )
+        key = (str(row.get("trade_date") or ""), session)
         grouped.setdefault(key, {})[str(row.get("ts_code") or "")] = float(price)
     return grouped
 

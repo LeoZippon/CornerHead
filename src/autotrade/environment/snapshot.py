@@ -1033,7 +1033,14 @@ class SnapshotBuilder:
                 keep = keep[close.reindex(keep.index) >= config.screen_min_price]
             if config.screen_max_price is not None:
                 keep = keep[close.reindex(keep.index) <= config.screen_max_price]
-        return frozenset(keep["ts_code"].astype(str))
+        screened = frozenset(keep["ts_code"].astype(str))
+        if not screened:
+            raise ValueError(
+                "universe screening left ZERO eligible codes at the decision anchor - "
+                "loosen the screen_* configuration (this would otherwise surface later "
+                "as an empty replay region)"
+            )
+        return screened
 
     @staticmethod
     def _apply_screen(frame: pd.DataFrame, allowed: frozenset[str] | None) -> pd.DataFrame:

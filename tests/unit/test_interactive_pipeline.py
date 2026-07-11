@@ -270,6 +270,20 @@ class InteractiveRunnerTest(unittest.TestCase):
         self.assertIsNone(fold_calls[0][5])
         self.assertEqual(fold_calls[1][5], f"stepnode_{node_id}")
 
+    def test_step_mode_defaults_the_gate_on_and_respects_override(self) -> None:
+        pipeline = FakePipeline(self.config)
+        key = fold_session_key("epoch_001", "fold_2022Q1")
+        runner = self._runner(pipeline)
+        hook = runner._step_gate_hook(key)
+        # mode="step": gate defaults ON -> hook holds until released.
+        self._control(mode="step", step_go={key: 1})
+        self.assertEqual(hook(1, {"total_return": 0.01}), "")
+        # Explicit per-session OFF overrides the mode default.
+        self._control(mode="step", step_gate={key: False})
+        self.assertEqual(hook(2, {"total_return": 0.01}), "")
+        status = read_status(self.hitl_dir / STATUS_NAME)
+        self.assertNotEqual(status.get("state"), "waiting_step_user")
+
     def test_step_gate_hook_waits_for_release_and_returns_directive(self) -> None:
         pipeline = FakePipeline(self.config)
         key = fold_session_key("epoch_001", "fold_2022Q1")
@@ -668,8 +682,9 @@ class ControlFileTest(unittest.TestCase):
             state = read_control(path)
             self.assertEqual((state.mode, state.request), ("manual", None))
             self.assertEqual(read_control(Path(tmp) / "missing.json").mode, "manual")
+            # "step" is the first-class per-step approval tier, never downgraded.
             path.write_text(json.dumps({"mode": "step"}), encoding="utf-8")
-            self.assertEqual(read_control(path).mode, "manual")
+            self.assertEqual(read_control(path).mode, "step")
 
 
 class FoldAnalysisTest(unittest.TestCase):

@@ -16,6 +16,8 @@ from typing import AsyncIterator
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, STATUS_NAME, read_status, status_pid_alive
 
 DEFAULT_PAGE_BYTES = 512 * 1024
+DEFAULT_TAIL_EVENTS = 200
+MAX_TAIL_BYTES = 4 * 1024 * 1024
 STREAM_POLL_SECONDS = 1.0
 STREAM_IDLE_HEARTBEAT_EVERY = 15
 
@@ -61,6 +63,58 @@ def read_trace_page(path: Path, *, offset: int = 0, max_bytes: int = DEFAULT_PAG
     return {"events": events, "next_offset": next_offset, "eof": next_offset >= size}
 
 
+def read_trace_tail(
+    path: Path,
+    *,
+    max_events: int = DEFAULT_TAIL_EVENTS,
+    max_bytes: int = MAX_TAIL_BYTES,
+) -> dict[str, object]:
+    """Read a bounded event tail and return the offset where live tailing starts."""
+    path = Path(path)
+    size = path.stat().st_size
+    if size == 0:
+        return {"events": [], "next_offset": 0, "eof": True, "history_truncated": False}
+
+    read_size = min(size, max(1, int(max_bytes)))
+    start = size - read_size
+    with path.open("rb") as handle:
+        handle.seek(start)
+        blob = handle.read(read_size)
+
+    # The first bytes may be the suffix of an oversized JSONL event. Never
+    # parse or expose that fragment; the live stream resumes after the last
+    # complete line returned below.
+    if start:
+        first_newline = blob.find(b"\n")
+        if first_newline < 0:
+            return {"events": [], "next_offset": size, "eof": True, "history_truncated": True}
+        start += first_newline + 1
+        blob = blob[first_newline + 1 :]
+
+    complete_bytes = blob.rfind(b"\n") + 1
+    complete = blob[:complete_bytes]
+    lines = complete.splitlines(keepends=True)
+    selected = lines[-max(1, int(max_events)) :]
+    selected_start = start + sum(len(line) for line in lines[: len(lines) - len(selected)])
+    events: list[dict[str, object]] = []
+    for raw in selected:
+        text = raw.decode("utf-8", errors="replace").strip()
+        if not text:
+            continue
+        try:
+            event = json.loads(text)
+            events.append(event if isinstance(event, dict) else {"raw": text})
+        except json.JSONDecodeError:
+            events.append({"raw": text})
+    next_offset = start + complete_bytes
+    return {
+        "events": events,
+        "next_offset": next_offset,
+        "eof": next_offset >= size,
+        "history_truncated": selected_start > 0,
+    }
+
+
 # Incremental aggregates per trace path: the live panel polls every 5 s while
 # the (append-only) trace grows into the megabytes; re-reading the whole file
 # each poll is O(size). Keyed by resolved path; value carries the byte offset
@@ -83,13 +137,15 @@ def trace_stats(path: Path) -> dict[str, object]:
     cached = _STATS_CACHE.get(key)
     if cached is None or size < int(cached["offset"]):  # rewritten/truncated: rescan
         cached = {"offset": 0, "counts": {}, "backtest_wall": 0.0, "llm_tokens": 0,
-                  "prompt_tokens": 0, "completion_tokens": 0, "last_ts": None}
+                  "prompt_tokens": 0, "completion_tokens": 0, "last_ts": None,
+                  "active_backtest_started_at": None}
     counts: dict[str, int] = dict(cached["counts"])
     backtest_wall = float(cached["backtest_wall"])
     llm_tokens = int(cached["llm_tokens"])
     prompt_tokens = int(cached["prompt_tokens"])
     completion_tokens = int(cached["completion_tokens"])
     last_ts: str | None = cached["last_ts"]
+    active_backtest_started_at: str | None = cached.get("active_backtest_started_at")
     offset = int(cached["offset"])
     with path.open("rb") as handle:
         handle.seek(offset)
@@ -108,9 +164,19 @@ def trace_stats(path: Path) -> dict[str, object]:
         kind = str(event.get("event_type") or "event")
         counts[kind] = counts.get(kind, 0) + 1
         last_ts = str(event.get("ts") or last_ts or "")
-        if kind == "backtest":
+        if kind == "backtest_start":
+            active_backtest_started_at = str(event.get("ts") or event.get("started_at") or "") or None
+        elif kind == "backtest":
             try:
                 backtest_wall += float(event.get("replay_wall_seconds") or 0.0)
+            except (TypeError, ValueError):
+                pass
+            active_backtest_started_at = None
+        elif kind == "step_gate":
+            # Step-gate holds are deadline-credited like backtest wall-time;
+            # counting them keeps the console countdown truthful during holds.
+            try:
+                backtest_wall += float(event.get("waited_seconds") or 0.0)
             except (TypeError, ValueError):
                 pass
         elif kind == "llm_call":
@@ -127,6 +193,7 @@ def trace_stats(path: Path) -> dict[str, object]:
     _STATS_CACHE[key] = {"offset": offset + tail, "counts": dict(counts), "backtest_wall": backtest_wall,
                          "llm_tokens": llm_tokens, "prompt_tokens": prompt_tokens,
                          "completion_tokens": completion_tokens, "last_ts": last_ts}
+    _STATS_CACHE[key]["active_backtest_started_at"] = active_backtest_started_at
     return {
         "counts": counts,
         "total_events": sum(counts.values()),
@@ -134,7 +201,8 @@ def trace_stats(path: Path) -> dict[str, object]:
         "llm_total_tokens": llm_tokens,
         "llm_prompt_tokens": prompt_tokens,
         "llm_completion_tokens": completion_tokens,
-        "in_backtest": counts.get("backtest_start", 0) > counts.get("backtest", 0),
+        "in_backtest": active_backtest_started_at is not None,
+        "active_backtest_started_at": active_backtest_started_at,
         "last_event_ts": last_ts,
         "trace_bytes": size,
     }

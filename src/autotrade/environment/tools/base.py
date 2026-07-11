@@ -18,6 +18,15 @@ PHASE_TRAIN_VALID = "train_valid"
 PHASE_FROZEN = "frozen"
 
 
+class SessionInterrupt(Exception):
+    """Control-flow signal (researcher stop at a gate): the session must abort.
+
+    The Agent runner's per-action catch-all converts unexpected tool failures
+    into error observations so an action can never kill the fold — this class
+    is the deliberate exception: it re-raises through the dispatch so the
+    worker's session loop can honor the stop immediately."""
+
+
 class ToolError(RuntimeError):
     """Explicit, agent-visible tool failure with a fixable reason."""
 

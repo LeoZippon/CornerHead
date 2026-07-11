@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from autotrade.environment.broker import BrokerProfile, MarketData, SimBroker, optype, prtype
+from autotrade.environment.broker import (
+    BrokerProfile,
+    MarketData,
+    SimBroker,
+    load_auction_prints_by_date,
+    optype,
+    prtype,
+)
 from autotrade.environment.main_ctx_engine import BacktestError, MainPolicyRunner, run_main_ctx_replay
 from autotrade.environment.replay_stats import ReplayResult, compute_return_stats
 from autotrade.environment.sandbox import hide_snapshot_slots_from_agent
@@ -1097,32 +1104,89 @@ class FillRealismTest(unittest.TestCase):
         # With the day's actual call-auction print in the replay slot, auction
         # orders clear at the print, not the bar open/close approximation.
         broker = self.make_broker()
-        broker.auction_prints_by_date = {
-            ("20220104", "open"): {"000001.SZ": 10.07},
-            ("20220104", "close"): {"000001.SZ": 10.33},
-        }
+        broker.auction_prints_by_date = {("20220104", "open"): {"000001.SZ": 10.07}}
         broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 1000, is_auction=True)
         broker.match_bar("20220104", "09:30", self.bar_group(10.0, 10.1, 9.9, 10.05))
         fill = next(e for e in broker.events if e["event_type"] == "order_filled")
         self.assertAlmostEqual(fill["price"], 10.07)  # print, slippage-free
         self.assertEqual(fill["price_label"], "auction")
-        # Close auction: a buy limit below the print rests (single price), a
-        # marketable one clears exactly at the print.
+        # Close auctions have no print source (stk_auction covers the open
+        # session only): they keep clearing at the final bar CLOSE.
         broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 10.2, 1000,
                          is_auction=True, auction_close=True)
         broker.match_bar("20220104", "15:00", self.bar_group(10.0, 10.4, 9.0, 10.3))
-        self.assertEqual(len(broker.working_orders()), 1)  # 10.2 < print 10.33
+        self.assertEqual(len(broker.working_orders()), 1)  # 10.2 < close 10.3
         broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 10.5, 1000,
                          is_auction=True, auction_close=True)
         broker.match_bar("20220104", "15:00", self.bar_group(10.0, 10.4, 9.0, 10.3))
         fills = [e for e in broker.events if e["event_type"] == "order_filled"]
-        self.assertAlmostEqual(fills[-1]["price"], 10.33)
+        self.assertAlmostEqual(fills[-1]["price"], 10.3)
         # A day without prints keeps the bar-based semantics.
         broker2 = self.make_broker()
         broker2.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 1000, is_auction=True)
         broker2.match_bar("20220104", "09:30", self.bar_group(10.0, 10.1, 9.9, 10.05))
         fill2 = next(e for e in broker2.events if e["event_type"] == "order_filled")
         self.assertAlmostEqual(fill2["price"], 10.0)  # bar open
+
+    def test_auction_loader_uses_stk_auction_price(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            replay = Path(tmp)
+            pd.DataFrame([
+                {"trade_date": "20220104", "session": "open", "ts_code": "000001.SZ",
+                 "price": 10.0, "vol": 1000, "amount": 10000},
+            ]).to_parquet(replay / "auction.parquet", index=False)
+
+            prints = load_auction_prints_by_date(replay)
+
+            self.assertEqual(prints[("20220104", "open")]["000001.SZ"], 10.0)
+
+    def test_auction_loader_recovers_missing_price_and_preserves_no_trade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            replay = Path(tmp)
+            pd.DataFrame([
+                {"trade_date": "20220104", "session": "open", "ts_code": "000001.SZ",
+                 "price": None, "vol": 1000, "amount": 10000},
+                {"trade_date": "20220104", "session": "open", "ts_code": "000002.SZ",
+                 "price": None, "vol": 0, "amount": 0},
+            ]).to_parquet(replay / "auction.parquet", index=False)
+
+            prints = load_auction_prints_by_date(replay)
+
+            self.assertEqual(prints[("20220104", "open")]["000001.SZ"], 10.0)
+            self.assertEqual(prints[("20220104", "open")]["000002.SZ"], 0.0)
+
+    def test_explicit_no_auction_trade_rolls_order_to_continuous_session(self):
+        broker = self.make_broker()
+        broker.auction_prints_by_date = {("20220104", "open"): {"000001.SZ": 0.0}}
+        broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 1000, is_auction=True)
+
+        broker.match_bar("20220104", "09:30", self.bar_group(10.0, 10.1, 9.9, 10.05))
+        self.assertEqual(broker.position_quantity("000001.SZ"), 0)
+        broker.match_bar("20220104", "09:31", self.bar_group(10.1, 10.2, 10.0, 10.15))
+
+        fill = next(e for e in broker.events if e["event_type"] == "order_filled")
+        self.assertEqual(fill["price_label"], "minute:09:31")
+
+    def test_auction_loader_rejects_duplicate_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            replay = Path(tmp)
+            row = {"trade_date": "20220104", "session": "open", "ts_code": "000001.SZ",
+                   "price": 10.0}
+            pd.DataFrame([row, row]).to_parquet(replay / "auction.parquet", index=False)
+
+            with self.assertRaisesRegex(ValueError, "duplicate clearing-price keys"):
+                load_auction_prints_by_date(replay)
+
+    def test_out_of_universe_order_rejects_at_submission(self):
+        # A code with no data anywhere in the replay region (e.g. screened out
+        # of the research universe) must fail fast, not rest all day and void
+        # as day_end_unfilled.
+        broker = self.make_broker()
+        broker.passorder(optype.STOCK_BUY, 1101, "", "999999.SZ", prtype.PEER, 0, 1000)
+        order = next(o for o in broker.orders if o.ts_code == "999999.SZ")
+        self.assertEqual(order.status, "rejected")
+        self.assertEqual(order.reject_reason, "code_not_in_universe")
+        self.assertEqual(len(broker.working_orders()), 0)
 
     def test_unfilled_auction_limit_degrades_to_continuous_order(self):
         # A limit auction order that does not clear at the single price rolls

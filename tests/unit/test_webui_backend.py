@@ -584,6 +584,61 @@ class WebuiBackendTest(unittest.TestCase):
             proc.kill()
             proc.wait()
 
+    def test_rerun_and_rollback_reset_step_gate_state(self) -> None:
+        # Seed per-step state for both folds, then exercise both cleanup paths.
+        self.client.post("/api/experiments/exp_hitl/control",
+                         json={"action": "set_step_gate", "session_key": "epoch_001/fold_2022Q2", "directive": "1"})
+        write_json_atomic(
+            self.experiments_root / "exp_hitl" / "hitl" / "status.json",
+            {"pid": 999_999_999, "state": "waiting_step_user",
+             "session_key": "epoch_001/fold_2022Q2", "awaiting_step": 2},
+        )
+        self.client.post("/api/experiments/exp_hitl/control",
+                         json={"action": "approve_step", "session_key": "epoch_001/fold_2022Q2", "directive": "旧指令"})
+        write_json_atomic(self.experiments_root / "exp_hitl" / "hitl" / "status.json",
+                          {"pid": 999_999_999, "state": "stopped"})
+        # rerun of the latest recorded fold (Q1) clears ITS step state only —
+        # seed Q1 state directly via the control file.
+        from autotrade.pipelines.hitl_state import read_control, write_control as wc, CONTROL_NAME
+        control_path = self.experiments_root / "exp_hitl" / "hitl" / CONTROL_NAME
+        control = read_control(control_path)
+        control.step_go["epoch_001/fold_2022Q1"] = 5
+        control.step_directives["epoch_001/fold_2022Q1#5"] = "stale"
+        wc(control_path, control)
+        with patch.object(ExperimentManager, "start_worker", return_value={"spawned_pid": 7}):
+            rerun = self.client.post("/api/experiments/exp_hitl/control",
+                                     json={"action": "rerun_fold", "session_key": "epoch_001/fold_2022Q1"})
+        self.assertEqual(rerun.status_code, 200, rerun.text)
+        control = read_control(control_path)
+        self.assertNotIn("epoch_001/fold_2022Q1", control.step_go)
+        self.assertNotIn("epoch_001/fold_2022Q1#5", control.step_directives)
+        # Q2's state is untouched by Q1's rerun...
+        self.assertEqual(control.step_go.get("epoch_001/fold_2022Q2"), 2)
+        # ...and dropped by a rollback to Q1 (Q2 has a ledger record? give it one).
+        experiment_dir = self.experiments_root / "exp_hitl"
+        q2_dir = experiment_dir / "strategy_artifacts" / "epoch_001" / "strategy_epoch_001_fold_2022Q2x"
+        q2_dir.mkdir(parents=True)
+        (q2_dir / "main.py").write_text("def main(ctx):\n    return 2\n", encoding="utf-8")
+        ledger = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
+        with ledger.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "record_type": "fold", "experiment_id": "exp_hitl", "epoch_id": "epoch_001",
+                "fold_id": "fold_2022Q2", "run_id": "run_002", "fold_status": "frozen",
+                "frozen_strategy_artifact_id": "strategy_epoch_001_fold_2022Q2x",
+                "frozen_strategy_artifact_hash": artifact_hash(q2_dir),
+                "frozen_strategy_artifact_path": str(q2_dir),
+                "frozen_model_artifact_path": None,
+                "validation_result": {"total_return": 0.02}, "test_result": {"total_return": 0.01},
+            }) + "\n")
+        with patch.object(ExperimentManager, "start_worker", return_value={"spawned_pid": 8}):
+            rollback = self.client.post("/api/experiments/exp_hitl/control",
+                                        json={"action": "rollback_fold", "session_key": "epoch_001/fold_2022Q1"})
+        self.assertEqual(rollback.status_code, 200, rollback.text)
+        control = read_control(control_path)
+        self.assertNotIn("epoch_001/fold_2022Q2", control.step_gate)
+        self.assertNotIn("epoch_001/fold_2022Q2", control.step_go)
+        self.assertFalse([k for k in control.step_directives if k.startswith("epoch_001/fold_2022Q2#")])
+
     def test_step_gate_controls(self) -> None:
         on = self.client.post(
             "/api/experiments/exp_hitl/control",

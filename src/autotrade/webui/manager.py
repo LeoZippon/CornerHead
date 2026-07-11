@@ -348,8 +348,14 @@ class ExperimentManager:
             if state.get("worker_alive"):
                 raise ManagerError("先停止运行中的 worker（停止/强制终止）再重跑该 Fold")
             control.rerun_sessions[session_key] = uuid.uuid4().hex[:12]
-            # Step-mode gating: the re-run must be re-approved (prompt edits land first).
+            # The re-run must be re-approved (prompt edits land first) and its
+            # step gating starts afresh: stale step_go would auto-release the
+            # first N step holds, stale per-step directives would replay.
             control.approved_sessions = tuple(k for k in control.approved_sessions if k != session_key)
+            control.step_go.pop(session_key, None)
+            for key in list(control.step_directives):
+                if key.split("#", 1)[0] == session_key:
+                    control.step_directives.pop(key, None)
             control.request = None
             write_control(control_path, control)
             return {"control": control.to_record(), **self.start_worker(experiment_id)}
@@ -496,6 +502,16 @@ class ExperimentManager:
         for key in list(control.parent_overrides):
             if key in dropped_session_keys:
                 control.parent_overrides.pop(key, None)
+        # Session-scoped inputs of dropped sessions are stale by definition:
+        # directives/prompt overrides describe runs that no longer exist, and
+        # leftover step_go would auto-release the re-run's early step gates.
+        for mapping in (control.directives, control.prompt_overrides, control.step_gate, control.step_go):
+            for key in list(mapping):
+                if key in dropped_session_keys:
+                    mapping.pop(key, None)
+        for key in list(control.step_directives):
+            if key.split("#", 1)[0] in dropped_session_keys:
+                control.step_directives.pop(key, None)
         return {
             "rolled_back_to": session_key,
             "dropped_records": len(dropped_records),

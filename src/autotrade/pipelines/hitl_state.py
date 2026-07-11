@@ -226,9 +226,6 @@ def resolve_options(params: Mapping[str, object], repo_root: Path) -> SimpleName
     merged["meta_learning_env"] = [str(name) for name in (merged.get("meta_learning_env") or ())]
     merged["web_search_engines"] = tuple(str(engine) for engine in (merged.get("web_search_engines") or ()))
     mode = str(merged["initial_control_mode"])
-    if mode == "step":  # Existing experiment params used the old, misleading name.
-        mode = "manual"
-        merged["initial_control_mode"] = mode
     if mode not in CONTROL_MODES:
         raise ValueError(f"initial_control_mode must be one of {CONTROL_MODES}, got {mode!r}")
     try:
@@ -293,8 +290,6 @@ class ControlState:
 def read_control(path: Path) -> ControlState:
     payload = read_json(path)
     mode = str(payload.get("mode") or "manual")
-    if mode == "step":  # Read-only migration for existing control files.
-        mode = "manual"
     if mode not in CONTROL_MODES:
         mode = "manual"
     request = payload.get("request")

@@ -532,6 +532,10 @@ function route() {
 }
 
 function selectSession(key) {
+  // In-experiment switches bypass route(): stop the previous session's live
+  // timers (GPU refresh, analysis re-polls) or they accumulate per visit.
+  for (const timer of liveTimers) clearInterval(timer);
+  liveTimers = [];
   detailView.selectedKey = key;
   const fresh = sessionDetailPanel(detailView.detail, key);
   detailView.rightHost.replaceWith(fresh);
@@ -1222,7 +1226,7 @@ function sessionDetailPanel(detail, selectedKey) {
   }
   const status = detail.status || {};
   const isCurrent = status.session_key === session.key;
-  const running = isCurrent && detail.worker_alive && detail.state === "running_session";
+  const running = isCurrent && detail.worker_alive && (detail.state === "running_session" || detail.state === "waiting_step_user");
   const waiting = isCurrent && detail.state === "waiting_user";
   const done = Boolean(session.record || (session.records || []).length);
 
@@ -1309,7 +1313,7 @@ function directivePanel(detail, session, waiting) {
       buttons.append(el("span", { class: "badge state-waiting_user" }, "已覆盖系统提示词"));
     }
   }
-  if ((detail.control || {}).mode === "manual" && !approved) {
+  if ((detail.control || {}).mode !== "auto" && !approved) {
     buttons.append(el("button", {
       class: "btn primary",
       onclick: () => send({ action: "approve", session_key: session.key, directive: textarea.value }, "已批准，会话即将启动"),
@@ -1460,7 +1464,7 @@ async function openPromptPreview(detail, session, directive, { approved, waiting
     } catch (error) { toast(`预览失败：${error.message}`, true); return; }
   }
   const footer = [el("button", { class: "btn", onclick: closeModal }, "关闭")];
-  if ((detail.control || {}).mode === "manual" && !approved) {
+  if ((detail.control || {}).mode !== "auto" && !approved) {
     footer.push(el("button", {
       class: "btn primary",
       onclick: () => {
@@ -2193,8 +2197,13 @@ function foldResultPanel(detail, session) {
   const panel = el("div", { class: "panel" },
     el("div", { class: "control-bar" },
       el("h4", { style: "margin:0" }, `Fold 结果 — ${session.fold_id || record.fold_id}`),
-      el("span", { class: `badge state-${record.fold_status === "frozen" ? "completed" : "stopped"}` },
-        statusLabels[record.fold_status] || record.fold_status || "—"),
+      el("span", {
+        class: `badge state-${record.fold_status !== "frozen" ? "stopped"
+          : (record.accept_warnings || []).length ? "waiting_user" : "completed"}`,
+      },
+        record.fold_status === "frozen" && (record.accept_warnings || []).length
+          ? "已冻结（有验收警告）"
+          : statusLabels[record.fold_status] || record.fold_status || "—"),
       record.finish_reason ? el("span", { class: "mode-note" }, `结束原因 ${record.finish_reason}`) : null,
     ),
   );

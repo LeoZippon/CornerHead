@@ -36,6 +36,7 @@ from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 from autotrade.environment.snapshot import SnapshotConfig
 from autotrade.environment.step_tree import StepTree
+from autotrade.environment.tools.base import SessionInterrupt
 
 from .config import ExperimentConfig, FrozenArtifact
 from .folds import build_fold_schedule, heldout_periods
@@ -61,8 +62,12 @@ from .hitl_state import (
     write_control,
 )
 
-class ExperimentStopped(Exception):
-    """Raised at a gate when the controller requested a durable stop."""
+class ExperimentStopped(SessionInterrupt):
+    """Raised at a gate when the controller requested a durable stop.
+
+    Subclasses SessionInterrupt so a stop issued while a fold is held at a
+    step gate re-raises through the Agent runner's tool dispatch instead of
+    being swallowed into an error observation."""
 
 
 def build_config_from_options(options: SimpleNamespace, *, repo_root: Path) -> ExperimentConfig:

@@ -35,7 +35,7 @@ from autotrade.environment.tools import (
     ToolError,
 )
 from autotrade.environment.tools.artifact_io import ArtifactIOTool
-from autotrade.environment.tools.base import ActionField, ActionSpec, ToolSchemaError
+from autotrade.environment.tools.base import ActionField, ActionSpec, SessionInterrupt, ToolSchemaError
 from autotrade.environment.tools.web_search import META_SEARCH_PERSPECTIVES, build_web_search_spec
 from autotrade.environment.web_fetch import WebFetchError
 from autotrade.environment.web_search import WebSearchError, WebSearchProvider
@@ -481,9 +481,20 @@ class AgentSessionRunner:
         # reaches the model inside this tool observation, clearly labelled.
         hook = self.ctx.extra.get("step_gate_hook")
         if hook is not None and not (args or {}).get("replay_window"):
+            # Gate steps are numbered by SUCCESSFUL formal validations only, so
+            # the index the researcher approves matches the step-tree valid_NNN
+            # numbering (probes and failed attempts don't advance it).
+            self._gated_step_count = getattr(self, "_gated_step_count", 0) + 1
             gate_started = time.monotonic()
-            directive = hook(self._backtest_count, dict(result))
-            self._excluded_backtest_seconds += time.monotonic() - gate_started
+            directive = hook(self._gated_step_count, dict(result))
+            waited_seconds = time.monotonic() - gate_started
+            self._excluded_backtest_seconds += waited_seconds
+            if waited_seconds >= 1.0:
+                self.ctx.trace.emit(
+                    "step_gate",
+                    {"step": self._gated_step_count, "waited_seconds": round(waited_seconds, 1)},
+                    step_id=self.ctx.current_step_id,
+                )
             if directive and str(directive).strip():
                 observation["researcher_step_directive"] = (
                     "研究者 Step 级指令（用户注入的待检验假设，不放宽任何硬约束）：" + str(directive).strip()
@@ -791,6 +802,8 @@ class AgentSessionRunner:
             return {"observation": "error", "error": f"unknown action: {action!r}"}
         try:
             return handler(args)
+        except SessionInterrupt:
+            raise  # researcher stop at a gate: abort the session, never an observation
         except ToolError as exc:
             return _tool_error_observation(action, exc)
         except (WebSearchError, WebFetchError) as exc:

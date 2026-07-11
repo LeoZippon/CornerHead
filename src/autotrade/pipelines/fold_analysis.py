@@ -40,6 +40,7 @@ _RECORD_FIELDS = (
     "fold_status",
     "finish_reason",
     "accept_reasons",
+    "accept_warnings",
     "selected_step_id",
     "steps",
     "validation_result",
