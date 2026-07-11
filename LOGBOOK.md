@@ -1,3 +1,9 @@
+2026-07-11 控制台三处细节跟进（feat/step-tree-rollback）
+
+- transfer 行决策时点改为与普通订单一致的 `HH:MM`（上海时区；日期已有独立列，不再带 `10-09` 前缀）。
+- 暗色模式交易明细滚动容器发白的根因：页面未声明 `color-scheme`，浏览器按浅色渲染原生滚动条轨道——`:root` 增加 `color-scheme: light`、`[data-theme=dark]` 增加 `color-scheme: dark`（滚动条/表单原生控件随主题），滚动容器补 `background: var(--panel)`。
+- GPU 实时检测间隔 15s → 60s（门控页面无需高频刷新）。已同步前端静态资源（nginx no-cache 下普通刷新即生效）。
+
 2026-07-11 前端看不到 UI 更新：nginx 静态资源缓存修复（feat/step-tree-rollback）
 
 - 排查：三个静态文件在前端服务器与本地逐字节一致（sync 一直正常）；根因是 nginx 对 /static/ 与 /（index.html）都不带 Cache-Control，浏览器按启发式缓存长期不重验证 → 旧 app.js/style.css 一直生效。

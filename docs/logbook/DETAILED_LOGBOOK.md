@@ -16936,3 +16936,7 @@ Economics (audit): fold wall ~90-100min dominated by ~16min full validations; ex
 ## 2026-07-11 Frontend appeared stale: nginx static caching fix
 
 Report: no UI changes visible despite repeated syncs. Verified /opt/cornerhead/static/{app.js,style.css,index.html} md5-identical to the repo (sync fine). Root cause: the cornerhead nginx site served /static/ and / with no Cache-Control, so browsers heuristically cached app.js/style.css (and index.html) without revalidating. Fix: add_header Cache-Control "no-cache" on both locations (ETag revalidation keeps repeats 304-cheap); nginx -t + reload; verified both paths now emit the header. Repo template ops/webui/nginx-cornerhead.conf updated to match; original config backed up on the frontend (/root/cornerhead.nginx.bak.<ts>). One hard refresh needed client-side to escape the already-cached copy.
+
+## 2026-07-11 Console detail follow-ups (transfer time, dark scrollbars, GPU interval)
+
+fmtOrderCell now renders ISO decision_time (transfers) as plain Shanghai HH:MM matching engine-written order times (the row already has a date column). Dark-mode "white background" in the orders scroll box was the UA scrollbar: style.css had no color-scheme declaration, so browsers painted light scrollbar tracks; added color-scheme light/dark on the theme roots plus an explicit var(--panel) background on .orders-table-box. GPU allocation panel re-detection interval 15s -> 60s. Static synced (no-cache headers make it visible on a normal reload).

@@ -1318,7 +1318,7 @@ function gpuAllocationRow(detail, session, send) {
   };
   refresh();
   // Live re-detection while the gate is open; dies with navigation (liveTimers).
-  liveTimers.push(setInterval(() => { if (wrap.isConnected) refresh(); }, 15_000));
+  liveTimers.push(setInterval(() => { if (wrap.isConnected) refresh(); }, 60_000));
   return wrap;
 }
 
@@ -2216,7 +2216,14 @@ function loadFoldExtras(experimentId, epochId, foldId) {
 /* Most orders carry HH:MM decision times; transfers record a full ISO
    timestamp — render those as Shanghai HH:MM:SS instead of the raw string. */
 function fmtOrderCell(key, value) {
-  if (key === "decision_time" && typeof value === "string" && value.includes("T")) return fmtTsTime(value);
+  if (key === "decision_time" && typeof value === "string" && value.includes("T")) {
+    const ms = Date.parse(value);
+    if (!Number.isNaN(ms)) {
+      return new Intl.DateTimeFormat("zh-CN", {
+        hour12: false, timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit",
+      }).format(ms);
+    }
+  }
   return value;
 }
 
