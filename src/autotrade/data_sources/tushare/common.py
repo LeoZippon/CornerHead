@@ -437,6 +437,9 @@ class TradeDateDataset:
     start_date: str = "20100101"
     zero_rows_ok: bool = False
     key_columns: tuple[str, ...] = ("trade_date", "ts_code")
+    # Source-side page overlap can repeat identical rows (observed on the
+    # auction endpoints); dropping EXACT duplicates is information-preserving.
+    dedup_exact: bool = False
 
 @dataclass
 class FundamentalDataset:
@@ -1241,11 +1244,13 @@ DAILY_SPECS = {
         api_name="stk_auction_o",
         fields="ts_code,trade_date,close,open,high,low,vol,amount,vwap",
         start_date="20100104",
+        dedup_exact=True,
     ),
     "stk_auction_c": TradeDateDataset(
         api_name="stk_auction_c",
         fields="ts_code,trade_date,close,open,high,low,vol,amount,vwap",
         start_date="20100104",
+        dedup_exact=True,
     ),
     "limit_list_d": TradeDateDataset(
         api_name="limit_list_d",

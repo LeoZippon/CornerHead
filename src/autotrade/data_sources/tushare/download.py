@@ -432,6 +432,8 @@ def download_trade_date_dataset(
         except Exception as exc:
             raise RuntimeError(f"{spec.api_name} trade_date={trade_date} failed: {exc}") from exc
         df = frame(result)
+        if getattr(spec, "dedup_exact", False) and not df.empty:
+            df = df.drop_duplicates().reset_index(drop=True)
         if df.empty and not spec.zero_rows_ok:
             zero_skipped += 1
             print(f"{spec.api_name} trade_date={trade_date} returned zero rows; skipped_write")
