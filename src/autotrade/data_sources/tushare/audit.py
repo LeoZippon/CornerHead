@@ -2017,8 +2017,16 @@ def expected_macro_paths(raw_dir: Path, spec: MacroDataset, start_date: str, end
             for curr_type in currencies
             for year in range(int(start[:4]), int(end_date[:4]) + 1)
         }
+    if spec.strategy == "trade_date":
+        open_dates = load_sse_open_dates(raw_dir, start, end_date)
+        return {raw_dir / spec.api_name / f"trade_date={d}.parquet" for d in open_dates}
     if spec.strategy == "date_year_by_ts_code":
-        codes = selected_index_codes(args) if spec.api_name == "index_global" else selected_fx_codes(args)
+        if spec.api_name == "index_global":
+            codes = selected_index_codes(args)
+        elif spec.api_name in ("index_daily", "index_dailybasic"):
+            codes = selected_cn_index_codes(args)
+        else:
+            codes = selected_fx_codes(args)
         return {
             raw_dir / spec.api_name / f"ts_code={safe_partition_value(ts_code)}" / f"year={year}.parquet"
             for ts_code in codes

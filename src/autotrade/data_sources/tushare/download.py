@@ -475,6 +475,8 @@ def download_macro(args: argparse.Namespace) -> int:
             download_macro_month_once(client, raw_dir, spec, max(retained_start_date, spec.start_date), args.end_date, args.force, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "month_loop":
             download_macro_month_loop(client, raw_dir, spec, start_date, args.end_date, args.force, revision_ledger, allow_empty_revision_overwrite)
+        elif spec.strategy == "trade_date":
+            download_macro_trade_date(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "date_year":
             download_macro_date_year(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "date_year_by_curr_type":
@@ -554,6 +556,57 @@ def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: MacroD
         if index % 24 == 0:
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
+
+def download_macro_trade_date(
+    client: TuShareClient,
+    raw_dir: Path,
+    spec: MacroDataset,
+    start_date: str,
+    end_date: str,
+    force: bool,
+    page_limit: int,
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
+) -> None:
+    """Per-trade-date pulls for daily macro tables whose range endpoints cap the
+    response server-side and ignore offset paging (ths/sw/ci index dailies:
+    year-range pulls silently truncated at 3000/4000 rows)."""
+    trade_dates = [d for d in load_sse_open_dates(raw_dir, start_date, end_date)]
+    dataset_dir = raw_dir / spec.api_name
+    written = 0
+    skipped = 0
+    total_rows = 0
+    for index, trade_date in enumerate(trade_dates, start=1):
+        path = dataset_dir / f"trade_date={trade_date}.parquet"
+        if path.exists() and not force and parquet_rows(path) > 0:
+            skipped += 1
+            continue
+        params = {"trade_date": trade_date}
+        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+        df = augment_macro_frame(frame(result), spec)
+        if df.empty:
+            print(f"{spec.api_name} trade_date={trade_date} returned zero rows; skipped_write")
+            continue
+        meta_params = dict(params)
+        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+        did_write = write_parquet_revision_aware(
+            path,
+            df,
+            api_name=spec.api_name,
+            params=meta_params,
+            fields=list(df.columns),
+            source_hash=result.source_hash,
+            key_columns=list(spec.key_columns),
+            revision_ledger=revision_ledger,
+            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        )
+        if did_write:
+            written += 1
+            total_rows += len(df)
+        if index % 250 == 0:
+            print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows}")
+    print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows}")
+
 
 def download_macro_date_year(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, page_limit: int, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     written = 0
