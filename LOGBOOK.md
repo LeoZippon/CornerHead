@@ -1,3 +1,15 @@
+2026-07-11 WebUI 与端到端流程全面复审 + 修复（feat/step-tree-rollback，bbebfd3）
+
+- 双审计器（WebUI 实测 + 端到端组合设计）复审全部近期特性与在途改动，确认缺陷全部修复，full suite 630 OK：
+  - **step 模式此前完全失效**：模式改名遗留的迁移块在 read_control/resolve_options 把 step→manual 逐次降级（worker 每轮重读即被清），门控默认永远看不到 step；连带发现旧测试断言的是降级语义。迁移块删除，step 为一等模式。
+  - **挂起态 UI 消失**：批准面板与实时 trace 只在 running_session 渲染——恰好在 waiting_step_user 时不见（唯一的 approve_step 按钮无法到达）；会话批准按钮只在 manual 模式出现而 worker 在 step 模式同样门控（修模式后将死锁）。两处判定放宽。
+  - **门控挂起中 stop 被吞**：runner 每动作 catch-all 把 ExperimentStopped 转成 internal tool failure 回喂模型。新增 SessionInterrupt 控制流异常（tools.base），dispatch 先行重抛，ExperimentStopped 继承之。
+  - **rollback/rerun 步态残留**：step_gate/step_go/step_directives（rollback 还有 directives/prompt_overrides）不清理——重跑 Fold 前 N 个门控被旧 step_go 自动放行、旧 Step 指令重放。两路径均清理，配回归测试。
+  - **筛选宇宙外订单静默作废**：全日挂单后 day_end_unfilled 与真实未成交不可区分；现按 code_not_in_universe 在申报时拒绝（MarketData.codes）。
+  - 步序号只计成功正式验证（探针/失败不再使批准序号偏离 step 树 valid_NNN）；≥1s 的挂起写 step_gate trace 事件并计入倒计时回补（挂起中的 Fold 不再显示超期）；fold_analysis 受限投影补 accept_warnings（评审 LLM 此前看不到收益/Sharpe 警告）；警告冻结 Fold 徽标转琥珀色；空筛选集在快照构建时显式报错；_auction_print 对齐 open-only 模型；会话内切换清理实时定时器。
+- 设计提示（未改码）：收益/Sharpe 改警告后走前链条失去了唯一的回归护栏（劣质更新会覆盖更好的父产物并向后传播）——按用户裁决保留警告语义；若需護栏可加可配置的"不劣于父产物才冻结"策略，待用户定夺。审计另确认：等待回补不会误触 wrap-up、approve_step 无丢唤醒、回滚归档/剪枝正确、竞价重构无 schema 失配（注意其为在途改动，broker/common/schedule/audit 需同 commit 落地）。
+- 控制台已同步重启。文档同步：pipeline_design 验收措辞（硬校验=回撤/非有限/完整验证；收益/Sharpe=警告）、parameters_reference 补 screen_* 全组。
+
 2026-07-11 三项 UX 裁决与落地（feat/step-tree-rollback）
 
 - 创建参数弹窗：改为全量展示——显式设置（params.json 实际落盘）在前，其余按创建表单 schema 默认值灰色列出（根因：创建表单只持久化与默认不同的值，弹窗原先只见少数几项），元数据/继承产物单独分节。
