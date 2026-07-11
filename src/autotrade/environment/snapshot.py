@@ -62,6 +62,11 @@ class SnapshotConfig:
         "slb_len_mm",
         "block_trade",
         "stk_holdernumber",
+        "top10_holders",
+        "top10_floatholders",
+        "pledge_detail",
+        "stk_surv",
+        "new_share",
         "stk_holdertrade",
         "repurchase",
         "share_float_complete",
@@ -104,6 +109,7 @@ class SnapshotConfig:
         "daily_info",
         "sz_daily_info",
         "moneyflow_mkt_dc",
+        "broker_recommend",
         "fx_daily",
         # Regime/background additions: repo liquidity, US nominal + real yield
         # curves (risk appetite). cn_schedule deliberately NOT exposed: the
