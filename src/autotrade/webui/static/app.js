@@ -1008,6 +1008,7 @@ async function renderDetailPage(experimentId, selectedKey) {
     ),
   );
   const container = el("div", {});
+  let barHost = null;
   if (detail.params && Object.keys(detail.params).length) {
     head.querySelector("h2").append(el("button", {
       class: "btn small", style: "margin-left:0.4rem",
@@ -1015,7 +1016,10 @@ async function renderDetailPage(experimentId, selectedKey) {
     }, "创建参数"));
   }
   container.append(head);
-  if (detail.kind === "hitl") container.append(controlBar(detail));
+  if (detail.kind === "hitl") {
+    barHost = controlBar(detail);
+    container.append(barHost);
+  }
   if ((detail.fold_returns || []).length) {
     const metrics = detail.metrics || {};
     const sharpe = metrics.mean_test_sharpe;
@@ -1040,11 +1044,12 @@ async function renderDetailPage(experimentId, selectedKey) {
   // Panels read the global detailView (held-out equity/style card): set it
   // BEFORE building them, or the first render of a detail page silently
   // skips those blocks (and could chart the previous experiment's data).
-  detailView = { experimentId, detail, listHost: null, rightHost: null, selectedKey };
+  detailView = { experimentId, detail, listHost: null, rightHost: null, barHost: null, selectedKey };
   const listHost = sessionListPanel(detail, selectedKey);
   const rightHost = sessionDetailPanel(detail, selectedKey);
   detailView.listHost = listHost;
   detailView.rightHost = rightHost;
+  detailView.barHost = barHost;
   layout.append(listHost, rightHost);
   container.append(layout);
   $main.innerHTML = "";
@@ -1070,7 +1075,7 @@ async function openParamsModal(detail) {
   let schemaFields = [];
   try {
     const schema = await api("/api/parameter-schema");
-    schemaFields = Object.values(schema.groups || {}).flat();
+    schemaFields = (schema.groups || []).flatMap((group) => group.fields || []);
   } catch { /* fall back to explicit params only */ }
   const render = (value) => el("code", {}, typeof value === "object" ? JSON.stringify(value) : String(value));
   const explicitRows = [];
@@ -1112,7 +1117,7 @@ function controlBar(detail) {
     try {
       await api(`/api/experiments/${encodeURIComponent(id)}/control`, { method: "POST", body: JSON.stringify(payload) });
       if (note) toast(note);
-      route();
+      refreshDetail();  // in-place: a full route() rebuild flashes the page
     } catch (error) { toast(error.message, true); }
   };
   const bar = el("div", { class: "panel control-bar section-gap" });
@@ -1399,6 +1404,11 @@ async function refreshDetail() {
   try {
     const detail = await api(`/api/experiments/${encodeURIComponent(detailView.experimentId)}`);
     detailView.detail = detail;
+    if (detailView.barHost) {
+      const bar = controlBar(detail);
+      detailView.barHost.replaceWith(bar);
+      detailView.barHost = bar;
+    }
     const list = sessionListPanel(detail, detailView.selectedKey);
     detailView.listHost.replaceWith(list);
     detailView.listHost = list;
@@ -1535,13 +1545,15 @@ function stepGatePanel(detail, session) {
         method: "POST", body: JSON.stringify(payload),
       });
       toast(message);
-      route();
+      refreshDetail();  // in-place: full route() rebuild flashes the page
     } catch (error) { toast(error.message, true); }
   };
   const panel = el("div", { class: "panel section-gap" },
     el("h4", { class: "subsection-title" }, "逐 Step 门控"),
     el("div", { class: "hint" },
-      "开启后，每次正式验证回测完成都会暂停会话等待批准；可在放行时注入 Step 级研究指令（等待时间不消耗 Fold 推理预算）。可随时开关。"),
+      (detail.control || {}).mode === "step"
+        ? "运行模式为「逐 Step 批准」：所有 Fold 默认开启门控，此处仅用于为本 Fold 单独例外（关闭/恢复默认）。"
+        : "为本 Fold 单独开启：每次正式验证回测完成即暂停等待批准，可在放行时注入 Step 级指令（等待不消耗推理预算）。全局默认请用运行模式「逐 Step 批准」。"),
     el("div", { class: "control-bar" },
       el("button", {
         class: enabled ? "btn" : "btn primary",
@@ -1593,7 +1605,7 @@ function liveTracePanel(detail, session) {
     return livePanel.node;
   }
   destroyLivePanel();
-  const panel = el("div", { class: "panel" }, el("h4", {}, `实时 Agent Trace — ${session.key}`));
+  const panel = el("div", { class: "panel section-gap" }, el("h4", {}, `实时 Agent Trace — ${session.key}`));
   const status = detail.status || {};
   const tools = el("div", { class: "trace-tools" });
   const box = el("div", { class: "trace-box" });
