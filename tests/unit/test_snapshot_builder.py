@@ -444,6 +444,50 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(fundamentals["business_key"].tolist(), ["k2"])
             self.assertIn("available_at", fundamentals.columns)
 
+    def test_macro_domain_dedups_overlapping_range_partitions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            events_root = Path(tmp) / "fund_events"
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            write_fundamental_status(status_path)
+            # Legacy end-suffixed range file repeating the SAME rows.
+            duplicate = pd.read_parquet(raw / "cn_gdp" / "range=2020Q1_2021Q4.parquet")
+            write(raw / "cn_gdp" / "range=2020Q1_2021Q2.parquet", duplicate)
+            out = Path(tmp) / "snap"
+            builder = SnapshotBuilder(raw, events_root, status_path)
+            manifest = builder.build_decision_snapshot(DECISION, out, CONFIG)
+
+            macro = pd.read_parquet(out / "macro.parquet")
+            self.assertEqual(list(macro["quarter"]), ["2021Q2"])
+            self.assertEqual(manifest["domains"]["macro"]["duplicate_rows_dropped"], {"cn_gdp": 1})
+
+    def test_raw_generation_recorded_and_guarded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            events_root = Path(tmp) / "fund_events"
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            write_fundamental_status(status_path)
+            generation = {"generation_id": "abc123", "completed_at": "2021-10-08T01:00:00+00:00"}
+            (raw / ".raw_generation.json").write_text(json.dumps(generation), encoding="utf-8")
+            builder = SnapshotBuilder(raw, events_root, status_path)
+
+            manifest = builder.build_decision_snapshot(DECISION, Path(tmp) / "snap", CONFIG)
+            self.assertEqual(manifest["raw_generation"], generation)
+            replay_manifest = builder.build_replay_slot("20211007", "20211011", Path(tmp) / "replay", label="valid", config=CONFIG)
+            self.assertEqual(replay_manifest["raw_generation"], generation)
+
+            # Lake mutating mid-build must fail the build.
+            with self.assertRaisesRegex(RuntimeError, "generation changed"):
+                with builder._raw_lake_guard():
+                    (raw / ".raw_generation.json").write_text(
+                        json.dumps({"generation_id": "def456", "completed_at": "2021-10-08T02:00:00+00:00"}),
+                        encoding="utf-8",
+                    )
+
     def test_replay_slot_builds_corporate_actions_from_dividend_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"

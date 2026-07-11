@@ -13,7 +13,7 @@ from autotrade.environment.features import (
     FundamentalEventsBuilder,
     FundamentalEventsConfig,
     audit_fundamental_events,
-    complete_months_for_date_window,
+    month_aligned_replace_window,
 )
 from autotrade.environment.features.auction import apply_open_auction_correction, market_bucket
 
@@ -137,6 +137,55 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
             )
             self.assertEqual(report["status"], "warning")
 
+    def test_forecast_revision_visible_only_from_its_own_ann_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            forecast_dir = raw / "forecast_vip"
+            forecast_dir.mkdir(parents=True)
+            pd.DataFrame([
+                {
+                    "ts_code": "600157.SH",
+                    "ann_date": "20200110",
+                    "first_ann_date": "20200110",
+                    "end_date": "20191231",
+                    "type": "预增",
+                    "update_flag": "0",
+                },
+                {
+                    "ts_code": "600157.SH",
+                    "ann_date": "20200125",
+                    "first_ann_date": "20200110",
+                    "end_date": "20191231",
+                    "type": "预增",
+                    "update_flag": "1",
+                },
+            ]).to_parquet(forecast_dir / "ann_month=202001.parquet", index=False)
+
+            builder = FundamentalEventsBuilder(raw)
+            config = FundamentalEventsConfig(start_date="20200101", end_date="20200131", datasets=("forecast_vip",))
+            events = builder.build(config).sort_values("available_at").reset_index(drop=True)
+
+            self.assertEqual(list(events["available_at_rule"]), ["source:ann_date", "source:ann_date"])
+            self.assertEqual(
+                list(events["available_at"]),
+                ["2020-01-10T18:00:00+08:00", "2020-01-25T18:00:00+08:00"],
+            )
+
+            output = Path(tmp) / "pit"
+            builder.write_partitioned(events, output)
+            # blank source_hash (fixture has no .meta.json sidecars) keeps this at warning
+            self.assertEqual(audit_fundamental_events(output, config)["status"], "warning")
+
+            # Backdating a revision to first_ann_date is determinate lookahead
+            # and must hard-fail the audit.
+            path = output / "forecast_vip" / "available_month=202001.parquet"
+            tampered = pd.read_parquet(path)
+            tampered.loc[tampered["update_flag"] == "1", "available_at"] = "2020-01-10T18:00:00+08:00"
+            tampered.to_parquet(path, index=False)
+            report = audit_fundamental_events(output, config)
+            self.assertEqual(report["status"], "error")
+            self.assertEqual(report["checks"][-1]["details"]["backdated_available_at_rows"], 1)
+
     def test_fundamental_events_merge_partial_month_and_replace_complete_month(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "pit"
@@ -161,14 +210,17 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
             merged = pd.read_parquet(output / "dividend" / "available_month=202001.parquet")
             self.assertEqual(set(merged["business_key"]), {"old", "new"})
 
-            builder.write_partitioned(update, output, replace_months=complete_months_for_date_window("20200101", "20200131"))
+            aligned_start, replace_months = month_aligned_replace_window("20200115", "20200131")
+            self.assertEqual(aligned_start, "20200101")
+            self.assertEqual(replace_months, {"202001"})
+            builder.write_partitioned(update, output, replace_months=replace_months)
             replaced = pd.read_parquet(output / "dividend" / "available_month=202001.parquet")
             self.assertEqual(set(replaced["business_key"]), {"new"})
 
             builder.write_partitioned(
                 pd.DataFrame(),
                 output,
-                replace_months=complete_months_for_date_window("20200101", "20200131"),
+                replace_months=replace_months,
                 replace_datasets=("dividend",),
             )
             self.assertFalse((output / "dividend" / "available_month=202001.parquet").exists())

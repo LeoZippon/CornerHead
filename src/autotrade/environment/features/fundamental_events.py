@@ -201,6 +201,7 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
         missing_source_path = 0
         bad_source_row_id = 0
         duplicate_keys = 0
+        backdated_available_at = 0
         for path in files:
             expected_dataset = path.parent.name
             df = pd.read_parquet(path)
@@ -225,8 +226,22 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
             bad_source_row_id += int(pd.to_numeric(df["source_row_id"], errors="coerce").isna().sum())
             sidecar_hash_mismatch += int(sum(_source_hash_mismatch(row["source_path"], row["source_hash"]) for row in df.to_dict("records")))
             duplicate_keys += int(df.duplicated(["dataset", "business_key", "available_at"], keep=False).sum())
+            if expected_dataset in {"forecast_vip", "express_vip"} and "ann_date" in df.columns:
+                ann = pd.to_datetime(df["ann_date"].astype(str).str.strip(), format="%Y%m%d", errors="coerce")
+                ann = ann.dt.tz_localize(CN_TZ)
+                # For forecast/express each version's ann_date IS its disclosure
+                # date; available_at before it is determinate lookahead (the
+                # first_ann_date bug class). Statement datasets are exempt:
+                # f_ann_date legitimately precedes ann_date.
+                backdated_available_at += int((parsed < ann).fillna(False).sum())
         total_rows += rows
-        severity = "error" if unparseable or wrong_partition or wrong_dataset or disallowed_rules or outside_window or blank_source_path or wrong_source_path or missing_source_path or bad_source_row_id else "warning" if duplicate_keys or blank_source_hash or sidecar_hash_mismatch else "info"
+        severity = (
+            "error"
+            if unparseable or wrong_partition or wrong_dataset or disallowed_rules or outside_window
+            or blank_source_path or wrong_source_path or missing_source_path or bad_source_row_id
+            or backdated_available_at or sidecar_hash_mismatch
+            else "warning" if duplicate_keys or blank_source_hash else "info"
+        )
         if severity == "error":
             errors += 1
         elif severity == "warning":
@@ -245,6 +260,7 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
                 "disallowed_available_at_rule_rows": disallowed_rules,
                 "blank_source_hash_rows": blank_source_hash,
                 "sidecar_hash_mismatch_rows": sidecar_hash_mismatch,
+                "backdated_available_at_rows": backdated_available_at,
                 "blank_source_path_rows": blank_source_path,
                 "wrong_source_path_rows": wrong_source_path,
                 "missing_source_path_rows": missing_source_path,
@@ -335,7 +351,11 @@ def _available_at_for_row(dataset: str, row: dict[str, object], statement_availa
     if dataset == "fina_indicator_vip":
         return _first_available(row, ("ann_date",), "source:ann_date")
     if dataset in {"forecast_vip", "express_vip"}:
-        return _first_available(row, ("first_ann_date", "ann_date"), "source:first_ann_date_or_ann_date")
+        # Each VERSION becomes visible at its OWN announcement date. Using
+        # first_ann_date backdated revised figures to the first announcement
+        # (a Jan-2026 revision was visible at Aug-2024 in a real snapshot) —
+        # determinate PIT lookahead. first_ann_date stays as a series attribute.
+        return _first_available(row, ("ann_date",), "source:ann_date")
     if dataset == "dividend":
         value = _first_available(row, ("imp_ann_date", "ann_date"), "source:imp_ann_date_or_ann_date")
         if value[0]:
@@ -368,8 +388,6 @@ def _is_allowed_available_at_rule(rule: str) -> bool:
         "source:f_ann_date_or_ann_date",
         "source:f_ann_date_or_ann_date:ann_date",
         "source:ann_date",
-        "source:first_ann_date_or_ann_date",
-        "source:first_ann_date_or_ann_date:ann_date",
         "source:imp_ann_date_or_ann_date",
         "source:imp_ann_date_or_ann_date:ann_date",
         "fallback_joined_statement_available_at",
@@ -391,17 +409,13 @@ def _month_keys_between(start_date: str, end_date: str) -> list[str]:
     return months
 
 
-def complete_months_for_date_window(start_date: str, end_date: str) -> set[str]:
-    start = pd.Timestamp(yyyymmdd(start_date))
-    end = pd.Timestamp(yyyymmdd(end_date))
-    months: set[str] = set()
-    current = pd.Timestamp(year=start.year, month=start.month, day=1)
-    while current <= end:
-        last = current + pd.offsets.MonthEnd(0)
-        if start <= current and end >= last:
-            months.add(current.strftime("%Y%m"))
-        current = current + pd.DateOffset(months=1)
-    return months
+def month_aligned_replace_window(start_date: str, end_date: str) -> tuple[str, set[str]]:
+    """Whole-month build window: start aligned to its month's first day, plus
+    every month key in the window (current month included). Month partitions
+    are then always replaced whole — merging a partial-window build would keep
+    stale rows the raw layer no longer carries."""
+    aligned = f"{yyyymmdd(start_date)[:6]}01"
+    return aligned, set(_month_keys_between(aligned, end_date))
 
 
 def _date_at(value: str, when: time) -> str:

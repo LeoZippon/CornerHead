@@ -660,7 +660,91 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         cpi_calls = [params for api_name, params in client.calls if api_name == "cn_cpi"]
         self.assertEqual(cpi_calls[0]["start_m"], "202001")
-        self.assertTrue((self.raw_dir / "cn_cpi" / "range=202001_202606.parquet").exists())
+        self.assertTrue((self.raw_dir / "cn_cpi" / "range=202001_latest.parquet").exists())
+
+    def test_macro_range_once_prunes_stale_end_suffixed_files(self):
+        stale = self.raw_dir / "cn_cpi" / "range=202001_202605.parquet"
+        pd.DataFrame([{"month": "202001"}]).pipe(
+            lambda df: common.write_parquet(stale, df, api_name="cn_cpi", params={}, fields=list(df.columns), source_hash="old")
+        )
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            tier="macro",
+            start_date="20260504",
+            macro_start_date="20200101",
+            end_date="20260603",
+            datasets=["cn_cpi"],
+            force=True,
+            page_limit=None,
+            revision_ledger=str(self.root / "revision_events.jsonl"),
+            allow_empty_revision_overwrite=False,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+        client = CountingMacroClient()
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
+            self.assertEqual(download.download_macro(args), 0)
+
+        remaining = sorted(path.name for path in (self.raw_dir / "cn_cpi").glob("range=*.parquet"))
+        self.assertEqual(remaining, ["range=202001_latest.parquet"])
+        self.assertFalse(stale.with_suffix(stale.suffix + ".meta.json").exists())
+
+    def test_fundamental_ann_month_windows_pull_full_natural_months(self):
+        windows = download.fundamental_ann_month_windows("20200615", "20200705", {"202004"})
+        self.assertEqual(windows, [
+            ("20200401", "20200430", "202004"),
+            ("20200601", "20200630", "202006"),
+            ("20200701", "20200705", "202007"),
+        ])
+
+    def test_revision_aware_writer_blocks_key_removal_overwrite(self):
+        path = self.raw_dir / "forecast_vip" / "ann_month=202001.parquet"
+        original = pd.DataFrame([
+            {"ts_code": "000001.SZ", "ann_date": "20200105", "type": "预增"},
+            {"ts_code": "000002.SZ", "ann_date": "20200110", "type": "预减"},
+        ])
+        common.write_parquet(path, original, api_name="forecast_vip", params={}, fields=list(original.columns), source_hash="old")
+        truncated = pd.DataFrame([
+            {"ts_code": "000002.SZ", "ann_date": "20200110", "type": "预减"},
+            {"ts_code": "000003.SZ", "ann_date": "20200120", "type": "预增"},
+        ])
+        ledger = self.root / "removal_revision_events.jsonl"
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            did_write = common.write_parquet_revision_aware(
+                path,
+                truncated,
+                api_name="forecast_vip",
+                params={"start_date": "20200110", "end_date": "20200131"},
+                fields=list(truncated.columns),
+                source_hash="new",
+                key_columns=["ts_code", "ann_date", "type"],
+                revision_ledger=ledger,
+            )
+
+        self.assertFalse(did_write)
+        self.assertIn("skipped_key_removal_overwrite", output.getvalue())
+        self.assertTrue(pd.read_parquet(path).equals(original))
+        event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(event["write_action"], "skipped_key_removal_overwrite")
+        self.assertEqual(event["removed_keys"], 1)
+
+        with redirect_stdout(io.StringIO()):
+            did_write = common.write_parquet_revision_aware(
+                path,
+                truncated,
+                api_name="forecast_vip",
+                params={"start_date": "20200110", "end_date": "20200131"},
+                fields=list(truncated.columns),
+                source_hash="new",
+                key_columns=["ts_code", "ann_date", "type"],
+                revision_ledger=ledger,
+                allow_key_removal_overwrite=True,
+            )
+        self.assertTrue(did_write)
+        self.assertEqual(set(pd.read_parquet(path)["ts_code"]), {"000002.SZ", "000003.SZ"})
 
     def test_daily_audit_warns_on_exact_limit_without_pagination_probe(self):
         path = self.raw_dir / "daily" / "trade_date=20200102.parquet"
@@ -673,6 +757,17 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         audit.audit_trade_date_dataset(self.raw_dir, common.DAILY_SPECS["daily"], {"20200102"}, lambda *item: findings.append(item))
         self.assertEqual(findings[0][0], "warning")
         self.assertEqual(findings[0][3]["exact_common_limit_row_count_dates"], ["20200102"])
+
+    def test_write_raw_generation_publishes_atomic_stamp(self):
+        raw = self.root / "genraw"
+        cron_update.write_raw_generation(raw)
+        first = json.loads((raw / ".raw_generation.json").read_text(encoding="utf-8"))
+        self.assertTrue(first["generation_id"])
+        self.assertTrue(first["completed_at"])
+        cron_update.write_raw_generation(raw)
+        second = json.loads((raw / ".raw_generation.json").read_text(encoding="utf-8"))
+        self.assertNotEqual(first["generation_id"], second["generation_id"])
+        self.assertEqual(list((raw).glob(".raw_generation.json.tmp*")), [])
 
     def test_cron_full_audit_builds_all_formal_status_commands(self):
         ctx = cron_update.RunContext(

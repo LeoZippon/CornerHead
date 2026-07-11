@@ -1,3 +1,12 @@
+2026-07-12 check.md 审计 P0 数据完整性修复（feat/step-tree-rollback）
+
+- **P0-1 forecast_vip/express_vip PIT 前视（已确认真实泄漏）**：available_at 此前优先 first_ann_date，把修订版本回溯到首告日（lap-test2 决策快照实含 22 条未来公告，600157.SH 2026-01 修订标 2024-08 可见）。改为每版本只用自身 ann_date（first_ann_date 保留为序列属性）；审计新增硬规则 available_at≥本行 ann_date（forecast/express，违反=error）；audit.py 指引文本同步。全量重建 data/pit/fundamental_events（20200101–20260711，754 分区 207.5 万行，13m20s），实测 63042 行 forecast_vip 0 条回溯；审计 errors=0。
+- **P0-2 公告月滚动窗破坏性覆盖**：month_windows 起始月截断+整月覆盖已真实删除 52 个业务键（202605/202606，修正账本可证）。修复：ann_month 触达月一律拉全自然月（fundamental_ann_month_windows）；write_parquet_revision_aware 检测到删除已有业务键默认阻断覆盖（skipped_key_removal_overwrite + REVISION_ALERT；接受源端撤回=先删分区文件）。全覆盖拉取族（trade_date/period/ts_code/merge 路径）显式 allow——该处删除只能是源端修正，沿用告警+账本工作流。受损月已重拉修复（202605 早前已被整月 refresh 自愈，202606 本次 +2 键复原）。
+- **P0-3 PIT 当前月只 merge 不 replace**：build-fundamental-events 改月对齐整月替换（month_aligned_replace_window，含当前月；cron 起点本就月对齐）；sidecar source hash 不匹配从 warning 升为 error。
+- **P0-4 宏观 range 文件堆积 2–3 倍重复**：quarter_once/month_once 固定写唯一 `range=<下界>_latest.parquet`（MACRO_RETAINED_FLOOR=20200101 单一来源），写后清理旧的按结束期命名文件（本次实清 cn_gdp/cn_cpi/cn_ppi/cn_pmi/cn_m/sf_month 各 3–6 个旧文件）；审计期望路径改 canonical 且多余 range 文件=error（顺带消灭了 index_daily 之外的宏观期望路径长期噪声，macro 审计 errors=0）；快照 _build_available_at_domain 防御性去重并记 manifest duplicate_rows_dropped。
+- **P0-5 raw 世代边界**：cron 落库类任务（update/download_tier/download_event_flow/pit_event_pipeline/revision_sentinel）成功后在排他 flock 内原子写 data/raw/.raw_generation.json；快照构建全程持共享 flock + 世代双读（变化即 RuntimeError），manifest 记 raw_generation，快照缓存键并入世代 id（夜间落库后旧缓存自动失效）。
+- 污染处置：lap-test2 已发 graceful stop（产物只留审计）；lzp-test snapshot_cache 已删除。check.md P0 条目已标注修复状态。full suite 638 OK；文档同步 data/environment/pipeline 三处。
+
 2026-07-11 控制台跟进批次：弹窗解析/闪烁/布局/耗时（feat/step-tree-rollback，d36ee80 + e1ea857）
 
 - 创建参数弹窗「默认值（9）+ 破折号」根因：/api/parameter-schema 的 groups 是 {name, fields} 列表，前端误当 dict 展平，把 9 个分组对象当字段渲染 → 改 flatMap(group.fields)。

@@ -1710,7 +1710,7 @@ def audit_fundamental_unit_and_pit_semantics(raw_dir: Path, add) -> None:
         "pit_rules": {
             "income_vip/balancesheet_vip/cashflow_vip": "use f_ann_date first, then ann_date; choose the latest visible version at decision time",
             "fina_indicator_vip": "no f_ann_date in local schema; use ann_date conservatively and expect duplicate same-period rows",
-            "forecast_vip": "use first_ann_date/ann_date and keep update_flag/type; it is an event table, not a final statement table",
+            "forecast_vip": "PIT visibility = each version's own ann_date (first_ann_date is a series attribute, never an availability floor); keep update_flag/type; it is an event table, not a final statement table",
             "express_vip": "use ann_date; it is a preliminary result table and may differ from later statements",
             "dividend": "use imp_ann_date, ex_date, record_date, and pay_date according to field meaning; ann_date can be blank",
             "disclosure_date": "calendar/planned disclosure table; do not treat it as a fundamental value",
@@ -1998,14 +1998,16 @@ def selected_audit_macro_datasets(args: argparse.Namespace) -> list[str]:
 
 def expected_macro_paths(raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
     start = max(start_date, spec.start_date)
-    if spec.strategy == "quarter_once":
-        start_q = max(yyyymmdd_to_quarter(start), spec.start_quarter)
-        end_q = yyyymmdd_to_quarter(end_date)
-        return {raw_dir / spec.api_name / f"range={start_q}_{end_q}.parquet"}
-    if spec.strategy == "month_once":
-        start_m = max(yyyymmdd_to_month(start), spec.start_month)
-        end_m = yyyymmdd_to_month(end_date)
-        return {raw_dir / spec.api_name / f"range={start_m}_{end_m}.parquet"}
+    if spec.strategy in {"quarter_once", "month_once"}:
+        # Mirrors the downloader's retained floor: range pulls always cover
+        # [floor, latest] and land in ONE canonical file regardless of the
+        # audit window, so the expectation must not follow start/end_date.
+        retained = max(min(start_date, MACRO_RETAINED_FLOOR), spec.start_date)
+        if spec.strategy == "quarter_once":
+            start_q = max(yyyymmdd_to_quarter(retained), spec.start_quarter)
+            return {raw_dir / spec.api_name / f"range={start_q}_latest.parquet"}
+        start_m = max(yyyymmdd_to_month(retained), spec.start_month)
+        return {raw_dir / spec.api_name / f"range={start_m}_latest.parquet"}
     if spec.strategy == "month_loop":
         return {raw_dir / spec.api_name / f"month={month}.parquet" for _, _, month in month_windows(start, end_date)}
     if spec.strategy == "date_year":
@@ -2106,6 +2108,20 @@ def audit_macro_completeness(raw_dir: Path, args: argparse.Namespace, add) -> No
     for dataset in datasets:
         spec = MACRO_SPECS[dataset]
         expected = expected_macro_paths(raw_dir, spec, args.start_date, args.end_date, args)
+        if spec.strategy in {"quarter_once", "month_once"}:
+            # Extra range files duplicate the whole series in snapshot domain
+            # unions; the downloader prunes them, so any survivor is an error.
+            stale = sorted(
+                str(path)
+                for path in (raw_dir / spec.api_name).glob("range=*.parquet")
+                if path.resolve() not in {p.resolve() for p in expected}
+            )
+            if stale:
+                add("error", f"{spec.api_name}_stale_range_partitions", "non-canonical range partitions duplicate the series", {
+                    "strategy": spec.strategy,
+                    "stale_files": len(stale),
+                    "stale_sample": stale[:10],
+                })
         audit_macro_dataset(raw_dir, spec, expected, add)
 
 def audit_macro_only(args: argparse.Namespace) -> int:

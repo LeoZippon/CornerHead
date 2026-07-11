@@ -25,7 +25,7 @@ from autotrade.environment.features import (
     FundamentalEventsBuilder,
     FundamentalEventsConfig,
     audit_fundamental_events,
-    complete_months_for_date_window,
+    month_aligned_replace_window,
 )
 
 
@@ -72,9 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_build_fundamental_events(args: argparse.Namespace) -> dict[str, object]:
     builder = FundamentalEventsBuilder(args.raw_dir)
+    start_date, replace_months = month_aligned_replace_window(args.start_date, args.end_date)
     events = builder.build(
         FundamentalEventsConfig(
-            start_date=args.start_date,
+            start_date=start_date,
             end_date=args.end_date,
             datasets=tuple(args.dataset or FUNDAMENTAL_EVENT_DATASETS),
         )
@@ -82,7 +83,7 @@ def run_build_fundamental_events(args: argparse.Namespace) -> dict[str, object]:
     written = builder.write_partitioned(
         events,
         args.output_root,
-        replace_months=complete_months_for_date_window(args.start_date, args.end_date),
+        replace_months=replace_months,
         replace_datasets=tuple(args.dataset or FUNDAMENTAL_EVENT_DATASETS),
     )
     return {

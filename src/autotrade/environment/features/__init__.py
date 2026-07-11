@@ -4,7 +4,7 @@ from .fundamental_events import (
     FundamentalEventsBuilder,
     FundamentalEventsConfig,
     audit_fundamental_events,
-    complete_months_for_date_window,
+    month_aligned_replace_window,
 )
 from .units import DAILY_UNIT_CONVERSIONS, normalize_daily_units
 
@@ -16,7 +16,7 @@ __all__ = [
     "FundamentalEventsConfig",
     "apply_open_auction_correction",
     "audit_fundamental_events",
-    "complete_months_for_date_window",
     "market_bucket",
+    "month_aligned_replace_window",
     "normalize_daily_units",
 ]

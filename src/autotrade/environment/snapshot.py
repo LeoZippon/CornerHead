@@ -17,9 +17,12 @@ replay regions read only by backtest_tool.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -258,10 +261,43 @@ class SnapshotBuilder:
         self.contracts = default_tushare_contracts()
         self.store = PITDataStore(self.raw_dir, self.contracts)
 
+    @contextmanager
+    def _raw_lake_guard(self):
+        """Shared flock over the cron updater's exclusive lock plus a
+        generation double-read: a snapshot build never overlaps a raw-lake
+        mutation run, and fails fast if the lake changed under it anyway
+        (a writer bypassing the lock). Lakes without the cron lock file
+        (manual/test raw dirs) have no updater to exclude."""
+        lock_path = self.raw_dir.parent.parent / ".runtime" / "tushare" / "locks" / "tushare_update.lock"
+        fd = None
+        if lock_path.exists():
+            fd = os.open(lock_path, os.O_RDONLY)
+            fcntl.flock(fd, fcntl.LOCK_SH)
+        try:
+            generation = read_raw_generation(self.raw_dir)
+            yield generation
+            if read_raw_generation(self.raw_dir) != generation:
+                raise RuntimeError(f"raw lake generation changed during snapshot build under {self.raw_dir}")
+        finally:
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
     # ---- decision-input snapshot ----
 
     def build_decision_snapshot(
         self, decision_time: datetime, output_dir: str | Path, config: SnapshotConfig | None = None
+    ) -> dict[str, object]:
+        with self._raw_lake_guard() as raw_generation:
+            manifest = self._build_decision_snapshot_impl(decision_time, output_dir, config, raw_generation)
+        return manifest
+
+    def _build_decision_snapshot_impl(
+        self,
+        decision_time: datetime,
+        output_dir: str | Path,
+        config: SnapshotConfig | None,
+        raw_generation: dict[str, object] | None,
     ) -> dict[str, object]:
         config = config or SnapshotConfig()
         decision_time = decision_time if decision_time.tzinfo else decision_time.replace(tzinfo=CN_TZ)
@@ -390,6 +426,7 @@ class SnapshotBuilder:
             },
             "domains": domains,
             "data_quality_warnings": data_quality_warnings,
+            "raw_generation": raw_generation,
             "build_profile": {
                 "total_seconds": round(time.perf_counter() - total_started, 3),
                 "domains": _profile_timings(profiles),
@@ -483,6 +520,19 @@ class SnapshotBuilder:
         fundamentals published inside the period, every domain carrying row-level
         ``available_at`` so the per-tick Timeview can roll each dataset in on its
         refresh node. Read only by backtest_tool; never PIT-filtered up front."""
+        with self._raw_lake_guard() as raw_generation:
+            manifest = self._build_replay_slot_impl(start_date, end_date, output_dir, label, config, raw_generation)
+        return manifest
+
+    def _build_replay_slot_impl(
+        self,
+        start_date: str,
+        end_date: str,
+        output_dir: str | Path,
+        label: str,
+        config: SnapshotConfig | None,
+        raw_generation: dict[str, object] | None,
+    ) -> dict[str, object]:
         config = config or SnapshotConfig()
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -593,6 +643,7 @@ class SnapshotBuilder:
             "period_start": start_key,
             "period_end": end_key,
             "domains": domains,
+            "raw_generation": raw_generation,
             "build_profile": {
                 "total_seconds": round(time.perf_counter() - total_started, 3),
                 "domains": _profile_timings(profiles),
@@ -849,6 +900,7 @@ class SnapshotBuilder:
     ) -> tuple[pd.DataFrame, dict[str, object]]:
         frames: list[pd.DataFrame] = []
         rules: dict[str, str] = {}
+        duplicate_rows_dropped: dict[str, int] = {}
         for dataset in datasets:
             dataset_dir = self.raw_dir / dataset
             if not dataset_dir.exists():
@@ -857,6 +909,13 @@ class SnapshotBuilder:
             rules[dataset] = "raw available_at column"
             if rows.empty:
                 continue
+            # Overlapping partition files (the pre-canonical macro range
+            # family) repeat identical rows; a duplicated series distorts
+            # every frequency/aggregate a strategy computes on it.
+            deduped = rows.drop_duplicates(ignore_index=True)
+            if len(deduped) < len(rows):
+                duplicate_rows_dropped[dataset] = int(len(rows) - len(deduped))
+                rows = deduped
             rows.insert(0, "dataset", dataset)
             frames.append(rows)
         merged = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
@@ -864,6 +923,8 @@ class SnapshotBuilder:
         # the daily-domain unit contract does NOT extend to same-named fields
         # here (env docs §1.4; raw unit table in data docs §1.2).
         meta = {"rows": int(len(merged)), "datasets": list(datasets), "units": "source", "availability_rules": rules}
+        if duplicate_rows_dropped:
+            meta["duplicate_rows_dropped"] = duplicate_rows_dropped
         return merged, meta
 
     def _read_dataset_window(
@@ -1209,6 +1270,17 @@ def verify_snapshot_hash(snapshot_dir: str | Path) -> None:
     actual = _snapshot_hash(Path(snapshot_dir))
     if manifest.get("snapshot_hash") != actual:
         raise ValueError(f"snapshot hash mismatch in {snapshot_dir}: manifest={manifest.get('snapshot_hash')} actual={actual}")
+
+
+def read_raw_generation(raw_dir: str | Path | None) -> dict[str, object] | None:
+    """Raw-lake generation stamp published by the cron updater after each
+    fully-successful mutation run; None for lakes without one (manual/test)."""
+    if raw_dir is None:
+        return None
+    path = Path(raw_dir) / ".raw_generation.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _partition_overlaps(stem: str, start_day: str, end_day: str) -> bool:

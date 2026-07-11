@@ -58,6 +58,41 @@ class AcceptanceRulesTest(unittest.TestCase):
             AcceptanceRules(max_drawdown=1.5)
 
 
+class CachingSnapshotProviderGenerationTest(unittest.TestCase):
+    def test_cache_key_includes_raw_generation(self):
+        import json
+
+        from autotrade.pipelines.config import CachingSnapshotProvider
+
+        class FakeProvider:
+            def __init__(self, raw_dir: Path) -> None:
+                self.raw_dir = raw_dir
+                self.config = None
+                self.builds = 0
+
+            def replay_slot(self, start, end, view, *, label):
+                self.builds += 1
+                Path(view).mkdir(parents=True, exist_ok=True)
+                (Path(view) / "daily.parquet").write_bytes(b"x")
+                return {"build": self.builds}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            raw.mkdir()
+            provider = FakeProvider(raw)
+            caching = CachingSnapshotProvider(provider, Path(tmp) / "cache")
+
+            caching.replay_slot("20220101", "20220131", Path(tmp) / "out1", label="valid")
+            caching.replay_slot("20220101", "20220131", Path(tmp) / "out2", label="valid")
+            self.assertEqual(provider.builds, 1)  # same generation -> cache hit
+
+            (raw / ".raw_generation.json").write_text(
+                json.dumps({"generation_id": "gen2", "completed_at": "now"}), encoding="utf-8"
+            )
+            caching.replay_slot("20220101", "20220131", Path(tmp) / "out3", label="valid")
+            self.assertEqual(provider.builds, 2)  # new generation -> rebuild
+
+
 class ExperimentConfigValidationTest(unittest.TestCase):
     def test_budget_knobs_must_be_positive_finite(self):
         with tempfile.TemporaryDirectory() as tmp:

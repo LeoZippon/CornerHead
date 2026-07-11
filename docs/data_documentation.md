@@ -298,9 +298,11 @@ flowchart LR
 - 已存在且旁路元数据覆盖请求范围的分区跳过。
 - 开放月份、开放年份和近期交易日会按配置强制刷新。
 - 远端空响应不会覆盖本地非空分区，除非显式允许。
+- 重拉若会删除已有业务键，默认阻断覆盖并写修正账本；接受源端真实撤回需先删除对应分区文件。
+- 公告月分区始终按完整自然月拉取；窗口起点截断到月中会在整月覆盖时删除早先公告。
 - 触发源端修正时写入修正账本。
 - 交易日历会向后补足，供次日盘前判断。
-- 宏观和全球 range 型数据使用固定历史下界维护，不生成短窗口碎片。
+- 宏观和全球 range 型数据使用固定历史下界维护，固定写入唯一 `range=<下界>_latest.parquet` 并在写后清理旧的按结束期命名文件；宏观审计将残留的多余 range 文件记为 error，快照域构造再按数据集防御性去重。
 
 | 数据域 | 日常刷新规则 | 风险控制 |
 |---|---|---|
@@ -334,7 +336,7 @@ TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_sched
 
 回测的逐 tick 数据视图按真实落库任务的约定完成时间放行数据；纯审计任务不落新数据，也不能成为可见性节点。完整门禁语义见 §3.3。
 
-runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
+runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw；落库类任务成功后在锁内原子更新 `data/raw/.raw_generation.json` 世代戳（纯审计任务不更新）。快照构造全程持同一把锁的共享模式并把世代写入 manifest 与快照缓存键，构造期间世代变化立即失败。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
 
 当前 crontab 必须通过 `ops/cron/install_tushare_cron.py` 安装，使用 `/home/lzp/miniconda3/envs/quant/bin/python` 和 `scripts/data/tushare_cron_update.py`。
 
@@ -457,6 +459,7 @@ crontab -l
 | `daily` / `daily_basic` | 行级时间在当日收盘后；再经晚间落库门禁，交易日内通常只到 D-1，当日数据约次日 02:05 可见，09:25 不得使用当日日频 |
 | 分钟线 | `available_at=trade_time`，视为该分钟 bar close 后可见；历史分钟随 `cn_evening_full` 晚间滚动落库，当日实时 bar 由引擎 `ctx.bars` 提供、不走持久化视图 |
 | 财务 | 优先 `f_ann_date`，否则 `ann_date`；多版本按决策时点选择；`fundamental_events` 由 `cn_nightly_pit_event_build`（约 03:50）落库后可查 |
+| 业绩预告/快报 | 每个版本按其自身 `ann_date` 可见；`first_ann_date` 只是序列属性，绝不作为可见性下界（PIT 审计强制 available_at ≥ 本行 ann_date，违反记 error） |
 | 分红 | Agent 可见性只用 `imp_ann_date/ann_date` 判断，`ex_date/record_date/pay_date` 是未来事件属性；Broker 侧另按 `ex_date` 消费已实施分红作为除权日市场事实（Environment 输入、非 Agent 输入，不构成 PIT 泄漏） |
 | 宏观 | 使用源表明确发布时间；否则按月末、季末或日期采用保守延后。发布日程当前未接入历史关联；Timeview 再叠加晚间落库时间 |
 | 全球事件 | 有具体 `time` 时使用 `date+time`，否则当日收盘后可见；Timeview 随 `cn_evening_full` 落库 |

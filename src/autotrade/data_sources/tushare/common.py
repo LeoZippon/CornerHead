@@ -177,6 +177,11 @@ SHARE_FLOAT_UNLOCK_TITLE_PATTERN = re.compile(
     r"限售|解禁|上市流通|解除限售|限售股份上市|限售股上市|首次公开发行限售|非公开发行限售|定向增发限售"
 )
 
+# Macro range pulls (quarter_once/month_once) always retain history from at
+# least this floor so the canonical range file's coverage never shrinks with
+# a rolling cron window.
+MACRO_RETAINED_FLOOR = "20200101"
+
 MACRO_DATASETS = [
     "cn_schedule",
     "cn_gdp",
@@ -1585,6 +1590,7 @@ def write_parquet_revision_aware(
     revision_ledger: Path | str | None,
     source: str = "force_refresh",
     allow_empty_revision_overwrite: bool = False,
+    allow_key_removal_overwrite: bool = False,
 ) -> bool:
     if path.exists():
         old_df = pd.read_parquet(path)
@@ -1592,28 +1598,39 @@ def write_parquet_revision_aware(
         write_action = "overwrite"
         if len(old_df) > 0 and df.empty and not allow_empty_revision_overwrite:
             write_action = "skipped_empty_revision_overwrite"
-        if revision_ledger:
-            event = build_revision_event(
-                dataset=api_name,
-                partition=path.with_suffix("").name,
-                path=path,
-                old_df=old_df,
-                new_df=df,
-                key_columns=key_columns,
-                source=source,
+        event = build_revision_event(
+            dataset=api_name,
+            partition=path.with_suffix("").name,
+            path=path,
+            old_df=old_df,
+            new_df=df,
+            key_columns=key_columns,
+            source=source,
+        )
+        # A re-pull that DROPS existing keys is destructive (the ann_month
+        # truncated-window class silently deleted announcements). Blocked by
+        # default; accepting a genuine source retraction means deleting the
+        # partition file first or passing allow_key_removal_overwrite.
+        if write_action == "overwrite" and event and event["removed_keys"] and not allow_key_removal_overwrite:
+            write_action = "skipped_key_removal_overwrite"
+        if revision_ledger and event:
+            event = finalize_revision_event(
+                event,
+                old_source_hash=str(old_meta.get("source_hash", "")),
+                new_source_hash=source_hash,
+                write_action=write_action,
+                allow_empty_revision_overwrite=allow_empty_revision_overwrite,
             )
-            if event:
-                event = finalize_revision_event(
-                    event,
-                    old_source_hash=str(old_meta.get("source_hash", "")),
-                    new_source_hash=source_hash,
-                    write_action=write_action,
-                    allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-                )
-                append_jsonl(Path(revision_ledger), event)
-                print("REVISION_ALERT " + json.dumps(event, ensure_ascii=False, sort_keys=True))
+            append_jsonl(Path(revision_ledger), event)
+            print("REVISION_ALERT " + json.dumps(event, ensure_ascii=False, sort_keys=True))
         if write_action == "skipped_empty_revision_overwrite":
             print(f"{api_name} {path} returned zero rows for existing nonempty partition; skipped_empty_revision_overwrite")
+            return False
+        if write_action == "skipped_key_removal_overwrite":
+            print(
+                f"{api_name} {path} new pull removes {event['removed_keys']} existing keys; "
+                "skipped_key_removal_overwrite (delete the partition to accept a source retraction)"
+            )
             return False
     write_parquet(path, df, api_name=api_name, params=params, fields=fields, source_hash=source_hash)
     return True
@@ -1970,6 +1987,8 @@ def write_event_result(
     allow_empty_revision_overwrite: bool = False,
 ) -> int:
     df = augment_event_frame(frame(result), spec)
+    # Event pulls cover their partition's full scope (request param == partition
+    # key), so removed keys can only be alerted source corrections.
     written = write_parquet_revision_aware(
         path,
         df,
@@ -1980,6 +1999,7 @@ def write_event_result(
         key_columns=list(spec.key_columns),
         revision_ledger=revision_ledger,
         allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        allow_key_removal_overwrite=True,
     )
     if not written:
         return 0
@@ -2045,6 +2065,8 @@ def write_board_result(
     allow_empty_revision_overwrite: bool = False,
 ) -> int:
     df = augment_board_frame(frame(result), spec, params)
+    # Board pulls cover their partition's full scope (request param == partition
+    # key), so removed keys can only be alerted source corrections.
     written = write_parquet_revision_aware(
         path,
         df,
@@ -2055,6 +2077,7 @@ def write_board_result(
         key_columns=list(spec.key_columns),
         revision_ledger=revision_ledger,
         allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        allow_key_removal_overwrite=True,
     )
     if not written:
         return 0

@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +25,9 @@ RUNTIME_ROOT = Path(".runtime/tushare")
 STATE_PATH = RUNTIME_ROOT / "cron_state.json"
 DISPATCH_LOG_PATH = Path("logs/tushare_cron_dispatch.log")
 DEFAULT_LOCK_WAIT_SECONDS = 900
+# Job operations that mutate the raw/PIT lake and therefore publish a new
+# generation on success; audit-only jobs must not churn snapshot cache keys.
+MUTATING_OPERATIONS = {"update", "download_tier", "download_event_flow", "pit_event_pipeline", "revision_sentinel"}
 
 
 @dataclass
@@ -443,6 +447,19 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def write_raw_generation(raw_dir: Path) -> None:
+    """Publish a new raw-lake generation after a fully-successful mutation run,
+    while still holding the exclusive tushare_update flock. Snapshot builds key
+    caches/manifests on generation_id and fail if it changes mid-build."""
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    path = raw_dir / ".raw_generation.json"
+    payload = {"generation_id": uuid.uuid4().hex, "completed_at": utc_now()}
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    print(f"raw generation {payload['generation_id']} published at {path}")
+
+
 def append_dispatch(message: str) -> None:
     DISPATCH_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with DISPATCH_LOG_PATH.open("a", encoding="utf-8") as handle:
@@ -557,6 +574,8 @@ def main() -> int:
             print(message)
             return 0
         returncode = run_update(ctx, commands, log_path)
+        if returncode == 0 and ctx.job.get("operation", "update") in MUTATING_OPERATIONS:
+            write_raw_generation(ctx.repo_root / ctx.config.get("default_raw_dir", "data/raw"))
         status = "ok" if returncode == 0 else "error"
         state[ctx.job_name] = {
             "status": status,

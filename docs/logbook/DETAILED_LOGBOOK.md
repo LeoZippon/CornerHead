@@ -16950,3 +16950,63 @@ New src/autotrade/data_sources/tushare/realtime.py: normalize_rt_minutes (histor
 Console: manager action "restart" (SIGTERM live worker, bounded 30s wait, ledger resume via start_worker) + confirm-modal 重启 button in the running-state control bar. Full suite 612 OK; static synced, console restarted.
 
 Queued next (user purchased full TuShare access): full catalog survey vs current ingestion; stk_auction/stk_auction_c into the download layer + broker auction matching (data-driven from 2025).
+
+## 2026-07-11 Opening-auction source correction and backfill
+
+Task: verify and correct the newly added auction source integration against real TuShare data.
+
+Findings:
+- `stk_auction_o` OHLC matches the 09:30 `stk_mins` bar exactly and its volume/amount share the same convention; it is not a replacement for the final-match `stk_auction` interface.
+- Using `stk_auction_o/_c.vwap` as a single auction clearing price was incorrect. On sampled real dates, opening VWAP differed from the official open for roughly 30% of stocks; closing VWAP differed from the official close for roughly 85%–90%.
+- `stk_auction` is nonempty from 2025-01-16. A source anomaly on 2025-02-26 leaves `price` null while positive volume/amount remain for 5,331 rows; `amount/vol` reconstructs the clearing price. Zero-volume rows represent no matched opening-auction trade and must not fall back to an auction fill.
+
+Changes:
+- Removed `stk_auction_o` and `stk_auction_c` from active daily ingestion, scheduling, Snapshot construction, Broker matching and living documentation.
+- Added required daily `stk_auction` ingestion from its verified start date. Snapshot `auction.parquet` carries only exact opening results; Broker uses `price`, derives it from positive amount/volume when necessary, preserves explicit no-trade rows, rejects duplicate keys and malformed inconsistent rows, and uses the 09:30 bar proxy only before coverage or for a genuinely missing row.
+- Closing call auctions continue to clear at the final 15:00 bar close. Pre-coverage Shenzhen volume/amount proxy factors remain explicitly labelled.
+
+Data run:
+- Resource precheck: system memory 431 GiB available; seven L20 GPUs had at least 28 GiB free except GPUs 0/3, and the download used no GPU.
+- Command: `tushare_download.py download --tier daily --datasets stk_auction --start-date 20250116 --end-date 20260710 --min-interval-seconds 0.22 --timeout-seconds 120`.
+- Result: 357 partitions, 1,967,391 rows, first 2025-01-16, last 2026-07-10, zero duplicate `(trade_date, ts_code)` keys. Runtime log: `logs/stk_auction_backfill_20250116_20260710.log`.
+
+Validation:
+- `python -m unittest tests.unit.test_snapshot_builder tests.unit.test_broker_engine tests.unit.test_timeview tests.unit.test_data_sources_tushare`: 189 OK.
+- Full `python -m unittest discover -t . -s tests`: 619 OK.
+- Real loader checks: 2025-02-26 loaded all 5,477 rows (5,331 derived prices, 146 explicit no-trade); 2026-07-10 loaded all 5,519 rows (83 explicit no-trade).
+- Schedule JSON parsing and `git diff --check` passed; no active-code or living-doc references to `stk_auction_o`, `stk_auction_c`, or auction VWAP clearing remain.
+
+## 2026-07-11 test7 investor-QA text mapping failure
+
+Failure:
+- `test7` stopped during `epoch_001/meta_learning` before any completed session.
+- Root cause: `irm_qa_sh` and `irm_qa_sz` raw rows use `q` and `a`, while Snapshot text construction only recognized generic title/content fields and raised `ValueError: no usable title/body columns`.
+
+Fix:
+- Added dataset-specific text layout for both investor-interaction sources: `q` is the index title and `q + a` is the body. Other text datasets retain the existing generic mapping, avoiding accidental interpretation of unrelated short column names.
+- Added a real-schema regression fixture that verifies title, question and answer content.
+
+Validation and recovery:
+- `python -m unittest tests.unit.test_snapshot_builder`: 17 OK; `git diff --check` passed.
+- Restarted `test7` through `ExperimentManager`; new run `run_8f0d85754407` passed Snapshot construction, entered the meta-learning Agent loop, established its deadline and continued heartbeating normally. The experiment remains running in auto mode.
+
+## 2026-07-12 check.md GPT audit: P0 data-integrity remediation and lake repair
+
+Task: verify and remediate the five P0 findings of the external GPT audit (check.md), then repair the raw/PIT lake.
+
+Verification (independent, before any fix): all five P0 claims CONFIRMED on real artifacts — lap-test2 fold-1 decision snapshot contained 22 future `forecast_vip` rows (e.g. 600157.SH ann_date=20260131 visible at 2024-08-08); revision ledger shows 52 business keys destructively removed from `forecast_vip/express_vip` ann_month=202605/202606 by truncated-window overwrites; macro range files duplicated series 2–3x (multiple overlapping `range=*` files per dataset); no generation boundary between cron mutation and snapshot builds.
+
+Changes (branch feat/step-tree-rollback, mixed working tree with the user's in-flight auction rework — staged surgically by hunk):
+- P0-1: `_available_at_for_row` uses each version's OWN `ann_date` for forecast/express (`source:ann_date`); removed the two `first_ann_date` rules from the allowed set; `audit_fundamental_events` hard rule `available_at >= ann_date` (error) scoped to forecast/express (statement tables exempt: `f_ann_date` legitimately precedes `ann_date`); audit.py guidance text updated. Regression test: first announcement + revision sequence, tampered backdating -> audit error.
+- P0-2: `fundamental_ann_month_windows` pulls every touched month as the FULL natural month; `write_parquet_revision_aware` blocks key-removal overwrites by default (`skipped_key_removal_overwrite`, event still ledgered + REVISION_ALERT; escape hatch = delete partition or `allow_key_removal_overwrite`); full-cover pull families (trade_date/period/ts_code/window-merged) explicitly opt in.
+- P0-3: `month_aligned_replace_window` replaces `complete_months_for_date_window` — build start aligned to month-1st, ALL months in window (incl. current) replaced whole; sidecar hash mismatch elevated warning -> error.
+- P0-4: quarter_once/month_once write canonical `range=<floor>_latest.parquet` (floor single-sourced as `MACRO_RETAINED_FLOOR`), `prune_stale_range_files` removes end-suffixed leftovers + meta; audit expects the canonical path and flags residual range files as error; snapshot `_build_available_at_domain` drops exact duplicate rows per dataset and records `duplicate_rows_dropped` in the manifest.
+- P0-5: cron runner publishes `data/raw/.raw_generation.json` (uuid + completed_at, atomic tmp+rename) after each successful MUTATING job (update/download_tier/download_event_flow/pit_event_pipeline/revision_sentinel; audit-only jobs excluded) while holding the exclusive flock; `SnapshotBuilder._raw_lake_guard` takes a shared flock on the same lock for the whole build and double-reads the generation (change -> RuntimeError); both builder manifests record `raw_generation`; `CachingSnapshotProvider` cache key includes the generation id.
+
+Validation:
+- Full unit suite: 638 OK (8 new tests: forecast revision visibility + audit hard rule, key-removal block, full-month windows, canonical range + prune, snapshot dedup, generation guard/manifest, cache-key generation, cron stamp).
+- Lake repair (all on B, quant env): macro canonicalization run pruned 3–6 stale range files per dataset (cn_gdp/cn_cpi/cn_ppi/cn_pmi/cn_m/sf_month); forecast/express re-pull 20260501–20260711 restored 202606 (+2 keys; 202605 had already self-healed via the 07-01 full-month refresh, verified in ledger); FULL PIT rebuild `build-fundamental-events 20200101–20260711`: 754 partitions, 2,075,456 rows, 13m20s.
+- Post-repair audits: fundamental-events audit errors=0 (warnings = natural sparse-month gaps); macro audit errors=0 (the standing expected-path calibration noise is gone with canonical naming). Real-data check: 63,042 forecast_vip PIT rows, 0 backdated; 600157.SH revision now visible only from 20260131.
+- Contamination handling: lap-test2 graceful stop requested (artifacts kept for audit only); lzp-test snapshot_cache purged (7.4G lap-test2 cache left to the stopping run; generation-keyed caches make stale reuse impossible for new runs).
+
+Docs: data_documentation (full-natural-month + removal block bullets, canonical range bullet, generation stamp + shared flock, forecast/express visibility row), environment_design (snapshot dedup + lake guard), pipeline_design (cache key generation). check.md P0 headers annotated with fix status.

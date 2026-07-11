@@ -16,7 +16,7 @@ from autotrade.environment.artifacts import ModificationConstraints
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.managed_proxy import ManagedProxySpec
 from autotrade.environment.sandbox import SandboxSpec, link_copytree
-from autotrade.environment.snapshot import SnapshotBuilder, SnapshotConfig
+from autotrade.environment.snapshot import SnapshotBuilder, SnapshotConfig, read_raw_generation
 from autotrade.environment.tools import ToolContext
 
 from .folds import FoldSpec, assert_no_overlap
@@ -42,6 +42,7 @@ class RawSnapshotProvider:
         config: SnapshotConfig | None = None,
         fundamental_events_status: str | Path | None = Path("results/data_quality/fundamental_events_status.json"),
     ) -> None:
+        self.raw_dir = Path(raw_dir)
         self.builder = SnapshotBuilder(raw_dir, fundamental_events_root, fundamental_events_status)
         self.config = config or SnapshotConfig()
 
@@ -96,7 +97,11 @@ class CachingSnapshotProvider:
         build: Callable[[Path], dict[str, object]],
         out_dir: Path,
     ) -> dict[str, object]:
-        key = hashlib.sha256("|".join((*parts, self._config_key)).encode("utf-8")).hexdigest()[:16]
+        # Raw-lake generation in the key: a cron mutation between folds must
+        # rebuild, never resurface a view of the previous lake.
+        generation = read_raw_generation(getattr(self._provider, "raw_dir", None))
+        generation_key = str((generation or {}).get("generation_id", ""))
+        key = hashlib.sha256("|".join((*parts, self._config_key, generation_key)).encode("utf-8")).hexdigest()[:16]
         entry = self._root / f"{parts[0]}_{key}"
         manifest_path = entry / "cache_manifest.json"
         if not manifest_path.exists():

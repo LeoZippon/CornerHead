@@ -199,6 +199,7 @@ def download_bak_basic(
             key_columns=list(BAK_BASIC_SPEC.key_columns),
             revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+            allow_key_removal_overwrite=True,
         )
         if index % 250 == 0:
             print(f"bak_basic {index}/{len(dates)}")
@@ -399,6 +400,7 @@ def write_window_merged_partition(
         key_columns=key_columns,
         revision_ledger=revision_ledger,
         allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        allow_key_removal_overwrite=True,
     )
     return len(df) if written else 0
 
@@ -450,6 +452,7 @@ def download_trade_date_dataset(
             key_columns=list(spec.key_columns),
             revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+            allow_key_removal_overwrite=True,
         )
         if did_write:
             total_rows += len(df)
@@ -503,26 +506,42 @@ def download_macro(args: argparse.Namespace) -> int:
 def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     start_q = max(yyyymmdd_to_quarter(start_date), spec.start_quarter)
     end_q = yyyymmdd_to_quarter(end_date)
-    path = raw_dir / spec.api_name / f"range={start_q}_{end_q}.parquet"
+    path = raw_dir / spec.api_name / f"range={start_q}_latest.parquet"
     coverage_params = {"start_date": start_date, "end_date": end_date}
     if should_skip_existing_partition(path, force=force, requested_params=coverage_params):
         return
     params = {"start_q": start_q, "end_q": end_q}
     result = client.query(spec.api_name, params, spec.fields)
     rows = write_macro_result(path, result, spec, {**params, **coverage_params}, revision_ledger, allow_empty_revision_overwrite)
+    prune_stale_range_files(path)
     print(f"{spec.api_name} quarters {start_q}-{end_q} rows={rows}")
 
 def download_macro_month_once(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     start_m = max(yyyymmdd_to_month(start_date), spec.start_month)
     end_m = yyyymmdd_to_month(end_date)
-    path = raw_dir / spec.api_name / f"range={start_m}_{end_m}.parquet"
+    path = raw_dir / spec.api_name / f"range={start_m}_latest.parquet"
     coverage_params = {"start_date": start_date, "end_date": end_date}
     if should_skip_existing_partition(path, force=force, requested_params=coverage_params):
         return
     params = {"start_m": start_m, "end_m": end_m}
     result = client.query(spec.api_name, params, spec.fields)
     rows = write_macro_result(path, result, spec, {**params, **coverage_params}, revision_ledger, allow_empty_revision_overwrite)
+    prune_stale_range_files(path)
     print(f"{spec.api_name} months {start_m}-{end_m} rows={rows}")
+
+def prune_stale_range_files(canonical: Path) -> None:
+    """A range dataset holds exactly ONE file (the canonical `range=*_latest`).
+    Older end-suffixed range files from before canonical naming duplicated the
+    whole series 2-3x in snapshot domain unions — remove them and their meta."""
+    if not canonical.exists():
+        return
+    for stale in sorted(canonical.parent.glob("range=*.parquet")):
+        if stale == canonical:
+            continue
+        meta = stale.with_suffix(stale.suffix + ".meta.json")
+        stale.unlink()
+        meta.unlink(missing_ok=True)
+        print(f"pruned stale range partition {stale}")
 
 def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     windows = month_windows(start_date, end_date)
@@ -601,6 +620,7 @@ def download_macro_trade_date(
             key_columns=list(spec.key_columns),
             revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+            allow_key_removal_overwrite=True,
         )
         if did_write:
             written += 1
@@ -924,6 +944,7 @@ def download_event_trade_date_dataset(
             key_columns=list(spec.key_columns),
             revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+            allow_key_removal_overwrite=True,
         )
         if did_write:
             total_rows += len(df)
@@ -1246,6 +1267,7 @@ def query_share_float_to_path(
         key_columns=list(EVENT_FLOW_SPECS["share_float"].key_columns),
         revision_ledger=revision_ledger,
         allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        allow_key_removal_overwrite=True,
     )
     rows = len(df) if did_write else parquet_rows(path) if path.exists() else 0
     return {"path": str(path), "rows": rows, "skipped": not did_write, "source_cap_risk": rows >= SHARE_FLOAT_ROW_LIMIT}
@@ -1607,6 +1629,7 @@ def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dic
         revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
         source="share_float_union_rebuild",
         allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
+        allow_key_removal_overwrite=True,
     )
     report["union"] = {
         "output": str(output),
@@ -1718,10 +1741,7 @@ def download_fundamental(args: argparse.Namespace) -> int:
     refresh_periods = set(recent_quarter_periods(args.end_date, getattr(args, "fundamental_refresh_period_count", 0)))
     refresh_months = set(recent_month_keys(args.end_date, getattr(args, "fundamental_refresh_ann_month_count", 0)))
     periods = sorted(set(quarter_periods(args.start_date, args.end_date)) | refresh_periods)
-    windows_by_month = {month: (start, end, month) for start, end, month in month_windows(args.start_date, args.end_date)}
-    for month in refresh_months:
-        windows_by_month.setdefault(month, month_window_for_key(month, args.end_date))
-    windows = [windows_by_month[month] for month in sorted(windows_by_month)]
+    windows = fundamental_ann_month_windows(args.start_date, args.end_date, refresh_months)
 
     unsupported = [dataset for dataset in datasets if FUNDAMENTAL_SPECS[dataset].strategy not in {"period", "ann_month", "ts_code"}]
     if unsupported:
@@ -1790,6 +1810,14 @@ def recent_month_keys(end_date: str, count: int) -> list[str]:
         else:
             current = date(current.year, current.month - 1, 1)
     return months
+
+
+def fundamental_ann_month_windows(start_date: str, end_date: str, refresh_months: set[str]) -> list[tuple[str, str, str]]:
+    """ann_month partitions are replaced whole, so every touched month is
+    pulled as the FULL natural month: a window truncated at a mid-month
+    start_date deletes that month's earlier announcements on overwrite."""
+    touched = {month for _, _, month in month_windows(start_date, end_date)} | set(refresh_months)
+    return [month_window_for_key(month, end_date) for month in sorted(touched)]
 
 
 def month_window_for_key(month: str, end_date: str) -> tuple[str, str, str]:
@@ -1908,6 +1936,7 @@ def download_fundamental_period_dataset(
             key_columns=list(spec.key_columns),
             revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+            allow_key_removal_overwrite=True,
         )
         if did_write:
             written += 1
@@ -1997,6 +2026,7 @@ def download_fundamental_ts_code_dataset(
             key_columns=list(spec.key_columns),
             revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+            allow_key_removal_overwrite=True,
         )
         if did_write:
             written += 1
@@ -2121,6 +2151,7 @@ def write_stk_mins_by_date(
         key_columns=["trade_date", "ts_code", "trade_time"],
         revision_ledger=revision_ledger,
         allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        allow_key_removal_overwrite=True,
     )
 
 def compact_intraday_by_date(args: argparse.Namespace) -> int:
@@ -2363,6 +2394,7 @@ def write_text_result(
         key_columns=list(spec.key_columns),
         revision_ledger=revision_ledger,
         allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        allow_key_removal_overwrite=True,
     )
     if not written:
         return 0
@@ -2707,7 +2739,7 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
     start_date = args.start_date
     if parse_yyyymmdd(start_date) > parse_yyyymmdd(args.end_date):
         raise RuntimeError(f"start_date {start_date} is after end_date {args.end_date}")
-    macro_floor = getattr(args, "macro_start_date", None) or "20200101"
+    macro_floor = getattr(args, "macro_start_date", None) or MACRO_RETAINED_FLOOR
     macro_start_date = min(start_date, macro_floor, key=parse_yyyymmdd)
     refresh_open_window = bool(getattr(args, "refresh_open_window", False))
     force_open_window = bool(args.force or refresh_open_window)
