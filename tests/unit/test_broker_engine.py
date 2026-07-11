@@ -1124,6 +1124,21 @@ class FillRealismTest(unittest.TestCase):
         fill2 = next(e for e in broker2.events if e["event_type"] == "order_filled")
         self.assertAlmostEqual(fill2["price"], 10.0)  # bar open
 
+    def test_unfilled_auction_limit_degrades_to_continuous_order(self):
+        # A limit auction order that does not clear at the single price rolls
+        # into continuous matching (real unmatched 集合竞价 semantics) — the
+        # auction print must not pin single-price forever.
+        broker = self.make_broker()
+        broker.auction_prints_by_date = {("20220104", "open"): {"000001.SZ": 10.30}}
+        broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 10.1, 1000, is_auction=True)
+        broker.match_bar("20220104", "09:30", self.bar_group(10.3, 10.35, 10.25, 10.3))
+        self.assertEqual(broker.position_quantity("000001.SZ"), 0)  # 10.1 < print 10.30
+        # Continuous bar trades strictly through the limit -> fills at the limit.
+        broker.match_bar("20220104", "09:31", self.bar_group(10.2, 10.25, 10.05, 10.1))
+        fill = next(e for e in broker.events if e["event_type"] == "order_filled")
+        self.assertAlmostEqual(fill["price"], 10.1)
+        self.assertEqual(fill["price_label"], "minute:09:31")
+
     def test_synthetic_fallback_bar_has_no_range_trade_through(self):
         # A synthetic daily-fallback bar's high/low span the whole session, so a
         # resting limit order must not fill against prices that predate it; the

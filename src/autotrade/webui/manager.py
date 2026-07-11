@@ -353,7 +353,10 @@ class ExperimentManager:
             if not status_pid_alive(status):
                 raise ManagerError("no live worker to terminate")
             pid = int(status["pid"])
-            os.kill(pid, signal.SIGTERM)
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError as exc:  # exited between check and signal
+                raise ManagerError("worker 已退出") from exc
             import time as _time
 
             deadline = _time.monotonic() + 10.0

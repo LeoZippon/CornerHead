@@ -110,6 +110,7 @@ class SnapshotConfig:
         "sz_daily_info",
         "moneyflow_mkt_dc",
         "broker_recommend",
+        "ths_daily",
         "fx_daily",
         # Regime/background additions: repo liquidity, US nominal + real yield
         # curves (risk appetite). cn_schedule deliberately NOT exposed: the

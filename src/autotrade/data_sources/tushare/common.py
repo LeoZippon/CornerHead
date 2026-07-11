@@ -226,6 +226,14 @@ MACRO_REGIME_DEFAULT_DATASETS = [
     "repo_daily",
     # Core A-share benchmark indexes (see DEFAULT_CN_INDEX_CODES).
     "index_daily",
+    "index_dailybasic",
+    "sw_daily",
+    "ci_daily",
+    "daily_info",
+    "sz_daily_info",
+    "moneyflow_mkt_dc",
+    "ths_daily",
+    "broker_recommend",
     "monetary_policy",
 ]
 
@@ -375,8 +383,8 @@ INTEGRATED_DOC_REFS = {
     "kpl_concept_cons": "https://tushare.pro/document/2?doc_id=351",
     "dc_index": "https://tushare.pro/document/2?doc_id=362",
     "dc_member": "https://tushare.pro/document/2?doc_id=363",
-    "sw_daily": "https://tushare.pro/document/2?doc_id=311",
-    "ci_daily": "https://tushare.pro/document/2?doc_id=310",
+    "sw_daily": "https://tushare.pro/document/2",
+    "ci_daily": "https://tushare.pro/document/2",
     "daily_info": "https://tushare.pro/document/2?doc_id=215",
     "sz_daily_info": "https://tushare.pro/document/2?doc_id=278",
     "moneyflow_mkt_dc": "https://tushare.pro/document/2?doc_id=345",
@@ -389,14 +397,12 @@ INTEGRATED_DOC_REFS = {
     "moneyflow_ind_dc": "https://tushare.pro/document/2?doc_id=343",
     "moneyflow_ind_ths": "https://tushare.pro/document/2?doc_id=341",
     "moneyflow_cnt_ths": "https://tushare.pro/document/2?doc_id=342",
-    "moneyflow_mkt_dc": "https://tushare.pro/document/2?doc_id=345",
     "cyq_perf": "https://tushare.pro/document/2?doc_id=293",
-    "bak_daily": "https://tushare.pro/document/2?doc_id=255",
     "stk_premarket": "https://tushare.pro/document/2?doc_id=284",
     "slb_len": "https://tushare.pro/document/2?doc_id=332",
     "slb_len_mm": "https://tushare.pro/document/2?doc_id=333",
     "stk_auction_o": "https://tushare.pro/document/2?doc_id=353",
-    "stk_auction_c": "https://tushare.pro/document/2?doc_id=355",
+    "stk_auction_c": "https://tushare.pro/document/2",
     "margin": "https://tushare.pro/document/2?doc_id=58",
     "margin_detail": "https://tushare.pro/document/2?doc_id=59",
     "margin_secs": "https://tushare.pro/document/2?doc_id=326",
@@ -991,7 +997,6 @@ EVENT_FLOW_SPECS = {
         page_limit=5000,
         key_columns=("ts_code", "ann_date", "end_date", "holder_name"),
         date_column="ann_date",
-        zero_rows_ok=True,
     ),
     "top10_floatholders": EventDataset(
         api_name="top10_floatholders",
@@ -1000,7 +1005,6 @@ EVENT_FLOW_SPECS = {
         page_limit=5000,
         key_columns=("ts_code", "ann_date", "end_date", "holder_name"),
         date_column="ann_date",
-        zero_rows_ok=True,
     ),
     "pledge_detail": EventDataset(
         api_name="pledge_detail",
@@ -1009,7 +1013,6 @@ EVENT_FLOW_SPECS = {
         page_limit=3000,
         key_columns=("ts_code", "ann_date", "holder_name", "start_date", "pledgor"),
         date_column="ann_date",
-        zero_rows_ok=True,
     ),
     "stk_surv": EventDataset(
         api_name="stk_surv",
@@ -1018,7 +1021,6 @@ EVENT_FLOW_SPECS = {
         page_limit=3000,
         key_columns=("ts_code", "surv_date", "rece_org"),
         date_column="surv_date",
-        zero_rows_ok=True,
         start_date="20220101",
     ),
     "new_share": EventDataset(
@@ -1028,7 +1030,6 @@ EVENT_FLOW_SPECS = {
         page_limit=2000,
         key_columns=("ts_code",),
         date_column="ipo_date",
-        zero_rows_ok=True,
     ),
     "stk_holdertrade": EventDataset(
         api_name="stk_holdertrade",

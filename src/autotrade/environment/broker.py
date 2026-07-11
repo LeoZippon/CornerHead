@@ -983,6 +983,13 @@ class SimBroker:
                     limit_price=order.price,
                 )
             else:
+                if order.is_auction and not order.auction_close:
+                    # Reached its OPEN-auction bar without clearing at the single
+                    # price: like a real unmatched 集合竞价 order it rolls into
+                    # continuous matching as a plain limit order (and stops
+                    # referencing the auction print). A close-auction order has
+                    # no session left to roll into; the day-end sweep voids it.
+                    order.is_auction = False
                 survivors.append(order)
         self._book = survivors
         self._mark_positions_to_bars(minute_group, at_open=False)
