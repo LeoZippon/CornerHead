@@ -1,3 +1,11 @@
+2026-07-11 控制台四特性：创建参数查看、股票筛选、逐 Step 门控、验收改警告（feat/step-tree-rollback，72bc04d + 040af96）
+
+- 创建参数查看（72bc04d）：详情页标题旁「创建参数」按钮 → params.json 全量弹窗（显式设置在前、元数据在后；未列项按系统默认，实际生效以 run manifest 为准）。
+- 股票筛选（72bc04d）：SnapshotConfig `screen_*` 旋钮（剔 ST/剔新股 N 天/流通市值带（亿）/股价带/板块子集 main·gem·star·bj），全部按决策锚点已知信息计算并整区间冻结（缺属性 fail-closed）；单一筛选集合限制 universe/daily/分钟/竞价/事件/财务逐股域（决策快照 + 回放槽一致），manifest 记录配置与结果规模；CLI `--screen-*`、HITL PARAM_DEFAULTS、控制台「股票筛选」表单组（板块复选）。目的=收窄研究宇宙、减少数据量、加速回测。
+- 验收改警告（72bc04d，特性 4）：min_return/min_sharpe 低于阈值不再重置 Fold——最新完整验证照常冻结，`accept_warnings` 记入账本（Agent 可见投影同步）并在 Fold 面板红字展示；非有限指标、完整验证与 max_drawdown 上限保持硬校验。提示词/facts 标注新语义。
+- 逐 Step 门控（040af96，特性 3）：`step_gate_hook` 从交互 worker 经 run_fold（ctx.extra）进 Agent runner——每次正式（非探针）验证回测后查询 control.json：开启则 status 置 `waiting_step_user`+step 摘要并挂起，直到 `step_go` 放行（stop 即刻生效、关门即放行、等待回补推理预算）；放行可带 Step 级指令，注入该次回测工具观察（标注为用户假设）。控制台：逐 Fold 门控开关 + 挂起时批准面板（指标块+指令框+批准并继续）；`approve_step` 服务端从 status 解析 step 序号。批量管线零变化（无 hook）。
+- 验证：full suite 627 OK；控制台已同步重启。注意：工作树含用户在途改动（控制模式改名 auto/manual、run_meta_learning 提示词覆盖、trace tail、预算默认调整、竞价改用 stk_auction 无后缀表等）——本批特性均基于当前工作树实现并全绿。
+
 2026-07-11 扩容收尾：审计驱动的三轮数据修复 + 全域审计清零（feat/step-tree-rollback，f5ae22e/4d1e6b7/fef1942）
 
 - 审计裁决修复（f5ae22e）：①cron 空转——cn_evening_full 固定子集漏掉全部新 macro/event 数据集（注册表有行、调度不调）→ MACRO_REGIME_DEFAULT_DATASETS +8、--event-datasets +15、reference 强刷 +ths_index/index_basic；②真实回归——竞价 print 覆盖使未成交开盘竞价限价单永久单价化、连续时段永不成交 → 未清算开盘竞价单降级为普通限价单（真实未撮合集合竞价语义；收盘竞价单无后续时段、日终清扫作废）+ 回归测试；③去重/文档 id 冲突/冗余默认清理；terminate 信号竞态防护；ths_daily 补 Agent 可见。
@@ -1269,3 +1277,14 @@
 - 串行逐行审读 Data、Environment、Agent、Pipeline、Deployment 和参数参考共 3,266 行；统一职责、PIT/回放、完整验证、QMT 原子传输、条件产物和配置入口表述，并把非必要默认值集中到参数参考。
 - 参数参考覆盖全部 `PARAM_DEFAULTS` 及 Snapshot、Experiment、Acceptance、Modification、Broker、Sandbox、Agent Session 和 Context Compaction 配置字段；明确仍存在的审计限制和代码级配置边界。
 - Validation: `~/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t .` -> 596 OK；Markdown 相对链接、表格结构和参数覆盖检查通过；`git diff --check` clean。
+
+2026-07-11 Exact opening-auction source correction
+
+- 实测确认 `stk_auction_o` 与09:30分钟 Bar同源，`stk_auction_c.vwap` 也不是收盘集合竞价单一清算价；移除两者的 Snapshot/Broker/调度集成，改用 `stk_auction`（2025-01-16起）提供精确开盘竞价价量，收盘竞价继续使用15:00官方收盘价。
+- 2025-01-16以前保留带来源和规则标记的09:30量额代理；`stk_auction` 缺失价格但量额有效时用 `amount/vol` 恢复，明确零成交时不虚构竞价成交并将订单滚入连续交易。
+- 回填357个交易日、1,967,391行，无重复键；完整619项单元测试、真实异常分区验证、配置JSON与 `git diff --check` 通过。
+
+2026-07-11 test7 investor-QA snapshot fix
+
+- `test7` 首次元学习在构造文本 Snapshot 时失败：新接入的上证/深证互动问答使用 `q/a` 字段，通用文本映射未识别。增加数据集专属结构映射，以问题为标题、问题和回答为正文，并加入回归测试。
+- 重启 `test7` 后已越过原失败点，完成 Snapshot 构造并进入元学习 Agent 会话；worker 心跳和截止时间正常。针对性17项测试及 `git diff --check` 通过。
