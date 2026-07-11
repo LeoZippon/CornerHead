@@ -16940,3 +16940,13 @@ Report: no UI changes visible despite repeated syncs. Verified /opt/cornerhead/s
 ## 2026-07-11 Console detail follow-ups (transfer time, dark scrollbars, GPU interval)
 
 fmtOrderCell now renders ISO decision_time (transfers) as plain Shanghai HH:MM matching engine-written order times (the row already has a date column). Dark-mode "white background" in the orders scroll box was the UA scrollbar: style.css had no color-scheme declaration, so browsers painted light scrollbar tracks; added color-scheme light/dark on the theme roots plus an explicit var(--panel) background on .orders-table-box. GPU allocation panel re-detection interval 15s -> 60s. Static synced (no-cache headers make it visible on a normal reload).
+
+## 2026-07-11 Realtime minute feed (advance), console restart action
+
+Scaffolding survey (Opus explorer): live executor/QMT bridge is design-only (deployment_documentation is the target contract; SimBroker + replay tick loop are the only runnable path); a live feed must match STK_MINS_REQUIRED_COLUMNS / MinuteMarketData. Probed live: rt_min works on the trial tier (freq "1MIN" mandatory; fields ts_code,freq,time,open,close,high,low,vol,amount; latest bar returned off-session); stk_auction (opening auction, 2025+) and stk_auction_c (closing auction) both accessible.
+
+New src/autotrade/data_sources/tushare/realtime.py: normalize_rt_minutes (historical stamping rule available_at=bar close), RealtimeMinuteFeed (watchlist poll, seen-dedup, serial-throttled TuShareClient), RealtimeMinuteStore (data/raw/rt_min_live/trade_date=*.parquet, dedup by ts_code+trade_time, atomic replace, replay-identical schema so the unified tick loop / Timeview consume live bars unchanged). CLI scripts/data/tushare_realtime.py --probe/--follow (probe verified on two codes). Unit test: fake-client poll dedup + store roundtrip.
+
+Console: manager action "restart" (SIGTERM live worker, bounded 30s wait, ledger resume via start_worker) + confirm-modal 重启 button in the running-state control bar. Full suite 612 OK; static synced, console restarted.
+
+Queued next (user purchased full TuShare access): full catalog survey vs current ingestion; stk_auction/stk_auction_c into the download layer + broker auction matching (data-driven from 2025).

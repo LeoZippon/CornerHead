@@ -1911,3 +1911,44 @@ class IntradayByDateTest(unittest.TestCase):
         self.assertEqual(self.module.audit_intraday_by_date(audit_args), 0)
         status = json.loads(status_path.read_text(encoding="utf-8"))
         self.assertEqual(status["status"], "ok")
+
+
+class RealtimeMinuteTest(unittest.TestCase):
+    def test_normalize_poll_dedup_and_store_roundtrip(self):
+        import pandas as pd
+
+        from autotrade.data_sources.tushare.common import ApiResult, STK_MINS_REQUIRED_COLUMNS
+        from autotrade.data_sources.tushare.realtime import RealtimeMinuteFeed, RealtimeMinuteStore
+
+        fields = ["ts_code", "freq", "time", "open", "close", "high", "low", "vol", "amount"]
+
+        class FakeClient:
+            def __init__(self):
+                self.calls = 0
+
+            def query(self, api_name, params=None, fields_arg="", retries=5):
+                assert api_name == "rt_min" and params["freq"] == "1MIN"
+                self.calls += 1
+                return ApiResult(fields=fields, items=[
+                    [params["ts_code"], "1MIN", "2026-07-13 09:31:00", 10.0, 10.1, 10.2, 9.9, 1000, 10050.0],
+                ], source_hash="x")
+
+        client = FakeClient()
+        feed = RealtimeMinuteFeed(client, ["000001.SZ", "600000.SH", "000001.SZ"])
+        first = feed.poll()
+        self.assertEqual(list(first.columns), STK_MINS_REQUIRED_COLUMNS)
+        self.assertEqual(len(first), 2)  # watchlist deduped
+        self.assertEqual(first.loc[0, "trade_date"], "20260713")
+        self.assertEqual(first.loc[0, "available_at"], "2026-07-13T09:31:00+08:00")
+        # Second poll returns the same bars -> all filtered as already seen.
+        self.assertTrue(feed.poll().empty)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RealtimeMinuteStore(Path(tmp) / "rt_min_live")
+            self.assertEqual(store.append(first), {"20260713": 2})
+            # Re-append overlaps: dedup by (ts_code, trade_time), atomic replace.
+            store.append(first)
+            bars = store.bars("20260713")
+            self.assertEqual(len(bars), 2)
+            self.assertEqual(list(bars.columns), STK_MINS_REQUIRED_COLUMNS)
+            self.assertTrue(store.bars("20990101").empty)

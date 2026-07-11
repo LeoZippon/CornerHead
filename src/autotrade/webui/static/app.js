@@ -1108,6 +1108,17 @@ function controlBar(detail) {
         ]);
       },
     }, "强制终止"));
+    bar.append(el("button", {
+      class: "btn",
+      onclick: () => {
+        showModal("确认重启？", el("div", {},
+          el("p", {}, "终止当前 worker 并立即按账本恢复运行：已完成会话保留，被中断的会话整体重跑。"),
+        ), [
+          el("button", { class: "btn", onclick: closeModal }, "取消"),
+          el("button", { class: "btn primary", onclick: () => { closeModal(); send({ action: "restart" }, "已重启 worker"); } }, "确认重启"),
+        ]);
+      },
+    }, "重启"));
   } else if (["interrupted", "stopped", "failed", "created"].includes(state)) {
     bar.append(el("button", { class: "btn primary", onclick: () => send({ action: "resume" }, "已请求恢复运行") }, "恢复运行"));
   }

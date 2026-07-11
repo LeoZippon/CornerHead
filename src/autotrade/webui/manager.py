@@ -329,6 +329,20 @@ class ExperimentManager:
             control.request = None
             write_control(control_path, control)
             return {"control": control.to_record(), **self.start_worker(experiment_id)}
+        elif action == "restart":
+            # Terminate-and-restart in one step: SIGTERM the live worker, wait
+            # for the pid to die (bounded), then resume via the ledger.
+            status = read_status(hitl_dir / STATUS_NAME)
+            if status_pid_alive(status):
+                os.kill(int(status["pid"]), signal.SIGTERM)
+                import time as _time
+
+                deadline = _time.monotonic() + 30.0
+                while _time.monotonic() < deadline and status_pid_alive(read_status(hitl_dir / STATUS_NAME)):
+                    _time.sleep(0.5)
+                if status_pid_alive(read_status(hitl_dir / STATUS_NAME)):
+                    raise ManagerError("worker 未在 30s 内退出；请稍后重试或强制终止后手动恢复")
+            return {"restarted": True, **self.start_worker(experiment_id)}
         elif action == "terminate":
             status = read_status(hitl_dir / STATUS_NAME)
             if not status_pid_alive(status):

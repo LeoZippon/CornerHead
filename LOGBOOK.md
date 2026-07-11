@@ -1,3 +1,10 @@
+2026-07-11 实时分钟接入（提前集成）+ 运行中实验一键重启（feat/step-tree-rollback）
+
+- 实测确认接口（当前 token）：`rt_min`（freq 必须 "1MIN"，返回 ts_code/freq/time/open/close/high/low/vol/amount，试用档非交易日也回最新 bar）；`stk_auction`（开盘集合竞价，2025 起，日频 price/vol/amount/pre_close/turnover_rate/volume_ratio/float_share）；`stk_auction_c`（收盘集合竞价 OHLC/vol/amount/vwap）均可访问。
+- 新 `data_sources/tushare/realtime.py`：`normalize_rt_minutes`（对齐 STK_MINS_REQUIRED_COLUMNS，available_at=bar 收盘同历史打点规则）、`RealtimeMinuteFeed`（watchlist 轮询 + 去重，复用 TuShareClient 串行限速）、`RealtimeMinuteStore`（data/raw/rt_min_live/ 按日分区，(ts_code,trade_time) 去重原子替换，schema 与回放槽一致——统一 tick 环路/Timeview 可直接消费）。CLI `scripts/data/tushare_realtime.py --probe/--follow`（实测 probe 两码通过）。设计前提：实盘环路（QMT 文件桥执行器）尚未实现，本模块是数据获取侧的提前就位；接入决策环 = 把 live 分区喂给 MinuteMarketData/ctx.bars（schema 已即插即用）。
+- 控制台：`restart` 动作（SIGTERM 活 worker → 有界等待退出 → 账本恢复重启）+ 运行态「重启」按钮（确认弹窗）；full suite 612 OK，已同步重启 console。
+- 待办（用户已购全量接口权限）：全 TuShare 目录 vs 现有摄取盘点 + stk_auction/stk_auction_c 纳入下载层与 Broker 竞价撮合（2025 起数据驱动启用）——下一大批次。
+
 2026-07-11 控制台三处细节跟进（feat/step-tree-rollback）
 
 - transfer 行决策时点改为与普通订单一致的 `HH:MM`（上海时区；日期已有独立列，不再带 `10-09` 前缀）。
