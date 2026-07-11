@@ -95,6 +95,12 @@ class SnapshotConfig:
         # Core A-share benchmark indexes (000001/000016/000300/000905/000852/
         # 399006/000688): market timing, beta management, relative strength.
         "index_daily",
+        "index_dailybasic",
+        "sw_daily",
+        "ci_daily",
+        "daily_info",
+        "sz_daily_info",
+        "moneyflow_mkt_dc",
         "fx_daily",
         # Regime/background additions: repo liquidity, US nominal + real yield
         # curves (risk appetite). cn_schedule deliberately NOT exposed: the
