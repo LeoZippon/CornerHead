@@ -1,3 +1,15 @@
+2026-07-11 TuShare 全量接口扩容：33 数据集 + 竞价撮合真值 + 终止加固（feat/step-tree-rollback，7 commits）
+
+- 全目录普查（Opus 检查器实测全部候选接口权限/字段/起始覆盖）+ 用户四项裁决（因子库不采、北向冻结跳过、MED 全纳、筹码只要汇总）后分 6 批落地，每批 full suite 613 绿：
+  - 批1 竞价（c013034）：**普查更正——批量表是 `stk_auction_o`/`stk_auction_c`（按 trade_date 全市场，20100104 起）**，无 2025 断点；`stk_auction`（无后缀）为按码滚动窗不采。入 DAILY_SPECS 必需集；快照双侧写独立 `auction.parquet`（session 列，行级 available_at=撮合公开时刻 09:25/15:00，节点=晚间物流）；**SimBroker 竞价单按当日真实竞价 vwap 单价清算**（可成交限价恰按竞价价、不及则留待；融券 uptick 参考同源；无行日期回落 bar 近似——corporate_actions 先例）。回填 2010→今完成。
+  - 批2/3 事件面板族（7073c5d）：moneyflow_dc/_ths/_ind_dc/_ind_ths/_cnt_ths、cyq_perf、bak_daily、stk_premarket（行级 09:00 盘前）、slb_len/_mm（转融券 2024-07 停，zero_rows_ok）——EventDataset(trade_date) 全走现成管道（spec/available_at 规则/审计 PIT/cron 注册/SnapshotConfig 默认）。
+  - 批2 宏观市场级（43832ce）：index_dailybasic（核心指数估值，by_ts_code）、sw_daily/ci_daily（申万/中信行业指数）、daily_info/sz_daily_info（市场日度汇总）、moneyflow_mkt_dc——MacroDataset date_year 系。
+  - 批4 板块概念（b652403 + 71aab90）：kpl_concept_cons（次日 08:30，随 kpl 盘前回补节点）、dc_index/dc_member（当日 20:00）、ths_daily（宏观域深史）；参考静态 ths_index/ths_member（N/I 型逐指数）、index_basic、hs_const、index_weight（核心 7 指数月频）入 download_reference 强刷族。
+  - 批5 治理（c98b442）：top10_holders/top10_floatholders、pledge_detail、stk_surv、new_share（EventDataset）+ broker_recommend（宏观 month_loop）。**pledge_stat 缓采**（接口无批量路径，仅 end_date 单点查询）。
+  - 批6 文本（627f903）：irm_qa_sh/_sz（互动易/e互动问答，pub_time 行级）入 TEXT 族；text day 策略参数名泛化为 spec.date_column（cctv_news 不变）。
+- 终止加固（f97c3a7，任务 #16）：terminate 动作 SIGTERM→10s 宽限→进程组 SIGKILL（test6 证据：优雅信号被元学习阻塞工作无视 1 小时）。**权衡后不加持久化 terminating 状态**：升级后窗口 ≤10s 且被同步控制请求覆盖，轮询无法观测中间态；与 launching 情形（20s+ 无属主、可重复拉起）本质不同。控制台已同步重启。
+- 回填后台进行中（竞价完成；事件/宏观/链式 board+治理+文本+参考在跑）；完成后跑全域审计。数据文档已补各数据集行与 PIT 口径汇总（含裁决不采清单）。
+
 2026-07-11 实时分钟接入（提前集成）+ 运行中实验一键重启（feat/step-tree-rollback）
 
 - 实测确认接口（当前 token）：`rt_min`（freq 必须 "1MIN"，返回 ts_code/freq/time/open/close/high/low/vol/amount，试用档非交易日也回最新 bar）；`stk_auction`（开盘集合竞价，2025 起，日频 price/vol/amount/pre_close/turnover_rate/volume_ratio/float_share）；`stk_auction_c`（收盘集合竞价 OHLC/vol/amount/vwap）均可访问。
