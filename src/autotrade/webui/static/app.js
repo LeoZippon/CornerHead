@@ -806,6 +806,7 @@ function fieldGrid(fields, inputs) {
 function fieldNode(field, inputs) {
   const wrap = el("div", { class: "field" });
   if (field.key === "gpu_count") wrap.classList.add("field-wide", "gpu-field");
+  if (field.type === "multi") wrap.classList.add("field-wide");
   const labelText = field.required ? `${field.label} *` : field.label;
   if (field.type === "bool") {
     const input = el("input", { type: "checkbox" });
@@ -2228,6 +2229,7 @@ function foldResultPanel(detail, session) {
   ])));
   const meta = el("table", { class: "kv section-gap" },
     kvRow("验证区间", fmtPeriodRange(record.validation_period || session.validation_period)),
+    record.run_wall_seconds ? kvRow("总耗时", fmtDuration(record.run_wall_seconds)) : null,
     kvRow("冻结产物", record.frozen_strategy_artifact_id || "—"),
     (record.accept_reasons || []).length ? kvRow("未接受原因", (record.accept_reasons || []).join("；")) : null,
     (record.accept_warnings || []).length

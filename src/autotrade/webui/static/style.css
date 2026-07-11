@@ -428,9 +428,13 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .field.checkbox { display: flex; gap: 0.6rem; align-items: flex-start; }
 .form-grid > .field.checkbox { padding-top: 1.45rem; }
 .field.checkbox input { margin-top: 0.3rem; width: 1.06rem; height: 1.06rem; }
-.check-group { display: flex; gap: 1.1rem; flex-wrap: wrap; padding: 0.3rem 0; }
-.check-item { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.94rem; font-weight: 500; cursor: pointer; }
-.check-item input { width: 1.06rem; height: 1.06rem; }
+.check-group { display: flex; gap: 0.55rem; flex-wrap: wrap; padding: 0.25rem 0; }
+.check-item { display: inline-flex; align-items: center; gap: 0.45rem; font-size: 0.9rem; font-weight: 500;
+  cursor: pointer; padding: 0.3rem 0.75rem; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--input-bg); transition: border-color 0.12s ease, background 0.12s ease; }
+.check-item:hover { border-color: var(--accent); }
+.check-item:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.check-item input { width: 1rem; height: 1rem; }
 details.advanced { margin-top: 0.55rem; }
 details.advanced summary { cursor: pointer; color: var(--muted); font-size: 0.875rem; }
 details.advanced .form-grid { margin-top: 0.55rem; }

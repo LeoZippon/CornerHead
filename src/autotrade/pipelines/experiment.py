@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 import traceback
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -317,6 +318,7 @@ class ExperimentPipeline:
         sandbox_gpu_count: int | None = None,
         step_gate_hook=None,
     ) -> FoldOutcome:
+        run_started = time.monotonic()
         sandbox, docker = self._start_sandbox(run_id, gpu_count=sandbox_gpu_count)
         paths = sandbox.paths
 
@@ -479,6 +481,10 @@ class ExperimentPipeline:
                     "epoch_id": epoch_id,
                     "fold_id": fold.fold_id,
                     "run_id": run_id,
+                    # Sandbox start -> record time: snapshots, agent session,
+                    # freeze and the frozen test eval (the researcher-facing
+                    # "how long did this fold take").
+                    "run_wall_seconds": round(time.monotonic() - run_started, 1),
                     **fold.to_record(),
                     "parent_strategy_artifact_id": parent.artifact_id if parent else None,
                     "fold_directive": fold_directive.strip() or None,
