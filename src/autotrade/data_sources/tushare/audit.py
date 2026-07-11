@@ -1949,6 +1949,8 @@ def text_pit_rules() -> dict[str, dict[str, str]]:
         "news": {"available_at": "datetime", "unit": "text"},
         "cctv_news": {"available_at": "date at 23:59:59+08:00 conservative fallback", "unit": "text"},
         "npr": {"available_at": "pubtime", "unit": "HTML/text"},
+        "irm_qa_sh": {"available_at": "pub_time; trade_date end-of-day fallback", "unit": "Q&A text"},
+        "irm_qa_sz": {"available_at": "pub_time; trade_date end-of-day fallback", "unit": "Q&A text"},
         "research_report": {"available_at": "trade_date conservative end-of-day unless a more precise time is available", "unit": "text/summary/url"},
         "report_rc": {"available_at": "create_time if present, otherwise report_date 22:00+08 based on documented nightly update", "unit": "mixed forecast fields; do not mix directly with P2 actual statements"},
     }

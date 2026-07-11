@@ -100,6 +100,8 @@ TEXT_DATASETS = [
     "npr",
     "research_report",
     "report_rc",
+    "irm_qa_sh",
+    "irm_qa_sz",
     "news",
 ]
 
@@ -276,6 +278,8 @@ TEXT_DEFAULT_DATASETS = [
     "npr",
     "research_report",
     "report_rc",
+    "irm_qa_sh",
+    "irm_qa_sz",
     "news",
 ]
 
@@ -349,6 +353,8 @@ INTEGRATED_DOC_REFS = {
     "us_tltr": "https://tushare.pro/document/2?doc_id=222",
     "index_daily": "https://tushare.pro/document/2?doc_id=95",
     "index_dailybasic": "https://tushare.pro/document/2?doc_id=128",
+    "irm_qa_sh": "https://tushare.pro/document/2?doc_id=364",
+    "irm_qa_sz": "https://tushare.pro/document/2?doc_id=365",
     "ths_daily": "https://tushare.pro/document/2?doc_id=260",
     "broker_recommend": "https://tushare.pro/document/2?doc_id=337",
     "top10_holders": "https://tushare.pro/document/2?doc_id=61",
@@ -582,6 +588,24 @@ TEXT_SPECS = {
         start_date="20100101",
         time_column="create_time",
         date_column="report_date",
+    ),
+    "irm_qa_sh": TextDataset(
+        api_name="irm_qa_sh",
+        strategy="day",
+        fields="ts_code,name,trade_date,q,a,pub_time",
+        key_columns=("trade_date", "ts_code", "q"),
+        start_date="20220101",
+        time_column="pub_time",
+        date_column="trade_date",
+    ),
+    "irm_qa_sz": TextDataset(
+        api_name="irm_qa_sz",
+        strategy="day",
+        fields="ts_code,name,trade_date,q,a,pub_time,industry",
+        key_columns=("trade_date", "ts_code", "q"),
+        start_date="20220101",
+        time_column="pub_time",
+        date_column="trade_date",
     ),
     "news": TextDataset(
         api_name="news",

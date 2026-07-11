@@ -2439,7 +2439,7 @@ def download_text_day(client: TuShareClient, raw_dir: Path, spec: TextDataset, d
         if path.exists() and not force:
             skipped += 1
             continue
-        params = {"date": day}
+        params = {spec.date_column or "date": day}
         result = client.query(spec.api_name, params, spec.fields)
         rows = write_text_result(path, result, spec, params, revision_ledger, allow_empty_revision_overwrite)
         written += 1

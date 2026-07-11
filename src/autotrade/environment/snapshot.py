@@ -119,7 +119,10 @@ class SnapshotConfig:
         "us_tycr",
         "us_trycr",
     )
-    text_datasets: tuple[str, ...] = ("anns_d", "major_news", "cctv_news", "npr", "research_report", "report_rc", "news")
+    text_datasets: tuple[str, ...] = (
+        "anns_d", "major_news", "cctv_news", "npr", "research_report", "report_rc",
+        "irm_qa_sh", "irm_qa_sz", "news",
+    )
     # Newswire knobs. Defaults are deliberately generous (testing phase,
     # maximize Agent-visible data): every src= partition on disk, the full
     # text window. Cross-source content dedup always applies — measured 43%
