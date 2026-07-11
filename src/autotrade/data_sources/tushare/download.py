@@ -482,10 +482,12 @@ def download_macro(args: argparse.Namespace) -> int:
         elif spec.strategy == "date_year_by_ts_code":
             if dataset == "index_global":
                 codes = selected_index_codes(args)
-            elif dataset == "index_daily":
+            elif dataset in ("index_daily", "index_dailybasic"):
                 codes = selected_cn_index_codes(args)
-            else:
+            elif dataset == "fx_daily":
                 codes = selected_fx_codes(args)
+            else:
+                raise RuntimeError(f"no ts_code universe defined for by-ts_code macro dataset {dataset!r}")
             download_macro_date_year_by_ts_code(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), codes, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "eco_cal_month":
             download_macro_eco_cal_month(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), args, revision_ledger, allow_empty_revision_overwrite)
@@ -530,7 +532,7 @@ def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: MacroD
         if should_skip_existing_partition(path, force=force, requested_params=coverage_params):
             skipped += 1
             continue
-        params = {"m": month}
+        params = {spec.month_param: month}
         meta_params = {**params, **coverage_params} if coverage_params else params
         result = client.query(spec.api_name, params, spec.fields)
         df = augment_macro_frame(frame(result), spec)

@@ -470,6 +470,7 @@ class MacroDataset:
     start_date: str = "20100101"
     start_month: str = "201001"
     start_quarter: str = "2010Q1"
+    month_param: str = "m"  # month_loop query param name (broker_recommend uses "month")
 
 @dataclass
 class EventDataset:
@@ -768,6 +769,7 @@ MACRO_SPECS = {
         fields="month,broker,ts_code,name",
         key_columns=("month", "broker", "ts_code"),
         date_column="month",
+        month_param="month",
     ),
     "ths_daily": MacroDataset(
         api_name="ths_daily",
