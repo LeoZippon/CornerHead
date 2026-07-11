@@ -129,6 +129,9 @@ EVENT_FLOW_DATASETS = [
 
 BOARD_TRADING_DATASETS = [
     "kpl_list",
+    "kpl_concept_cons",
+    "dc_index",
+    "dc_member",
     "limit_step",
     "limit_cpt_list",
     "limit_list_ths",
@@ -181,6 +184,7 @@ MACRO_DATASETS = [
     "us_tbr",
     "us_tltr",
     "index_daily",
+    "ths_daily",
     "index_dailybasic",
     "sw_daily",
     "ci_daily",
@@ -339,6 +343,10 @@ INTEGRATED_DOC_REFS = {
     "us_tltr": "https://tushare.pro/document/2?doc_id=222",
     "index_daily": "https://tushare.pro/document/2?doc_id=95",
     "index_dailybasic": "https://tushare.pro/document/2?doc_id=128",
+    "ths_daily": "https://tushare.pro/document/2?doc_id=260",
+    "kpl_concept_cons": "https://tushare.pro/document/2?doc_id=351",
+    "dc_index": "https://tushare.pro/document/2?doc_id=362",
+    "dc_member": "https://tushare.pro/document/2?doc_id=363",
     "sw_daily": "https://tushare.pro/document/2?doc_id=311",
     "ci_daily": "https://tushare.pro/document/2?doc_id=310",
     "daily_info": "https://tushare.pro/document/2?doc_id=215",
@@ -702,6 +710,13 @@ MACRO_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
+    "ths_daily": MacroDataset(
+        api_name="ths_daily",
+        strategy="date_year",
+        fields="ts_code,trade_date,open,high,low,close,pre_close,avg_price,change,pct_change,vol,turnover_rate",
+        key_columns=("trade_date", "ts_code"),
+        date_column="trade_date",
+    ),
     "index_dailybasic": MacroDataset(
         api_name="index_dailybasic",
         strategy="date_year_by_ts_code",
@@ -963,6 +978,30 @@ BOARD_TRADING_SPECS = {
         fields="ts_code,name,trade_date,lu_time,ld_time,open_time,last_time,lu_desc,tag,theme,net_change,bid_amount,status,bid_change,bid_turnover,lu_bid_vol,pct_chg,bid_pct_chg,rt_pct_chg,limit_order,amount,turnover_rate,free_float,lu_limit_order",
         page_limit=8000,
         key_columns=("trade_date", "ts_code", "tag", "status", "lu_time", "open_time", "last_time"),
+    ),
+    "kpl_concept_cons": BoardTradingDataset(
+        api_name="kpl_concept_cons",
+        strategy="trade_date",
+        fields="ts_code,name,con_name,con_code,trade_date,desc,hot_num",
+        page_limit=3000,
+        key_columns=("trade_date", "con_code", "ts_code"),
+        start_date="20250101",
+    ),
+    "dc_index": BoardTradingDataset(
+        api_name="dc_index",
+        strategy="trade_date",
+        fields="ts_code,trade_date,name,leading,leading_code,pct_change,leading_pct,total_mv,turnover_rate,up_num,down_num,idx_type,level",
+        page_limit=5000,
+        key_columns=("trade_date", "ts_code"),
+        start_date="20250101",
+    ),
+    "dc_member": BoardTradingDataset(
+        api_name="dc_member",
+        strategy="trade_date",
+        fields="trade_date,ts_code,con_code,name",
+        page_limit=8000,
+        key_columns=("trade_date", "ts_code", "con_code"),
+        start_date="20250101",
     ),
     "limit_step": BoardTradingDataset(
         api_name="limit_step",
@@ -1835,9 +1874,11 @@ def board_available_at(value: str, api_name: str, params: dict[str, Any] | None 
     text = str(value or "").strip()
     if not re.fullmatch(r"\d{8}", text):
         return "", "missing_source_date"
-    if api_name == "kpl_list":
+    if api_name in {"kpl_list", "kpl_concept_cons"}:
         next_day = parse_yyyymmdd(text) + timedelta(days=1)
         return local_time(format_yyyymmdd(next_day), "08:30:00"), "official_next_day_0830_from:trade_date"
+    if api_name in {"dc_index", "dc_member"}:
+        return local_time(text, "20:00:00"), "official_20_from:trade_date"
     if api_name == "limit_list_ths":
         return local_time(text, "16:00:00"), "official_16_from:trade_date"
     if api_name in {"top_list", "top_inst"}:

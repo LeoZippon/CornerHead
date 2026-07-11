@@ -71,6 +71,9 @@ class SnapshotConfig:
         # next-morning labels — descriptive sentiment signals, never a truth
         # source for fills/tradability/risk):
         "kpl_list",
+        "kpl_concept_cons",
+        "dc_index",
+        "dc_member",
         "limit_step",
         "limit_cpt_list",
         "limit_list_ths",

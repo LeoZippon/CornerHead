@@ -2410,6 +2410,9 @@ def audit_board_dataset(raw_dir: Path, spec: BoardTradingDataset, expected_paths
 def board_pit_rules() -> dict[str, dict[str, str]]:
     return {
         "kpl_list": {"available_at": "official next-day 08:30 from trade_date", "usage": "next-day board sentiment/evidence; no same-day intraday lookahead"},
+        "kpl_concept_cons": {"available_at": "official next-day 08:30 from trade_date", "usage": "next-day concept membership/heat evidence; no same-day intraday lookahead"},
+        "dc_index": {"available_at": "official 20:00 from trade_date", "usage": "post-close board-index rotation evidence"},
+        "dc_member": {"available_at": "official 20:00 from trade_date", "usage": "post-close board membership map"},
         "limit_step": {"available_at": "conservative trade-date end-of-day", "usage": "market height and limit-up ladder after close"},
         "limit_cpt_list": {"available_at": "conservative trade-date end-of-day", "usage": "topic strength and limit-up board rotation after close"},
         "limit_list_ths": {"available_at": "official around 16:00 from trade_date", "usage": "post-close THS limit-up/down pool evidence; no same-day intraday lookahead"},
