@@ -207,6 +207,10 @@ def _artifact_contract_facts(
             "parent": _compact_mapping(parent),
             "modification_constraints": manifest.get("modification_constraints"),
             "acceptance_rules": None if is_meta else manifest.get("acceptance_rules"),
+            # Semantics: max_drawdown + complete validation are HARD gates;
+            # min_return / min_sharpe are targets — shortfalls freeze WITH a
+            # recorded warning instead of resetting the fold.
+            "acceptance_semantics": None if is_meta else "drawdown+complete=hard; return/sharpe=warn-only targets",
             "step_tree_enabled": manifest.get("step_tree_enabled"),
             "record_failed_attempts": manifest.get("record_failed_attempts"),
             "nl_failure_policy": manifest.get("nl_failure_policy"),

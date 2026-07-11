@@ -160,6 +160,13 @@ def build_snapshot_config(args) -> SnapshotConfig:
         macro_window_months=args.macro_window_months,
         text_window_months=args.text_window_months,
         intraday_trade_days=args.intraday_trade_days,
+        screen_exclude_st=bool(getattr(args, "screen_exclude_st", False)),
+        screen_exclude_new_listed_days=int(getattr(args, "screen_exclude_new_listed_days", 0) or 0),
+        screen_min_circ_mv_yi=getattr(args, "screen_min_circ_mv_yi", None),
+        screen_max_circ_mv_yi=getattr(args, "screen_max_circ_mv_yi", None),
+        screen_min_price=getattr(args, "screen_min_price", None),
+        screen_max_price=getattr(args, "screen_max_price", None),
+        screen_boards=tuple(getattr(args, "screen_boards", ()) or ()),
     )
 
 
@@ -418,6 +425,7 @@ def build_session_builders(
             acceptance_rules={},
             mode="meta_learning",
             meta_learning_directive=str(ctx.manifest.get("meta_learning_directive", "")),
+            system_prompt_override=str(ctx.manifest.get("system_prompt_override", "")),
             web_search_providers=web_search_providers,
             compact_proxy=compact_proxy,
             explore_proxy=explore_proxy,

@@ -135,6 +135,20 @@ def add_snapshot_window_arguments(parser: argparse.ArgumentParser, *, verbose_he
             verbose_help,
         ),
     )
+    parser.add_argument("--screen-exclude-st", action="store_true",
+                        help="Universe screen: exclude names carrying ST at the decision anchor.")
+    parser.add_argument("--screen-exclude-new-listed-days", type=int, default=0,
+                        help="Universe screen: exclude stocks listed within N days of the anchor (0=off).")
+    parser.add_argument("--screen-min-circ-mv-yi", type=float, default=None,
+                        help="Universe screen: minimum circulating market cap (亿元).")
+    parser.add_argument("--screen-max-circ-mv-yi", type=float, default=None,
+                        help="Universe screen: maximum circulating market cap (亿元).")
+    parser.add_argument("--screen-min-price", type=float, default=None,
+                        help="Universe screen: minimum close price at the anchor.")
+    parser.add_argument("--screen-max-price", type=float, default=None,
+                        help="Universe screen: maximum close price at the anchor.")
+    parser.add_argument("--screen-boards", nargs="+", choices=["main", "gem", "star", "bj"], default=[],
+                        help="Universe screen: restrict to these boards (empty = all).")
 
 
 def add_model_arguments(parser: argparse.ArgumentParser, *, verbose_help: bool) -> None:

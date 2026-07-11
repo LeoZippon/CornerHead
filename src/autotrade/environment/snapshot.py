@@ -20,8 +20,8 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -140,6 +140,31 @@ class SnapshotConfig:
     replay_include_minutes: bool = True
     replay_include_macro: bool = True
     replay_include_fundamentals: bool = True
+    # ---- universe screening (experiment-level research universe) ----
+    # Applied to every per-stock domain (universe/daily/minutes/auction/events/
+    # fundamentals) at snapshot AND replay-slot build, using only decision-time
+    # knowledge (as-of names, list_date, latest daily_basic <= anchor). The set
+    # is frozen at the decision anchor: codes turning ST / delisting inside the
+    # replay period keep their data (they were eligible when chosen). Empty /
+    # default values disable screening entirely (zero overhead).
+    screen_exclude_st: bool = False
+    screen_exclude_new_listed_days: int = 0
+    screen_min_circ_mv_yi: float | None = None  # 流通市值下限（亿元）
+    screen_max_circ_mv_yi: float | None = None  # 流通市值上限（亿元）
+    screen_min_price: float | None = None
+    screen_max_price: float | None = None
+    screen_boards: tuple[str, ...] = ()  # subset of main/gem/star/bj; empty = all
+
+    def screening_active(self) -> bool:
+        return bool(
+            self.screen_exclude_st
+            or self.screen_exclude_new_listed_days > 0
+            or self.screen_min_circ_mv_yi is not None
+            or self.screen_max_circ_mv_yi is not None
+            or self.screen_min_price is not None
+            or self.screen_max_price is not None
+            or self.screen_boards
+        )
 
     def __post_init__(self) -> None:
         for name, value in self.to_record()["decision_windows"].items():
@@ -147,6 +172,17 @@ class SnapshotConfig:
                 raise ValueError(f"{name} must be positive")
         if self.intraday_trade_days <= 0:
             raise ValueError("intraday_trade_days must be positive")
+        if self.screen_exclude_new_listed_days < 0:
+            raise ValueError("screen_exclude_new_listed_days must be >= 0")
+        unknown_boards = set(self.screen_boards) - {"main", "gem", "star", "bj"}
+        if unknown_boards:
+            raise ValueError(f"unknown screen_boards: {sorted(unknown_boards)}")
+        for low, high, label in (
+            (self.screen_min_circ_mv_yi, self.screen_max_circ_mv_yi, "screen_circ_mv_yi"),
+            (self.screen_min_price, self.screen_max_price, "screen_price"),
+        ):
+            if low is not None and high is not None and low > high:
+                raise ValueError(f"{label}: min must be <= max")
 
     def months_for(self, domain: str) -> int:
         overrides = {
@@ -182,6 +218,15 @@ class SnapshotConfig:
             "include_intraday": self.include_intraday,
             "include_industry": self.include_industry,
             "text_body_chars": self.text_body_chars,
+            "universe_screen": {
+                "exclude_st": self.screen_exclude_st,
+                "exclude_new_listed_days": self.screen_exclude_new_listed_days,
+                "min_circ_mv_yi": self.screen_min_circ_mv_yi,
+                "max_circ_mv_yi": self.screen_max_circ_mv_yi,
+                "min_price": self.screen_min_price,
+                "max_price": self.screen_max_price,
+                "boards": list(self.screen_boards),
+            },
             "replay": {
                 "include_events": self.replay_include_events,
                 "include_text": self.replay_include_text,
@@ -233,8 +278,14 @@ class SnapshotBuilder:
         profiles: dict[str, dict[str, object]] = {}
         total_started = time.perf_counter()
 
+        # Research-universe screen: one decision-time set restricts every
+        # per-stock domain below (None = screening off, zero overhead).
+        screened = self._screened_codes(decision_time, config)
+
         started = time.perf_counter()
         daily, daily_meta = self._build_daily(decision_time, daily_window_start)
+        daily = self._apply_screen(daily, screened)
+        daily_meta = {**daily_meta, "rows": int(len(daily))}
         profiles["daily.parquet"] = _write_with_profile(
             output_dir / "daily.parquet", daily, build_seconds=time.perf_counter() - started
         )
@@ -244,6 +295,7 @@ class SnapshotBuilder:
         auction, auction_meta = self._build_auction(
             daily_window_start.strftime("%Y%m%d"), decision_time.strftime("%Y%m%d")
         )
+        auction = self._apply_screen(auction, screened)
         if not auction.empty:
             auction = auction[auction["available_at"] <= decision_time.isoformat()].reset_index(drop=True)
             auction_meta = {**auction_meta, "rows": int(len(auction))}
@@ -255,6 +307,8 @@ class SnapshotBuilder:
         started = time.perf_counter()
         if config.include_intraday:
             intraday, intraday_meta = self._build_intraday(decision_time, daily_meta["trade_dates"], config)
+            intraday = self._apply_screen(intraday, screened)
+            intraday_meta = {**intraday_meta, "rows": int(len(intraday))}
         else:
             intraday, intraday_meta = pd.DataFrame(), {"rows": 0, "datasets": [], "skipped": True}
         profiles["intraday_1min.parquet"] = _write_with_profile(
@@ -272,6 +326,7 @@ class SnapshotBuilder:
             min_available_at=fundamentals_window_start.isoformat(),
             require_partitions=bool(config.fundamental_datasets),
         )
+        fundamentals = self._apply_screen(fundamentals, screened)
         profiles["fundamentals.parquet"] = _write_with_profile(
             output_dir / "fundamentals.parquet", fundamentals, build_seconds=time.perf_counter() - started
         )
@@ -283,6 +338,8 @@ class SnapshotBuilder:
 
         started = time.perf_counter()
         events, events_meta = self._build_available_at_domain(config.events_datasets, decision_time, events_window_start)
+        events = self._apply_screen(events, screened)
+        events_meta = {**events_meta, "rows": int(len(events))}
         profiles["events.parquet"] = _write_with_profile(
             output_dir / "events.parquet", events, build_seconds=time.perf_counter() - started
         )
@@ -304,10 +361,16 @@ class SnapshotBuilder:
 
         started = time.perf_counter()
         universe = self._build_universe(decision_time, config)
+        universe = self._apply_screen(universe, screened)
         profiles["universe.parquet"] = _write_with_profile(
             output_dir / "universe.parquet", universe, build_seconds=time.perf_counter() - started
         )
         domains["universe"] = {"rows": int(len(universe))}
+        domains["universe_screen"] = {
+            "active": screened is not None,
+            "codes": len(screened) if screened is not None else None,
+            "config": config.to_record()["universe_screen"],
+        }
 
         manifest = {
             "snapshot_id": new_id("snap"),
@@ -430,8 +493,15 @@ class SnapshotBuilder:
         profiles: dict[str, dict[str, object]] = {}
         total_started = time.perf_counter()
 
+        # Same screened set the agent's decision snapshot used: anchored strictly
+        # BEFORE the period, frozen across it (no intra-period re-screening).
+        screened = self._screened_codes(
+            period_start.to_pydatetime() - timedelta(seconds=1), config
+        ) if config.screening_active() else None
+
         started = time.perf_counter()
         daily = self._daily_join(start_key, end_key)
+        daily = self._apply_screen(daily, screened)
         daily, conversions = normalize_daily_units(daily)
         daily = _stamp_daily_available_at(daily, self.contracts["daily"])
         profiles["daily.parquet"] = _write_with_profile(
@@ -460,6 +530,7 @@ class SnapshotBuilder:
                 min_available_at=period_start.isoformat(),
                 require_partitions=False,
             )
+            fundamentals = self._apply_screen(fundamentals, screened)
             profiles["fundamentals.parquet"] = _write_with_profile(
                 output_dir / "fundamentals.parquet", fundamentals, build_seconds=time.perf_counter() - started
             )
@@ -470,6 +541,8 @@ class SnapshotBuilder:
             events, events_meta = self._build_available_at_domain(
                 config.events_datasets, period_end, period_start
             )
+            events = self._apply_screen(events, screened)
+            events_meta = {**events_meta, "rows": int(len(events))}
             profiles["events.parquet"] = _write_with_profile(
                 output_dir / "events.parquet", events, build_seconds=time.perf_counter() - started
             )
@@ -484,6 +557,8 @@ class SnapshotBuilder:
         if config.replay_include_minutes:
             started = time.perf_counter()
             minutes, minutes_meta = self._read_minutes_range(start_key, end_key)
+            minutes = self._apply_screen(minutes, screened)
+            minutes_meta = {**minutes_meta, "rows": int(len(minutes))}
             profiles["intraday_1min.parquet"] = _write_with_profile(
                 output_dir / "intraday_1min.parquet", minutes, build_seconds=time.perf_counter() - started
             )
@@ -498,10 +573,17 @@ class SnapshotBuilder:
 
         started = time.perf_counter()
         auction, auction_meta = self._build_auction(start_key, end_key)
+        auction = self._apply_screen(auction, screened)
+        auction_meta = {**auction_meta, "rows": int(len(auction))}
         profiles["auction.parquet"] = _write_with_profile(
             output_dir / "auction.parquet", auction, build_seconds=time.perf_counter() - started
         )
         domains["auction"] = auction_meta
+        domains["universe_screen"] = {
+            "active": screened is not None,
+            "codes": len(screened) if screened is not None else None,
+            "config": config.to_record()["universe_screen"],
+        }
 
         manifest = {
             "snapshot_id": new_id("replay"),
@@ -522,37 +604,46 @@ class SnapshotBuilder:
         _write_manifest(output_dir, manifest)
         return manifest
 
-    _AUCTION_SESSIONS = (("stk_auction_o", "open", "09:25:00"), ("stk_auction_c", "close", "15:00:00"))
-    _AUCTION_COLUMNS = ("ts_code", "trade_date", "session", "open", "high", "low", "close",
-                        "vol", "amount", "vwap", "available_at", "available_at_rule")
+    _AUCTION_COLUMNS = (
+        "ts_code", "trade_date", "session", "price", "vol", "amount", "pre_close",
+        "turnover_rate", "volume_ratio", "float_share", "available_at", "available_at_rule",
+    )
 
     def _build_auction(self, start_key: str, end_key: str) -> tuple[pd.DataFrame, dict[str, object]]:
-        """Full-market call-auction prints (open + close sessions) in the window,
-        one row per (trade_date, ts_code, session). Broker fill truth at replay —
-        the exchange publishes the print at matching time (09:25 / 15:00), so the
-        row-level ``available_at`` carries those times; the agent research view
-        still rolls in on the evening refresh node (download logistics)."""
-        parts: list[pd.DataFrame] = []
-        for dataset, session, match_time in self._AUCTION_SESSIONS:
-            frame = self.store.read_trade_range(dataset, start_key, end_key)
-            if frame.empty:
-                continue
-            out = frame.copy()
-            out["session"] = session
-            out["available_at"] = [
-                f"{d[:4]}-{d[4:6]}-{d[6:]}T{match_time}+08:00" for d in out["trade_date"].astype(str)
-            ]
-            out["available_at_rule"] = f"rule:auction_{session}_match_time"
-            parts.append(out)
-        if not parts:
+        """Exact opening call-auction results available from 2025-01-16."""
+        frame = self.store.read_trade_range("stk_auction", start_key, end_key)
+        price_quality = {"source_price_rows": 0, "derived_price_rows": 0, "no_trade_rows": 0}
+        if frame.empty:
             auction = pd.DataFrame(columns=list(self._AUCTION_COLUMNS))
         else:
-            auction = pd.concat(parts, ignore_index=True)[list(self._AUCTION_COLUMNS)]
+            auction = frame.copy()
+            price = pd.to_numeric(auction["price"], errors="coerce")
+            volume = pd.to_numeric(auction["vol"], errors="coerce")
+            amount = pd.to_numeric(auction["amount"], errors="coerce")
+            valid_price = price.notna() & price.gt(0)
+            derived_price = ~valid_price & volume.gt(0) & amount.gt(0)
+            no_trade = ~valid_price & volume.fillna(0).eq(0) & amount.fillna(0).eq(0)
+            price_quality = {
+                "source_price_rows": int(valid_price.sum()),
+                "derived_price_rows": int(derived_price.sum()),
+                "no_trade_rows": int(no_trade.sum()),
+            }
+            auction["session"] = "open"
+            auction["available_at"] = [
+                f"{d[:4]}-{d[4:6]}-{d[6:]}T09:25:00+08:00"
+                for d in auction["trade_date"].astype(str)
+            ]
+            auction["available_at_rule"] = "rule:opening_auction_match_time"
+            auction = auction[list(self._AUCTION_COLUMNS)]
             auction = auction.sort_values(["trade_date", "session", "ts_code"]).reset_index(drop=True)
         return auction, {
             "rows": int(len(auction)),
-            "datasets": [dataset for dataset, _, _ in self._AUCTION_SESSIONS],
+            "datasets": ["stk_auction"],
             "units": "vol=股, amount=元",
+            "coverage_start": "20250116",
+            "clearing_price_fields": {"open": "price", "close": "15:00 bar close"},
+            "precoverage_fallback": "labelled 09:30 minute proxy; Shenzhen vol/amount use configured correction",
+            "price_quality": price_quality,
         }
 
     _CORPORATE_ACTION_COLUMNS = (
@@ -833,8 +924,15 @@ class SnapshotBuilder:
                 rows = self._read_dataset_window(dataset_dir, decision_time, window_start)
             if rows.empty:
                 continue
-            title_column = next((c for c in ("title", "report_title", "name") if c in rows.columns), None)
-            body_columns = [c for c in ("title", "report_title", "abstr", "content", "content_html", "url") if c in rows.columns]
+            if dataset in {"irm_qa_sh", "irm_qa_sz"}:
+                title_column = "q" if "q" in rows.columns else None
+                body_columns = [c for c in ("q", "a") if c in rows.columns]
+            else:
+                title_column = next((c for c in ("title", "report_title", "name") if c in rows.columns), None)
+                body_columns = [
+                    c for c in ("title", "report_title", "abstr", "content", "content_html", "url")
+                    if c in rows.columns
+                ]
             if title_column is None or not body_columns:
                 raise ValueError(f"text dataset {dataset} has no usable title/body columns: {list(rows.columns)}")
             titles = rows[title_column].fillna("").astype(str)
@@ -876,6 +974,75 @@ class SnapshotBuilder:
         )
         meta = {"rows": int(len(index)), "datasets": list(config.text_datasets), "library_dir": "text_library"}
         return index, meta
+
+    _BOARD_PREFIXES = {
+        "main": ("600", "601", "603", "605", "000", "001", "002", "003"),
+        "gem": ("300", "301", "302"),
+        "star": ("688", "689"),
+        "bj": (),  # matched by the .BJ suffix instead
+    }
+
+    def _screened_codes(self, decision_time: datetime, config: SnapshotConfig) -> frozenset[str] | None:
+        """Research-universe screen, evaluated with decision-time knowledge only.
+
+        Returns None when screening is off. ST status comes from the as-of name
+        (namechange), listing age from stock_basic list_date, cap/price bands
+        from the latest daily_basic row at or before the anchor day. Codes with
+        a missing attribute fail closed for that filter (an unnamed or unpriced
+        code cannot prove eligibility)."""
+        if not config.screening_active():
+            return None
+        universe = self._build_universe(decision_time, replace(config, include_industry=False))
+        day = decision_time.strftime("%Y%m%d")
+        keep = universe[["ts_code"]].copy()
+        keep["name"] = universe.get("name")
+        keep["list_date"] = universe.get("list_date")
+        if config.screen_exclude_st:
+            names = keep["name"].fillna("").astype(str).str.upper()
+            keep = keep[(names != "") & ~names.str.contains("ST")]
+        if config.screen_exclude_new_listed_days > 0:
+            cutoff = (decision_time - timedelta(days=config.screen_exclude_new_listed_days)).strftime("%Y%m%d")
+            listed = keep["list_date"].fillna("").astype(str)
+            keep = keep[(listed != "") & (listed <= cutoff)]
+        if config.screen_boards:
+            codes = keep["ts_code"].astype(str)
+            allowed_boards = set(config.screen_boards)
+            prefixes = tuple(p for board in allowed_boards for p in self._BOARD_PREFIXES[board])
+            mask = codes.str.startswith(prefixes) if prefixes else pd.Series(False, index=codes.index)
+            if "bj" in allowed_boards:
+                mask = mask | codes.str.endswith(".BJ")
+            keep = keep[mask]
+        needs_basic = any(
+            value is not None
+            for value in (config.screen_min_circ_mv_yi, config.screen_max_circ_mv_yi,
+                          config.screen_min_price, config.screen_max_price)
+        )
+        if needs_basic:
+            basic_dates = [d for d in self.store.trade_dates("daily_basic") if d <= day]
+            if not basic_dates:
+                raise FileNotFoundError(f"universe screening needs a daily_basic partition at or before {day}")
+            basic = self.store.read_trade_date("daily_basic", basic_dates[-1], columns=["ts_code", "close", "circ_mv"])
+            keep = keep.merge(basic, on="ts_code", how="left")
+            circ_mv_yi = pd.to_numeric(keep["circ_mv"], errors="coerce") / 1e4  # 万元 -> 亿元
+            close = pd.to_numeric(keep["close"], errors="coerce")
+            if config.screen_min_circ_mv_yi is not None:
+                keep = keep[circ_mv_yi.reindex(keep.index) >= config.screen_min_circ_mv_yi]
+            if config.screen_max_circ_mv_yi is not None:
+                keep = keep[circ_mv_yi.reindex(keep.index) <= config.screen_max_circ_mv_yi]
+            if config.screen_min_price is not None:
+                keep = keep[close.reindex(keep.index) >= config.screen_min_price]
+            if config.screen_max_price is not None:
+                keep = keep[close.reindex(keep.index) <= config.screen_max_price]
+        return frozenset(keep["ts_code"].astype(str))
+
+    @staticmethod
+    def _apply_screen(frame: pd.DataFrame, allowed: frozenset[str] | None) -> pd.DataFrame:
+        """Restrict per-stock rows to the screened set; market-level rows
+        (no ts_code column or null ts_code) always pass."""
+        if allowed is None or frame.empty or "ts_code" not in frame.columns:
+            return frame
+        codes = frame["ts_code"].astype(str)
+        return frame[frame["ts_code"].isna() | codes.isin(allowed)].reset_index(drop=True)
 
     def _build_universe(self, decision_time: datetime, config: SnapshotConfig) -> pd.DataFrame:
         """Stocks listed as of the decision day (delistings after it included).

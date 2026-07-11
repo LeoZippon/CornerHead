@@ -198,7 +198,8 @@ h4.subsection-title, .panel h4.subsection-title {
   margin: 0; font-size: 1.02rem; font-weight: 700; color: var(--text); letter-spacing: 0;
 }
 .chart-tip { white-space: pre-line; }
-textarea.prompt-editor { min-height: 55vh; font-size: 0.845rem; }
+.modal.prompt-modal { width: min(1280px, 96vw); max-height: 96vh; }
+.modal.prompt-modal .body { flex: 1; }
 .panel.hero { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft), var(--shadow-lift); }
 .hero-crown { font-size: 1.2rem; }
 
@@ -258,6 +259,9 @@ textarea.directive {
   width: 100%; min-height: 8rem; border: 1px solid var(--input-border); border-radius: 10px;
   padding: 0.7rem 0.8rem; font: 0.94rem/1.55 var(--mono); resize: vertical;
   background: var(--input-bg); color: var(--text);
+}
+.modal.prompt-modal textarea.prompt-editor {
+  height: 70vh; min-height: 70vh; font-size: 0.845rem;
 }
 .hint { font-size: 0.875rem; color: var(--muted); margin-top: 0.45rem; }
 .hint.warn { color: var(--warn); }
@@ -442,6 +446,9 @@ details.advanced .form-grid { margin-top: 0.55rem; }
 .loading { color: var(--muted); padding: 1.4rem; text-align: center; }
 
 /* ---------------- responsive breakpoints ---------------- */
+
+.params-modal-body { max-height: 62vh; overflow-y: auto; }
+.params-modal-body code { word-break: break-all; }
 
 /* ---- gpu allocation ---- */
 .gpu-grid { display: flex; flex-direction: column; gap: 0.45rem; margin: 0.5rem 0; }

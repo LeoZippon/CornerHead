@@ -26,7 +26,7 @@
 ## 1. Fold Agent 系统提示词（完整渲染示例）
 
 <details open>
-<summary>完整文本，26,810 字符</summary>
+<summary>完整文本，26,897 字符</summary>
 
 ````text
 # 角色与目标
@@ -132,6 +132,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
       "min_sharpe": 0.0,
       "require_complete_validation": true
     },
+    "acceptance_semantics": "drawdown+complete=hard; return/sharpe=warn-only targets",
     "model_artifacts_allowed": true,
     "modification_constraints": {
       "max_changed_lines": 500,

@@ -35,7 +35,7 @@ SCHEDULE_NAME = "schedule.json"
 ANALYSIS_DIR_NAME = "analysis"
 HELDOUT_SESSION_KEY = "heldout"
 
-CONTROL_MODES = ("auto", "step")
+CONTROL_MODES = ("auto", "manual")
 CONTROL_REQUESTS = (None, "pause", "stop")
 
 # Creation parameters mirror the run_experiment.py CLI dests one-to-one so the
@@ -70,6 +70,13 @@ PARAM_DEFAULTS: dict[str, object] = {
     "macro_window_months": None,
     "text_window_months": None,
     "intraday_trade_days": SnapshotConfig().intraday_trade_days,
+    "screen_exclude_st": False,
+    "screen_exclude_new_listed_days": 0,
+    "screen_min_circ_mv_yi": None,
+    "screen_max_circ_mv_yi": None,
+    "screen_min_price": None,
+    "screen_max_price": None,
+    "screen_boards": (),
     "max_fold_minutes": 60,
     "convergence_start_epoch": 3,
     "disable_step_tree": False,
@@ -86,9 +93,9 @@ PARAM_DEFAULTS: dict[str, object] = {
     "offsession_tick_minutes": 30,
     "intraday_decision_minutes": 1,
     "execution_lag_bars": 2,
-    "decision_max_sim_minutes": 60.0,
-    "backtest_max_seconds_per_decision": 300.0,
-    "backtest_max_seconds_per_trading_day": 900.0,
+    "decision_max_sim_minutes": 30.0,
+    "backtest_max_seconds_per_decision": 1800.0,
+    "backtest_max_seconds_per_trading_day": 3600.0,
     "nl_max_calls_per_decision_day": 10,
     "nl_max_calls_per_backtest": None,
     # Broker profile overrides (dataclasses.replace over the default profile).
@@ -128,7 +135,7 @@ PARAM_DEFAULTS: dict[str, object] = {
     "meta_learning_xray_startup_timeout": 15.0,
     "disable_meta_sandbox_rebuild": False,
     # HITL-only knobs (not run_experiment CLI dests).
-    "initial_control_mode": "step",
+    "initial_control_mode": "manual",
     "gpu_count": SandboxSpec().gpu_count,
     "analysis_enabled": True,
     "analysis_model": "deepseek-v4-pro",
@@ -216,6 +223,9 @@ def resolve_options(params: Mapping[str, object], repo_root: Path) -> SimpleName
     merged["meta_learning_env"] = [str(name) for name in (merged.get("meta_learning_env") or ())]
     merged["web_search_engines"] = tuple(str(engine) for engine in (merged.get("web_search_engines") or ()))
     mode = str(merged["initial_control_mode"])
+    if mode == "step":  # Existing experiment params used the old, misleading name.
+        mode = "manual"
+        merged["initial_control_mode"] = mode
     if mode not in CONTROL_MODES:
         raise ValueError(f"initial_control_mode must be one of {CONTROL_MODES}, got {mode!r}")
     try:
@@ -230,7 +240,7 @@ def resolve_options(params: Mapping[str, object], repo_root: Path) -> SimpleName
 
 @dataclass
 class ControlState:
-    mode: str = "step"
+    mode: str = "manual"
     request: str | None = None
     approved_sessions: tuple[str, ...] = ()
     directives: dict[str, str] = field(default_factory=dict)
@@ -269,9 +279,11 @@ class ControlState:
 
 def read_control(path: Path) -> ControlState:
     payload = read_json(path)
-    mode = str(payload.get("mode") or "step")
+    mode = str(payload.get("mode") or "manual")
+    if mode == "step":  # Read-only migration for existing control files.
+        mode = "manual"
     if mode not in CONTROL_MODES:
-        mode = "step"
+        mode = "manual"
     request = payload.get("request")
     request = str(request) if request in ("pause", "stop") else None
     approved = payload.get("approved_sessions")

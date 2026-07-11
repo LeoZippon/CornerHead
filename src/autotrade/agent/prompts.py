@@ -426,7 +426,7 @@ def build_system_prompt(
     else:
         env_parts += [
             f"## 本 Fold 信息\n{json.dumps(fold_info, ensure_ascii=False, sort_keys=True, default=str)}",
-            f"## 提交验收规则（Pipeline 硬校验）\n{json.dumps(acceptance_rules, ensure_ascii=False, sort_keys=True)}",
+            f"## 提交验收规则（回撤上限与完整验证为硬校验；收益/Sharpe 阈值为目标，低于目标仍会冻结但账本记录警告）\n{json.dumps(acceptance_rules, ensure_ascii=False, sort_keys=True)}",
         ]
     if step_tree_enabled:
         env_parts.append(STEP_TREE_SECTION.replace("# Step 产物树", "## Step 产物树"))

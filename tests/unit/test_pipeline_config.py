@@ -33,18 +33,23 @@ class AcceptanceRulesTest(unittest.TestCase):
         # guard a NaN total_return would pass acceptance outright.
         rules = AcceptanceRules()
         summary = {"total_return": math.nan, "sharpe": 1.0, "max_drawdown": 0.1, "complete_validation": True}
-        accepted, reasons = rules.evaluate(summary)
-        self.assertFalse(accepted)
+        reasons, warnings = rules.evaluate(summary)
         self.assertTrue(any("non-finite" in reason for reason in reasons))
+        self.assertEqual(warnings, [])
 
     def test_finite_metrics_keep_threshold_semantics(self):
         rules = AcceptanceRules()
         ok = {"total_return": 0.02, "sharpe": 0.5, "max_drawdown": 0.1, "complete_validation": True}
-        self.assertEqual(rules.evaluate(ok), (True, []))
+        self.assertEqual(rules.evaluate(ok), ([], []))
+        # Drawdown breach stays a HARD reject (risk limit).
         bad = {"total_return": 0.02, "sharpe": 0.5, "max_drawdown": 0.30, "complete_validation": True}
-        accepted, reasons = rules.evaluate(bad)
-        self.assertFalse(accepted)
+        reasons, warnings = rules.evaluate(bad)
         self.assertIn("max drawdown", reasons[0])
+        # Return/Sharpe shortfalls only WARN: the fold freezes instead of resetting.
+        weak = {"total_return": -0.01, "sharpe": -0.2, "max_drawdown": 0.1, "complete_validation": True}
+        reasons, warnings = rules.evaluate(weak)
+        self.assertEqual(reasons, [])
+        self.assertEqual(len(warnings), 2)
 
     def test_rule_values_must_be_finite_and_ranged(self):
         with self.assertRaises(ValueError):

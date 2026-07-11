@@ -438,7 +438,7 @@ class ExperimentPipeline:
             agent = self.agent_factory(ctx, fold, dict(manifest.data))
             session_summary = agent.run()
 
-            frozen, fold_status, accept_reasons, selected = self._accept_or_fallback(
+            frozen, fold_status, accept_reasons, accept_warnings, selected = self._accept_or_fallback(
                 ctx, fold, epoch_id=epoch_id, run_id=run_id, parent=parent, is_initial=is_initial
             )
             sandbox.lock_agent_output()
@@ -480,6 +480,7 @@ class ExperimentPipeline:
                     "finish_reason": session_summary.get("finish_status"),
                     "fold_status": fold_status,
                     "accept_reasons": accept_reasons,
+                    "accept_warnings": accept_warnings,
                     "selected_step_id": self._step_id_for(manifest, selected) if selected else None,
                     "steps": steps,
                     "frozen_strategy_artifact_id": frozen.artifact_id,
@@ -521,6 +522,7 @@ class ExperimentPipeline:
         previous_taste: str = "",
         visible_fold: FoldSpec | None = None,
         directive_override: str | None = None,
+        system_prompt_override: str = "",
     ) -> tuple[FrozenArtifact | None, str]:
         if self.meta_learner is None:
             raise RuntimeError("no meta learner configured")
@@ -533,6 +535,7 @@ class ExperimentPipeline:
                 previous_taste=previous_taste,
                 visible_fold=visible_fold,
                 directive_override=directive_override,
+                system_prompt_override=system_prompt_override,
             )
         except Exception as exc:
             self._record_attempt_failure(
@@ -549,6 +552,7 @@ class ExperimentPipeline:
         previous_taste: str = "",
         visible_fold: FoldSpec | None = None,
         directive_override: str | None = None,
+        system_prompt_override: str = "",
     ) -> tuple[FrozenArtifact | None, str]:
         sandbox, docker = self._start_sandbox(run_id, kind="meta_learning")
         paths = sandbox.paths
@@ -666,6 +670,7 @@ class ExperimentPipeline:
                 "meta_learning_directive": (
                     self.config.meta_learning_directive if directive_override is None else directive_override
                 ).strip(),
+                "system_prompt_override": system_prompt_override.strip(),
                 "web_search_engines": [],
             },
         )
@@ -780,6 +785,7 @@ class ExperimentPipeline:
                     "agent_session_summary": session_summary if isinstance(session_summary, dict) else None,
                     "agent_trace_ref": str(agent_trace_ref) if agent_trace_ref.exists() else None,
                     "meta_learning_directive": manifest.get("meta_learning_directive"),
+                    "system_prompt_overridden": bool(manifest.get("system_prompt_override")),
                     "web_search_engines": manifest.get("web_search_engines"),
                     "sandbox_image_update": sandbox_image_update,
                     "finalize_error": (
@@ -1051,6 +1057,7 @@ class ExperimentPipeline:
         is_initial: bool,
     ) -> tuple[FrozenArtifact, str, list[str], dict[str, object] | None]:
         manifest = ctx.manifest
+        accept_warnings: list[str] = []
         reasons: list[str] = []
         current_hash = artifact_hash(ctx.paths.agent_output)
         current_model_hash = model_artifact_hash(ctx.paths.model_artifacts)
@@ -1081,7 +1088,7 @@ class ExperimentPipeline:
         ):
             reasons.append("current artifact lacks a passing modification check")
         else:
-            _accepted, hard_reasons = self.config.acceptance.evaluate(selected)
+            hard_reasons, accept_warnings = self.config.acceptance.evaluate(selected)
             reasons.extend(hard_reasons)
         if not reasons:
             # A HITL re-run freezes under a tagged id so it cannot collide with
@@ -1098,7 +1105,7 @@ class ExperimentPipeline:
                 run_id=run_id,
                 step=self._step_id_for(manifest, selected),
             )
-            return frozen, "frozen", [], selected
+            return frozen, "frozen", [], accept_warnings, selected
 
         if parent is not None:
             # No accepted update: reuse the parent artifact; the fold counts as not improved.
@@ -1112,7 +1119,7 @@ class ExperimentPipeline:
             copy_artifact(parent.path, ctx.paths.agent_output)
             copy_model_artifacts(parent.model_path, ctx.paths.model_artifacts)
             status = "no_valid_backtest" if selected is None else "no_update"
-            return parent, status, reasons, selected
+            return parent, status, reasons, accept_warnings, selected
         if is_initial:
             raise RuntimeError(f"initial fold produced no acceptable baseline artifact: {reasons}")
         raise RuntimeError(f"fold has neither an accepted artifact nor a parent fallback: {reasons}")
@@ -1302,6 +1309,7 @@ def _compact_fold_history(record: dict[str, object]) -> dict[str, object]:
         "finish_reason": record.get("finish_reason"),
         "validation_result": record.get("validation_result"),
         "accept_reasons": record.get("accept_reasons"),
+        "accept_warnings": record.get("accept_warnings"),
         "backtest_summaries": backtests,
     }
 
@@ -1319,6 +1327,7 @@ def _agent_visible_ledger_record(record: dict[str, object]) -> dict[str, object]
         "finish_reason",
         "fold_status",
         "accept_reasons",
+        "accept_warnings",
         "selected_step_id",
         "steps",
         "frozen_strategy_artifact_id",

@@ -68,8 +68,9 @@ _FIELDS: list[dict[str, object]] = [
      "help": "留空=从空白模板开始。选择后，新实验的首个 Fold 以该实验最新冻结的策略产物（output+models）为父产物起步；创建时拷贝并哈希校验，源实验之后删除也不受影响。"},
     # 运行控制（HITL）
     {"key": "initial_control_mode", "group": "运行控制", "label": "初始运行模式", "type": "choice",
-     "choices": ["step", "auto"],
-     "help": "step：每个会话（元学习/Fold/Held-out）开始前等待人工批准并可注入指令；auto：全自动连续执行，可随时暂停。"},
+     "choices": ["manual", "auto"],
+     "choice_labels": {"manual": "人工控制", "auto": "自动运行"},
+     "help": "manual：每个会话（元学习/Fold/Held-out）开始前等待人工批准并可注入指令；auto：全自动连续执行，可随时暂停。"},
     {"key": "analysis_model", "group": "运行控制", "label": "策略分析模型", "type": "choice",
      "choices": list(MODEL_CHOICES),
      "help": "生成 Fold 策略分析所用的 DeepSeek 模型。"},
@@ -122,6 +123,23 @@ _FIELDS: list[dict[str, object]] = [
      "help": "文本域单独窗口；留空回退基础窗口。"},
     {"key": "intraday_trade_days", "group": "数据窗口", "label": "分钟线交易日窗口", "type": "int",
      "help": "决策输入快照包含的最近可见分钟线交易日数。"},
+    # 股票筛选（研究宇宙）：全部条件按决策锚点前的已知信息计算，冻结整个区间；
+    # 缩小宇宙可显著减少数据量与回测耗时。默认全部关闭 = 全市场。
+    {"key": "screen_exclude_st", "group": "股票筛选", "label": "剔除 ST 股", "type": "bool",
+     "help": "按锚点在市名称剔除含 ST 的股票（含 *ST）。"},
+    {"key": "screen_exclude_new_listed_days", "group": "股票筛选", "label": "剔除新股（上市天数 <）", "type": "int",
+     "help": "剔除锚点前 N 天内上市的新股；0 = 不剔除。"},
+    {"key": "screen_min_circ_mv_yi", "group": "股票筛选", "label": "流通市值下限（亿元）", "type": "float", "optional": True,
+     "help": "只保留锚点流通市值不低于该值的股票（如填 100 = 只做大盘股）；留空不限制。"},
+    {"key": "screen_max_circ_mv_yi", "group": "股票筛选", "label": "流通市值上限（亿元）", "type": "float", "optional": True, "advanced": True,
+     "help": "只保留锚点流通市值不高于该值的股票（小盘研究）；留空不限制。"},
+    {"key": "screen_min_price", "group": "股票筛选", "label": "股价下限（元）", "type": "float", "optional": True, "advanced": True,
+     "help": "剔除锚点收盘价低于该值的股票（低价股/仙股）；留空不限制。"},
+    {"key": "screen_max_price", "group": "股票筛选", "label": "股价上限（元）", "type": "float", "optional": True, "advanced": True,
+     "help": "剔除锚点收盘价高于该值的股票；留空不限制。"},
+    {"key": "screen_boards", "group": "股票筛选", "label": "板块范围", "type": "multi", "optional": True, "default": [],
+     "choices": ["main", "gem", "star", "bj"],
+     "help": "只保留所选板块（main=主板 gem=创业板 star=科创板 bj=北交所）；全不选 = 全部板块。"},
     # 回放执行
     {"key": "nl_max_calls_per_decision_day", "group": "回放执行", "label": "NL 子代理日均配额", "type": "int",
      "help": "每回测 NL 调用配额 = 该值 × 决策天数；策略内 ctx.nl() 的总预算。"},
@@ -206,7 +224,7 @@ _FIELDS: list[dict[str, object]] = [
      "help": "本实验保留的派生沙箱镜像数，更旧的尽力 GC。"},
 ]
 
-_GROUP_ORDER = ("基本与排程", "运行控制", "预算与验收", "数据窗口", "回放执行", "Broker 账户", "模型与上下文", "元学习联网")
+_GROUP_ORDER = ("基本与排程", "运行控制", "预算与验收", "数据窗口", "股票筛选", "回放执行", "Broker 账户", "模型与上下文", "元学习联网")
 
 
 def build_period_options(trading_days: list[str]) -> dict[str, list[str]]:

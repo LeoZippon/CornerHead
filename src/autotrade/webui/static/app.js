@@ -814,7 +814,7 @@ function fieldNode(field, inputs) {
   let input;
   if (field.type === "choice") {
     input = el("select", {}, ...field.choices.map((choice) => {
-      const option = el("option", { value: choice }, choice);
+      const option = el("option", { value: choice }, (field.choice_labels || {})[choice] || choice);
       if (choice === field.default) option.selected = true;
       return option;
     }));
@@ -945,10 +945,10 @@ function collectParams(inputs) {
 
 /* ---------------- modal helpers ---------------- */
 
-function showModal(title, body, footerButtons) {
+function showModal(title, body, footerButtons, modalClass = "") {
   closeModal();
   const mask = el("div", { class: "modal-mask", onclick: (event) => { if (event.target === mask) closeModal(); } });
-  mask.append(el("div", { class: "modal" },
+  mask.append(el("div", { class: `modal${modalClass ? ` ${modalClass}` : ""}` },
     el("header", {}, el("h3", {}, title), el("button", { class: "btn small", onclick: closeModal }, "✕")),
     el("div", { class: "body" }, body),
     el("footer", {}, ...footerButtons),
@@ -965,7 +965,8 @@ let livePanel = null; // {expId, key, node, source, timers, refresh}
 
 function destroyLivePanel() {
   if (!livePanel) return;
-  try { livePanel.source.close(); } catch { /* already closed */ }
+  livePanel.closed = true;
+  try { livePanel.source?.close(); } catch { /* already closed */ }
   for (const timer of livePanel.timers) clearInterval(timer);
   livePanel = null;
 }
@@ -1002,6 +1003,12 @@ async function renderDetailPage(experimentId, selectedKey) {
     ),
   );
   const container = el("div", {});
+  if (detail.params && Object.keys(detail.params).length) {
+    head.querySelector("h2").append(el("button", {
+      class: "btn small", style: "margin-left:0.4rem",
+      onclick: () => openParamsModal(detail),
+    }, "创建参数"));
+  }
   container.append(head);
   if (detail.kind === "hitl") container.append(controlBar(detail));
   if ((detail.fold_returns || []).length) {
@@ -1048,9 +1055,27 @@ async function renderDetailPage(experimentId, selectedKey) {
   }, 4000);
 }
 
+/* Full creation-parameter record (params.json), grouped: explicit settings
+   first, metadata last; values rendered verbatim so the researcher sees the
+   exact configuration this experiment was built from. */
+function openParamsModal(detail) {
+  const params = detail.params || {};
+  const keys = Object.keys(params).sort((a, b) => {
+    const metaA = a.startsWith("_"), metaB = b.startsWith("_");
+    if (metaA !== metaB) return metaA ? 1 : -1;
+    return a.localeCompare(b);
+  });
+  const rows = keys.map((key) => kvRow(key,
+    el("code", {}, typeof params[key] === "object" ? JSON.stringify(params[key]) : String(params[key]))));
+  showModal(`创建参数 · ${detail.experiment_id}`, el("div", { class: "params-modal-body" },
+    el("p", { class: "hint" }, "实验创建时落盘的完整参数（params.json）；未列出的旋钮按系统默认生效，实际生效值以 run manifest 为准。"),
+    el("table", { class: "kv" }, ...rows),
+  ), [el("button", { class: "btn", onclick: closeModal }, "关闭")]);
+}
+
 function controlBar(detail) {
   const id = detail.experiment_id;
-  const control = detail.control || { mode: "step", request: null };
+  const control = detail.control || { mode: "manual", request: null };
   const state = detail.state;
   const alive = detail.worker_alive;
   const send = async (payload, note) => {
@@ -1065,8 +1090,8 @@ function controlBar(detail) {
   const modeSelect = el("select", {
     onchange: () => send({ action: "set_mode", mode: modeSelect.value }, `模式已切换为 ${modeSelect.value}`),
   },
-    el("option", { value: "step" }, "step（逐会话批准）"),
-    el("option", { value: "auto" }, "auto（连续执行）"),
+    el("option", { value: "manual" }, "人工控制（逐会话批准）"),
+    el("option", { value: "auto" }, "自动运行（连续执行）"),
   );
   modeSelect.value = control.mode;
   bar.append(modeSelect);
@@ -1082,7 +1107,7 @@ function controlBar(detail) {
         class: "btn",
         onclick: () => {
           showModal("提前进入 Held-out", el("p", {},
-            "跳过剩余全部 Fold（及后续元学习），直接以最新冻结策略进入 Held-out 冻结测试。已完成的 Fold 不受影响；step 模式下 Held-out 会话仍需批准。确定？"), [
+            "跳过剩余全部 Fold（及后续元学习），直接以最新冻结策略进入 Held-out 冻结测试。已完成的 Fold 不受影响；人工控制模式下 Held-out 会话仍需批准。确定？"), [
             el("button", { class: "btn", onclick: closeModal }, "取消"),
             el("button", { class: "btn primary", onclick: () => { closeModal(); send({ action: "skip_to_heldout" }, "已请求提前进入 Held-out"); } }, "确认提前收官"),
           ]);
@@ -1240,7 +1265,7 @@ function directivePanel(detail, session, waiting) {
     } catch (error) { toast(error.message, true); }
   };
   if (session.kind !== "heldout") {
-    if (session.kind === "fold") {
+    if (session.kind === "fold" || session.kind === "meta_learning") {
       buttons.append(el("button", {
         class: "btn",
         onclick: () => openPromptEditor(detail, session, textarea.value),
@@ -1254,7 +1279,7 @@ function directivePanel(detail, session, waiting) {
       buttons.append(el("span", { class: "badge state-waiting_user" }, "已覆盖系统提示词"));
     }
   }
-  if ((detail.control || {}).mode === "step" && !approved) {
+  if ((detail.control || {}).mode === "manual" && !approved) {
     buttons.append(el("button", {
       class: "btn primary",
       onclick: () => send({ action: "approve", session_key: session.key, directive: textarea.value }, "已批准，会话即将启动"),
@@ -1386,7 +1411,7 @@ async function openPromptEditor(detail, session, directive) {
       el("div", { class: "hint warn" },
         "保存后本会话将【原样】使用此文本作为系统提示词：运行时不再注入自动生成的「当前实验事实」JSON 与其它自动段落，请保留必要的协议/合同/禁止行为段落。清除覆盖即恢复自动装配。覆盖内容会记录进 run manifest 供审计。"),
       editor,
-    ), footer);
+    ), footer, "prompt-modal");
 }
 
 /* Review-then-approve: assemble the session's system prompt (with the draft
@@ -1405,7 +1430,7 @@ async function openPromptPreview(detail, session, directive, { approved, waiting
     } catch (error) { toast(`预览失败：${error.message}`, true); return; }
   }
   const footer = [el("button", { class: "btn", onclick: closeModal }, "关闭")];
-  if ((detail.control || {}).mode === "step" && !approved) {
+  if ((detail.control || {}).mode === "manual" && !approved) {
     footer.push(el("button", {
       class: "btn primary",
       onclick: () => {
@@ -1465,7 +1490,7 @@ function liveTracePanel(detail, session) {
   // Reuse the streaming panel across page rebuilds and session navigation so
   // the SSE stream, scroll position, and accumulated events survive.
   if (livePanel && livePanel.expId === detail.experiment_id && livePanel.key === session.key
-      && livePanel.source.readyState !== EventSource.CLOSED) {
+      && !livePanel.closed && (!livePanel.source || livePanel.source.readyState !== EventSource.CLOSED)) {
     livePanel.refresh(detail);
     return livePanel.node;
   }
@@ -1489,25 +1514,40 @@ function liveTracePanel(detail, session) {
   const prep = el("div", { class: "prep-indicator" }, el("span", { class: "spinner" }), prepText);
   panel.append(tools, statsHost, prep, box);
   let sawEvent = false;
-  const source = new EventSource(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stream`);
-  source.onmessage = (event) => {
-    try {
-      sawEvent = true;
-      prep.style.display = "none";
-      box.append(traceEventNode(JSON.parse(event.data)));
-      while (box.children.length > 400) box.firstChild.remove();
-      if (autoScroll) box.scrollTop = box.scrollHeight;
-    } catch { /* skip malformed */ }
+  let source = null;
+  const runId = String(status.run_id || "");
+  const runQuery = runId ? `run_id=${encodeURIComponent(runId)}&` : "";
+  const appendEvents = (events) => {
+    if (!events.length) return;
+    sawEvent = true;
+    prep.style.display = "none";
+    const fragment = document.createDocumentFragment();
+    for (const event of events) fragment.append(traceEventNode(event));
+    box.append(fragment);
+    while (box.children.length > 400) box.firstChild.remove();
+    if (autoScroll) box.scrollTop = box.scrollHeight;
   };
-  source.addEventListener("eof", () => {
-    box.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
-    source.close();
-  });
-  source.onerror = () => { /* EventSource auto-reconnects */ };
+  const openStream = (offset) => {
+    if (!livePanel || livePanel.node !== panel || livePanel.closed) return;
+    source = new EventSource(
+      `/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stream?${runQuery}offset=${offset}`,
+    );
+    livePanel.source = source;
+    source.onmessage = (event) => {
+      try { appendEvents([JSON.parse(event.data)]); } catch { /* skip malformed */ }
+    };
+    source.addEventListener("eof", () => {
+      box.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
+      source.close();
+    });
+    source.onerror = () => { /* EventSource auto-reconnects */ };
+  };
   let deadlineMs = status.fold_deadline_at ? Date.parse(status.fold_deadline_at) : null;
   let startedMs = status.session_started_at ? Date.parse(status.session_started_at) : Date.now();
   let creditSeconds = 0;
   let inBacktest = false;
+  let activeBacktestStartedMs = null;
+  let statsSignature = "";
   const tick = () => {
     if (!sawEvent) {
       const elapsed = (Date.now() - startedMs) / 1000;
@@ -1516,7 +1556,8 @@ function liveTracePanel(detail, session) {
     if (deadlineMs) {
       countdown.style.display = "";
       if (inBacktest) {
-        countdown.textContent = `回测执行中（独立计时，已回补 ${fmtDuration(creditSeconds)}）`;
+        const activeSeconds = activeBacktestStartedMs ? Math.max(0, (Date.now() - activeBacktestStartedMs) / 1000) : 0;
+        countdown.textContent = `回测执行中（本次 ${fmtDuration(activeSeconds)}，结束后回补；此前已回补 ${fmtDuration(creditSeconds)}）`;
       } else {
         const remain = (deadlineMs + creditSeconds * 1000 - Date.now()) / 1000;
         countdown.textContent = remain >= 0
@@ -1527,11 +1568,16 @@ function liveTracePanel(detail, session) {
   };
   const pollStats = async () => {
     try {
-      const stats = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stats`);
+      const stats = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stats?${runQuery}`);
       creditSeconds = Number(stats.backtest_wall_seconds) || 0;
       inBacktest = Boolean(stats.in_backtest);
-      statsHost.innerHTML = "";
-      statsHost.append(statsChipsRow(stats));
+      activeBacktestStartedMs = stats.active_backtest_started_at ? Date.parse(stats.active_backtest_started_at) : null;
+      const signature = JSON.stringify([stats.counts, stats.backtest_wall_seconds,
+        stats.llm_prompt_tokens, stats.llm_completion_tokens, stats.llm_total_tokens]);
+      if (signature !== statsSignature) {
+        statsSignature = signature;
+        statsHost.replaceChildren(statsChipsRow(stats));
+      }
     } catch { /* trace not started yet */ }
     try {
       const fresh = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/status`);
@@ -1541,19 +1587,34 @@ function liveTracePanel(detail, session) {
     } catch { /* transient */ }
   };
   tick();
-  pollStats();
   const timers = [setInterval(tick, 1000), setInterval(pollStats, 5000)];
   livePanel = {
     expId: detail.experiment_id,
     key: session.key,
     node: panel,
-    source,
+    source: null,
+    closed: false,
     timers,
     refresh: (freshDetail) => {
       const rawStatus = freshDetail.status || {};
       if (rawStatus.fold_deadline_at) deadlineMs = Date.parse(rawStatus.fold_deadline_at);
     },
   };
+  (async () => {
+    let offset = 0;
+    try {
+      const tail = await api(
+        `/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace?${runQuery}tail_events=200`,
+      );
+      if (tail.history_truncated) {
+        box.append(el("div", { class: "hint" }, "仅显示最近 200 条事件；完整记录可在运行结束后回放或下载。"));
+      }
+      appendEvents(tail.events || []);
+      offset = Number(tail.next_offset) || 0;
+    } catch { /* trace may not exist while the sandbox is being prepared */ }
+    openStream(offset);
+    pollStats();
+  })();
   return panel;
 }
 
@@ -1630,7 +1691,7 @@ function traceEventNode(event) {
   const head = el("div", { class: "head" },
     el("span", { class: `type ${type}` }, type),
     el("span", {}, time),
-    event.step_id ? el("span", {}, `step ${event.step_id}`) : null,
+    event.step_id ? el("span", {}, event.step_id) : null,
     event.phase ? el("span", {}, event.phase) : null,
     event.status ? el("span", {}, String(event.status)) : null,
   );
@@ -1707,7 +1768,7 @@ function rollbackPanel(detail, session) {
   const panel = el("div", { class: "panel section-gap" },
     el("h4", { class: "subsection-title" }, "回滚到此 Fold"),
     el("div", { class: "hint" },
-      "把实验进度回退到本 Fold 刚完成时：其后所有 Fold、后续 Epoch 元学习与全部 Held-out 账本记录将被移除（原账本自动备份、冻结产物归档到 _archive，可人工找回），随后从下一个 Fold 继续（step 模式下等待批准，可先修改指令/提示词）。"),
+      "把实验进度回退到本 Fold 刚完成时：其后所有 Fold、后续 Epoch 元学习与全部 Held-out 账本记录将被移除（原账本自动备份、冻结产物归档到 _archive，可人工找回），随后从下一个 Fold 继续（人工控制模式下等待批准，可先修改指令/提示词）。"),
   );
   const bar = el("div", { class: "control-bar section-gap" });
   if (alive) {
@@ -1989,7 +2050,7 @@ function openStepParentOverrideModal(detail, payload, node) {
   const body = el("div", {},
     el("p", {}, `把 ${node.node_id} 设为所选 Fold 会话的父产物起点（替代默认的冻结继承链）。`),
     el("p", { class: "hint" },
-      "只能选不晚于该节点所属会话的目标（更晚节点携带未来验证信息会被拒绝）。尚未运行的 Fold：下次启动该会话时生效（step 模式下批准后）。已完成的 Fold：用「设置并重跑」"
+      "只能选不晚于该节点所属会话的目标（更晚节点携带未来验证信息会被拒绝）。尚未运行的 Fold：下次启动该会话时生效（人工控制模式下批准后）。已完成的 Fold：用「设置并重跑」"
       + "（仅允许重跑最新完成的 Fold，且需先停止 worker）。设置持续有效：重新设置即覆盖，「清除」即恢复默认继承链。"),
     el("label", { class: "hint" }, "目标 Fold 会话"),
     select,
@@ -2054,6 +2115,9 @@ function foldResultPanel(detail, session) {
     kvRow("验证区间", fmtPeriodRange(record.validation_period || session.validation_period)),
     kvRow("冻结产物", record.frozen_strategy_artifact_id || "—"),
     (record.accept_reasons || []).length ? kvRow("未接受原因", (record.accept_reasons || []).join("；")) : null,
+    (record.accept_warnings || []).length
+      ? kvRow("验收警告", el("span", { class: "num neg" }, record.accept_warnings.join("；")))
+      : null,
   );
   panel.append(meta);
   if (record.run_id) {

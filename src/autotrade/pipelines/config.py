@@ -130,10 +130,15 @@ class AcceptanceRules:
         if not 0.0 <= float(self.max_drawdown) <= 1.0:
             raise ValueError(f"max_drawdown must be within [0, 1], got {self.max_drawdown!r}")
 
-    def evaluate(self, summary: dict[str, object]) -> tuple[bool, list[str]]:
-        """Non-finite metrics are hard rejects: every IEEE comparison against NaN
-        is False, so without this guard a NaN metric would pass all thresholds."""
+    def evaluate(self, summary: dict[str, object]) -> tuple[list[str], list[str]]:
+        """(hard_reasons, warnings). Integrity failures are hard rejects:
+        non-finite metrics (every IEEE comparison against NaN is False, so a NaN
+        metric would otherwise pass all thresholds) and incomplete validation.
+        The max_drawdown cap stays a hard risk limit. Return/Sharpe shortfalls
+        are WARNINGS only — the fold still freezes its validated update; a weak
+        step recorded with a warning beats silently resetting the fold chain."""
         reasons: list[str] = []
+        warnings: list[str] = []
         total_return = float(summary.get("total_return", -1.0))
         sharpe = float(summary.get("sharpe", -1.0))
         max_drawdown = float(summary.get("max_drawdown", 1.0))
@@ -146,14 +151,14 @@ class AcceptanceRules:
             reasons.append(f"non-finite validation metrics: {non_finite}")
         else:
             if total_return < self.min_return:
-                reasons.append(f"validation return {summary.get('total_return')} < {self.min_return}")
+                warnings.append(f"validation return {summary.get('total_return')} < {self.min_return}")
             if sharpe < self.min_sharpe:
-                reasons.append(f"sharpe {summary.get('sharpe')} < {self.min_sharpe}")
+                warnings.append(f"sharpe {summary.get('sharpe')} < {self.min_sharpe}")
             if max_drawdown > self.max_drawdown:
                 reasons.append(f"max drawdown {summary.get('max_drawdown')} > {self.max_drawdown}")
         if self.require_complete_validation and not summary.get("complete_validation"):
             reasons.append("accepted step requires successful main.py execution and broker replay")
-        return (not reasons, reasons)
+        return reasons, warnings
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -234,9 +239,9 @@ class ExperimentConfig:
     # cumulative compute exceeds backtest_max_seconds_per_trading_day aborts the replay
     # (BacktestError, not accept-eligible) — forcing the Agent to cache heavy recompute
     # and bound rebalance/graph cost.
-    decision_max_sim_minutes: float | None = 60.0
-    backtest_max_seconds_per_decision: float = 300.0
-    backtest_max_seconds_per_trading_day: float = 900.0
+    decision_max_sim_minutes: float | None = 30.0
+    backtest_max_seconds_per_decision: float = 1800.0
+    backtest_max_seconds_per_trading_day: float = 3600.0
     # The two caps above are real wall-clock, hence load-dependent. To keep
     # acceptance reproducible (H2), they bound ONLY agent-iteration validation
     # backtests. The final evals (the per-fold frozen test_000 and held-out) must

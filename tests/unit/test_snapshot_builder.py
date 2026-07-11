@@ -31,7 +31,12 @@ def build_raw(raw: Path) -> None:
         )
         write(
             raw / "daily_basic" / f"trade_date={trade_date}.parquet",
-            pd.DataFrame([{"trade_date": trade_date, "ts_code": "000001.SZ", "turnover_rate": 2.0, "pe": 10.0, "total_share": 100.0, "total_mv": 1000.0}]),
+            pd.DataFrame([
+                {"trade_date": trade_date, "ts_code": "000001.SZ", "turnover_rate": 2.0, "pe": 10.0,
+                 "total_share": 100.0, "total_mv": 1000.0, "close": 10.5, "circ_mv": 2_000_000.0},
+                {"trade_date": trade_date, "ts_code": "000010.SZ", "turnover_rate": 1.0, "pe": 30.0,
+                 "total_share": 10.0, "total_mv": 100.0, "close": 3.2, "circ_mv": 80_000.0},
+            ]),
         )
         write(
             raw / "stk_limit" / f"trade_date={trade_date}.parquet",
@@ -42,15 +47,14 @@ def build_raw(raw: Path) -> None:
             pd.DataFrame([{"trade_date": trade_date, "ts_code": "000001.SZ", "adj_factor": 1.0}]),
         )
         write(raw / "suspend_d" / f"trade_date={trade_date}.parquet", pd.DataFrame(columns=["trade_date", "ts_code"]))
-        for auction_dataset, auction_price in (("stk_auction_o", 10.02), ("stk_auction_c", 10.48)):
-            write(
-                raw / auction_dataset / f"trade_date={trade_date}.parquet",
-                pd.DataFrame([{
-                    "ts_code": "000001.SZ", "trade_date": trade_date, "close": auction_price,
-                    "open": auction_price, "high": auction_price, "low": auction_price,
-                    "vol": 30000.0, "amount": auction_price * 30000.0, "vwap": auction_price,
-                }]),
-            )
+        write(
+            raw / "stk_auction" / f"trade_date={trade_date}.parquet",
+            pd.DataFrame([{
+                "ts_code": "000001.SZ", "trade_date": trade_date, "price": 10.02,
+                "vol": 30000.0, "amount": 300600.0, "pre_close": 10.0,
+                "turnover_rate": 0.01, "volume_ratio": 1.2, "float_share": 300000.0,
+            }]),
+        )
     write(
         raw / "stk_mins_1min_by_date" / "trade_date=20210930.parquet",
         pd.DataFrame(
@@ -83,7 +87,11 @@ def build_raw(raw: Path) -> None:
     write(
         raw / "stock_basic" / "list_status=L.parquet",
         pd.DataFrame(
-            [{"ts_code": "000001.SZ", "name": "平安银行", "exchange": "SZSE", "list_date": "19910403", "delist_date": None}]
+            [
+                {"ts_code": "000001.SZ", "name": "平安银行", "exchange": "SZSE", "list_date": "19910403", "delist_date": None},
+                # ST at the decision day + small cap: universe-screening fixture.
+                {"ts_code": "000010.SZ", "name": "ST美丽", "exchange": "SZSE", "list_date": "19951027", "delist_date": None},
+            ]
         ),
     )
     write(
@@ -105,6 +113,7 @@ def build_raw(raw: Path) -> None:
                 {"ts_code": "000005.SZ", "name": "世纪星源", "start_date": "19901210", "end_date": "", "ann_date": "19901210", "change_reason": "上市"},
                 # Renamed AFTER the decision day: the as-of universe must keep 世纪星源.
                 {"ts_code": "000005.SZ", "name": "ST星源", "start_date": "20230601", "end_date": "", "ann_date": "20230525", "change_reason": "ST"},
+                {"ts_code": "000010.SZ", "name": "ST美丽", "start_date": "20200101", "end_date": "", "ann_date": "20191230", "change_reason": "ST"},
             ]
         ),
     )
@@ -177,6 +186,10 @@ class SnapshotBuilderTest(unittest.TestCase):
             # available_at on minute bars == bar close, an internal gate, not agent info.
             self.assertNotIn("available_at", intraday.columns)
 
+            auction = pd.read_parquet(out / "auction.parquet")
+            self.assertIn("20211008", set(auction["trade_date"]))
+            self.assertEqual(float(auction.loc[auction["trade_date"] == "20211008", "price"].iloc[0]), 10.02)
+
             events = pd.read_parquet(out / "events.parquet")
             datasets = set(events["dataset"])
             self.assertIn("margin_secs", datasets)  # same-day 09:00 visible at 09:25
@@ -198,6 +211,7 @@ class SnapshotBuilderTest(unittest.TestCase):
             codes = set(universe["ts_code"])
             self.assertIn("000001.SZ", codes)
             self.assertIn("000005.SZ", codes)  # delisted 2024 -> alive at the 2021 decision
+            self.assertIn("000010.SZ", codes)  # screening off by default: ST stays
             self.assertNotIn("000003.SZ", codes)  # delisted 2002 -> excluded
             named = universe.set_index("ts_code")
             self.assertEqual(named.loc["000001.SZ", "name"], "平安银行")
@@ -243,6 +257,45 @@ class SnapshotBuilderTest(unittest.TestCase):
             manifest = load_snapshot_manifest(out)
             self.assertIn("20211008", manifest["domains"]["daily"]["visible_trade_dates_by_dataset"]["daily"])
             self.assertNotIn("20211008", manifest["domains"]["daily"]["visible_trade_dates_by_dataset"]["daily_basic"])
+
+    def test_universe_screening_restricts_per_stock_domains(self):
+        from dataclasses import replace as dc_replace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            events_root = Path(tmp) / "fund_events"
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            write_fundamental_status(status_path)
+            out = Path(tmp) / "snap"
+            config = dc_replace(CONFIG, screen_exclude_st=True, screen_min_circ_mv_yi=50.0)
+            builder = SnapshotBuilder(raw, events_root, status_path)
+            manifest = builder.build_decision_snapshot(DECISION, out, config)
+
+            universe = pd.read_parquet(out / "universe.parquet")
+            codes = set(universe["ts_code"])
+            self.assertIn("000001.SZ", codes)          # 200亿, non-ST
+            self.assertNotIn("000010.SZ", codes)       # ST at the decision day
+            # No daily_basic row -> cannot prove the cap floor -> fails closed.
+            self.assertNotIn("000005.SZ", codes)
+            screen = manifest["domains"]["universe_screen"]
+            self.assertTrue(screen["active"])
+            self.assertEqual(screen["codes"], 1)
+            self.assertTrue(screen["config"]["exclude_st"])
+            # Every per-stock domain is restricted to the screened set.
+            for name in ("daily.parquet", "intraday_1min.parquet", "events.parquet", "fundamentals.parquet"):
+                frame = pd.read_parquet(out / name)
+                if "ts_code" in frame.columns and len(frame):
+                    stock_rows = frame[frame["ts_code"].notna()]
+                    self.assertTrue(set(stock_rows["ts_code"].astype(str)) <= {"000001.SZ"}, name)
+
+            # The replay slot freezes the SAME pre-period set.
+            slot = Path(tmp) / "slot"
+            slot_manifest = builder.build_replay_slot("20211008", "20211011", slot, label="valid", config=config)
+            self.assertTrue(slot_manifest["domains"]["universe_screen"]["active"])
+            slot_daily = pd.read_parquet(slot / "daily.parquet")
+            self.assertTrue(set(slot_daily["ts_code"].astype(str)) <= {"000001.SZ"})
 
     def test_decision_windows_are_configurable_by_domain(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -518,6 +571,39 @@ class SnapshotBuilderTest(unittest.TestCase):
             )
             with self.assertRaises(FileNotFoundError):
                 builder._build_text(bad, DECISION, window_start, out_dir)
+
+    def test_investor_qa_uses_question_title_and_question_answer_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            write(
+                raw / "irm_qa_sh" / "date=20211007.parquet",
+                pd.DataFrame([{
+                    "ts_code": "600000.SH",
+                    "name": "浦发银行",
+                    "trade_date": "20211007",
+                    "q": "公司最新股东人数是多少？",
+                    "a": "截至季度末为十万户。",
+                    "pub_time": "2021-10-07 18:30:00",
+                    "available_at": "2021-10-07 18:30:00+08:00",
+                    "available_at_rule": "source:pub_time",
+                }]),
+            )
+            builder = SnapshotBuilder(raw, Path(tmp) / "fund_events_missing")
+            config = SnapshotConfig(
+                events_datasets=(), macro_datasets=(), fundamental_datasets=(),
+                text_datasets=("irm_qa_sh",), intraday_trade_days=1, include_industry=False,
+            )
+            out_dir = Path(tmp) / "text_out"
+            out_dir.mkdir()
+
+            index, _ = builder._build_text(
+                config, DECISION, pd.Timestamp("2021-01-01", tz="Asia/Shanghai"), out_dir
+            )
+            bodies = pd.read_parquet(out_dir / "text_library" / "irm_qa_sh.parquet")
+
+            self.assertEqual(index.loc[0, "title"], "公司最新股东人数是多少？")
+            self.assertIn("公司最新股东人数是多少？", bodies.loc[0, "body"])
+            self.assertIn("截至季度末为十万户。", bodies.loc[0, "body"])
 
     def test_missing_configured_dataset_fails_fast(self):
         with tempfile.TemporaryDirectory() as tmp:
