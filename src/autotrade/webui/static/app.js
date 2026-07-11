@@ -1059,19 +1059,44 @@ async function renderDetailPage(experimentId, selectedKey) {
 /* Full creation-parameter record (params.json), grouped: explicit settings
    first, metadata last; values rendered verbatim so the researcher sees the
    exact configuration this experiment was built from. */
-function openParamsModal(detail) {
+async function openParamsModal(detail) {
   const params = detail.params || {};
-  const keys = Object.keys(params).sort((a, b) => {
-    const metaA = a.startsWith("_"), metaB = b.startsWith("_");
-    if (metaA !== metaB) return metaA ? 1 : -1;
-    return a.localeCompare(b);
-  });
-  const rows = keys.map((key) => kvRow(key,
-    el("code", {}, typeof params[key] === "object" ? JSON.stringify(params[key]) : String(params[key]))));
-  showModal(`创建参数 · ${detail.experiment_id}`, el("div", { class: "params-modal-body" },
-    el("p", { class: "hint" }, "实验创建时落盘的完整参数（params.json）；未列出的旋钮按系统默认生效，实际生效值以 run manifest 为准。"),
-    el("table", { class: "kv" }, ...rows),
-  ), [el("button", { class: "btn", onclick: closeModal }, "关闭")]);
+  // The create form only persists values that differ from the defaults, so the
+  // full effective configuration = schema defaults overlaid with params.json.
+  let schemaFields = [];
+  try {
+    const schema = await api("/api/parameter-schema");
+    schemaFields = Object.values(schema.groups || {}).flat();
+  } catch { /* fall back to explicit params only */ }
+  const render = (value) => el("code", {}, typeof value === "object" ? JSON.stringify(value) : String(value));
+  const explicitRows = [];
+  const defaultRows = [];
+  const covered = new Set();
+  for (const field of schemaFields) {
+    covered.add(field.key);
+    if (Object.prototype.hasOwnProperty.call(params, field.key)) {
+      explicitRows.push(kvRow(el("span", {}, field.label, el("div", { class: "hint", style: "margin:0" }, field.key)),
+        render(params[field.key])));
+    } else {
+      defaultRows.push(kvRow(el("span", {}, field.label, el("div", { class: "hint", style: "margin:0" }, field.key)),
+        el("span", { class: "hint" }, render(field.default ?? "—").textContent)));
+    }
+  }
+  // Anything persisted outside the schema (metadata, inherited artifact, …).
+  const extraRows = Object.keys(params).filter((key) => !covered.has(key)).sort()
+    .map((key) => kvRow(key, render(params[key])));
+  const body = el("div", { class: "params-modal-body" },
+    el("p", { class: "hint" },
+      "创建时显式设置的参数在前；其余按创建表单默认生效（灰色）。运行期实际生效值以 run manifest / snapshot manifest 为准。"),
+    explicitRows.length ? el("h4", {}, `显式设置（${explicitRows.length}）`) : null,
+    explicitRows.length ? el("table", { class: "kv" }, ...explicitRows) : null,
+    el("h4", {}, `默认值（${defaultRows.length}）`),
+    el("table", { class: "kv" }, ...defaultRows),
+    extraRows.length ? el("h4", {}, "元数据 / 其他") : null,
+    extraRows.length ? el("table", { class: "kv" }, ...extraRows) : null,
+  );
+  showModal(`创建参数 · ${detail.experiment_id}`, body,
+    [el("button", { class: "btn", onclick: closeModal }, "关闭")]);
 }
 
 function controlBar(detail) {
@@ -1091,7 +1116,8 @@ function controlBar(detail) {
   const modeSelect = el("select", {
     onchange: () => send({ action: "set_mode", mode: modeSelect.value }, `模式已切换为 ${modeSelect.value}`),
   },
-    el("option", { value: "manual" }, "人工控制（逐会话批准）"),
+    el("option", { value: "manual" }, "逐会话批准"),
+    el("option", { value: "step" }, "逐 Step 批准（最细）"),
     el("option", { value: "auto" }, "自动运行（连续执行）"),
   );
   modeSelect.value = control.mode;
@@ -1176,7 +1202,10 @@ function sessionListPanel(detail, selectedKey) {
         session.kind === "fold" ? String(session.fold_id || "").replace("fold_", "Fold ") : KIND_LABELS[session.kind] || session.kind),
       validReturn !== null && validReturn !== undefined
         ? el("span", { class: `ret ${numClass(validReturn)}` }, fmtPct(validReturn))
-        : el("span", { class: "ret" }, isWaiting ? "待批准" : isCurrent ? "运行中" : ""),
+        : el("span", { class: "ret" },
+            isCurrent && status.state === "waiting_step_user"
+              ? `Step ${status.awaiting_step ?? "?"} 待批准`
+              : isWaiting ? "待批准" : isCurrent ? "运行中" : ""),
     );
     list.append(item);
   }
@@ -1494,7 +1523,8 @@ function stepGatePanel(detail, session) {
   if (session.kind !== "fold" || detail.kind !== "hitl") return el("span", {});
   const control = detail.control || {};
   const status = (detail.status || {});
-  const enabled = Boolean((control.step_gate || {})[session.key]);
+  const override = (control.step_gate || {})[session.key];
+  const enabled = override === undefined ? control.mode === "step" : Boolean(override);
   const send = async (payload, message) => {
     try {
       await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`, {
@@ -1512,11 +1542,16 @@ function stepGatePanel(detail, session) {
       el("button", {
         class: enabled ? "btn" : "btn primary",
         onclick: () => send(
-          { action: "set_step_gate", session_key: session.key, directive: enabled ? "" : "1" },
-          enabled ? "已关闭逐 Step 门控" : "已开启逐 Step 门控",
+          { action: "set_step_gate", session_key: session.key, directive: enabled ? "0" : "1" },
+          enabled ? "已关闭本 Fold 逐 Step 门控" : "已开启本 Fold 逐 Step 门控",
         ),
       }, enabled ? "关闭门控" : "开启门控"),
-      enabled ? el("span", { class: "badge state-waiting_user" }, "门控已开启") : null,
+      override !== undefined && control.mode === "step" ? el("button", {
+        class: "btn small",
+        onclick: () => send({ action: "set_step_gate", session_key: session.key, directive: "" }, "已恢复模式默认"),
+      }, "恢复模式默认") : null,
+      enabled ? el("span", { class: "badge state-waiting_user" },
+        override === undefined ? "门控开启（逐 Step 模式）" : "门控已开启") : null,
     ),
   );
   if (status.state === "waiting_step_user" && status.session_key === session.key) {

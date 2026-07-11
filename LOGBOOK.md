@@ -1,3 +1,10 @@
+2026-07-11 三项 UX 裁决与落地（feat/step-tree-rollback）
+
+- 创建参数弹窗：改为全量展示——显式设置（params.json 实际落盘）在前，其余按创建表单 schema 默认值灰色列出（根因：创建表单只持久化与默认不同的值，弹窗原先只见少数几项），元数据/继承产物单独分节。
+- 运行模式增至三档：auto（连续）/ manual（逐会话批准）/ **step（逐 Step 批准，最细）**——step = manual + 全部 Fold 会话默认开启逐 Step 门控；逐 Fold `set_step_gate` 支持显式开/关覆盖与清空恢复默认；创建表单与详情页模式切换同步三档。
+- 会话列表不加 Step 行（裁决）：Step 非可寻址会话，长 Fold 下 10+ 行/Fold 会淹没导航；Step 已有三处完整呈现（Step 历史表、Step 产物树、实时 trace）。折中：门控挂起时，该 Fold 行内显示「Step N 待批准」徽标（定位当下最需要的信息）。
+- full suite 627 OK；控制台已同步。
+
 2026-07-11 控制台四特性：创建参数查看、股票筛选、逐 Step 门控、验收改警告（feat/step-tree-rollback，72bc04d + 040af96）
 
 - 创建参数查看（72bc04d）：详情页标题旁「创建参数」按钮 → params.json 全量弹窗（显式设置在前、元数据在后；未列项按系统默认，实际生效以 run manifest 为准）。

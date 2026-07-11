@@ -336,7 +336,7 @@ class InteractiveExperimentRunner:
                     self.status.set(state="paused", phase=phase, session_key=key, epoch_id=epoch_id, fold_id=fold_id)
                 time.sleep(self.poll_seconds)
                 continue
-            if control.mode == "manual" and key not in control.approved_sessions:
+            if control.mode in ("manual", "step") and key not in control.approved_sessions:
                 if announced_state != "waiting_user":
                     announced_state = "waiting_user"
                     self.status.set(
@@ -451,7 +451,7 @@ class InteractiveExperimentRunner:
 
         def hook(step_index: int, summary: dict[str, object]) -> str:
             control = read_control(self.control_path)
-            if not control.step_gate.get(key):
+            if not control.step_gate.get(key, control.mode == "step"):
                 return ""
             self.status.set(
                 state="waiting_step_user", session_key=key, awaiting_step=int(step_index),
@@ -466,7 +466,7 @@ class InteractiveExperimentRunner:
                     control = read_control(self.control_path)
                     if control.request == "stop":
                         raise ExperimentStopped(f"stop requested at step gate {key}#{step_index}")
-                    if not control.step_gate.get(key) or control.step_go.get(key, 0) >= int(step_index):
+                    if not control.step_gate.get(key, control.mode == "step") or control.step_go.get(key, 0) >= int(step_index):
                         break
                     time.sleep(self.poll_seconds)
             finally:

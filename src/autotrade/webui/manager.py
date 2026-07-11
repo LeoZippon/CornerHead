@@ -246,8 +246,8 @@ class ExperimentManager:
         elif action == "stop":
             control.request = "stop"
         elif action == "set_mode":
-            if mode not in ("auto", "manual"):
-                raise ManagerError("set_mode requires mode auto|manual")
+            if mode not in ("auto", "manual", "step"):
+                raise ManagerError("set_mode requires mode auto|manual|step")
             control.mode = mode
         elif action == "approve":
             if not session_key:
@@ -283,12 +283,15 @@ class ExperimentManager:
             else:
                 control.gpu_counts.pop(session_key, None)
         elif action == "set_step_gate":
+            # "1" -> on, "0" -> explicitly off (overrides mode="step"), "" -> clear
+            # back to the mode default.
             if not session_key:
                 raise ManagerError("set_step_gate requires session_key")
-            if directive and str(directive).strip() not in ("", "0", "false", "off"):
-                control.step_gate[session_key] = True
-            else:
+            value = str(directive or "").strip()
+            if not value:
                 control.step_gate.pop(session_key, None)
+            else:
+                control.step_gate[session_key] = value not in ("0", "false", "off")
         elif action == "approve_step":
             # Release the session held at its current step gate; the optional
             # directive is delivered inside that step's tool observation.

@@ -68,9 +68,9 @@ _FIELDS: list[dict[str, object]] = [
      "help": "留空=从空白模板开始。选择后，新实验的首个 Fold 以该实验最新冻结的策略产物（output+models）为父产物起步；创建时拷贝并哈希校验，源实验之后删除也不受影响。"},
     # 运行控制（HITL）
     {"key": "initial_control_mode", "group": "运行控制", "label": "初始运行模式", "type": "choice",
-     "choices": ["manual", "auto"],
-     "choice_labels": {"manual": "人工控制", "auto": "自动运行"},
-     "help": "manual：每个会话（元学习/Fold/Held-out）开始前等待人工批准并可注入指令；auto：全自动连续执行，可随时暂停。"},
+     "choices": ["manual", "step", "auto"],
+     "choice_labels": {"manual": "逐会话批准", "step": "逐 Step 批准（最细）", "auto": "自动运行"},
+     "help": "manual：每个会话（元学习/Fold/Held-out）开始前等待批准并可注入指令；step：在 manual 基础上，每次正式验证回测后再挂起等待批准，可注入 Step 级指令（逐 Fold 可单独覆盖开关）；auto：全自动连续执行，可随时暂停。"},
     {"key": "analysis_model", "group": "运行控制", "label": "策略分析模型", "type": "choice",
      "choices": list(MODEL_CHOICES),
      "help": "生成 Fold 策略分析所用的 DeepSeek 模型。"},

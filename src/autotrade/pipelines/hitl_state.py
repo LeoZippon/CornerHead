@@ -35,7 +35,10 @@ SCHEDULE_NAME = "schedule.json"
 ANALYSIS_DIR_NAME = "analysis"
 HELDOUT_SESSION_KEY = "heldout"
 
-CONTROL_MODES = ("auto", "manual")
+# auto: run continuously; manual: approve each SESSION before it starts;
+# step: manual PLUS every fold session holds at each validated step
+# (per-session step_gate entries override in both directions).
+CONTROL_MODES = ("auto", "manual", "step")
 CONTROL_REQUESTS = (None, "pause", "stop")
 
 # Creation parameters mirror the run_experiment.py CLI dests one-to-one so the
