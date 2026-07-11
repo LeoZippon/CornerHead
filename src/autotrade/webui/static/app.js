@@ -335,7 +335,7 @@ function equityChart(payload, { width = 680, height = 240, ddH = 90, mini = fals
   const dates = [...new Set(seriesList.flatMap((s) => s.dates))].sort();
   if (mini) ddH = 0;
   const showDD = ddH > 0;
-  const padL = mini ? 44 : 52, padR = 12, padT = 8, padB = mini ? 22 : 26, gap = showDD ? 18 : 0;
+  const padL = mini ? 44 : 52, padR = 12, padT = 8, padB = mini ? 26 : 32, gap = showDD ? 18 : 0;
   const totalH = height + (showDD ? ddH + gap : 0);
   const plotW = width - padL - padR, mainH = height - padT - padB;
   const xOf = (i) => padL + (dates.length === 1 ? plotW / 2 : (i / (dates.length - 1)) * plotW);
@@ -358,7 +358,8 @@ function equityChart(payload, { width = 680, height = 240, ddH = 90, mini = fals
   // x ticks (≤7), year shown on the first tick and on year changes
   const tickEvery = Math.max(1, Math.ceil(dates.length / (mini ? 4 : 7)));
   let prevYear = null;
-  const tickY = padT + mainH + (mini ? 14 : 16);
+  // Date labels sit a clear step below the axis line (padB reserves the room).
+  const tickY = padT + mainH + (mini ? 17 : 20);
   dates.forEach((d, i) => {
     if (i % tickEvery !== 0 && i !== dates.length - 1) return;
     const withYear = prevYear !== d.slice(0, 4);
@@ -1557,7 +1558,7 @@ function stepGatePanel(detail, session) {
         : "为本 Fold 单独开启：每次正式验证回测完成即暂停等待批准，可在放行时注入 Step 级指令（等待不消耗推理预算）。全局默认请用运行模式「逐 Step 批准」。"),
     el("div", { class: "control-bar" },
       el("button", {
-        class: enabled ? "btn" : "btn primary",
+        class: enabled ? "btn small" : "btn small primary",
         onclick: () => send(
           { action: "set_step_gate", session_key: session.key, directive: enabled ? "0" : "1" },
           enabled ? "已关闭本 Fold 逐 Step 门控" : "已开启本 Fold 逐 Step 门控",
