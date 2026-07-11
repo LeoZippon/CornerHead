@@ -62,7 +62,9 @@ class BacktestTool:
             "first run a small replay_window pass, read the returned replay_wall_seconds + replayed_trade_days, "
             "extrapolate to the full validation period, and only run the full backtest once it fits. "
             "replay_window passes are debug-only (complete_validation=false): freezing and finish_fold "
-            "both require a successful full-window run of the current artifacts."
+            "both require a successful full-window run of the current artifacts. Probe P&L covers only "
+            "the FIRST N days - a biased sample, NOT comparable to full-window results; never tune "
+            "strategy quality against probe returns/sharpe, only runtime."
         ),
         fields=(
             ActionField(
@@ -390,6 +392,10 @@ class BacktestTool:
             "nl_tool_dir": self.ctx.executor.map_path(nl_tool_dir),
             "host_nl_tool_dir": str(nl_tool_dir),
             "modification_delta_summary": _modification_delta_summary(modification_check),
+            "probe_note": (
+                "replay_window 前 N 交易日样本：P&L/Sharpe 与全窗口不可比，仅用于运行成本试算"
+                if replay_window is not None else None
+            ),
             "started_at": started_at,
             "finished_at": utc_now_iso(),
             "replay_wall_seconds": stats.get("replay_wall_seconds"),

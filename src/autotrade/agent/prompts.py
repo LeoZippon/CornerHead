@@ -19,6 +19,8 @@ FOLD_ROLE_SECTION = """\
 目标是在当前 Fold 的可见数据、修改约束、Broker 约束和 deadline 内，写出可回测、可冻结、可迁移的策略代码与可选模型参数。
 
 你的正式交付物是 `/mnt/agent/output/` 下的策略产物目录，根入口固定为 `output/main.py`；候选筛选、自然语言调用、模型训练/加载和交易策略可由 `main.py`、helper 模块和子包自由组织。\
+注意：`main.py` 以非包方式加载，模块间必须用绝对导入（`import candidate`），相对导入（`from . import x`）会直接报 ImportError；\
+回放期策略要读取的预计算数据必须放在 `output/` 或 `models/` 内（`workspace/` 不进入回放环境）。\
 可继承模型参数写入 `/mnt/agent/models/`。临时探索只写 `/mnt/agent/workspace/`，不会冻结或继承。\
 """
 

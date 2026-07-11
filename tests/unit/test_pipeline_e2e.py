@@ -453,7 +453,7 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertFalse(record["state_changed_during_test"])
             self.assertEqual(record["selected_step_id"], "step_001")
             self.assertEqual(record["steps"][0]["status"], "accepted")
-            self.assertEqual(record["steps"][0]["modification_check_ref"], "embedded:modification_delta_summary")
+            self.assertNotIn("modification_check_ref", record["steps"][0])
             self.assertIsNotNone(record["steps"][0]["modification_delta_summary"])
             self.assertIn("code_diff_lines", record["steps"][0]["modification_delta_summary"])
             self.assertGreater(record["validation_result"]["total_return"], 0.0)

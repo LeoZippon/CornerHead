@@ -421,7 +421,7 @@ def run_main_ctx_replay(
     max_seconds_per_trading_day: float | None = None,
     enforce_substep_timeout: bool = True,
     enforce_substep_coverage: bool = True,
-    max_untracked_substep_wall_s: float = 0.05,
+    max_untracked_substep_wall_s: float = 0.25,
     timeview_enabled: bool = False,
     snapshot_dir: Path | None = None,
     replay_dir: Path | None = None,
@@ -679,7 +679,9 @@ def run_main_ctx_replay(
                     if enforce_substep_coverage and untracked_wall > max_untracked_substep_wall_s:
                         raise BacktestError(
                             f"main(ctx) at {trade_date} {tick.minute_key} spent {untracked_wall:.3f}s outside "
-                            "ctx.substep; wrap every strategy step in ctx.substep(name, budget_minutes=B)"
+                            f"ctx.substep (allowed: {max_untracked_substep_wall_s:.2f}s per tick). Move imports, "
+                            "data loading and any per-tick computation INSIDE a ctx.substep(name, "
+                            "budget_minutes=B) block; only trivial glue may run outside"
                         )
                     substep_budgets = {
                         str(sub.get("name")): float(sub.get("budget_minutes", 0.0) or 0.0)

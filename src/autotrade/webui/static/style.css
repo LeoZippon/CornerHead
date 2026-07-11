@@ -224,7 +224,6 @@ textarea.prompt-editor { min-height: 55vh; font-size: 0.845rem; }
 .session-item.phase-head:hover { background: var(--hover-bg); }
 .session-item.phase-head.selected {
   border-color: var(--accent); background: var(--accent-soft);
-  box-shadow: inset 3px 0 0 var(--accent);
 }
 .session-item.phase-head .label { order: 1; }
 .session-item.phase-head .dot { order: 2; margin-left: auto; }
@@ -413,6 +412,13 @@ button.spin:active { background: var(--accent-soft); }
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 input[type="checkbox"] { accent-color: var(--accent); }
+/* generic themed input/select (used outside .field forms, e.g. step-tree filter) */
+.input {
+  background: var(--input-bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 0.4rem 0.6rem; font-size: 0.875rem;
+}
+.input:focus { outline: none; border-color: var(--accent); }
 .field.checkbox { display: flex; gap: 0.6rem; align-items: flex-start; }
 .form-grid > .field.checkbox { padding-top: 1.45rem; }
 .field.checkbox input { margin-top: 0.3rem; width: 1.06rem; height: 1.06rem; }
@@ -434,6 +440,14 @@ details.advanced .form-grid { margin-top: 0.55rem; }
 .loading { color: var(--muted); padding: 1.4rem; text-align: center; }
 
 /* ---------------- responsive breakpoints ---------------- */
+
+/* ---- gpu allocation ---- */
+.gpu-grid { display: flex; flex-direction: column; gap: 0.45rem; margin: 0.5rem 0; }
+.gpu-row { display: flex; align-items: center; gap: 0.7rem; font-size: 0.85rem; }
+.gpu-row .gpu-name { flex: 0 0 11rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gpu-bar { flex: 1; height: 0.6rem; border-radius: 999px; background: var(--chip-bg); overflow: hidden; }
+.gpu-bar > span { display: block; height: 100%; border-radius: 999px; background: var(--accent); opacity: 0.75; }
+.gpu-row .gpu-meta { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* ---- step tree ---- */
 .step-toolbar { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.6rem; flex-wrap: wrap; }

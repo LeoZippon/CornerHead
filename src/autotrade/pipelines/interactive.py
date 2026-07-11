@@ -40,20 +40,25 @@ from autotrade.environment.step_tree import StepTree
 from .config import ExperimentConfig, FrozenArtifact
 from .folds import build_fold_schedule, heldout_periods
 from .hitl_state import (
+    ANALYSIS_DIR_NAME,
     CONTROL_NAME,
-    _epoch_ids,
+    ControlState,
     HELDOUT_SESSION_KEY,
     HITL_DIR_NAME,
     PARAMS_NAME,
     SCHEDULE_NAME,
     STATUS_NAME,
     StatusReporter,
+    _epoch_ids,
     build_session_plan,
     fold_session_key,
     meta_session_key,
     read_control,
     read_json,
+    read_status,
     resolve_options,
+    status_pid_alive,
+    write_control,
 )
 
 class ExperimentStopped(Exception):
@@ -74,7 +79,7 @@ def build_config_from_options(options: SimpleNamespace, *, repo_root: Path) -> E
 
     from .config import AcceptanceRules
 
-    sandbox_spec = SandboxSpec.from_host_fraction()
+    sandbox_spec = SandboxSpec.from_host_fraction(gpu_count=int(options.gpu_count))
     meta_learning_sandbox_spec = build_meta_learning_sandbox_spec(options, sandbox_spec, repo_root=repo_root)
     meta_learning_managed_proxy = build_meta_learning_managed_proxy_spec(
         options,

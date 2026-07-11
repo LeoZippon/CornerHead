@@ -22,6 +22,7 @@ from typing import Mapping
 from autotrade.agent.compact import ContextCompactionConfig
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
+from autotrade.environment.sandbox import SandboxSpec
 from autotrade.environment.snapshot import SnapshotConfig
 
 from .config import AcceptanceRules, ExperimentConfig
@@ -128,6 +129,7 @@ PARAM_DEFAULTS: dict[str, object] = {
     "disable_meta_sandbox_rebuild": False,
     # HITL-only knobs (not run_experiment CLI dests).
     "initial_control_mode": "step",
+    "gpu_count": SandboxSpec().gpu_count,
     "analysis_enabled": True,
     "analysis_model": "deepseek-v4-pro",
     "analysis_max_tokens": 6000,
@@ -216,6 +218,12 @@ def resolve_options(params: Mapping[str, object], repo_root: Path) -> SimpleName
     mode = str(merged["initial_control_mode"])
     if mode not in CONTROL_MODES:
         raise ValueError(f"initial_control_mode must be one of {CONTROL_MODES}, got {mode!r}")
+    try:
+        merged["gpu_count"] = int(merged["gpu_count"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("gpu_count must be an integer") from exc
+    if not 1 <= merged["gpu_count"] <= 4:
+        raise ValueError("gpu_count must be between 1 and 4")
     return SimpleNamespace(**merged)
 
 

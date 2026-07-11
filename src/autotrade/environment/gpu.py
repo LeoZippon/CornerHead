@@ -10,15 +10,22 @@ from __future__ import annotations
 import subprocess
 
 
+def _int_or_none(value: str) -> int | None:
+    try:
+        return int(value)
+    except ValueError:  # "[N/A]" on some drivers
+        return None
+
+
 class GpuUnavailableError(RuntimeError):
     pass
 
 
 def list_gpus() -> list[dict[str, object]]:
-    """[{index, name, memory_free_mib, memory_total_mib}] from nvidia-smi."""
+    """[{index, name, memory_free_mib, memory_total_mib, utilization_pct, temperature_c}] from nvidia-smi."""
     try:
         completed = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,name,memory.free,memory.total", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "--query-gpu=index,name,memory.free,memory.total,utilization.gpu,temperature.gpu", "--format=csv,noheader,nounits"],
             capture_output=True,
             text=True,
             timeout=15,
@@ -29,9 +36,10 @@ def list_gpus() -> list[dict[str, object]]:
         raise GpuUnavailableError(f"nvidia-smi failed: {completed.stderr.strip()[:200]}")
     gpus = []
     for line in completed.stdout.strip().splitlines():
-        index, name, free, total = (part.strip() for part in line.split(",", 3))
+        index, name, free, total, util, temp = (part.strip() for part in line.split(",", 5))
         gpus.append(
-            {"index": int(index), "name": name, "memory_free_mib": int(free), "memory_total_mib": int(total)}
+            {"index": int(index), "name": name, "memory_free_mib": int(free), "memory_total_mib": int(total),
+             "utilization_pct": _int_or_none(util), "temperature_c": _int_or_none(temp)}
         )
     if not gpus:
         raise GpuUnavailableError("nvidia-smi reported no GPUs")

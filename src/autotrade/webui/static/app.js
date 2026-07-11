@@ -1264,11 +1264,16 @@ function directivePanel(detail, session, waiting) {
 function gpuAllocationRow(detail, session, send) {
   const current = ((detail.control || {}).gpu_counts || {})[session.key];
   const experimentDefault = Number((detail.params || {}).gpu_count || 1);
-  const wrap = el("div", { class: "section-gap" },
-    el("h4", { class: "subsection-title" }, "本 Fold GPU 分配"));
-  const statusHost = el("div", { class: "hint" }, "GPU 状态加载中…");
-  const select = el("select", {});
-  const row = el("div", { class: "control-bar" },
+  const wrap = el("div", { class: "panel section-gap" },
+    el("h4", { class: "subsection-title" }, "本 Fold GPU 分配"),
+    el("div", { class: "hint" }, "批准前可查看实时资源并为本 Fold 沙箱设定 GPU 数；具体设备仍按空闲显存自动挑选。"));
+  const statusHost = el("div", {}, el("div", { class: "hint" }, "GPU 状态加载中…"));
+  const stamp = el("span", { class: "hint", style: "margin-left:auto" });
+  const select = el("select", { class: "input" });
+  select.append(el("option", { value: "" }, `实验默认（${experimentDefault} 块）`));
+  for (let n = 1; n <= 4; n += 1) select.append(el("option", { value: String(n) }, `${n} 块`));
+  if (current) select.value = String(current);
+  const row = el("div", { class: "control-bar section-gap" },
     el("span", { class: "mode-note" }, "分配数量："), select,
     el("button", {
       class: "btn small",
@@ -1278,24 +1283,42 @@ function gpuAllocationRow(detail, session, send) {
       ),
     }, "保存"),
     current ? el("span", { class: "badge state-waiting_user" }, `已设 ${current} 块`) : null,
+    stamp,
   );
   wrap.append(statusHost, row);
-  api("/api/gpus").then((payload) => {
-    const gpus = payload.gpus || [];
-    if (!gpus.length) {
-      statusHost.textContent = `无可用 GPU 信息${payload.error ? `（${payload.error}）` : ""}；将按默认配置运行`;
-      select.append(el("option", { value: "" }, "默认"));
+  const refresh = async () => {
+    let payload;
+    try { payload = await api("/api/gpus"); } catch (error) {
+      statusHost.innerHTML = "";
+      statusHost.append(el("div", { class: "hint" }, `GPU 状态加载失败：${error.message}`));
       return;
     }
+    const gpus = payload.gpus || [];
     statusHost.innerHTML = "";
-    statusHost.append(el("table", { class: "kv" },
-      ...gpus.map((gpu) => kvRow(`GPU ${gpu.index} · ${gpu.name}`,
-        `空闲 ${(gpu.memory_free_mib / 1024).toFixed(1)}G / 共 ${(gpu.memory_total_mib / 1024).toFixed(1)}G`)),
-    ));
-    select.append(el("option", { value: "" }, `实验默认（${experimentDefault} 块，按空闲显存自动挑选）`));
-    for (let n = 1; n <= Math.min(4, gpus.length); n += 1) select.append(el("option", { value: String(n) }, `${n} 块`));
-    if (current) select.value = String(current);
-  }).catch((error) => { statusHost.textContent = `GPU 状态加载失败：${error.message}`; });
+    if (!gpus.length) {
+      statusHost.append(el("div", { class: "hint" },
+        `无可用 GPU 信息${payload.error ? `（${payload.error}）` : ""}；将按默认配置运行`));
+      return;
+    }
+    const grid = el("div", { class: "gpu-grid" });
+    for (const gpu of gpus) {
+      const usedPct = gpu.memory_total_mib
+        ? Math.round(100 * (gpu.memory_total_mib - gpu.memory_free_mib) / gpu.memory_total_mib) : 0;
+      const util = gpu.utilization_pct === null || gpu.utilization_pct === undefined ? "—" : `${gpu.utilization_pct}%`;
+      const temp = gpu.temperature_c === null || gpu.temperature_c === undefined ? "—" : `${gpu.temperature_c}°C`;
+      grid.append(el("div", { class: "gpu-row" },
+        el("span", { class: "gpu-name" }, `GPU ${gpu.index} · ${gpu.name.replace(/^NVIDIA\s+/, "")}`),
+        el("span", { class: "gpu-bar", title: `显存占用 ${usedPct}%` }, el("span", { style: `width:${usedPct}%` })),
+        el("span", { class: "gpu-meta" },
+          `空闲 ${(gpu.memory_free_mib / 1024).toFixed(1)}G / ${(gpu.memory_total_mib / 1024).toFixed(1)}G ｜ 算力 ${util} ｜ ${temp}`),
+      ));
+    }
+    statusHost.append(grid);
+    stamp.textContent = `实时检测 · ${new Date().toLocaleTimeString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" })}`;
+  };
+  refresh();
+  // Live re-detection while the gate is open; dies with navigation (liveTimers).
+  liveTimers.push(setInterval(() => { if (wrap.isConnected) refresh(); }, 15_000));
   return wrap;
 }
 
@@ -2190,6 +2213,13 @@ function loadFoldExtras(experimentId, epochId, foldId) {
   return wrap;
 }
 
+/* Most orders carry HH:MM decision times; transfers record a full ISO
+   timestamp — render those as Shanghai HH:MM:SS instead of the raw string. */
+function fmtOrderCell(key, value) {
+  if (key === "decision_time" && typeof value === "string" && value.includes("T")) return fmtTsTime(value);
+  return value;
+}
+
 const ORDER_TABLE_COLUMNS = [
   ["trade_date", "日期"], ["decision_time", "决策时点"], ["ts_code", "代码"], ["action", "动作"],
   ["account", "账户"], ["requested_amount", "委托量"], ["filled_quantity", "成交量"],
@@ -2261,7 +2291,7 @@ function ordersNode(experimentId, epochId, foldId) {
       const table = el("table", { class: "data section-gap" },
         el("tr", {}, ...ORDER_TABLE_COLUMNS.map(([, label]) => el("th", {}, label))),
         ...rows.slice(0, 80).map((row) => el("tr", {}, ...ORDER_TABLE_COLUMNS.map(([key]) => {
-          let value = row[key];
+          let value = fmtOrderCell(key, row[key]);
           if (key === "price" && value !== null && value !== undefined) value = Number(value).toFixed(3);
           return el("td", {}, value === null || value === undefined ? "—" : String(value));
         }))),

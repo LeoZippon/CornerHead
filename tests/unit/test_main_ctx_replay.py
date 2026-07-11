@@ -390,7 +390,7 @@ import time
 
 def main(ctx):
     if ctx.cur_time == "09:30":
-        time.sleep(0.1)
+        time.sleep(0.4)  # above the 0.25s untracked-wall grace
 '''
 
 # A small positive budget submits at the first tick at/after ready_at, then fills

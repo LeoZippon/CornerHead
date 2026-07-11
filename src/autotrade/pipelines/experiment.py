@@ -30,7 +30,7 @@ from autotrade.environment.identity import agent_visible_ref as _agent_visible_r
 from autotrade.environment.llm.proxy import LLMProxy
 from autotrade.environment.managed_proxy import ManagedProxySession
 from autotrade.environment.runtime import AgentTraceWriter, RunManifest, new_id, sanitize_for_log, utc_now_iso
-from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree
+from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, _chmod_tree, link_copytree
 from autotrade.environment.sandbox_images import (
     SANDBOX_ENVIRONMENT_REQUEST_NAME,
     maybe_rebuild_sandbox_image,
@@ -1060,7 +1060,13 @@ class ExperimentPipeline:
         ]
         # Only successful complete validations can freeze a strategy artifact.
         complete_runs = [s for s in valid_runs if s.get("complete_validation")]
-        selected = complete_runs[-1] if complete_runs else None
+        # The LATEST complete validation of the CURRENT hash: a revert (or
+        # step_rollback) back to an already-validated artifact freezes without
+        # forcing a redundant full re-validation of identical content.
+        selected = next(
+            (s for s in reversed(complete_runs) if str(s.get("artifact_hash")) == current_hash),
+            complete_runs[-1] if complete_runs else None,
+        )
 
         if not selected:
             reasons.append("no successful complete validation backtest in this fold")
@@ -1096,6 +1102,11 @@ class ExperimentPipeline:
 
         if parent is not None:
             # No accepted update: reuse the parent artifact; the fold counts as not improved.
+            # finish_fold read-locks output/ and models/ (and the Docker agent's
+            # subuid may own files inside) — make them deletable again or the
+            # restore below dies with PermissionError on unlink.
+            _chmod_tree(ctx.paths.agent_output, file_mode=0o666, dir_mode=0o777)
+            _chmod_tree(ctx.paths.model_artifacts, file_mode=0o666, dir_mode=0o777)
             # Distinguish "never validated anything" from "validated but not accepted" so
             # audits do not need to reverse-engineer the reason list.
             copy_artifact(parent.path, ctx.paths.agent_output)
@@ -1198,7 +1209,6 @@ class ExperimentPipeline:
                     "model_artifact_ref": summary.get("model_artifact_hash"),
                     "combined_artifact_ref": summary.get("combined_artifact_hash"),
                     "validation_result_ref": summary.get("host_result_path") or summary.get("result_path"),
-                    "modification_check_ref": "embedded:modification_delta_summary",
                     "modification_delta_summary": summary.get("modification_delta_summary"),
                     "run_manifest_ref": str(manifest.path),
                     "timing": {"finished_at": summary.get("finished_at")},

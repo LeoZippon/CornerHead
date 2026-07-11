@@ -13,6 +13,8 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -49,6 +51,26 @@ def _weekday_trading_days(first: str, last: str) -> list[str]:
 
 
 TRADING_DAYS = _weekday_trading_days("2020-01-01", "2023-12-31")
+
+
+class WorkerEntrypointTest(unittest.TestCase):
+    def test_rejects_an_existing_live_worker_before_runtime_setup(self) -> None:
+        from autotrade.pipelines import interactive
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            experiment_dir = root / "experiments" / "exp"
+            hitl_dir = experiment_dir / "hitl"
+            hitl_dir.mkdir(parents=True)
+            (hitl_dir / "params.json").write_text('{"experiment_id": "exp"}', encoding="utf-8")
+            options = SimpleNamespace(experiments_root=root / "experiments", experiment_id="exp")
+            with (
+                patch.object(interactive, "resolve_options", return_value=options),
+                patch.object(interactive, "read_status", return_value={"state": "starting", "pid": 123}),
+                patch.object(interactive, "status_pid_alive", return_value=True),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "already has a live worker"):
+                    interactive.run_interactive_worker(experiment_dir, repo_root=root)
 
 
 class FakePipeline:
@@ -472,7 +494,22 @@ class ResolveOptionsTest(unittest.TestCase):
         self.assertEqual(options.raw_dir, repo_root / "data/raw")
         self.assertEqual(options.model, PARAM_DEFAULTS["model"])
         self.assertEqual(options.web_search_engines, ("tavily", "semantic_scholar"))
+        self.assertEqual(options.gpu_count, 1)
         self.assertTrue(options.analysis_enabled)
+
+    def test_gpu_count_validation(self) -> None:
+        base = {
+            "experiment_id": "exp1",
+            "first_test_period": "2022Q1",
+            "last_test_period": "2022Q2",
+            "heldout_first_period": "2023Q1",
+            "heldout_last_period": "2023Q1",
+        }
+        self.assertEqual(resolve_options({**base, "gpu_count": "3"}, Path("/repo")).gpu_count, 3)
+        for invalid in (0, 5, 17, "bad"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "gpu_count"):
+                    resolve_options({**base, "gpu_count": invalid}, Path("/repo"))
 
     def test_extended_params_flow_into_config_and_broker_profile(self) -> None:
         from autotrade.pipelines.interactive import build_config_from_options
@@ -488,6 +525,7 @@ class ResolveOptionsTest(unittest.TestCase):
                     "heldout_last_period": "2023Q1",
                     "max_steps_per_fold": 5,
                     "max_backtests_per_fold": 12,
+                    "gpu_count": 3,
                     "meta_memory_max_epochs": 1,
                     "nl_max_calls_per_decision_day": 4,
                     "nl_max_calls_per_backtest": 20,
@@ -503,6 +541,8 @@ class ResolveOptionsTest(unittest.TestCase):
             config = build_config_from_options(options, repo_root=repo_root)
         self.assertEqual(config.max_steps_per_fold, 5)
         self.assertEqual(config.max_backtests_per_fold, 12)
+        self.assertEqual(config.sandbox_spec.gpu_count, 3)
+        self.assertEqual(config.meta_learning_sandbox_spec.gpu_count, 3)
         self.assertEqual(config.meta_memory_max_epochs, 1)
         self.assertEqual(config.nl_max_calls_per_decision_day, 4)
         self.assertEqual(config.nl_max_calls_per_backtest, 20)
