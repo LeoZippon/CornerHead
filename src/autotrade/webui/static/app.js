@@ -1104,7 +1104,7 @@ function controlBar(detail) {
       onclick: () => {
         showModal("强制终止", el("p", {}, "立即向 worker 发送 SIGTERM。正在运行的 Fold 会被中断且不写入账本（恢复时将重跑该 Fold）。确定？"), [
           el("button", { class: "btn", onclick: closeModal }, "取消"),
-          el("button", { class: "btn danger", onclick: () => { closeModal(); send({ action: "terminate" }, "已发送终止信号"); } }, "强制终止"),
+          el("button", { class: "btn danger", onclick: () => { closeModal(); send({ action: "terminate" }, "已终止（超时未退将升级 SIGKILL）"); } }, "强制终止"),
         ]);
       },
     }, "强制终止"));

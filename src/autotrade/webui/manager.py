@@ -344,11 +344,28 @@ class ExperimentManager:
                     raise ManagerError("worker 未在 30s 内退出；请稍后重试或强制终止后手动恢复")
             return {"restarted": True, **self.start_worker(experiment_id)}
         elif action == "terminate":
+            # Graceful first, then guaranteed: the worker's SIGTERM handler
+            # unwinds through finally blocks, but blocking work (LLM retries,
+            # derived-image docker build) can ignore it for a long time — test6
+            # kept heartbeating for an hour. After a short grace, SIGKILL the
+            # whole process group (worker runs with start_new_session=True).
             status = read_status(hitl_dir / STATUS_NAME)
             if not status_pid_alive(status):
                 raise ManagerError("no live worker to terminate")
-            os.kill(int(status["pid"]), signal.SIGTERM)
-            return {"terminated_pid": status["pid"]}
+            pid = int(status["pid"])
+            os.kill(pid, signal.SIGTERM)
+            import time as _time
+
+            deadline = _time.monotonic() + 10.0
+            while _time.monotonic() < deadline:
+                if not status_pid_alive(read_status(hitl_dir / STATUS_NAME)):
+                    return {"terminated_pid": pid, "escalated": False}
+                _time.sleep(0.5)
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+            return {"terminated_pid": pid, "escalated": True}
         else:
             raise ManagerError(f"unknown control action: {action!r}")
         write_control(control_path, control)

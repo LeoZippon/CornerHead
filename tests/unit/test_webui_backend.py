@@ -538,6 +538,26 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(cleared.json()["control"]["parent_overrides"], {})
 
+    def test_terminate_returns_after_graceful_exit(self) -> None:
+        import subprocess
+        import sys as _sys
+
+        from autotrade.pipelines.hitl_state import proc_start_ticks
+
+        proc = subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        try:
+            write_json_atomic(
+                self.experiments_root / "exp_hitl" / "hitl" / "status.json",
+                {"pid": proc.pid, "pid_start_ticks": proc_start_ticks(proc.pid), "state": "running_session"},
+            )
+            manager = ExperimentManager(self.repo_root, self.experiments_root)
+            result = manager.control("exp_hitl", "terminate")
+            self.assertEqual(result["terminated_pid"], proc.pid)
+            self.assertFalse(result["escalated"])  # plain sleep dies on SIGTERM
+        finally:
+            proc.kill()
+            proc.wait()
+
     def test_launching_stub_bridges_spawn_to_first_worker_status(self) -> None:
         from types import SimpleNamespace
 
