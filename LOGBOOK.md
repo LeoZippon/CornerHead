@@ -1,3 +1,12 @@
+2026-07-11 控制台跟进批次：弹窗解析/闪烁/布局/耗时（feat/step-tree-rollback，d36ee80 + e1ea857）
+
+- 创建参数弹窗「默认值（9）+ 破折号」根因：/api/parameter-schema 的 groups 是 {name, fields} 列表，前端误当 dict 展平，把 9 个分组对象当字段渲染 → 改 flatMap(group.fields)。
+- 闪烁修复：批准/切模式/门控开关此前走 route() 整页重建 → 控制条纳入 refreshDetail() 原位替换（detailView.barHost），两处 send 改原位刷新。
+- 模式 vs 门控卡辨析（用户问是否重复）：非重复——模式 step=全局默认、卡片=本 Fold 例外；卡片文案按当前模式动态说明关系。门控卡下方缺间距：实时 trace 面板补 section-gap。
+- 已完成 Fold 显示总耗时：账本新增 run_wall_seconds（沙箱启动→记账，含快照/会话/冻结/测试评估），面板 kv 行「总耗时」（旧记录无字段则不显示）。
+- 股票筛选布局：板块选择改全宽 chip 药丸（勾选高亮描边），复选组通用样式升级。
+- full suite 630 OK；控制台已同步重启。
+
 2026-07-11 WebUI 与端到端流程全面复审 + 修复（feat/step-tree-rollback，bbebfd3）
 
 - 双审计器（WebUI 实测 + 端到端组合设计）复审全部近期特性与在途改动，确认缺陷全部修复，full suite 630 OK：
