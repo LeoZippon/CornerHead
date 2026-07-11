@@ -1,3 +1,11 @@
+2026-07-10 test5 故障双修 + 控制台细节 + Agent 决策链审计修复（feat/step-tree-rollback，fe9ec20）
+
+- test5 巡检（fold finalize 崩溃）确认两个系统缺陷并修复：① no_update 回退把父产物拷回 finish_fold 只读锁定的 output/ → unlink PermissionError（现在回退前 _chmod_tree 解锁，兼顾 Docker subuid 文件）；② 分析钩子 NameError ANALYSIS_DIR_NAME（hitl_state 拆分漏导入，该路径无单测覆盖）。
+- 控制台四项：`.input` 类从未定义 → Step 树筛选框暗色模式白底（补主题化 .input）；Held-out phase-head 选中态去掉多余 3px inset 左描边；transfer 行 decision_time 原样渲染 ISO 串 → 上海时区 HH:MM:SS；GPU 分配面板确认原先仅单次探测 → 改为面板存续期每 15s 实时复测（liveTimers 随导航清理）、逐卡显存条 + 算力% + 温度（nvidia-smi 查询扩展 utilization/temperature）、panel 化样式。
+- Agent 决策链审计（Opus 审计器全量核对 test2/test5 trace、账本、订单、策略产物）8 项发现，4 项系统缺陷修复：F1 replay_window 探针 P&L（前 N 日有偏样本）被 Agent 当调优信号（同一 hash 探针 sharpe 6.4 vs 全窗 -0.10）→ 概要携带不可比 note + 工具说明明令禁止按探针调质量；F2 50ms 未跟踪 substep 宽限连杀两次 16 分钟全量回测（0.2s pandas 胶水）→ 默认 0.25s + 报错点名阈值与整改方向；F3 提示词契约缺口（main.py 非包加载相对导入必炸、workspace/ 不进回放）连烧 5 次起步回测 → 明示绝对导入与数据必须放 output|models；F5 冻结只认最后一次完整验证 → 改为匹配当前 hash 的最近一次完整验证（回退/step_rollback 到已验证版本不再强制 16 分钟重跑）。记录不改：逐 tick fail-fast（原则优先，静默 except 诱因记录在案）、ctx.nl 两实验零使用（观察项）、margin_secs 担保品代理（等真实券源数据）。
+- 经济性事实（审计）：单 Fold ~90-100 分钟墙钟由 ~16 分钟全量回测主导；explore 每 Fold 固定 ~25 万 token；两实验均验证过拟合（valid sharpe 2.92/0.72 → test -1.23/-0.74）。
+- 验证：full suite 611 OK；PROMPTS.md 重导出；控制台已同步重启（GPU 端点实测返回 util/temp）。
+
 2026-07-10 控制台全面巡检：launching 状态、收益曲线纠偏、实时视图修复（feat/step-tree-rollback，0a77e02）
 
 - 「创建并启动」后详情页长时间显示未启动：worker 进程拉起到首次写 status.json 之间（解释器+导入耗秒级）状态读作 created，且该窗口 worker_alive=false 会放行重复拉起/删除。权衡后实现 launching 存根（成本=每次拉起一次原子写，无轮询开销）：manager 在 Popen 前写入（进程尚不存在，单写者不破坏）、保留进度字段；新鲜期显示脉动「启动中」徽标并计入并行上限、阻止重复启动/续跑/删除；超 180s 未接管降级 interrupted（worker 拉起失败可见）。

@@ -16920,3 +16920,15 @@ Inspection (read-only Opus agent exercised every endpoint against test2 + code c
 Deferred (rationale in commit): list_experiments memoization; persistent analysis-pending marker.
 
 Verified working per the inspection: health/parameter-schema/gpus, experiments list/detail/status, fold detail + strategy.zip, steps + node zip, orders(+csv incl. traversal guard), analysis GET, trace page/download, prompt-preview POST, timezone rendering, dark-theme vars, no 500s on any GET.
+
+## 2026-07-10 test5 failure remediation, console details, agent-loop audit
+
+Commit fe9ec20 on feat/step-tree-rollback. Full suite 611 OK; console synced+restarted.
+
+test5 diagnosis: worker died in _accept_or_fallback -> copy_artifact into finish_fold-locked output/ (PermissionError unlink nl_prompt.md). Fix: _chmod_tree(0o666/0o777) on output+models before the fallback restore (experiment.py); covers host-lock and Docker-subuid ownership. Second bug: interactive.py used ANALYSIS_DIR_NAME without importing it after the hitl_state split (analysis hook path untested) - import added.
+
+Console: themed .input class (step-tree filter was white in dark mode - class simply didn't exist); phase-head selected inset stroke removed; orders decision_time ISO strings (transfers) render via fmtTsTime; gpuAllocationRow rewritten - panel styling, per-GPU memory bar + utilization_pct + temperature_c (gpu.py nvidia-smi query extended, _int_or_none for [N/A]), 15s live refresh registered in liveTimers, timestamp chip. Answer to the user's question: the panel previously detected GPUs ONCE per render; now it re-detects periodically while open.
+
+Agent decision-process audit (read-only Opus agent over test2/test5 traces, manifests, ledgers, orders, strategy code) - system fixes: (F1) probe P&L not-comparable note in backtest summaries (probe_note) + spec wording; (F2) max_untracked_substep_wall_s 0.05->0.25 + actionable error (threshold named); regression fixture sleeps 0.4s; (F3) prompt: absolute imports mandatory (main.py loaded as non-package), replay-visible data must live in output|models (workspace not mounted in replay); (F5) freeze selection = latest complete validation matching current hash (reverts/step_rollback need no redundant re-validation; last-run-only was also a latent last-not-best trap). Recorded-not-changed: F6 per-tick fail-fast (design principle), F7 ctx.nl unused in both real runs (watch), F8 margin_secs collateral proxy (needs real data), F4 analysis length-stop already mitigated by the retry escalation.
+
+Economics (audit): fold wall ~90-100min dominated by ~16min full validations; explore phase ~250K tokens/fold flat; both experiments overfit valid->test (2.92->-1.23, 0.72->-0.74).
