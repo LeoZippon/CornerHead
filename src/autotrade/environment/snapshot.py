@@ -212,6 +212,18 @@ class SnapshotBuilder:
         domains["daily"] = daily_meta
 
         started = time.perf_counter()
+        auction, auction_meta = self._build_auction(
+            daily_window_start.strftime("%Y%m%d"), decision_time.strftime("%Y%m%d")
+        )
+        if not auction.empty:
+            auction = auction[auction["available_at"] <= decision_time.isoformat()].reset_index(drop=True)
+            auction_meta = {**auction_meta, "rows": int(len(auction))}
+        profiles["auction.parquet"] = _write_with_profile(
+            output_dir / "auction.parquet", auction, build_seconds=time.perf_counter() - started
+        )
+        domains["auction"] = auction_meta
+
+        started = time.perf_counter()
         if config.include_intraday:
             intraday, intraday_meta = self._build_intraday(decision_time, daily_meta["trade_dates"], config)
         else:
@@ -455,6 +467,13 @@ class SnapshotBuilder:
         )
         domains["corporate_actions"] = actions_meta
 
+        started = time.perf_counter()
+        auction, auction_meta = self._build_auction(start_key, end_key)
+        profiles["auction.parquet"] = _write_with_profile(
+            output_dir / "auction.parquet", auction, build_seconds=time.perf_counter() - started
+        )
+        domains["auction"] = auction_meta
+
         manifest = {
             "snapshot_id": new_id("replay"),
             "kind": "replay_slot",
@@ -473,6 +492,39 @@ class SnapshotBuilder:
         manifest["snapshot_hash"] = _snapshot_hash(output_dir)
         _write_manifest(output_dir, manifest)
         return manifest
+
+    _AUCTION_SESSIONS = (("stk_auction_o", "open", "09:25:00"), ("stk_auction_c", "close", "15:00:00"))
+    _AUCTION_COLUMNS = ("ts_code", "trade_date", "session", "open", "high", "low", "close",
+                        "vol", "amount", "vwap", "available_at", "available_at_rule")
+
+    def _build_auction(self, start_key: str, end_key: str) -> tuple[pd.DataFrame, dict[str, object]]:
+        """Full-market call-auction prints (open + close sessions) in the window,
+        one row per (trade_date, ts_code, session). Broker fill truth at replay —
+        the exchange publishes the print at matching time (09:25 / 15:00), so the
+        row-level ``available_at`` carries those times; the agent research view
+        still rolls in on the evening refresh node (download logistics)."""
+        parts: list[pd.DataFrame] = []
+        for dataset, session, match_time in self._AUCTION_SESSIONS:
+            frame = self.store.read_trade_range(dataset, start_key, end_key)
+            if frame.empty:
+                continue
+            out = frame.copy()
+            out["session"] = session
+            out["available_at"] = [
+                f"{d[:4]}-{d[4:6]}-{d[6:]}T{match_time}+08:00" for d in out["trade_date"].astype(str)
+            ]
+            out["available_at_rule"] = f"rule:auction_{session}_match_time"
+            parts.append(out)
+        if not parts:
+            auction = pd.DataFrame(columns=list(self._AUCTION_COLUMNS))
+        else:
+            auction = pd.concat(parts, ignore_index=True)[list(self._AUCTION_COLUMNS)]
+            auction = auction.sort_values(["trade_date", "session", "ts_code"]).reset_index(drop=True)
+        return auction, {
+            "rows": int(len(auction)),
+            "datasets": [dataset for dataset, _, _ in self._AUCTION_SESSIONS],
+            "units": "vol=股, amount=元",
+        }
 
     _CORPORATE_ACTION_COLUMNS = (
         "ts_code", "ex_date", "record_date", "pay_date", "div_listdate",

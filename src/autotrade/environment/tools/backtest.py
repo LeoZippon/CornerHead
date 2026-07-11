@@ -28,6 +28,7 @@ from autotrade.environment.artifacts import (
 from autotrade.environment.replay_stats import compute_return_stats
 from autotrade.environment.broker import (
     BrokerProfile,
+    load_auction_prints_by_date,
     load_corporate_actions_by_date,
     load_shortable_by_date,
     load_shortable_codes,
@@ -273,6 +274,7 @@ class BacktestTool:
                         shortable_codes=shortable,
                         shortable_by_date=shortable_by_date,
                         corporate_actions_by_date=load_corporate_actions_by_date(replay_dir),
+                        auction_prints_by_date=load_auction_prints_by_date(replay_dir),
                         main_policy=policy,
                         replay_intraday_1min=replay_minutes,
                         auction_enabled=bool(manifest.get("auction_enabled", True)),

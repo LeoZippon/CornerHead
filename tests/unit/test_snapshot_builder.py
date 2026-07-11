@@ -42,6 +42,15 @@ def build_raw(raw: Path) -> None:
             pd.DataFrame([{"trade_date": trade_date, "ts_code": "000001.SZ", "adj_factor": 1.0}]),
         )
         write(raw / "suspend_d" / f"trade_date={trade_date}.parquet", pd.DataFrame(columns=["trade_date", "ts_code"]))
+        for auction_dataset, auction_price in (("stk_auction_o", 10.02), ("stk_auction_c", 10.48)):
+            write(
+                raw / auction_dataset / f"trade_date={trade_date}.parquet",
+                pd.DataFrame([{
+                    "ts_code": "000001.SZ", "trade_date": trade_date, "close": auction_price,
+                    "open": auction_price, "high": auction_price, "low": auction_price,
+                    "vol": 30000.0, "amount": auction_price * 30000.0, "vwap": auction_price,
+                }]),
+            )
     write(
         raw / "stk_mins_1min_by_date" / "trade_date=20210930.parquet",
         pd.DataFrame(

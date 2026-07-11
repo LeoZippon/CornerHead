@@ -76,7 +76,7 @@ REFERENCE_DATASETS = [
     "index_member_all",
 ]
 
-DAILY_REQUIRED_DATASETS = ["daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d"]
+DAILY_REQUIRED_DATASETS = ["daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d", "stk_auction_o", "stk_auction_c"]
 
 DAILY_OPTIONAL_DATASETS = ["limit_list_d"]
 
@@ -914,6 +914,20 @@ DAILY_SPECS = {
         fields="ts_code,trade_date,suspend_timing,suspend_type",
         zero_rows_ok=True,
         key_columns=("trade_date", "ts_code", "suspend_type", "suspend_timing"),
+    ),
+    # Full-market call-auction prints (both back to 20100104). The broker uses
+    # them for auction-order fills on days where rows exist; the exchange
+    # publishes the print at matching time (09:25 / 15:00), so same-day broker
+    # use is PIT-correct even though TuShare batch delivery is evening.
+    "stk_auction_o": TradeDateDataset(
+        api_name="stk_auction_o",
+        fields="ts_code,trade_date,close,open,high,low,vol,amount,vwap",
+        start_date="20100104",
+    ),
+    "stk_auction_c": TradeDateDataset(
+        api_name="stk_auction_c",
+        fields="ts_code,trade_date,close,open,high,low,vol,amount,vwap",
+        start_date="20100104",
     ),
     "limit_list_d": TradeDateDataset(
         api_name="limit_list_d",

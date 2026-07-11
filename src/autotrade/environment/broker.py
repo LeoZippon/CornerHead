@@ -505,9 +505,17 @@ class SimBroker:
         shortable_codes: frozenset[str],
         shortable_by_date: dict[str, frozenset[str]] | None = None,
         corporate_actions_by_date: dict[str, list[dict[str, object]]] | None = None,
+        auction_prints_by_date: dict[tuple[str, str], dict[str, float]] | None = None,
     ) -> None:
         self.profile = profile
         self.market = market
+        # Actual call-auction prints from the replay slot (environment market
+        # truth): {(trade_date, "open"|"close"): {ts_code: matched price}}. When
+        # a print exists, auction orders clear at it instead of the bar
+        # open/close approximation; the exchange publishes the print at matching
+        # time, so same-day use is PIT-correct. Days without rows (pre-coverage
+        # or per-code gaps) keep the bar-based semantics.
+        self.auction_prints_by_date = dict(auction_prints_by_date or {})
         # Ex-date corporate actions from the replay slot (environment market truth,
         # not an agent input — the agent's dividend view stays announcement-gated):
         # {ex_date: [{ts_code, cash_per_share, stock_per_share, record_date, ...}]}.
@@ -938,7 +946,9 @@ class SimBroker:
                 # reaches the exchange (its activation bar). An aggressive limit below
                 # the reference price would have been rejected at 申报.
                 order.uptick_checked = True
-                ref_price = _close_price(bar) if order.auction_close else _open_price(bar)
+                ref_price = self._auction_print(trade_date, order) or (
+                    _close_price(bar) if order.auction_close else _open_price(bar)
+                )
                 if order.price is not None and ref_price is not None and order.price < ref_price:
                     rejected = Order(
                         ts_code=order.ts_code, action="short", side="short",
@@ -950,7 +960,10 @@ class SimBroker:
                     self.orders.append(rejected)
                     self._reject(rejected, "slo_sell_uptick_rule")
                     continue
-            price = _limit_fill_price(order, bar, use_close=order.auction_close)
+            price = _limit_fill_price(
+                order, bar, use_close=order.auction_close,
+                ref_override=self._auction_print(trade_date, order),
+            )
             if price is not None:
                 self.execute(
                     order.ts_code,
@@ -973,6 +986,17 @@ class SimBroker:
                 survivors.append(order)
         self._book = survivors
         self._mark_positions_to_bars(minute_group, at_open=False)
+
+    def _auction_print(self, trade_date: object, order: "WorkingOrder") -> float | None:
+        """The day's actual auction price for this order, if it is still an
+        auction order and the replay slot carries the print."""
+        if not order.is_auction:
+            return None
+        session = "close" if order.auction_close else "open"
+        prints = self.auction_prints_by_date.get((str(trade_date), session))
+        if not prints:
+            return None
+        return prints.get(order.ts_code)
 
     def _mark_positions_to_bars(self, minute_group: pd.DataFrame, *, at_open: bool) -> None:
         """Re-mark held positions to the current bar (open or close phase)."""
@@ -2191,6 +2215,30 @@ def load_shortable_by_date(replay_dir: str | Path) -> dict[str, frozenset[str]]:
     }
 
 
+def load_auction_prints_by_date(replay_dir: str | Path) -> dict[tuple[str, str], dict[str, float]]:
+    """Actual call-auction prints from a replay slot, keyed by (trade_date, session).
+
+    Environment-side fill truth for SimBroker's auction matching. Empty when the
+    slot predates the auction domain; the broker then keeps the bar-based
+    approximation — matching that slot's build-time world."""
+    path = Path(replay_dir) / "auction.parquet"
+    if not path.exists():
+        return {}
+    prints = pd.read_parquet(path)
+    if prints.empty:
+        return {}
+    grouped: dict[tuple[str, str], dict[str, float]] = {}
+    for row in prints.to_dict("records"):
+        price = row.get("vwap")
+        if price is None or pd.isna(price):
+            price = row.get("close")
+        if price is None or pd.isna(price):
+            continue
+        key = (str(row.get("trade_date") or ""), str(row.get("session") or ""))
+        grouped.setdefault(key, {})[str(row.get("ts_code") or "")] = float(price)
+    return grouped
+
+
 def load_corporate_actions_by_date(replay_dir: str | Path) -> dict[str, list[dict[str, object]]]:
     """Ex-date corporate actions from a replay slot, keyed by ex_date.
 
@@ -2247,7 +2295,9 @@ def _is_synthetic_bar(bar: pd.Series) -> bool:
     return flag is not None and pd.notna(flag) and bool(flag)
 
 
-def _limit_fill_price(order: WorkingOrder, bar: pd.Series, *, use_close: bool = False) -> float | None:
+def _limit_fill_price(
+    order: WorkingOrder, bar: pd.Series, *, use_close: bool = False, ref_override: float | None = None
+) -> float | None:
     """Fill price for a working order against this bar, or None if not fillable now.
 
     Market orders fill at the bar reference price: the bar OPEN by default, or the
@@ -2264,10 +2314,15 @@ def _limit_fill_price(order: WorkingOrder, bar: pd.Series, *, use_close: bool = 
     price, and a synthetic daily-fallback bar, whose high/low span the whole
     session — hours before the order could exist — so filling against them would
     be retroactive."""
-    ref_price = _close_price(bar) if use_close else _open_price(bar)
+    # ref_override = the day's ACTUAL call-auction print (replay slot data): it
+    # replaces the bar-derived reference and forces single-price clearing,
+    # because a call auction matches every order at exactly that price.
+    ref_price = ref_override if ref_override is not None else (
+        _close_price(bar) if use_close else _open_price(bar)
+    )
     if order.price is None or ref_price is None:
         return ref_price
-    single_price = use_close or _is_synthetic_bar(bar)
+    single_price = use_close or ref_override is not None or _is_synthetic_bar(bar)
     limit = order.price
     if order.action in ("buy", "credit_buy", "fin_buy", "cover"):
         if ref_price <= limit:

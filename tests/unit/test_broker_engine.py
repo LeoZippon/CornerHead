@@ -1093,6 +1093,37 @@ class FillRealismTest(unittest.TestCase):
         fill = next(e for e in broker.events if e["event_type"] == "order_filled")
         self.assertAlmostEqual(fill["price"], 10.3)
 
+    def test_auction_print_overrides_bar_reference(self):
+        # With the day's actual call-auction print in the replay slot, auction
+        # orders clear at the print, not the bar open/close approximation.
+        broker = self.make_broker()
+        broker.auction_prints_by_date = {
+            ("20220104", "open"): {"000001.SZ": 10.07},
+            ("20220104", "close"): {"000001.SZ": 10.33},
+        }
+        broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 1000, is_auction=True)
+        broker.match_bar("20220104", "09:30", self.bar_group(10.0, 10.1, 9.9, 10.05))
+        fill = next(e for e in broker.events if e["event_type"] == "order_filled")
+        self.assertAlmostEqual(fill["price"], 10.07)  # print, slippage-free
+        self.assertEqual(fill["price_label"], "auction")
+        # Close auction: a buy limit below the print rests (single price), a
+        # marketable one clears exactly at the print.
+        broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 10.2, 1000,
+                         is_auction=True, auction_close=True)
+        broker.match_bar("20220104", "15:00", self.bar_group(10.0, 10.4, 9.0, 10.3))
+        self.assertEqual(len(broker.working_orders()), 1)  # 10.2 < print 10.33
+        broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 10.5, 1000,
+                         is_auction=True, auction_close=True)
+        broker.match_bar("20220104", "15:00", self.bar_group(10.0, 10.4, 9.0, 10.3))
+        fills = [e for e in broker.events if e["event_type"] == "order_filled"]
+        self.assertAlmostEqual(fills[-1]["price"], 10.33)
+        # A day without prints keeps the bar-based semantics.
+        broker2 = self.make_broker()
+        broker2.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 1000, is_auction=True)
+        broker2.match_bar("20220104", "09:30", self.bar_group(10.0, 10.1, 9.9, 10.05))
+        fill2 = next(e for e in broker2.events if e["event_type"] == "order_filled")
+        self.assertAlmostEqual(fill2["price"], 10.0)  # bar open
+
     def test_synthetic_fallback_bar_has_no_range_trade_through(self):
         # A synthetic daily-fallback bar's high/low span the whole session, so a
         # resting limit order must not fill against prices that predate it; the

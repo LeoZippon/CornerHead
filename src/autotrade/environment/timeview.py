@@ -46,6 +46,7 @@ _DOMAINS: tuple[tuple[str, str, str | None], ...] = (
     ("macro", "macro.parquet", "macro"),
     ("fundamentals", "fundamentals.parquet", "fundamentals"),
     ("intraday_1min", "intraday_1min.parquet", "intraday_1min"),
+    ("auction", "auction.parquet", "auction"),
 )
 
 

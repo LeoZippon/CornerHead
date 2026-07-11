@@ -141,6 +141,9 @@ DOMAIN_REFRESH_NODES: dict[str, tuple[str, ...]] = {
     "daily": (EVENING_NODE,),
     "intraday_1min": (EVENING_NODE,),
     "macro": (EVENING_NODE,),
+    # Auction prints: row available_at = match time (09:25/15:00), but OUR
+    # pipeline receives them in the evening batch — the node states logistics.
+    "auction": (EVENING_NODE,),
     "fundamentals": ("cn_nightly_pit_event_build",),
 }
 
