@@ -23,7 +23,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 
-from .ledger import ExperimentLedger
+from .ledger import ExperimentLedger, latest_fold_records, latest_heldout_records
 
 DEV_COLOR = "#1f77b4"
 TEST_COLOR = "#d62728"
@@ -43,8 +43,10 @@ def build_experiment_report(ledger_path: str | Path, output_dir: str | Path) -> 
     data), so the report never reads the mutable raw lake and always matches
     what the Agent and the console saw."""
     ledger = ExperimentLedger(ledger_path)
-    folds = ledger.read("fold")
-    heldout = ledger.read("heldout")
+    # Latest record per (epoch, fold) / held-out period: after a fold re-run
+    # the formal report counts only the superseding attempt.
+    folds = list(latest_fold_records(ledger.read("fold")).values())
+    heldout = latest_heldout_records(ledger.read("heldout"))
     if not folds:
         raise ValueError(f"no fold records in {ledger_path}")
     output_dir = Path(output_dir)

@@ -1,3 +1,15 @@
+2026-07-12 check.md 审计 P1/P2 修复批次（feat/step-tree-rollback）
+
+- **P1-1 探针脱敏**：replay_window 探针回放的是决策时点的未来窗口，此前完整返回收益五项+benchmark 并把 detailed_return/style/orders/positions 写进 Agent 可读结果目录（真实 Agent 已据此调参）。现探针只返回耗时/tick/substep/订单生命周期统计；结果目录除 nl_tool 外为空；prompts + PROMPTS.md + env 文档同步。
+- **P1-5 统一 substep 合同**：声明预算推进仿真时间（ready_at=tick+B），冻结/held-out 关闭实测检查会让超预算计算拿到不真实成交时点。现 valid/test/held-out 全部强制 substep 超时+覆盖检查（超限=无效不评分）；粗粒度防挂死墙钟保持 3× 宽松；引擎开关仅留给 dev 基准脚本（推翻早期 D-R7 裁决，理由=成交时点可比性优先，check.md 论证成立）。
+- **P1-2(d) state_staging 收容**：staging_rel/state_rel 来自 Agent 侧驱动报告，此前直接拼路径（../ 或符号链接可逃逸到宿主任意可写路径）。现 register 时 resolve+收容校验（违规=BacktestError），merge 时拒绝符号链接/非常规文件（防 TOCTOU 换链）。
+- **P1-3 世代新鲜度（部分）**：六大域审计状态 created_at 早于当前 raw 世代 → 快照 manifest 记 warning。硬门禁刻意未采用：审计按夜间节奏在每个落库任务后重跑，硬拒会每晚锁死实验数小时；硬保证由共享 flock + 世代缓存键承担。
+- **P2-1 报表去重**：latest_fold_records/latest_heldout_records 下沉 pipelines/ledger.py（reporting 与 webui 共用）；正式报告 rerun 后只计最新记录（此前同 fold 重跑会重复计入均值/复合收益）。
+- **P2-2 措辞**：AcceptanceRules docstring 与创建表单 min_return/min_sharpe 帮助文案改为“目标值：低于记警告不阻止冻结”。
+- **P2-4 清理保障**：引擎 close() 无条件 kill_marker 清扫（此前只在 terminate 路径）；fold/held-out 容器启动纳入 try/finally；沙箱容器带 mq.experiment 标签，SIGKILL 升级与删除实验后按标签 docker rm -f 回收。
+- **待用户决策**：P2-3（_legacy_benchmark_year 是用户在途代码，建议冻结迁移替代请求时读 raw）；P1-8 跨周期验收合同；P1-7 HITL test 展示策略；P1-6 Timeview 性能批次。P1-4 维持部分成交缓办裁决。
+- full suite 642 OK；PROMPTS.md 重导出；无需重建沙箱镜像（驱动未动）。
+
 2026-07-12 check.md 审计 P0 数据完整性修复（feat/step-tree-rollback）
 
 - **P0-1 forecast_vip/express_vip PIT 前视（已确认真实泄漏）**：available_at 此前优先 first_ann_date，把修订版本回溯到首告日（lap-test2 决策快照实含 22 条未来公告，600157.SH 2026-01 修订标 2024-08 可见）。改为每版本只用自身 ann_date（first_ann_date 保留为序列属性）；审计新增硬规则 available_at≥本行 ann_date（forecast/express，违反=error）；audit.py 指引文本同步。全量重建 data/pit/fundamental_events（20200101–20260711，754 分区 207.5 万行，13m20s），实测 63042 行 forecast_vip 0 条回溯；审计 errors=0。

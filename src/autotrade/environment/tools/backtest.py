@@ -212,12 +212,14 @@ class BacktestTool:
         # strategy that already fit the caps during validation must finish its final
         # eval (H2) — so they use a GENEROUS wall-clock backstop whose only job is to
         # kill a true hang, not to gate acceptance.
-        # The per-substep wall fail-fast is part of the tight iteration-validation
-        # gate; the final/frozen (held-out) eval skips it so a transient overrun under
-        # load cannot abort an already-accepted strategy's reproducible eval (it still
-        # aggregates the substep runtime). This tracks the same valid/final split as
-        # the coarse caps below.
-        enforce_substep_timeout = mode == "valid"
+        # The per-substep budget/coverage checks are DIFFERENT from the coarse caps:
+        # declared budgets advance sim time (orders fill at ready_at = tick + B), so
+        # compute that misses its own declared budget would fill unrealistically
+        # early. Valid, test and held-out enforce the SAME substep contract (engine
+        # defaults) — an overrun result is invalid and never scored — otherwise
+        # final scores are not comparable to validation. Only the coarse wall caps
+        # below stay generous for frozen evals (kill true hangs, don't gate
+        # acceptance).
         valid_decision_cap = float(manifest.get("backtest_max_seconds_per_decision", 300))
         valid_per_day_cap = _optional_float(manifest.get("backtest_max_seconds_per_trading_day", 900))
         if mode == "valid":
@@ -288,13 +290,6 @@ class BacktestTool:
                         offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 30)),
                         intraday_decision_minutes=int(manifest.get("intraday_decision_minutes", 1)),
                         max_seconds_per_trading_day=per_day_cap,
-                        enforce_substep_timeout=enforce_substep_timeout,
-                        # The unwrapped-compute coverage check is also a real-wall measure,
-                        # so it follows the same valid/final split as the timeout: only the
-                        # tight iteration-validation gate enforces it. The frozen/held-out
-                        # final eval must stay reproducible under load (H2), so a transient
-                        # deschedule outside a substep cannot abort an accepted strategy.
-                        enforce_substep_coverage=enforce_substep_timeout,
                         timeview_enabled=timeview_enabled,
                         snapshot_dir=snapshot_dir,
                         replay_dir=replay_dir,
@@ -317,33 +312,42 @@ class BacktestTool:
                 shutil.rmtree(tmp_nl_dir, ignore_errors=True)
             cleanup_nl_rpc_files(requests_host, responses_host)
 
-        order_records = replay.broker.get_trade_detail_data(
-            account_type="STOCK", data_type="ORDER"
-        ) + replay.broker.get_trade_detail_data(account_type="CREDIT", data_type="ORDER")
-        orders_path = self._write_orders(result_dir, order_records)
-        # Broker end-of-day positions per (date, account, ts_code, side): the
-        # attribution ground truth (forced closes / bonus shares / hedged legs).
-        position_records = replay.broker.positions_eod_records()
-        if position_records:
-            pd.DataFrame(position_records).to_parquet(result_dir / "positions_eod.parquet", index=False)
-        # allow_nan=False: detailed_return.json feeds acceptance and the console;
-        # a NaN metric must fail the replay here, not pass thresholds silently.
-        (result_dir / "detailed_return.json").write_text(
-            json.dumps(sanitize_for_log(stats), ensure_ascii=False, indent=2, sort_keys=True, default=str, allow_nan=False),
-            encoding="utf-8",
-        )
-        # Barra-lite attribution, computed once per replay from frozen run
-        # inputs only: replay-slot cross-section + slot index_daily benchmark +
-        # snapshot universe industry. Every mode gets a sidecar (test/held-out
-        # replays run after the Agent session); the compact block rides in the
-        # tool result. Descriptive diagnostics, never an optimization target.
-        style_payload = replay_style_analysis(
-            replay_daily, position_records, stats, replay_dir=replay_dir, snapshot_dir=snapshot_dir
-        )
-        (result_dir / "style_analysis.json").write_text(
-            json.dumps(sanitize_for_log(style_payload), ensure_ascii=False, indent=2, sort_keys=True, default=str),
-            encoding="utf-8",
-        )
+        # replay_window probes replay a FUTURE window relative to the decision
+        # time: their financial outputs (returns, fill prices, EOD positions)
+        # are lookahead for the Agent and were demonstrably used to tune against
+        # the first-N-days P&L. Probes keep only run-cost/lifecycle statistics;
+        # no financial artifact lands in the agent-readable results dir.
+        probe = replay_window is not None
+        style_payload: dict[str, object] = {}
+        orders_path = None
+        if not probe:
+            order_records = replay.broker.get_trade_detail_data(
+                account_type="STOCK", data_type="ORDER"
+            ) + replay.broker.get_trade_detail_data(account_type="CREDIT", data_type="ORDER")
+            orders_path = self._write_orders(result_dir, order_records)
+            # Broker end-of-day positions per (date, account, ts_code, side): the
+            # attribution ground truth (forced closes / bonus shares / hedged legs).
+            position_records = replay.broker.positions_eod_records()
+            if position_records:
+                pd.DataFrame(position_records).to_parquet(result_dir / "positions_eod.parquet", index=False)
+            # allow_nan=False: detailed_return.json feeds acceptance and the console;
+            # a NaN metric must fail the replay here, not pass thresholds silently.
+            (result_dir / "detailed_return.json").write_text(
+                json.dumps(sanitize_for_log(stats), ensure_ascii=False, indent=2, sort_keys=True, default=str, allow_nan=False),
+                encoding="utf-8",
+            )
+            # Barra-lite attribution, computed once per replay from frozen run
+            # inputs only: replay-slot cross-section + slot index_daily benchmark +
+            # snapshot universe industry. Every mode gets a sidecar (test/held-out
+            # replays run after the Agent session); the compact block rides in the
+            # tool result. Descriptive diagnostics, never an optimization target.
+            style_payload = replay_style_analysis(
+                replay_daily, position_records, stats, replay_dir=replay_dir, snapshot_dir=snapshot_dir
+            )
+            (result_dir / "style_analysis.json").write_text(
+                json.dumps(sanitize_for_log(style_payload), ensure_ascii=False, indent=2, sort_keys=True, default=str),
+                encoding="utf-8",
+            )
         staging_audit = replay.state_staging_audit or []
         unmerged = sum(1 for record in staging_audit if not record.get("merged"))
         if staging_audit:
@@ -374,29 +378,15 @@ class BacktestTool:
             "nl_calls": int(nl_service.calls),
             "nl_max_calls_per_backtest": nl_service.max_calls,
             "trade_count": int(stats["trade_count"]),
-            "total_return": stats["total_return"],
-            "long_return": stats["long_return"],
-            "short_return": stats["short_return"],
-            "sharpe": stats["sharpe"],
-            "max_drawdown": stats["max_drawdown"],
-            # Exit-day liquidation completeness: final equity is mark-to-market
-            # either way; leftovers (suspension/limit-lock/T+1) are itemized in
-            # detailed_return.json's unliquidated_positions.
-            "liquidation_complete": stats["liquidation_complete"],
-            "unliquidated_position_count": len(stats["unliquidated_positions"]),
             "margin_secs_reject_count": stats["margin_secs_reject_count"],
             "max_holdings_reject_count": stats["max_holdings_reject_count"],
-            # Descriptive attribution vs 沪深300 (see style_analysis.json) —
-            # interpretation aid, NOT an optimization target.
-            "benchmark": style_payload.get("compact"),
-            "orders_path": self.ctx.executor.map_path(orders_path) if orders_path else None,
-            "host_orders_path": str(orders_path) if orders_path else None,
             "nl_tool_dir": self.ctx.executor.map_path(nl_tool_dir),
             "host_nl_tool_dir": str(nl_tool_dir),
             "modification_delta_summary": _modification_delta_summary(modification_check),
             "probe_note": (
-                "replay_window 前 N 交易日样本：P&L/Sharpe 与全窗口不可比，仅用于运行成本试算"
-                if replay_window is not None else None
+                "replay_window 前 N 交易日探针：只返回运行成本与订单生命周期统计，"
+                "收益指标与成交明细不生成（对未来窗口的 P&L 属于前视信息）"
+                if probe else None
             ),
             "started_at": started_at,
             "finished_at": utc_now_iso(),
@@ -410,6 +400,24 @@ class BacktestTool:
             "state_staged_writes": len(staging_audit),
             "state_unmerged_writes": unmerged,
         }
+        if not probe:
+            summary.update({
+                "total_return": stats["total_return"],
+                "long_return": stats["long_return"],
+                "short_return": stats["short_return"],
+                "sharpe": stats["sharpe"],
+                "max_drawdown": stats["max_drawdown"],
+                # Exit-day liquidation completeness: final equity is mark-to-market
+                # either way; leftovers (suspension/limit-lock/T+1) are itemized in
+                # detailed_return.json's unliquidated_positions.
+                "liquidation_complete": stats["liquidation_complete"],
+                "unliquidated_position_count": len(stats["unliquidated_positions"]),
+                # Descriptive attribution vs 沪深300 (see style_analysis.json) —
+                # interpretation aid, NOT an optimization target.
+                "benchmark": style_payload.get("compact"),
+                "orders_path": self.ctx.executor.map_path(orders_path) if orders_path else None,
+                "host_orders_path": str(orders_path) if orders_path else None,
+            })
         self.ctx.manifest.append_backtest_summary(summary)
         self.ctx.trace.emit("backtest", summary, step_id=self.ctx.current_step_id)
         if mode == "valid" and complete_validation and self.ctx.manifest.get("step_tree_enabled"):

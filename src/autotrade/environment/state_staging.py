@@ -21,6 +21,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 
+def _contained(root: Path, rel: str) -> Path:
+    candidate = root / rel
+    if not candidate.resolve().is_relative_to(root.resolve()):
+        raise ValueError(f"staged state path escapes {root.name}: {rel!r}")
+    return candidate
+
+
 @dataclass
 class _Staged:
     seq: int
@@ -68,11 +75,17 @@ class StateStager:
             state_rel = str(item.get("state_rel", ""))
             if not staging_rel or not state_rel:
                 continue
+            # The rel paths come from the sandbox driver's tick report, i.e. from
+            # agent-controlled code: containment is enforced HERE, host-side.
+            # resolve() also follows symlinks, so a staged link pointing outside
+            # either root is rejected at registration.
+            staging_path = _contained(self.staging_dir, staging_rel)
+            visible_path = _contained(self.visible_dir, state_rel)
             record = _Staged(
                 seq=self._seq,
                 state_rel=state_rel,
-                staging_path=self.staging_dir / staging_rel,
-                visible_path=self.visible_dir / state_rel,
+                staging_path=staging_path,
+                visible_path=visible_path,
                 substep=str(item.get("substep", "")),
                 budget_minutes=budget,
                 gen_at=when.isoformat(),
@@ -93,8 +106,12 @@ class StateStager:
         merged = 0
         for record in ready:
             self._pending.remove(record)
-            if not record.staging_path.exists():
-                record.status = "missing_staging_file"
+            if record.staging_path.is_symlink() or not record.staging_path.is_file():
+                # Re-checked at merge time (registration-time containment can be
+                # raced by swapping the file for a symlink/dir before ready_at).
+                record.status = (
+                    "missing_staging_file" if not record.staging_path.exists() else "rejected_not_regular_file"
+                )
                 continue
             if self._applied_seq.get(record.state_rel, -1) > record.seq:
                 record.status = "superseded"

@@ -121,7 +121,9 @@ class CachingSnapshotProvider:
 
 @dataclass(frozen=True)
 class AcceptanceRules:
-    """Hard validation acceptance checks (docs/pipeline_design.md 4.1)."""
+    """Validation acceptance checks (docs/pipeline_design.md 4.1): drawdown,
+    finiteness and completeness are HARD rejects; min_return/min_sharpe are
+    warn-only targets — a shortfall records a warning and never resets the fold."""
 
     min_return: float = 0.0
     min_sharpe: float = 0.0

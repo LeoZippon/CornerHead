@@ -19,6 +19,27 @@ RECORD_TYPES = ("fold", "meta_learning", "heldout", "attempt_failed")
 LINK_KEYS = ("experiment_id", "epoch_id", "fold_id", "run_id")
 
 
+def latest_fold_records(records: list[dict[str, object]]) -> dict[tuple[str, str], dict[str, object]]:
+    """Latest fold record per (epoch, fold): the ledger is append-only, so a
+    re-run appends a superseding record. Formal consumers (reporting, console)
+    must never double-count earlier attempts."""
+    latest: dict[tuple[str, str], dict[str, object]] = {}
+    for record in records:
+        if record.get("record_type") == "fold":
+            latest[(str(record.get("epoch_id")), str(record.get("fold_id")))] = record
+    return latest
+
+
+def latest_heldout_records(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Latest record per held-out period (a fold re-run replays held-out, so
+    earlier period records are superseded, not removed)."""
+    latest: dict[str, dict[str, object]] = {}
+    for record in records:
+        if record.get("record_type") == "heldout":
+            latest[str(record.get("fold_id"))] = record
+    return [latest[key] for key in sorted(latest)]
+
+
 class ExperimentLedger:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)

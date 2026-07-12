@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Mapping
 
 from autotrade.pipelines.fold_analysis import analysis_paths
+from autotrade.pipelines.ledger import latest_fold_records, latest_heldout_records
 from autotrade.pipelines.hitl_state import (
     ANALYSIS_DIR_NAME,
     CONTROL_NAME,
@@ -93,24 +94,6 @@ def read_ledger_records(experiment_dir: Path) -> list[dict[str, object]]:
         if isinstance(record, dict):
             records.append(record)
     return records
-
-
-def latest_fold_records(records: list[dict[str, object]]) -> dict[tuple[str, str], dict[str, object]]:
-    latest: dict[tuple[str, str], dict[str, object]] = {}
-    for record in records:
-        if record.get("record_type") == "fold":
-            latest[(str(record.get("epoch_id")), str(record.get("fold_id")))] = record
-    return latest
-
-
-def latest_heldout_records(records: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Latest record per held-out period (append-only ledger; a fold re-run
-    replays held-out, so earlier period records are superseded, not removed)."""
-    latest: dict[str, dict[str, object]] = {}
-    for record in records:
-        if record.get("record_type") == "heldout":
-            latest[str(record.get("fold_id"))] = record
-    return [latest[key] for key in sorted(latest)]
 
 
 def _compound(returns: list[float]) -> float | None:

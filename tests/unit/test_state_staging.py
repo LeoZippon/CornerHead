@@ -99,6 +99,48 @@ class StateStagerTest(unittest.TestCase):
             self.assertFalse(audit["late.txt"]["merged"])
             self.assertEqual(audit["late.txt"]["status"], "unmerged_at_region_end")
 
+    def test_path_escape_is_rejected_at_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            stager = _stager(tmp)
+            outside = tmp / "outside.txt"
+            for rel in ("../outside.txt", "a/../../outside.txt"):
+                with self.assertRaisesRegex(ValueError, "escapes"):
+                    stager.register(
+                        [{"staging_rel": "t0/s/x.txt", "state_rel": rel, "substep": "s", "budget_minutes": 1}],
+                        when=T0,
+                    )
+            # Symlink escape: staging path resolving outside its root.
+            link = stager.staging_dir / "t0" / "s"
+            link.parent.mkdir(parents=True, exist_ok=True)
+            outside.write_text("secret", encoding="utf-8")
+            link.symlink_to(tmp)
+            with self.assertRaisesRegex(ValueError, "escapes"):
+                stager.register(
+                    [{"staging_rel": "t0/s/outside.txt", "state_rel": "x.txt", "substep": "s", "budget_minutes": 1}],
+                    when=T0,
+                )
+            self.assertEqual(stager.audit(), [])
+
+    def test_non_regular_staging_file_is_rejected_at_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            stager = _stager(tmp)
+            _stage_file(stager, "t0/s/x.txt", "ok")
+            stager.register(
+                [{"staging_rel": "t0/s/x.txt", "state_rel": "x.txt", "substep": "s", "budget_minutes": 1}],
+                when=T0,
+            )
+            # TOCTOU: swap the registered regular file for a symlink before ready_at.
+            target = stager.staging_dir / "t0" / "s" / "x.txt"
+            target.unlink()
+            secret = tmp / "secret.txt"
+            secret.write_text("secret", encoding="utf-8")
+            target.symlink_to(secret)
+            self.assertEqual(stager.merge_ready(T0 + timedelta(minutes=2)), 0)
+            self.assertFalse((stager.visible_dir / "x.txt").exists())
+            self.assertEqual(stager.audit()[0]["status"], "rejected_not_regular_file")
+
     def test_missing_staging_file_is_flagged(self):
         with tempfile.TemporaryDirectory() as tmp:
             stager = _stager(Path(tmp))

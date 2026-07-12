@@ -182,7 +182,7 @@ class ExperimentPipeline:
         )
         docker = None
         if self.config.use_docker:
-            docker = DockerSandbox(sandbox, spec)
+            docker = DockerSandbox(sandbox, spec, labels={"mq.experiment": self.config.experiment_id})
         return sandbox, docker
 
     @staticmethod
@@ -426,10 +426,12 @@ class ExperimentPipeline:
                 "conversation_id": conversation_id,
             },
         )
-        self._start_container(docker, manifest)
         test_summary: dict[str, object] | None = None
         test_eval_error: Exception | None = None
         try:
+            # Inside the try: a partially-started container (or a failure right
+            # after start) is still torn down by the finally's docker.stop().
+            self._start_container(docker, manifest)
             ctx = ToolContext(
                 paths=paths,
                 manifest=manifest,
@@ -963,8 +965,8 @@ class ExperimentPipeline:
                     "conversation_id": str(manifest.require("conversation_id")),
                 },
             )
-            self._start_container(docker, manifest)
             try:
+                self._start_container(docker, manifest)
                 ctx = ToolContext(
                     paths=paths,
                     manifest=manifest,

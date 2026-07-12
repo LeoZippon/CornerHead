@@ -589,9 +589,12 @@ class DockerSandbox:
     test phase reuses the same container after writes are locked.
     """
 
-    def __init__(self, local: LocalSandbox, spec: SandboxSpec) -> None:
+    def __init__(self, local: LocalSandbox, spec: SandboxSpec, labels: dict[str, str] | None = None) -> None:
         self.local = local
         self.spec = spec
+        # Ownership labels: a SIGKILLed worker cannot run its finally-stop, so
+        # the console reclaims leaked containers by label (docker rm -f).
+        self.labels = dict(labels or {})
         self.container = new_id("mqsbx")
         self.gpu_indices: list[int] = []
         self.active_env_passthrough: list[str] = []
@@ -634,6 +637,7 @@ class DockerSandbox:
             "--init",
             "--name",
             self.container,
+            *(arg for key, value in sorted(self.labels.items()) for arg in ("--label", f"{key}={value}")),
             *gpu_args,
             f"--network={self.spec.network}",
             f"--cpus={self.spec.cpus}",

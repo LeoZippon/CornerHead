@@ -463,6 +463,31 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(list(macro["quarter"]), ["2021Q2"])
             self.assertEqual(manifest["domains"]["macro"]["duplicate_rows_dropped"], {"cn_gdp": 1})
 
+    def test_stale_audit_status_warns_against_current_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            events_root = Path(tmp) / "fund_events"
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            write_fundamental_status(status_path)
+            # Macro status proves an OLDER generation than the current lake.
+            (Path(tmp) / "macro_context_status.json").write_text(
+                json.dumps({"status": "ok", "datasets": {}, "created_at": "2021-10-01T00:00:00+00:00"}),
+                encoding="utf-8",
+            )
+            (raw / ".raw_generation.json").write_text(
+                json.dumps({"generation_id": "g2", "completed_at": "2021-10-07T00:00:00+00:00"}),
+                encoding="utf-8",
+            )
+            manifest = SnapshotBuilder(raw, events_root, status_path).build_decision_snapshot(
+                DECISION, Path(tmp) / "snap", CONFIG
+            )
+            warnings = manifest["data_quality_warnings"]
+            self.assertIn("predates current raw generation", warnings["macro"])
+            # Statuses without created_at (fixture default) are not flagged.
+            self.assertNotIn("events", warnings)
+
     def test_raw_generation_recorded_and_guarded(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"

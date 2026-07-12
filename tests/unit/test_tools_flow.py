@@ -1031,6 +1031,16 @@ class ToolFlowTest(unittest.TestCase):
             self.assertFalse(summary["complete_validation"])
             # A short debug window is not a validated step, so no step-tree node.
             self.assertFalse((ctx.paths.steps / "tree.json").exists())
+            # Probe responses and the agent-readable results dir carry NO
+            # financial output: the probed window is the strategy's future.
+            for key in ("total_return", "sharpe", "max_drawdown", "benchmark", "orders_path"):
+                self.assertNotIn(key, summary)
+            self.assertIn("replayed_trade_days", summary)
+            self.assertTrue(summary["probe_note"])
+            result_dir = Path(summary["host_result_path"])
+            self.assertEqual(
+                sorted(path.name for path in result_dir.iterdir() if path.name != "nl_tool"), []
+            )
 
 
 class ShellToolTest(unittest.TestCase):

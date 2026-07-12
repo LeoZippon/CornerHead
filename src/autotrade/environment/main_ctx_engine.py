@@ -314,8 +314,10 @@ class MainPolicyRunner:
             except Exception:  # noqa: BLE001 - best effort cleanup
                 proc.kill()
                 proc.wait()
-            # Killing the host client may leave the in-container driver alive; reap it.
-            self.executor.kill_marker(self._run_marker)
+        # The in-container driver can outlive the host client either way (a
+        # crashed client never signalled it), so the marker sweep is
+        # unconditional, not just on the terminate path.
+        self.executor.kill_marker(self._run_marker)
         # The process is dead, so proc.stderr hits EOF and the daemon drainer
         # finishes; join it before closing the fd so we never race it.
         if self._stderr_thread is not None:
@@ -470,8 +472,8 @@ def run_main_ctx_replay(
 
     ``enforce_substep_timeout`` (default True) keeps the per-substep wall fail-fast
     that aborts the replay when a declared ``ctx.substep`` block runs over its budget
-    B; the final/frozen (held-out) eval passes False so a reproducible eval of an
-    already-accepted strategy is not aborted by transient load. The per-substep
+    B. Declared budgets advance sim time, so valid/test/held-out all enforce it;
+    only the token-free dev benchmark harness passes False. The per-substep
     runtime statistics are aggregated either way; only the raise is skipped.
     ``enforce_substep_coverage`` rejects substantive Python-side ``main(ctx)`` time
     outside declared substeps (with a small overhead grace), so heavy unwrapped work
@@ -638,7 +640,12 @@ def run_main_ctx_replay(
                     day_compute_wall += _tick_wall
                     phase_wall["strategy_step"] += _tick_wall
                     if stager is not None and staged:
-                        stager.register(staged, when=when)
+                        try:
+                            stager.register(staged, when=when)
+                        except ValueError as exc:
+                            # Agent-controlled rel path escaped its root — a
+                            # protocol violation, not an internal error.
+                            raise BacktestError(str(exc)) from exc
                     if max_seconds_per_trading_day is not None and day_compute_wall > max_seconds_per_trading_day:
                         raise BacktestError(
                             f"trade day {trade_date} exceeded its compute budget "
@@ -652,9 +659,6 @@ def run_main_ctx_replay(
                     for sub in substeps:
                         budget_min = float(sub.get("budget_minutes", 0.0) or 0.0)
                         real_wall = float(sub.get("real_wall_s", 0.0) or 0.0)
-                        # Final/frozen (held-out) eval skips the raise so a transient
-                        # overrun under load cannot abort an already-accepted strategy's
-                        # reproducible eval; the runtime is still aggregated below.
                         if enforce_substep_timeout and real_wall > budget_min * 60.0:
                             raise BacktestError(
                                 f"sub-step {str(sub.get('name'))!r} at {trade_date} {tick.minute_key} exceeded its "

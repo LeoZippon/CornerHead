@@ -126,7 +126,7 @@ FOLD_ACTION_SECTION = """\
 | `read` | root?, path, offset?, limit? | 按行号读取文件（可分页）；读要编辑的代码优先用它而非 shell `cat`/`head`，`cat`/`head` 仍可用于管道；不访问测试或隐藏路径 |
 | `explore` | task, max_rounds? | 委托只读数据探查 Sub Agent（更便宜模型）调查一个具体问题并返回简洁摘要，把大量 shell/grep 探查移出主上下文 |
 | `modification_check` | （无） | 主动检查正式产物改动是否在约束内；`backtest` 执行前也会自动复核 |
-| `backtest` | replay_window? | 验证回测；Environment 逐 tick 回放当前 `output/main.py` 的 `main(ctx)`；可选 `replay_window` 只回放前 N 个交易日做快速调试（标记非完整验证、不可冻结、不满足 `finish_fold`），默认整段回放 |
+| `backtest` | replay_window? | 验证回测；Environment 逐 tick 回放当前 `output/main.py` 的 `main(ctx)`；可选 `replay_window` 只回放前 N 个交易日做运行成本/生命周期试探（只返回耗时、tick/substep 与订单生命周期统计，不产生收益指标和成交明细；标记非完整验证、不可冻结、不满足 `finish_fold`），默认整段回放 |
 | `finish_fold` | （无） | 结束本 Fold；调用前先按“提交合同”自检；成功后 `output/` 和 `models/` 只读锁定，Sandbox 内 Agent 后台进程会被清理 |
 
 一轮可以发起多个工具调用：相互独立的只读检索（如多个 grep/glob）应在同一轮并行发起以省时；`write_file`/`edit_file`/`explore`/`modification_check`/`backtest`/`finish_fold` 等有状态工具按因果顺序单独调用。每个工具调用都会单独返回一条结果。

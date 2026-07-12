@@ -1084,11 +1084,11 @@ def main(ctx):
         with self.assertRaises(BacktestError):
             self._run_with(_ohlc_replay(), _dense_minutes())
 
-    def test_substep_overrun_does_not_abort_under_final_eval(self) -> None:
-        # R7: the final/frozen (held-out) eval skips the per-substep wall fail-fast so
-        # a transient overrun cannot abort an already-accepted strategy's reproducible
-        # eval. The same SUBSTEP_OVERRUN_MAIN that aborts under valid completes here,
-        # and the overrunning sub-step's runtime is still aggregated.
+    def test_substep_overrun_knob_only_skips_the_raise(self) -> None:
+        # enforce_substep_timeout=False (dev benchmark harness only; every formal
+        # mode enforces the unified substep contract) skips just the raise: the
+        # same SUBSTEP_OVERRUN_MAIN that aborts when enforced completes here, and
+        # the overrunning sub-step's runtime is still aggregated.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_OVERRUN_MAIN, encoding="utf-8")
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,

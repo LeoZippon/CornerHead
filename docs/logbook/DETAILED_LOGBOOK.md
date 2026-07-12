@@ -17010,3 +17010,20 @@ Validation:
 - Contamination handling: lap-test2 graceful stop requested (artifacts kept for audit only); lzp-test snapshot_cache purged (7.4G lap-test2 cache left to the stopping run; generation-keyed caches make stale reuse impossible for new runs).
 
 Docs: data_documentation (full-natural-month + removal block bullets, canonical range bullet, generation stamp + shared flock, forecast/express visibility row), environment_design (snapshot dedup + lake guard), pipeline_design (cache key generation). check.md P0 headers annotated with fix status.
+
+
+## 2026-07-12 check.md GPT audit: P1/P2 remediation batch
+
+Task: remediate the actionable P1/P2 findings of check.md after the P0 batch.
+
+Changes (same surgical-staging discipline: the user's in-flight hunks in backtest.py and the docs stay unstaged):
+- P1-1: `BacktestTool` probe runs (`replay_window`) no longer produce ANY financial output — summary drops total/long/short return, sharpe, max_drawdown, benchmark, liquidation fields and orders paths (keeps wall/tick/substep/order-lifecycle stats + probe_note); orders.parquet/positions_eod.parquet/detailed_return.json/style_analysis.json are not written for probes. Rationale: the probed window is the strategy's future; lap-test2's agent tuned against first-N-days P&L. Prompts row updated + PROMPTS.md re-exported; environment_design tool table updated.
+- P1-5: unified substep contract — `enforce_substep_timeout/coverage` are engine defaults (True) for valid AND frozen/held-out; the tool no longer disables them (declared budgets advance sim time, so unchecked overruns fill unrealistically early; an overrun final eval is invalid and unscored). Coarse per-decision/per-day caps keep the 3x frozen multiplier. Engine knob retained solely for scripts/dev/replay_benchmark.py; docstring/comments/env-doc updated; the old R7 skip-test rewritten as a knob-behavior test.
+- P1-2(d): `state_staging.py` containment — `_contained()` resolves staging/state rel paths and requires them inside their roots (raises; engine wraps as BacktestError), merge-time rejects symlinks/non-regular files (`rejected_not_regular_file`, TOCTOU guard). Tests: escape rejection (.. and symlinked dir) + merge-time swap rejection.
+- P1-3 (partial): `_domain_status_gates` compares each status file's `created_at` against `.raw_generation.json` `completed_at`; older reports record a `data_quality_warnings` entry ("audit status predates current raw generation"). Deliberately warn-only: audits re-run nightly AFTER each mutating job, a hard gate would lock experiments out for hours every night; the hard guarantees are the shared flock and generation-keyed snapshot caches.
+- P2-1: `latest_fold_records`/`latest_heldout_records` moved to `pipelines/ledger.py` (webui.registry re-imports); `build_experiment_report` consumes latest-per-key so reruns never double-count. Regression test: superseded fold + heldout records excluded from means.
+- P2-2: AcceptanceRules class docstring + params_schema min_return/min_sharpe labels/help now say "target, shortfall warns, never blocks freezing".
+- P2-4: engine `close()` sweeps the kill marker unconditionally (a crashed host client leaves the in-container driver alive); `_start_container` moved inside try/finally for fold and held-out paths; `DockerSandbox` gains ownership labels (`mq.experiment=<id>`), and the console manager force-removes labelled containers after SIGKILL escalation and on experiment deletion (`_reclaim_sandbox_containers`).
+- Deferred to the user: P2-3 (the `_legacy_benchmark_year` request-time raw read is the user's own uncommitted code; recommended alternative = one-time frozen migration), P1-8 (multi-cycle acceptance contract), P1-7 (HITL test-result display policy), P1-6 (Timeview performance batch). P1-4 keeps the standing partial-fill deferral.
+
+Validation: full unit suite 642 OK; PROMPTS.md re-exported byte-consistent with prompts.py; no sandbox image rebuild needed (in-container driver untouched). check.md P1/P2 headers annotated with dispositions.

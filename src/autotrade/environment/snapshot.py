@@ -463,29 +463,41 @@ class SnapshotBuilder:
             "macro": bool(config.macro_datasets),
             "text": bool(config.text_datasets),
         }
+        # Reports written before the current raw generation prove the PREVIOUS
+        # lake. Deliberately a warning, not a hard gate: audits re-run on a
+        # nightly cadence after each mutating job, so hard-gating would lock
+        # experiments out for hours every night; the shared flock and the
+        # generation-keyed snapshot cache carry the hard guarantees.
+        generation = read_raw_generation(self.raw_dir) or {}
+        generation_at = str(generation.get("completed_at", ""))
         warnings: dict[str, str] = {}
         for domain, filename, critical in self._DOMAIN_STATUS_FILES:
             if not enabled[domain]:
                 continue
             path = self.data_quality_dir / filename
             problem = ""
+            stale = ""
             if not path.exists():
                 problem = "status file missing"
             else:
                 try:
-                    status = str(json.loads(path.read_text(encoding="utf-8")).get("status", "")).lower()
+                    payload = json.loads(path.read_text(encoding="utf-8"))
                 except json.JSONDecodeError:
                     problem = "status file unreadable"
                 else:
-                    if status == "error":
+                    if str(payload.get("status", "")).lower() == "error":
                         problem = "audit status is error"
-            if not problem:
-                continue
-            if critical:
-                raise ValueError(
-                    f"data-quality gate failed for execution-critical domain {domain!r}: {problem} ({path})"
-                )
-            warnings[domain] = f"{problem} ({filename})"
+                    created_at = str(payload.get("created_at", ""))
+                    if generation_at and created_at and created_at < generation_at:
+                        stale = f"audit status predates current raw generation ({filename})"
+            if problem:
+                if critical:
+                    raise ValueError(
+                        f"data-quality gate failed for execution-critical domain {domain!r}: {problem} ({path})"
+                    )
+                warnings[domain] = f"{problem} ({filename})"
+            elif stale:
+                warnings[domain] = stale
         return warnings
 
     def _assert_fundamental_event_status_ok(self) -> None:

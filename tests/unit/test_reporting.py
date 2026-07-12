@@ -124,6 +124,35 @@ class ReportingTest(unittest.TestCase):
                 statistics.mean(dev_active) / (statistics.stdev(dev_active) / math.sqrt(len(dev_active))),
             )
 
+    def test_rerun_supersedes_earlier_fold_and_heldout_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            ledger = ExperimentLedger(tmp / "ledger.jsonl")
+            ledger.append(fold_record("fold_2022Q1", 0.03, 0.02))
+            # Re-run of the SAME (epoch, fold): only the later record counts.
+            ledger.append(fold_record("fold_2022Q1", 0.05, 0.06))
+            for total in (0.010, 0.020):
+                ledger.append(
+                    {
+                        "record_type": "heldout",
+                        "experiment_id": "e",
+                        "epoch_id": "epoch_001",
+                        "fold_id": "heldout_2026Q1",
+                        "run_id": f"run_ho_{total}",
+                        "period": {"start": "20260101", "end": "20260331"},
+                        "test_result": {
+                            "total_return": total, "sharpe": 0.5, "max_drawdown": 0.04,
+                            "order_count": 3, "margin_secs_reject_count": 0,
+                            "benchmark": {"label": "沪深300", "benchmark_return": 0.01},
+                        },
+                    }
+                )
+            summary = build_experiment_report(tmp / "ledger.jsonl", tmp / "reports")
+            self.assertEqual(summary["folds"], 1)
+            self.assertEqual(summary["heldout_periods"], 1)
+            self.assertAlmostEqual(summary["development"]["mean_test_return"], 0.06)
+            self.assertAlmostEqual(summary["heldout"]["mean_return"], 0.020)
+
     def test_warns_when_frozen_benchmark_blocks_missing(self):
         # A ledger record without the replay-time benchmark block must flag the
         # report status as "warning" (docs/pipeline_design.md §4.2) — the report

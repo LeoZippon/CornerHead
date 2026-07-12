@@ -42,6 +42,25 @@ _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 _TERMINAL_RESUMABLE_STATES = ("stopped", "failed", "interrupted", "created")
 
 
+def _reclaim_sandbox_containers(experiment_id: str) -> list[str]:
+    """Force-remove sandbox containers labelled for this experiment.
+
+    A SIGKILLed worker skips its finally-block docker.stop(); the labels are
+    set at container start (DockerSandbox). Best-effort: no docker on PATH or
+    an empty listing simply reclaims nothing."""
+    try:
+        listing = subprocess.run(
+            ["docker", "ps", "-aq", "--filter", f"label=mq.experiment={experiment_id}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        containers = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
+        if containers:
+            subprocess.run(["docker", "rm", "-f", *containers], capture_output=True, text=True, timeout=60)
+        return containers
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
 class ManagerError(RuntimeError):
     """User-facing lifecycle error (mapped to HTTP 4xx by the server)."""
 
@@ -398,7 +417,8 @@ class ExperimentManager:
                 os.killpg(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 os.kill(pid, signal.SIGKILL)
-            return {"terminated_pid": pid, "escalated": True}
+            reclaimed = _reclaim_sandbox_containers(experiment_id)
+            return {"terminated_pid": pid, "escalated": True, "reclaimed_containers": reclaimed}
         else:
             raise ManagerError(f"unknown control action: {action!r}")
         write_control(control_path, control)
@@ -645,4 +665,5 @@ class ExperimentManager:
                 shutil.rmtree(work_path, ignore_errors=True)
                 removed_work_root = str(work_path)
         shutil.rmtree(experiment_dir)
+        _reclaim_sandbox_containers(experiment_id)
         return {"deleted": experiment_id, "removed_work_root": removed_work_root}
