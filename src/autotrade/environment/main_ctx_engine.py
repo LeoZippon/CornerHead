@@ -413,6 +413,7 @@ def run_main_ctx_replay(
     auction_prints_by_date: dict[tuple[str, str], dict[str, float]] | None = None,
     main_policy: MainPolicyRunner,
     replay_intraday_1min: pd.DataFrame | None = None,
+    replay_auction_results: pd.DataFrame | None = None,
     auction_enabled: bool = True,
     auction_preopen_time: str | None = "09:15",
     auction_decision_time: str = "09:25",
@@ -450,8 +451,11 @@ def run_main_ctx_replay(
 
     The tick grid spans the whole day on the same ``main(ctx)`` entry, so the loop
     drives both backtest and live. ``auction_enabled`` leads each day with a 09:15
-    info tick (no price, fills at the 09:30 opening auction) and a 09:25 tick (on the
-    matched open, fills at the first continuous bar); ``auction_close_time`` (e.g.
+    info tick (no price, fills at the 09:30 opening auction) and a blind 09:25
+    submission tick (no price, fills at the first continuous bar). A captured
+    ``stk_auction`` result wakes ``main(ctx)`` only at its observed availability;
+    pre-open result ticks are research-only, while arrivals after 09:30 wake the
+    corresponding real bar. ``auction_close_time`` (e.g.
     14:57) makes that bar's decision fill at the day's final bar (the 15:00 close
     auction). These batch-auction fills are labelled ``price_label="auction"``.
     ``afterhours_decision_time`` (None = off) appends the after-hours fixed-price
@@ -491,6 +495,14 @@ def run_main_ctx_replay(
         if replay_intraday_1min is not None and not replay_intraday_1min.empty
         else None
     )
+    auction_results_by_date = {
+        str(day): group.reset_index(drop=True)
+        for day, group in (
+            replay_auction_results.groupby(replay_auction_results["trade_date"].astype(str), sort=False)
+            if replay_auction_results is not None and not replay_auction_results.empty
+            else []
+        )
+    }
     granularity = "minute" if minute_market is not None else "daily"
     entry_date, exit_date = market.trade_dates[0], market.trade_dates[-1]
     broker = SimBroker(
@@ -507,7 +519,9 @@ def run_main_ctx_replay(
             host_dir=main_policy.paths.workspace / ".asof",
             executor=main_policy.executor,
             snapshot_dir=snapshot_dir,
-            replay_frames=_timeview_replay_frames(replay_dir, replay_daily, replay_intraday_1min),
+            replay_frames=_timeview_replay_frames(
+                replay_dir, replay_daily, replay_intraday_1min, replay_auction_results
+            ),
             replay_text_library_dir=(Path(replay_dir) / "text_library") if replay_dir is not None else None,
         )
         if timeview_enabled and snapshot_dir is not None and getattr(main_policy, "paths", None) is not None
@@ -564,6 +578,7 @@ def run_main_ctx_replay(
                     execution_lag_bars, offsession_tick_minutes=offsession_tick_minutes,
                     close_auction_time=auction_close_time,
                     afterhours_time=afterhours_decision_time,
+                    auction_results=auction_results_by_date.get(str(trade_date)),
                 )
                 real_index = {tick.minute_key: i for i, tick in enumerate(t for t in plan if t.is_real)}
                 n_real = len(real_index)
@@ -809,6 +824,9 @@ class _Tick:
     # An after-hours fixed-price tick (盘后固定价格交易): its orders settle
     # immediately at the day's official close for board-eligible codes.
     is_afterhours: bool = False
+    # Data-driven market event (for example a newly-landed auction result) that
+    # always wakes main(ctx) without changing how its orders are matched.
+    always_decide: bool = False
 
 
 def _is_decision_tick(tick: "_Tick", intraday_decision_minutes: int) -> bool:
@@ -820,7 +838,13 @@ def _is_decision_tick(tick: "_Tick", intraday_decision_minutes: int) -> bool:
     behavior)."""
     if intraday_decision_minutes <= 1:
         return True
-    if tick.is_offsession or tick.is_auction or tick.is_close_auction or tick.is_afterhours:
+    if (
+        tick.is_offsession
+        or tick.is_auction
+        or tick.is_close_auction
+        or tick.is_afterhours
+        or getattr(tick, "always_decide", False)
+    ):
         return True
     hour_text, _, minute_text = str(tick.minute_key).partition(":")
     try:
@@ -853,6 +877,7 @@ def _day_tick_plan(
     offsession_tick_minutes: int = 15,
     close_auction_time: str | None = "14:57",
     afterhours_time: str | None = None,
+    auction_results: pd.DataFrame | None = None,
 ) -> list[_Tick]:
     """Ordered decision ticks for one day, each tagged with the real-bar index its
     orders reach the book at (``activate_index``).
@@ -861,8 +886,9 @@ def _day_tick_plan(
     such later bar (near the close) yields ``activate_index=None``. With
     ``auction_enabled`` two pre-open ticks lead the day: a ``preopen_time`` (09:15)
     info tick with no bars (``ctx.price`` is None) activating at the first real bar
-    (the 09:30 opening auction), and a ``decision_time`` (09:25) tick on the matched
-    open activating at the first continuous bar (09:31). ``close_auction_time`` (e.g.
+    (the 09:30 opening auction), and a blind ``decision_time`` (09:25) tick. An
+    observed ``stk_auction`` result can add a source-backed pre-open tick or wake
+    the corresponding real minute after continuous trading begins. ``close_auction_time`` (e.g.
     14:57) makes that bar's decision activate at the day's final bar (the 15:00 close
     auction) instead of the default lag. ``offsession_tick_minutes`` (0 = off) adds a
     research-only grid outside the session: off-session ticks never fill orders. The
@@ -887,25 +913,21 @@ def _day_tick_plan(
     for key in _offsession_keys(0, open_min, offsession_tick_minutes):
         plan.append(_Tick(key, empty_minute_rows(), None, False, False, True))
     if auction_enabled:
-        # The 09:25 tick may expose only the matched OPENING print, so the per-code
-        # "first bar" is restricted to opening bars (<= 09:31). A code whose first
-        # bar arrives later (intraday resumption, late first trade) has no matched
-        # open: it stays absent from the 09:25 view until its real bar — exposing
-        # its later first price here would be look-ahead.
-        opening = minute_rows[minute_rows["minute_sort"] <= minute_sort("09:31")]
-        first = opening.sort_values("minute_sort", kind="stable").drop_duplicates("ts_code", keep="first").copy()
-        open_group = first.assign(high=first["open"], low=first["open"], close=first["open"])
-        for column in ("vol", "amount"):
-            if column in open_group.columns:
-                open_group[column] = float("nan")  # intraday volume is unknown pre-open
         if preopen_time:
             # 09:15 blind pre-open order clears in the 09:30 opening call auction (single
             # price, no slippage): is_auction=True.
             plan.append(_Tick(preopen_time, empty_minute_rows(), 0, False, True))
-        # 09:25 sees the matched open and fills at the first CONTINUOUS bar (09:31), so it
-        # is a continuous taker fill (slippage applies): is_auction=False. Only the open/
-        # close call auctions are slippage-free.
-        plan.append(_Tick(decision_time, open_group, min(1, n - 1), False, False))
+        # The exchange has matched by 09:25, but this project's TuShare source does
+        # not publish the full result until 09:27-09:29. Keep this order-entry tick
+        # blind; never reconstruct its price from the future 09:30/09:31 minute bar.
+        plan.append(_Tick(decision_time, empty_minute_rows(), min(1, n - 1), False, False))
+        auction_ticks, auction_wake_keys = _auction_result_ticks(
+            auction_results,
+            real_keys=real_keys,
+        )
+        plan.extend(auction_ticks)
+    else:
+        auction_wake_keys = set()
     # Clamp the lag to the day's bar count so short/daily-fallback days (e.g. the
     # 09:30+15:00 synthesis) still trade even with auctions disabled: >=1 preserves
     # next-bar execution; <=n-1 lets the first decision reach the last bar.
@@ -917,7 +939,16 @@ def _day_tick_plan(
             plan.append(_Tick(key, groups[key], n - 1, True, True, is_close_auction=True))
         else:
             activate_index = index + lag
-            plan.append(_Tick(key, groups[key], activate_index if activate_index < n else None, True, False))
+            plan.append(
+                _Tick(
+                    key,
+                    groups[key],
+                    activate_index if activate_index < n else None,
+                    True,
+                    False,
+                    always_decide=key in auction_wake_keys,
+                )
+            )
     session_end = close_min
     if afterhours_time and minute_sort(str(afterhours_time)) > close_min:
         # After-hours fixed-price tick: the close prints are visible (ctx.bars =
@@ -928,7 +959,58 @@ def _day_tick_plan(
     after_start = ((session_end // offsession_tick_minutes) + 1) * offsession_tick_minutes if offsession_tick_minutes > 0 else 0
     for key in _offsession_keys(after_start, 24 * 60, offsession_tick_minutes):
         plan.append(_Tick(key, empty_minute_rows(), None, False, False, True))
-    return plan
+    return sorted(plan, key=lambda tick: minute_sort(tick.minute_key))
+
+
+def _auction_result_ticks(
+    rows: pd.DataFrame | None,
+    *,
+    real_keys: list[str],
+) -> tuple[list[_Tick], set[str]]:
+    """Return source-backed pre-open ticks and real bars that an arrival wakes."""
+    if rows is None or rows.empty or "available_at" not in rows.columns or "price" not in rows.columns:
+        return [], set()
+    frame = rows.copy()
+    available = pd.to_datetime(frame["available_at"], errors="coerce", utc=True).dt.tz_convert("Asia/Shanghai")
+    trade_days = frame["trade_date"].astype(str) if "trade_date" in frame.columns else pd.Series("", index=frame.index)
+    same_day = available.dt.strftime("%Y%m%d").eq(trade_days)
+    visible_mask = available.notna() & same_day
+    frame = frame[visible_mask].copy()
+    available = available[visible_mask]
+    if frame.empty:
+        return [], set()
+    frame["result_minute"] = available.dt.ceil("min").dt.strftime("%H:%M").to_numpy()
+    ticks: list[_Tick] = []
+    wake_keys: set[str] = set()
+    first_real_key = real_keys[0]
+    for minute_key, group in frame.groupby("result_minute", sort=True):
+        if minute_sort(str(minute_key)) >= minute_sort(first_real_key):
+            wake_key = next(
+                (key for key in real_keys if minute_sort(key) >= minute_sort(str(minute_key))),
+                None,
+            )
+            if wake_key is not None:
+                wake_keys.add(wake_key)
+            continue
+        price = pd.to_numeric(group.get("price"), errors="coerce")
+        visible = group[price.gt(0)].copy()
+        visible["open"] = pd.to_numeric(visible["price"], errors="coerce")
+        visible["high"] = visible["open"]
+        visible["low"] = visible["open"]
+        visible["close"] = visible["open"]
+        visible["minute_key"] = str(minute_key)
+        visible["minute_sort"] = minute_sort(str(minute_key))
+        ticks.append(
+            _Tick(
+                str(minute_key),
+                visible,
+                None,
+                False,
+                False,
+                always_decide=True,
+            )
+        )
+    return ticks, wake_keys
 
 
 def _phase_seconds(phase_wall: dict[str, float], nl_wall: float) -> dict[str, float]:
@@ -1615,6 +1697,7 @@ def _timeview_replay_frames(
     replay_dir: Path | None,
     replay_daily: pd.DataFrame,
     replay_intraday_1min: pd.DataFrame | None,
+    replay_auction_results: pd.DataFrame | None,
 ) -> dict[str, pd.DataFrame]:
     """Replay-slot frames the Timeview rolls in. daily/intraday reuse the frames
     already loaded for the replay; events/macro/fundamentals are read from the
@@ -1622,6 +1705,8 @@ def _timeview_replay_frames(
     frames: dict[str, pd.DataFrame] = {"daily": replay_daily}
     if replay_intraday_1min is not None:
         frames["intraday_1min"] = replay_intraday_1min
+    if replay_auction_results is not None:
+        frames["auction"] = replay_auction_results
     if replay_dir is not None:
         for name, filename in (
             ("events", "events.parquet"),

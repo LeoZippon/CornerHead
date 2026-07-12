@@ -161,11 +161,44 @@ CONFIG = SnapshotConfig(
 
 
 class SnapshotBuilderTest(unittest.TestCase):
+    def test_auction_availability_before_match_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            path = raw / "stk_auction" / "trade_date=20260713.parquet"
+            write(path, pd.DataFrame([{"trade_date": "20260713", "ts_code": "000001.SZ"}]))
+            path.with_suffix(".parquet.meta.json").write_text(
+                json.dumps(
+                    {
+                        "availability": {
+                            "available_at": "2026-07-13T08:00:00+08:00",
+                            "rule": "bad_fixture",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            builder = SnapshotBuilder(raw, Path(tmp) / "missing_events")
+
+            with self.assertRaisesRegex(ValueError, "precedes the 09:25 match"):
+                builder._auction_partition_availability("20260713")
+
     def test_decision_snapshot_is_pit_filtered_and_unit_normalized(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"
             events_root = Path(tmp) / "fund_events"
             build_raw(raw)
+            auction_path = raw / "stk_auction" / "trade_date=20211008.parquet"
+            auction_path.with_suffix(".parquet.meta.json").write_text(
+                json.dumps(
+                    {
+                        "availability": {
+                            "available_at": "2021-10-08T09:28:36+08:00",
+                            "rule": "observed:test_capture",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
             build_fundamental_events(events_root)
             status_path = Path(tmp) / "fundamental_events_status.json"
             write_fundamental_status(status_path)
@@ -187,8 +220,25 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertNotIn("available_at", intraday.columns)
 
             auction = pd.read_parquet(out / "auction.parquet")
-            self.assertIn("20211008", set(auction["trade_date"]))
-            self.assertEqual(float(auction.loc[auction["trade_date"] == "20211008", "price"].iloc[0]), 10.02)
+            self.assertNotIn("20211008", set(auction["trade_date"]))
+            self.assertIn("20210930", set(auction["trade_date"]))
+
+            after_out = Path(tmp) / "snap_after_auction"
+            builder.build_decision_snapshot(
+                datetime(2021, 10, 8, 9, 30, tzinfo=CN_TZ), after_out, CONFIG
+            )
+            after_auction = pd.read_parquet(after_out / "auction.parquet")
+            self.assertIn("20211008", set(after_auction["trade_date"]))
+            self.assertEqual(
+                float(after_auction.loc[after_auction["trade_date"] == "20211008", "price"].iloc[0]),
+                10.02,
+            )
+            self.assertEqual(
+                after_auction.loc[
+                    after_auction["trade_date"] == "20211008", "available_at_rule"
+                ].iloc[0],
+                "observed:test_capture",
+            )
 
             events = pd.read_parquet(out / "events.parquet")
             datasets = set(events["dataset"])

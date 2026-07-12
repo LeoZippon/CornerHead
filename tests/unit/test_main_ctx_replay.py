@@ -50,12 +50,18 @@ def main(ctx):
             ctx.broker.buy(code, amount=1000, reason="clean_open")
 '''
 
-# Enters at the 09:25 call-auction tick and fills at the first continuous bar.
+# Enters once the observed stk_auction result becomes visible and fills at the
+# first continuous bar. The fixed 09:25 tick is deliberately blind.
 AUCTION_MAIN = '''
+_RESULT_SEEN = False
+
 def main(ctx):
+    global _RESULT_SEEN
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
-        if ctx.cur_time == "09:25" and ctx.broker.position(code) == 0 and ctx.price(code) is not None:
+        if ctx.cur_time == "09:29" and ctx.price(code) is not None:
+            _RESULT_SEEN = True
+        if ctx.cur_time == "09:30" and _RESULT_SEEN and ctx.broker.position(code) == 0:
             ctx.broker.buy(code, amount=1000, reason="auction_entry")
 '''
 
@@ -570,8 +576,7 @@ def _limit_minutes() -> pd.DataFrame:
 
 
 def _auction_minutes() -> pd.DataFrame:
-    # Day 1 has a 09:30 opening-auction print and a 09:31 first-continuous bar, so
-    # next-bar execution fills a 09:15 order at 09:30 and a 09:25 order at 09:31.
+    # Day 1 has a 09:30 opening-auction print and a 09:31 first-continuous bar.
     return pd.DataFrame(
         [
             {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": "09:30", "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0},
@@ -579,6 +584,25 @@ def _auction_minutes() -> pd.DataFrame:
             {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": "14:57", "open": 10.5, "high": 10.6, "low": 10.4, "close": 10.5},
         ]
     )
+
+
+def _auction_results(replay: pd.DataFrame, *, observed_time: str = "09:28:36") -> pd.DataFrame:
+    """Observed stk_auction rows; 09:28:36 becomes Agent-visible at 09:29."""
+    rows = replay.sort_values(["trade_date", "ts_code"], kind="stable").drop_duplicates(
+        ["trade_date", "ts_code"], keep="first"
+    )
+    return pd.DataFrame(
+        {
+            "trade_date": rows["trade_date"].astype(str),
+            "ts_code": rows["ts_code"].astype(str),
+            "price": pd.to_numeric(rows["open"], errors="coerce"),
+            "vol": 1000.0,
+            "amount": pd.to_numeric(rows["open"], errors="coerce") * 1000.0,
+            "available_at": rows["trade_date"].astype(str).map(
+                lambda value: f"{value[:4]}-{value[4:6]}-{value[6:8]}T{observed_time}+08:00"
+            ),
+        }
+    ).reset_index(drop=True)
 
 
 def _replay_daily() -> pd.DataFrame:
@@ -787,14 +811,19 @@ class MainCtxReplayTest(unittest.TestCase):
             )
 
     def test_auction_entry_fills_at_first_continuous_bar(self) -> None:
-        # A 09:25 order is decided on the matched open but, under next-bar
-        # execution, fills at the 09:31 open (the first continuous bar) — never
-        # within the bar it was decided on.
+        # A result observed at 09:28:36 becomes visible at the conservative 09:29
+        # tick and fills at the 09:31 first-continuous bar under next-bar execution.
         (self.sandbox.paths.agent_output / "main.py").write_text(AUCTION_MAIN, encoding="utf-8")
-        result = self._run_with(_ohlc_replay(), _auction_minutes())
+        replay = _ohlc_replay()
+        result = self._run_with(
+            replay,
+            _auction_minutes(),
+            replay_auction_results=_auction_results(replay),
+            execution_lag_bars=1,
+        )
         buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)
-        # The 09:25 decision fills at the first CONTINUOUS bar (09:31), so it is a taker
+        # The result-driven decision fills at the first CONTINUOUS bar (09:31), so it is a taker
         # fill: continuous price label and slippage apply (only the open/close call
         # auctions are slippage-free).
         self.assertEqual(buys[0]["price_label"], "minute:09:31")
@@ -1333,7 +1362,8 @@ def main(ctx):
 
     def test_auction_buy_rejected_at_one_sided_limit_up_open(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(AUCTION_MAIN, encoding="utf-8")
-        result = self._run_with(_limit_up_open_replay())
+        replay = _limit_up_open_replay()
+        result = self._run_with(replay, replay_auction_results=_auction_results(replay))
         rejects = [o for o in _all_orders(result.broker) if o["status"] == "rejected"]
         self.assertTrue(any(o["reject_reason"] == "limit_up_blocked_buy" for o in rejects))
 
@@ -1499,15 +1529,23 @@ def main(ctx):
     def test_cur_datetime_is_exposed(self) -> None:
         # ctx.cur_datetime carries the Beijing-time sim clock for the tick.
         main = (
+            "_SEEN = False\n"
             "def main(ctx):\n"
-            "    if ctx.cur_time == '09:25':\n"
-            "        assert ctx.cur_datetime == '2022-01-04T09:25:00+08:00', ctx.cur_datetime\n"
-            "        if ctx.broker.position('000001.SZ') == 0 and ctx.price('000001.SZ') is not None:\n"
-            "            with ctx.substep('main_tick', budget_minutes=0.5):\n"
-            "                ctx.broker.buy('000001.SZ', amount=1000)\n"
+            "    global _SEEN\n"
+            "    if ctx.cur_time == '09:29':\n"
+            "        assert ctx.cur_datetime == '2022-01-04T09:29:00+08:00', ctx.cur_datetime\n"
+            "        _SEEN = ctx.price('000001.SZ') is not None\n"
+            "    if ctx.cur_time == '09:30' and _SEEN and ctx.broker.position('000001.SZ') == 0:\n"
+            "        with ctx.substep('main_tick', budget_minutes=0.5):\n"
+            "            ctx.broker.buy('000001.SZ', amount=1000)\n"
         )
         (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
-        result = self._run_with(_ohlc_replay(), _auction_minutes())
+        replay = _ohlc_replay()
+        result = self._run_with(
+            replay,
+            _auction_minutes(),
+            replay_auction_results=_auction_results(replay),
+        )
         buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
         self.assertEqual(len(buys), 1)  # the cur_datetime assert passed, then it bought
 
@@ -1517,10 +1555,7 @@ if __name__ == "__main__":
 
 
 class DayTickPlanTest(unittest.TestCase):
-    def test_0925_view_excludes_codes_without_opening_print(self) -> None:
-        # A code whose first bar of the day arrives mid-session (intraday
-        # resumption, late first trade) has no matched open: exposing its later
-        # first price at the 09:25 auction tick would be look-ahead.
+    def test_0925_is_blind_and_result_tick_uses_stk_auction(self) -> None:
         minutes = pd.DataFrame(
             [
                 {"trade_date": "20220104", "ts_code": "000001.SZ", "trade_time": "09:30", "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0},
@@ -1529,12 +1564,49 @@ class DayTickPlanTest(unittest.TestCase):
             ]
         )
         rows = MinuteMarketData(minutes).rows_for_date("20220104")
-        plan = _day_tick_plan(rows, True, "09:15", "09:25", 2)
-        tick = next(t for t in plan if t.minute_key == "09:25")
-        self.assertEqual(set(tick.group["ts_code"]), {"000001.SZ"})
-        # The opening code exposes exactly its 09:30 print (collapsed to the open).
-        row = tick.group.iloc[0]
-        self.assertEqual((row["open"], row["high"], row["low"], row["close"]), (10.0, 10.0, 10.0, 10.0))
+        auction = pd.DataFrame(
+            [{
+                "trade_date": "20220104",
+                "ts_code": "000001.SZ",
+                "price": 10.05,
+                "vol": 3000.0,
+                "amount": 30150.0,
+                "available_at": "2022-01-04T09:28:36+08:00",
+            }]
+        )
+        plan = _day_tick_plan(rows, True, "09:15", "09:25", 2, auction_results=auction)
+        blind = next(t for t in plan if t.minute_key == "09:25")
+        self.assertTrue(blind.group.empty)
+        result = next(t for t in plan if t.minute_key == "09:29")
+        self.assertIsNone(result.activate_index)
+        self.assertEqual(set(result.group["ts_code"]), {"000001.SZ"})
+        row = result.group.iloc[0]
+        self.assertEqual((row["open"], row["high"], row["low"], row["close"]), (10.05,) * 4)
+        self.assertNotIn("000009.SZ", set(result.group["ts_code"]))
+
+    def test_result_at_market_open_wakes_real_bar_without_replacing_it(self) -> None:
+        minutes = pd.DataFrame(
+            [
+                {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": "09:30", "open": 10.0, "high": 10.1, "low": 9.9, "close": 10.02},
+                {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": "09:31", "open": 10.02, "high": 10.2, "low": 10.0, "close": 10.1},
+            ]
+        )
+        auction = pd.DataFrame(
+            [{
+                "trade_date": "20220104",
+                "ts_code": TS_CODE,
+                "price": 9.98,
+                "available_at": "2022-01-04T09:29:50+08:00",
+            }]
+        )
+        rows = MinuteMarketData(minutes).rows_for_date("20220104")
+        plan = _day_tick_plan(rows, True, "09:15", "09:25", 5, auction_results=auction)
+
+        opening = [tick for tick in plan if tick.minute_key == "09:30"]
+        self.assertEqual(len(opening), 1)
+        self.assertTrue(opening[0].is_real)
+        self.assertTrue(opening[0].always_decide)
+        self.assertEqual(float(opening[0].group.iloc[0]["open"]), 10.0)
 
 
 class DecisionGridTest(unittest.TestCase):

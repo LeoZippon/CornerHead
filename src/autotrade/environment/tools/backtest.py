@@ -28,7 +28,7 @@ from autotrade.environment.artifacts import (
 from autotrade.environment.replay_stats import compute_return_stats
 from autotrade.environment.broker import (
     BrokerProfile,
-    load_auction_prints_by_date,
+    auction_prints_by_date,
     load_corporate_actions_by_date,
     load_shortable_by_date,
     load_shortable_codes,
@@ -165,6 +165,7 @@ class BacktestTool:
         replay_dir = self.ctx.paths.valid if mode == "valid" else self.ctx.paths.test
         replay_daily = pd.read_parquet(replay_dir / "daily.parquet")
         replay_minutes = _read_replay_minutes(replay_dir)
+        replay_auction = _read_replay_auction(replay_dir)
         # A short debug window replays only the first N trade days; such a run is
         # never accept-eligible (complete_validation=False).
         complete_validation = replay_window is None
@@ -174,6 +175,9 @@ class BacktestTool:
             if replay_minutes is not None:
                 replay_minutes = replay_minutes[replay_minutes["trade_date"].astype(str).isin(keep)]
                 replay_minutes = None if replay_minutes.empty else replay_minutes
+            if replay_auction is not None:
+                replay_auction = replay_auction[replay_auction["trade_date"].astype(str).isin(keep)].reset_index(drop=True)
+                replay_auction = None if replay_auction.empty else replay_auction
         replay_granularity = "minute" if replay_minutes is not None else "daily"
         result_dir = self._planned_result_dir(mode, result_name)
         if result_dir.exists():
@@ -279,9 +283,12 @@ class BacktestTool:
                         shortable_codes=shortable,
                         shortable_by_date=shortable_by_date,
                         corporate_actions_by_date=load_corporate_actions_by_date(replay_dir),
-                        auction_prints_by_date=load_auction_prints_by_date(replay_dir),
+                        auction_prints_by_date=auction_prints_by_date(
+                            replay_auction if replay_auction is not None else pd.DataFrame()
+                        ),
                         main_policy=policy,
                         replay_intraday_1min=replay_minutes,
+                        replay_auction_results=replay_auction,
                         auction_enabled=bool(manifest.get("auction_enabled", True)),
                         auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
                         auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
@@ -574,6 +581,14 @@ def _read_replay_minutes(replay_dir: Path) -> pd.DataFrame | None:
         return None
     minutes = pd.read_parquet(path)
     return None if minutes.empty else minutes
+
+
+def _read_replay_auction(replay_dir: Path) -> pd.DataFrame | None:
+    path = replay_dir / "auction.parquet"
+    if not path.exists():
+        return None
+    frame = pd.read_parquet(path)
+    return None if frame.empty else frame
 
 
 def _decision_date(decision_time: str) -> str:

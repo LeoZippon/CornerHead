@@ -1532,7 +1532,7 @@ class ReplayIntegrationTest(unittest.TestCase):
         self.assertAlmostEqual(fill["price"], BrokerProfile().slipped_price(10.20, is_buy=True))
 
     def test_swing_t_buys_dip_and_sells_rally_next_day(self):
-        # Enter once pre-open; on a later-day rally the swing reduces. Orders fill
+        # Enter once on a real minute bar; on a later-day rally the swing reduces. Orders fill
         # on the next bar, so the entry/exit land one bar after each decision.
         def swing(state):
             # state["bars"] is the columnar wire payload; the in-container driver
@@ -1547,7 +1547,7 @@ class ReplayIntegrationTest(unittest.TestCase):
             price = float(close)
             pos = _held(state, "000001.SZ")
             if pos is None:
-                if state["cur_time"] == "09:25":
+                if state["cur_time"] == "09:31":
                     return [{"action": "buy", "ts_code": "000001.SZ", "amount": 500}]
                 return []
             if int(pos["sellable_quantity"]) >= 500 and price > float(pos["entry_price"]) * 1.01:

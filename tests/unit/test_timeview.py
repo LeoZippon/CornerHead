@@ -195,6 +195,37 @@ class TimeviewTest(unittest.TestCase):
             # 20220104 appears exactly once even after repeated refreshes.
             self.assertEqual(list(daily["trade_date"].astype(str)).count("20220104"), 1)
 
+    def test_auction_rolls_at_observed_row_time_not_evening_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames = _replay_frames()
+            frames["auction"] = pd.DataFrame(
+                [{
+                    "trade_date": "20220104",
+                    "session": "open",
+                    "ts_code": TS,
+                    "price": 10.0,
+                    "available_at": "2022-01-04T09:28:36+08:00",
+                }]
+            )
+            tv = Timeview(
+                host_dir=root / "asof",
+                executor=FakeExecutor(),
+                snapshot_dir=_frozen_snapshot(root),
+                replay_frames=frames,
+            )
+
+            asof, before = tv.refresh(_when("2022-01-04 09:28:00"))
+            self.assertEqual(list((Path(asof) / "auction").glob("*.parquet")), [])
+            asof, after = tv.refresh(_when("2022-01-04 09:29:00"))
+            self.assertNotEqual(before, after)
+            auction = pd.read_parquet(Path(asof) / "auction")
+            self.assertEqual(auction["ts_code"].tolist(), [TS])
+            part_count = len(list((Path(asof) / "auction").glob("*.parquet")))
+            _, repeated = tv.refresh(_when("2022-01-04 09:29:00"))
+            self.assertEqual(repeated, after)
+            self.assertEqual(len(list((Path(asof) / "auction").glob("*.parquet"))), part_count)
+
 
 class TimeviewIntradaySchemaTest(unittest.TestCase):
     """The frozen and replay intraday domains share one schema: no internal

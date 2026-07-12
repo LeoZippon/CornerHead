@@ -798,6 +798,310 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_revision_sentinel_is_not_a_mutating_operation(self):
         self.assertNotIn("revision_sentinel", cron_update.MUTATING_OPERATIONS)
 
+    def test_parquet_availability_survives_identical_refresh_but_moves_on_revision(self):
+        path = self.raw_dir / "stk_auction" / "trade_date=20260713.parquet"
+        first = pd.DataFrame(
+            [{"trade_date": "20260713", "ts_code": "000001.SZ", "price": 10.0}]
+        )
+        availability = {
+            "available_at": "2026-07-13T09:28:36+08:00",
+            "rule": "observed:cn_open_auction_capture",
+        }
+        common.write_parquet(
+            path,
+            first,
+            api_name="stk_auction",
+            params={},
+            fields=list(first.columns),
+            source_hash="first",
+            extra_metadata={"availability": availability},
+        )
+        common.write_parquet(
+            path,
+            first.copy(),
+            api_name="stk_auction",
+            params={},
+            fields=list(first.columns),
+            source_hash="same-payload",
+        )
+        self.assertEqual(common.parquet_meta(path)["availability"], availability)
+
+        revised = first.assign(price=10.1)
+        common.write_parquet(
+            path,
+            revised,
+            api_name="stk_auction",
+            params={},
+            fields=list(revised.columns),
+            source_hash="revision",
+        )
+        revised_availability = common.parquet_meta(path)["availability"]
+        self.assertEqual(revised_availability["rule"], "observed:content_revision_fetch")
+        self.assertNotEqual(revised_availability["available_at"], availability["available_at"])
+
+    def test_capture_open_auction_waits_for_stable_complete_frame(self):
+        self._write_trade_cal("20260713")
+        previous = self.raw_dir / "stk_auction" / "trade_date=20260710.parquet"
+        previous.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"x": 1}, {"x": 2}]).to_parquet(previous, index=False)
+        fields = common.DAILY_SPECS["stk_auction"].fields.split(",")
+
+        def result(items):
+            return common.ApiResult(fields, items, common.stable_hash(items))
+
+        full = [
+            ["000001.SZ", "20260713", 1000.0, 10.0, 10000.0, 9.9, 0.1, 1.0, 100000.0],
+            ["600000.SH", "20260713", 2000.0, 8.0, 16000.0, 7.9, 0.2, 1.1, 200000.0],
+        ]
+        responses = [
+            (result([]), 1),
+            (result(full), 1),
+            RuntimeError("transient source error"),
+            (result(full), 1),
+            (result(full), 1),
+        ]
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            trade_date="20260713",
+            page_limit=10000,
+            max_wait_seconds=10.0,
+            retry_delay_seconds=0.0,
+            stable_reads=2,
+            min_rows=2,
+            min_previous_day_ratio=0.98,
+            max_previous_day_drop=10,
+            revision_ledger=str(self.root / "revision_events.jsonl"),
+            min_interval_seconds=0.0,
+            timeout_seconds=1.0,
+        )
+        with (
+            patch.object(download, "load_token", return_value="token"),
+            patch.object(download, "TuShareClient"),
+            patch.object(download, "query_paged", side_effect=responses) as query,
+            patch.object(download.time, "sleep", return_value=None),
+        ):
+            self.assertEqual(download.capture_open_auction(args), 0)
+
+        self.assertEqual(query.call_count, 5)
+        target = self.raw_dir / "stk_auction" / "trade_date=20260713.parquet"
+        self.assertEqual(len(pd.read_parquet(target)), 2)
+        availability = common.parquet_meta(target)["availability"]
+        self.assertEqual(availability["rule"], "observed:cn_open_auction_capture")
+        self.assertEqual(availability["row_count"], 2)
+
+    def test_capture_open_auction_timeout_does_not_replace_partition(self):
+        self._write_trade_cal("20260713")
+        target = self.raw_dir / "stk_auction" / "trade_date=20260713.parquet"
+        original = pd.DataFrame(
+            [{"trade_date": "20260713", "ts_code": "000001.SZ", "price": 9.9}]
+        )
+        common.write_parquet(
+            target,
+            original,
+            api_name="stk_auction",
+            params={},
+            fields=list(original.columns),
+            source_hash="old",
+        )
+        original_hash = common.file_sha256(target)
+        fields = common.DAILY_SPECS["stk_auction"].fields.split(",")
+        partial = common.ApiResult(
+            fields,
+            [["000001.SZ", "20260713", 1000.0, 10.0, 10000.0, 9.9, 0.1, 1.0, 100000.0]],
+            "partial",
+        )
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            trade_date="20260713",
+            page_limit=10000,
+            max_wait_seconds=0.0,
+            retry_delay_seconds=0.0,
+            stable_reads=1,
+            min_rows=2,
+            min_previous_day_ratio=0.98,
+            max_previous_day_drop=10,
+            revision_ledger=str(self.root / "revision_events.jsonl"),
+            min_interval_seconds=0.0,
+            timeout_seconds=1.0,
+        )
+        with (
+            patch.object(download, "load_token", return_value="token"),
+            patch.object(download, "TuShareClient"),
+            patch.object(download, "query_paged", return_value=(partial, 1)),
+        ):
+            self.assertEqual(
+                download.capture_open_auction(args),
+                common.NO_MUTATION_RETRY_EXIT_CODE,
+            )
+
+        self.assertEqual(common.file_sha256(target), original_hash)
+
+    def test_auction_capture_rejects_duplicate_business_keys(self):
+        row = {
+            "ts_code": "000001.SZ",
+            "trade_date": "20260713",
+            "vol": 1000.0,
+            "price": 10.0,
+            "amount": 10000.0,
+            "pre_close": 9.9,
+            "turnover_rate": 0.1,
+            "volume_ratio": 1.0,
+            "float_share": 100000.0,
+        }
+        errors = download._validate_auction_capture(
+            pd.DataFrame([row, row]), "20260713", min_rows=1
+        )
+        self.assertIn("duplicate_keys=1", errors)
+
+    def test_auction_capture_row_floor_allows_only_small_day_to_day_drop(self):
+        previous = self.raw_dir / "stk_auction" / "trade_date=20260710.parquet"
+        previous.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"row": range(5519)}).to_parquet(previous, index=False)
+
+        minimum = download._auction_capture_min_rows(
+            self.raw_dir,
+            "20260713",
+            floor=1000,
+            ratio=0.995,
+            max_previous_day_drop=10,
+        )
+
+        self.assertEqual(minimum, 5509)
+
+    def test_non_trading_auction_job_skips_before_generation_fence(self):
+        self._write_trade_cal("20260712", is_open="0")
+        config_path = self.root / "auction_schedule.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "timezone": "Asia/Shanghai",
+                    "repo_root": str(self.root),
+                    "python": "/env/python",
+                    "default_raw_dir": "raw",
+                    "default_start_date": "20200101",
+                    "jobs": {
+                        "auction": {
+                            "operation": "auction_capture",
+                            "only_if_sse_open_date": True,
+                            "start_date_lookback_days": 0,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        generation = self.raw_dir / ".raw_generation.json"
+        cron_update.write_raw_generation(self.raw_dir)
+        before = generation.read_bytes()
+        args = argparse.Namespace(
+            config=str(config_path),
+            job="auction",
+            start_date=None,
+            end_date="20260712",
+            dry_run=False,
+            force_run=False,
+        )
+        written_state = []
+        with (
+            patch.object(cron_update, "parse_args", return_value=args),
+            patch.object(cron_update.os, "chdir"),
+            patch.object(cron_update, "read_state", return_value={}),
+            patch.object(cron_update, "write_state", side_effect=written_state.append),
+            patch.object(cron_update, "append_dispatch"),
+            patch.object(cron_update, "acquire_lock", side_effect=AssertionError("must not lock")),
+        ):
+            self.assertEqual(cron_update.main(), 0)
+
+        self.assertEqual(generation.read_bytes(), before)
+        self.assertTrue(written_state[0]["auction"]["skipped_non_trading_day"])
+
+    def test_same_day_open_check_fails_when_calendar_does_not_cover_target(self):
+        self._write_trade_cal("20260712", is_open="0")
+
+        with self.assertRaisesRegex(RuntimeError, "does not cover target date 20260713"):
+            cron_update.is_sse_open_date(self.root, "raw", "20260713")
+
+    def test_not_ready_auction_job_restores_committed_generation(self):
+        self._write_trade_cal("20260713", is_open="1")
+        config_path = self.root / "auction_schedule.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "timezone": "Asia/Shanghai",
+                    "repo_root": str(self.root),
+                    "python": "/env/python",
+                    "default_raw_dir": "raw",
+                    "default_start_date": "20200101",
+                    "jobs": {
+                        "auction": {
+                            "operation": "auction_capture",
+                            "only_if_sse_open_date": True,
+                            "start_date_lookback_days": 0,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        generation = self.raw_dir / ".raw_generation.json"
+        cron_update.write_raw_generation(self.raw_dir)
+        before = json.loads(generation.read_text(encoding="utf-8"))
+        args = argparse.Namespace(
+            config=str(config_path),
+            job="auction",
+            start_date=None,
+            end_date="20260713",
+            dry_run=False,
+            force_run=False,
+        )
+
+        class FakeLock:
+            fd = 7
+
+            def release(self):
+                return None
+
+        written_state = []
+        with (
+            patch.object(cron_update, "parse_args", return_value=args),
+            patch.object(cron_update.os, "chdir"),
+            patch.object(cron_update, "read_state", return_value={}),
+            patch.object(cron_update, "write_state", side_effect=written_state.append),
+            patch.object(cron_update, "append_dispatch"),
+            patch.object(cron_update, "acquire_lock", return_value=FakeLock()),
+            patch.object(
+                cron_update,
+                "run_update",
+                return_value=common.NO_MUTATION_RETRY_EXIT_CODE,
+            ),
+        ):
+            self.assertEqual(cron_update.main(), common.NO_MUTATION_RETRY_EXIT_CODE)
+
+        self.assertEqual(json.loads(generation.read_text(encoding="utf-8")), before)
+        self.assertEqual(written_state[-1]["auction"]["status"], "not_ready")
+
+    def test_auction_cron_command_overrides_global_request_timeout(self):
+        ctx = cron_update.RunContext(
+            config={
+                "default_raw_dir": "raw",
+                "default_update_args": ["--timeout-seconds", "120"],
+            },
+            repo_root=self.root,
+            python="/env/python",
+            job_name="auction",
+            job={
+                "operation": "auction_capture",
+                "extra_args": ["--timeout-seconds", "15"],
+            },
+            start_date="20260713",
+            end_date="20260713",
+            timezone_name="Asia/Shanghai",
+        )
+
+        command = cron_update.build_job_commands(ctx)[0]
+        timeout_positions = [i for i, value in enumerate(command) if value == "--timeout-seconds"]
+        self.assertEqual(command[timeout_positions[-1] + 1], "15")
+
     def test_cron_full_audit_builds_all_formal_status_commands(self):
         ctx = cron_update.RunContext(
             config={"default_raw_dir": "raw"},

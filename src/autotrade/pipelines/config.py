@@ -203,9 +203,9 @@ class ExperimentConfig:
     # how many a fold may run (so the deadline-exclusion can't be abused).
     max_backtests_per_fold: int = 30
     # Pre-open auction: replay injects pre-open decision ticks per day. The 09:15
-    # info tick exposes no price (auction not yet matched) and gives a ~10-minute
-    # decision window; the 09:25 tick carries the matched open price. Orders placed
-    # at 09:15 fill at 09:30; 09:25 orders fill at the first continuous bar.
+    # info tick exposes no price and gives a ~10-minute decision window; 09:25 is
+    # also blind because the data source lands later. Orders placed at 09:15 fill
+    # at 09:30; 09:25 orders fill at the first continuous bar.
     # Set auction_preopen_time=None to drop 09:15.
     auction_enabled: bool = True
     auction_preopen_time: str | None = "09:15"

@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
-from datetime import date
+import time
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -328,6 +331,178 @@ def download_daily(args: argparse.Namespace) -> int:
     if required_zero_skipped:
         raise RuntimeError(f"required daily partitions returned zero rows and were not written: {required_zero_skipped}")
     print(f"daily market download finished under {raw_dir}")
+    return 0
+
+
+def _auction_capture_min_rows(
+    raw_dir: Path,
+    trade_date: str,
+    *,
+    floor: int,
+    ratio: float,
+    max_previous_day_drop: int,
+) -> int:
+    previous = sorted(
+        path
+        for path in (raw_dir / "stk_auction").glob("trade_date=*.parquet")
+        if path.stem.split("=", 1)[-1] < trade_date
+    )
+    previous_rows = pq.ParquetFile(previous[-1]).metadata.num_rows if previous else 0
+    return max(
+        int(floor),
+        math.floor(int(previous_rows) * float(ratio)),
+        int(previous_rows) - max(0, int(max_previous_day_drop)),
+    )
+
+
+def _validate_auction_capture(frame_: pd.DataFrame, trade_date: str, *, min_rows: int) -> list[str]:
+    required = set(DAILY_SPECS["stk_auction"].fields.split(","))
+    missing = sorted(required.difference(frame_.columns))
+    errors = [f"missing_columns={missing}"] if missing else []
+    if frame_.empty:
+        return [*errors, "empty_response"]
+    dates = set(frame_["trade_date"].astype(str)) if "trade_date" in frame_.columns else set()
+    if dates != {trade_date}:
+        errors.append(f"unexpected_trade_dates={sorted(dates)}")
+    if {"trade_date", "ts_code"}.issubset(frame_.columns):
+        duplicates = int(frame_.duplicated(["trade_date", "ts_code"]).sum())
+        if duplicates:
+            errors.append(f"duplicate_keys={duplicates}")
+        valid_codes = frame_["ts_code"].astype(str).str.fullmatch(r"\d{6}\.(SH|SZ|BJ)")
+        invalid_codes = int((~valid_codes).sum())
+        if invalid_codes:
+            errors.append(f"invalid_codes={invalid_codes}")
+    if len(frame_) < int(min_rows):
+        errors.append(f"rows={len(frame_)} below_min_rows={min_rows}")
+    if {"price", "vol", "amount"}.issubset(frame_.columns):
+        price = pd.to_numeric(frame_["price"], errors="coerce")
+        volume = pd.to_numeric(frame_["vol"], errors="coerce")
+        amount = pd.to_numeric(frame_["amount"], errors="coerce")
+        traded = volume.fillna(0).gt(0) | amount.fillna(0).gt(0)
+        inconsistent = traded & (~price.gt(0) | ~volume.gt(0) | ~amount.gt(0))
+        if inconsistent.any():
+            errors.append(f"inconsistent_trade_rows={int(inconsistent.sum())}")
+    return errors
+
+
+def _auction_frame_fingerprint(frame_: pd.DataFrame) -> str:
+    ordered = frame_.sort_values(["trade_date", "ts_code"], kind="stable").reset_index(drop=True)
+    return stable_hash(ordered.fillna("").astype(str).to_dict("records"))
+
+
+def capture_open_auction(args: argparse.Namespace) -> int:
+    """Poll the same-day opening-auction endpoint until a stable, complete frame lands."""
+    repo_root = Path.cwd().resolve()
+    raw_dir = repo_root / args.raw_dir
+    trade_date = normalize_date_key(args.trade_date)
+    if not trade_date:
+        raise ValueError(f"invalid --trade-date: {args.trade_date!r}")
+    if not load_sse_open_dates(raw_dir, trade_date, trade_date, allow_empty=True):
+        print(json.dumps({"status": "skipped_non_trading_day", "trade_date": trade_date}, ensure_ascii=False))
+        return 0
+
+    spec = DAILY_SPECS["stk_auction"]
+    try:
+        client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
+        min_rows = _auction_capture_min_rows(
+            raw_dir,
+            trade_date,
+            floor=args.min_rows,
+            ratio=args.min_previous_day_ratio,
+            max_previous_day_drop=args.max_previous_day_drop,
+        )
+        deadline = time.monotonic() + max(0.0, float(args.max_wait_seconds))
+        required_stable_reads = max(1, int(args.stable_reads))
+        stable_count = 0
+        last_fingerprint = ""
+        accepted: tuple[pd.DataFrame, ApiResult, int] | None = None
+        last_errors: list[str] = ["not_queried"]
+        while True:
+            try:
+                result, pages = query_paged(
+                    client,
+                    spec.api_name,
+                    {"trade_date": trade_date},
+                    spec.fields,
+                    args.page_limit,
+                )
+                candidate = frame(result).reset_index(drop=True)
+                last_errors = _validate_auction_capture(candidate, trade_date, min_rows=min_rows)
+            except Exception as exc:
+                last_errors = [f"query_error={type(exc).__name__}: {exc}"]
+                stable_count = 0
+                last_fingerprint = ""
+            else:
+                if not last_errors:
+                    fingerprint = _auction_frame_fingerprint(candidate)
+                    stable_count = stable_count + 1 if fingerprint == last_fingerprint else 1
+                    last_fingerprint = fingerprint
+                    if stable_count >= required_stable_reads:
+                        accepted = (candidate, result, pages)
+                        break
+                else:
+                    stable_count = 0
+                    last_fingerprint = ""
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            print(
+                f"stk_auction trade_date={trade_date} not ready; errors={last_errors} "
+                f"stable={stable_count}/{required_stable_reads}; retrying"
+            )
+            time.sleep(min(float(args.retry_delay_seconds), remaining))
+    except Exception as exc:
+        print(json.dumps({
+            "status": "not_ready_no_mutation",
+            "trade_date": trade_date,
+            "errors": [f"setup_error={type(exc).__name__}: {exc}"],
+        }, ensure_ascii=False, sort_keys=True))
+        return NO_MUTATION_RETRY_EXIT_CODE
+    if accepted is None:
+        print(json.dumps({
+            "status": "not_ready_no_mutation",
+            "trade_date": trade_date,
+            "errors": last_errors,
+        }, ensure_ascii=False, sort_keys=True))
+        return NO_MUTATION_RETRY_EXIT_CODE
+
+    captured, result, pages = accepted
+    landed_at = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).isoformat()
+    path = raw_dir / "stk_auction" / f"trade_date={trade_date}.parquet"
+    availability = {
+        "matched_at": f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}T09:25:00+08:00",
+        "available_at": landed_at,
+        "rule": "observed:cn_open_auction_capture",
+        "landing_job": "cn_open_auction_capture_0927",
+        "row_count": int(len(captured)),
+        "content_hash": last_fingerprint,
+    }
+    revision_ledger = resolve_revision_ledger(
+        raw_dir,
+        getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+        repo_root=repo_root,
+    )
+    wrote = write_parquet_revision_aware(
+        path,
+        captured,
+        api_name=spec.api_name,
+        params={"trade_date": trade_date, "pagination": {"page_limit": args.page_limit, "pages": pages}},
+        fields=result.fields,
+        source_hash=result.source_hash,
+        key_columns=list(spec.key_columns),
+        revision_ledger=revision_ledger,
+        allow_key_removal_overwrite=False,
+        extra_metadata={"availability": availability},
+    )
+    if not wrote:
+        raise RuntimeError(f"stk_auction trade_date={trade_date} complete frame was not published")
+    print(json.dumps({
+        "status": "ok",
+        "trade_date": trade_date,
+        "rows": len(captured),
+        "pages": pages,
+        "available_at": availability["available_at"],
+    }, ensure_ascii=False, sort_keys=True))
     return 0
 
 def date_series_in_window(series: pd.Series, start_date: str, end_date: str) -> pd.Series:
@@ -3110,6 +3285,21 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
     core.add_macro_filter_args(parser)
     core.add_runtime_args(parser, min_interval=None, timeout=None)
 
+
+def add_auction_capture_parser(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser("capture-open-auction", help="poll and atomically publish today's complete stk_auction frame")
+    core.add_raw_arg(parser)
+    parser.add_argument("--trade-date", required=True)
+    parser.add_argument("--page-limit", type=int, default=TRADE_DATE_PAGE_LIMIT)
+    parser.add_argument("--max-wait-seconds", type=float, default=170.0)
+    parser.add_argument("--retry-delay-seconds", type=float, default=10.0)
+    parser.add_argument("--stable-reads", type=int, default=2)
+    parser.add_argument("--min-rows", type=int, default=1000)
+    parser.add_argument("--min-previous-day-ratio", type=float, default=0.98)
+    parser.add_argument("--max-previous-day-drop", type=int, default=10)
+    parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
+    core.add_runtime_args(parser, min_interval=0.22, timeout=30)
+
 def add_intraday_parsers(sub: argparse._SubParsersAction) -> None:
     compact = sub.add_parser("compact-intraday-by-date", help="build final full-market daily minute files from stock-year source partitions")
     core.add_intraday_by_date_common_args(compact)
@@ -3178,6 +3368,7 @@ def parse_args() -> argparse.Namespace:
     sub = parser.add_subparsers(dest="command", required=True)
     add_download_parser(sub)
     add_update_parser(sub)
+    add_auction_capture_parser(sub)
     add_intraday_parsers(sub)
     add_share_float_parser(sub)
     add_repair_text_parser(sub)
@@ -3189,6 +3380,8 @@ def main() -> int:
         return download_selected_tier(args)
     if args.command == "update":
         return update_data(args)
+    if args.command == "capture-open-auction":
+        return capture_open_auction(args)
     if args.command == "compact-intraday-by-date":
         return compact_intraday_by_date(args)
     if args.command == "update-intraday-by-date":

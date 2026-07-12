@@ -17222,3 +17222,21 @@ Validation:
 - `python -m unittest tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest tests.unit.test_snapshot_builder.SnapshotBuilderTest tests.unit.test_refresh_nodes`: 102 OK.
 - Schedule JSON parsing and `git diff --check` passed.
 - No production cron installation, data mutation, experiment, Docker sandbox, or external API call was run.
+
+
+## 2026-07-13 Opening-auction observed-availability PIT fix
+
+Task: remove both opening-auction look-ahead paths while preserving hidden Broker clearing truth and a small operational footprint.
+
+Implementation:
+- Added `capture-open-auction`: query only the exact same SSE open date, poll through the variable 09:27–09:29 publication window, require complete fields, unique business keys, legal price/volume/amount combinations, two identical reads, and no more than a ten-row drop from the latest partition. Cron runs at 09:27, retries at 09:31, and performs a normally-skipped same-job recovery at 23:20 before the evening mutation.
+- A non-trading day skips before the generation fence. Exit 75 is a narrow single-command `auction_capture` contract proving no raw write began; the runner restores the exact prior generation and leaves the job retryable. Publish-stage failures still leave the lake dirty.
+- Parquet availability survives an identical refresh only. A revised payload receives the revision fetch time, preventing new content from inheriting an old PIT timestamp.
+- Snapshot writes observed `available_at` into `auction.parquet`, validates it is timezone-aware and no earlier than the 09:25 match, imputes legacy history at 09:29, and fails closed after the deployment boundary when evidence is missing. Timeview rolls auction rows directly on this timestamp.
+- Replay reads `auction.parquet` once for both Broker-hidden prices and Agent visibility. The fixed 09:25 tick is blind; it no longer derives price from future minute rows. A result landing before 09:30 creates a research-only wake-up tick; a later arrival wakes the corresponding real bar without replacing that bar.
+- Updated the Agent prompt, template guard, data/environment/parameter docs, and regenerated `configs/prompts/PROMPTS.md`.
+
+Validation:
+- `test_data_sources_tushare test_main_ctx_replay test_broker_engine test_snapshot_builder test_timeview test_refresh_nodes`: 288 OK.
+- `tests.unit.test_tools_flow`: 86 OK.
+- Schedule JSON, generated prompt, and `git diff --check` verified. Production cron installation intentionally follows the focused commit.

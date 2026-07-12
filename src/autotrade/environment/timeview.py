@@ -41,6 +41,7 @@ from autotrade.environment.data.contracts import (
 from autotrade.environment.snapshot import to_cn_timestamps
 
 _EMPTY_INDICES = np.array([], dtype=np.int64)
+_ROW_AVAILABLE_AT = "row_available_at"
 
 
 def _utc_ns(values: pd.Series) -> np.ndarray:
@@ -94,7 +95,9 @@ _DOMAINS: tuple[tuple[str, str, str | None], ...] = (
     ("macro", "macro.parquet", "macro"),
     ("fundamentals", "fundamentals.parquet", "fundamentals"),
     ("intraday_1min", "intraday_1min.parquet", "intraday_1min"),
-    ("auction", "auction.parquet", "auction"),
+    # Auction sidecars preserve the actual first landing time, so this domain
+    # rolls directly on each row instead of a fixed cron-duration approximation.
+    ("auction", "auction.parquet", _ROW_AVAILABLE_AT),
 )
 
 
@@ -240,6 +243,8 @@ class _DomainView:
 
     def _newly_visible(self, when: pd.Timestamp) -> np.ndarray:
         if self._cursor is not None:
+            if self.cutoff_key == _ROW_AVAILABLE_AT:
+                return self._cursor.advance(_cutoff_ns(when))
             cutoff = domain_visible_cutoff(self.cutoff_key, when)
             return self._cursor.advance(_cutoff_ns(cutoff)) if cutoff is not None else _EMPTY_INDICES
         parts = [
@@ -252,6 +257,8 @@ class _DomainView:
 
     def _signature(self, when: pd.Timestamp) -> object:
         if self.cutoff_key is not None:
+            if self.cutoff_key == _ROW_AVAILABLE_AT:
+                return str(pd.Timestamp(when).floor("min"))
             return str(domain_visible_cutoff(self.cutoff_key, when))
         return tuple((d, str(event_dataset_visible_cutoff(d, when))) for d in self._dataset_names)
 

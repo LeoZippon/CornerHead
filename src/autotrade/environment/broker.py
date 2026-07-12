@@ -2266,7 +2266,11 @@ def load_auction_prints_by_date(replay_dir: str | Path) -> dict[tuple[str, str],
     path = Path(replay_dir) / "auction.parquet"
     if not path.exists():
         return {}
-    prints = pd.read_parquet(path)
+    return auction_prints_by_date(pd.read_parquet(path))
+
+
+def auction_prints_by_date(prints: pd.DataFrame) -> dict[tuple[str, str], dict[str, float]]:
+    """Validate one replay auction frame and return Broker-only clearing prices."""
     if prints.empty:
         return {}
     required = {"trade_date", "session", "ts_code", "price"}

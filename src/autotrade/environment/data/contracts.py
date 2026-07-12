@@ -132,6 +132,10 @@ REFRESH_NODES: dict[str, RefreshNode] = {
     # Previous-day margin / margin_detail first attempt + retry.
     "cn_preopen_margin_backfill_0905": RefreshNode("cn_preopen_margin_backfill_0905", time(9, 5), 2),
     "cn_preopen_margin_retry_0915": RefreshNode("cn_preopen_margin_retry_0915", time(9, 15), 2),
+    # Same-day exact opening-auction capture. Agent visibility uses each
+    # partition's observed row-level available_at; the node remains the cron
+    # drift/lifecycle record and covers the 09:27 polling window.
+    "cn_open_auction_capture_0927": RefreshNode("cn_open_auction_capture_0927", time(9, 27), 4),
 }
 
 EVENING_NODE = "cn_evening_full"
@@ -141,9 +145,9 @@ DOMAIN_REFRESH_NODES: dict[str, tuple[str, ...]] = {
     "daily": (EVENING_NODE,),
     "intraday_1min": (EVENING_NODE,),
     "macro": (EVENING_NODE,),
-    # Exact opening-auction rows match at 09:25, while our pipeline receives
-    # them in the evening batch — the node states download logistics.
-    "auction": (EVENING_NODE,),
+    # Auction is deliberately not node-gated: each row carries the partition's
+    # observed first availability and Timeview advances on that timestamp.
+    "auction": (),
     "fundamentals": ("cn_nightly_pit_event_build",),
 }
 

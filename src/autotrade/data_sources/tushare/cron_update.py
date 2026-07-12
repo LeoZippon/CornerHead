@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .common import normalize_date_key, read_many
+from .common import NO_MUTATION_RETRY_EXIT_CODE, normalize_date_key, read_many
 
 
 DEFAULT_CONFIG = Path("configs/tushare_update_schedule.json")
@@ -27,7 +27,7 @@ DISPATCH_LOG_PATH = Path("logs/tushare_cron_dispatch.log")
 DEFAULT_LOCK_WAIT_SECONDS = 900
 # Job operations that mutate the raw/PIT lake and therefore publish a new
 # generation on success; audit-only jobs must not churn snapshot cache keys.
-MUTATING_OPERATIONS = {"update", "download_tier", "download_event_flow", "pit_event_pipeline"}
+MUTATING_OPERATIONS = {"update", "download_tier", "download_event_flow", "pit_event_pipeline", "auction_capture"}
 GENERATION_SCHEMA_VERSION = 2
 GENERATION_COMMITTED = "committed"
 GENERATION_IN_PROGRESS = {"updating", "dirty"}
@@ -91,6 +91,19 @@ def resolve_job_end_date(job: dict, repo_root: Path, raw_dir: str, target_date: 
     if mode == "sse_open_on_or_before":
         return resolve_sse_open_on_or_before(repo_root, raw_dir, target_date)
     raise ValueError(f"unsupported end_date_mode: {mode}")
+
+
+def is_sse_open_date(repo_root: Path, raw_dir: str, target_date: str) -> bool:
+    """Whether ``target_date`` itself is open, without silently rolling backward."""
+    files = sorted((repo_root / raw_dir / "trade_cal" / "exchange=SSE").glob("year=*.parquet"))
+    if not files:
+        raise RuntimeError(f"SSE trade_cal partitions are missing under {repo_root / raw_dir}")
+    calendar = read_many(files, columns=["cal_date", "is_open"])
+    dates = calendar["cal_date"].map(normalize_date_key)
+    exact = dates == target_date
+    if not exact.any():
+        raise RuntimeError(f"SSE trade_cal does not cover target date {target_date}")
+    return bool((exact & (calendar["is_open"].astype(str) == "1")).any())
 
 
 def resolve_event_flow_audit_end_date(ctx: RunContext, raw_dir: str) -> str:
@@ -288,6 +301,19 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
         command.extend(ctx.config.get("default_update_args", []))
         command.extend(ctx.job.get("extra_args", []))
         return [command]
+    if operation == "auction_capture":
+        command = [
+            ctx.python,
+            "scripts/data/tushare_download.py",
+            "capture-open-auction",
+            "--trade-date",
+            ctx.end_date,
+            "--raw-dir",
+            raw_dir,
+        ]
+        command.extend(ctx.config.get("default_update_args", []))
+        command.extend(ctx.job.get("extra_args", []))
+        return [command]
     if operation == "audit_event_flow":
         command = [
             ctx.python,
@@ -472,6 +498,14 @@ def _write_raw_generation_file(raw_dir: Path, payload: dict) -> None:
     tmp.replace(path)
 
 
+def _restore_raw_generation_file(raw_dir: Path, payload: dict) -> None:
+    """Undo an updating fence after a child proves it performed no mutation."""
+    if payload:
+        _write_raw_generation_file(raw_dir, payload)
+    else:
+        (raw_dir / ".raw_generation.json").unlink(missing_ok=True)
+
+
 def write_raw_generation(raw_dir: Path, *, transaction: dict | None = None) -> dict:
     """Publish a committed generation after one fully-successful mutating job."""
     payload = {
@@ -586,7 +620,9 @@ def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path, *, lo
         run_probe(["free", "-h"], log)
         log.write(f"returncodes={returncodes}\n")
         log.write(f"finished_at={utc_now()}\n")
-    return 1 if any(code != 0 for code in returncodes) else 0
+    if returncodes and all(code in {0, NO_MUTATION_RETRY_EXIT_CODE} for code in returncodes):
+        return NO_MUTATION_RETRY_EXIT_CODE if NO_MUTATION_RETRY_EXIT_CODE in returncodes else 0
+    return 1
 
 
 def should_skip_completed(ctx: RunContext, args: argparse.Namespace, job_state: dict, payload: dict) -> bool:
@@ -625,6 +661,27 @@ def main() -> int:
 
     os.chdir(ctx.repo_root)
     state = read_state()
+    if ctx.job.get("only_if_sse_open_date") and not is_sse_open_date(
+        ctx.repo_root,
+        ctx.config.get("default_raw_dir", "data/raw"),
+        ctx.end_date,
+    ):
+        state[ctx.job_name] = {
+            "status": "ok",
+            "returncode": 0,
+            "start_date": ctx.start_date,
+            "end_date": ctx.end_date,
+            "command_hash": payload["command_hash"],
+            "config_hash": payload["config_hash"],
+            "log_path": str(log_path),
+            "skipped_non_trading_day": True,
+            "updated_at": utc_now(),
+        }
+        write_state(state)
+        message = json.dumps({**state[ctx.job_name], "job": ctx.job_name}, ensure_ascii=False)
+        append_dispatch(f"{utc_now()} {message}")
+        print(message)
+        return 0
     job_state = state.get(ctx.job_name, {})
     generation = _read_raw_generation_file(raw_dir) if mutates_lake else {}
     generation_committed = str(generation.get("state", GENERATION_COMMITTED)) == GENERATION_COMMITTED
@@ -669,6 +726,7 @@ def main() -> int:
             print(message)
             return 0
         transaction = None
+        generation_before = generation
         if mutates_lake:
             transaction = begin_raw_generation_update(
                 raw_dir,
@@ -686,12 +744,21 @@ def main() -> int:
             if transaction is not None:
                 mark_raw_generation_dirty(raw_dir, transaction, error=f"runner_exception: {exc}")
             raise
+        no_mutation_retry = bool(
+            returncode == NO_MUTATION_RETRY_EXIT_CODE
+            and ctx.job.get("operation") == "auction_capture"
+            and len(commands) == 1
+        )
         if transaction is not None:
-            if returncode == 0:
+            if no_mutation_retry:
+                _restore_raw_generation_file(raw_dir, generation_before)
+            elif returncode == 0:
                 write_raw_generation(raw_dir, transaction=transaction)
             else:
                 mark_raw_generation_dirty(raw_dir, transaction, error=f"job_returncode={returncode}")
-        status = "ok" if returncode == 0 else "error"
+        status = "ok" if returncode == 0 else (
+            "not_ready" if no_mutation_retry else "error"
+        )
         state[ctx.job_name] = {
             "status": status,
             "returncode": returncode,

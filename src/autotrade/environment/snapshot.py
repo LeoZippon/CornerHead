@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from autotrade.data_sources.tushare.common import STK_AUCTION_OBSERVED_AVAILABILITY_START
+from autotrade.data_sources.tushare.io import parquet_meta
 from autotrade.environment.data import PITDataStore, default_tushare_contracts
 from autotrade.environment.data.contracts import CN_TZ
 from autotrade.environment.data.pit import yyyymmdd
@@ -333,7 +335,8 @@ class SnapshotBuilder:
         )
         auction = self._apply_screen(auction, screened)
         if not auction.empty:
-            auction = auction[auction["available_at"] <= decision_time.isoformat()].reset_index(drop=True)
+            available_at = to_cn_timestamps(auction["available_at"])
+            auction = auction[available_at <= decision_time].reset_index(drop=True)
             auction_meta = {**auction_meta, "rows": int(len(auction))}
         profiles["auction.parquet"] = _write_with_profile(
             output_dir / "auction.parquet", auction, build_seconds=time.perf_counter() - started
@@ -692,11 +695,12 @@ class SnapshotBuilder:
                 "no_trade_rows": int(no_trade.sum()),
             }
             auction["session"] = "open"
-            auction["available_at"] = [
-                f"{d[:4]}-{d[4:6]}-{d[6:]}T09:25:00+08:00"
-                for d in auction["trade_date"].astype(str)
-            ]
-            auction["available_at_rule"] = "rule:opening_auction_match_time"
+            availability = {
+                trade_date: self._auction_partition_availability(trade_date)
+                for trade_date in auction["trade_date"].astype(str).unique()
+            }
+            auction["available_at"] = [availability[str(day)][0] for day in auction["trade_date"]]
+            auction["available_at_rule"] = [availability[str(day)][1] for day in auction["trade_date"]]
             auction = auction[list(self._AUCTION_COLUMNS)]
             auction = auction.sort_values(["trade_date", "session", "ts_code"]).reset_index(drop=True)
         return auction, {
@@ -708,6 +712,46 @@ class SnapshotBuilder:
             "precoverage_fallback": "labelled 09:30 minute proxy; Shenzhen vol/amount use configured correction",
             "price_quality": price_quality,
         }
+
+    def _auction_partition_availability(self, trade_date: str) -> tuple[str, str]:
+        path = self.raw_dir / "stk_auction" / f"trade_date={trade_date}.parquet"
+        meta = parquet_meta(path)
+        availability = meta.get("availability") or {}
+        observed = str(availability.get("available_at") or "")
+        if observed:
+            return self._validated_auction_available_at(observed, trade_date, path), str(
+                availability.get("rule") or "observed:stk_auction_landing"
+            )
+        if trade_date < STK_AUCTION_OBSERVED_AVAILABILITY_START:
+            return (
+                f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}T09:29:00+08:00",
+                "imputed:official_latest_publish_time",
+            )
+        fetched_at = str(meta.get("fetched_at") or "")
+        if not fetched_at:
+            raise ValueError(f"stk_auction partition lacks observed availability and fetched_at: {path}")
+        return (
+            self._validated_auction_available_at(fetched_at, trade_date, path),
+            "observed:fallback_sidecar_fetched_at",
+        )
+
+    @staticmethod
+    def _validated_auction_available_at(value: str, trade_date: str, path: Path) -> str:
+        try:
+            available = pd.Timestamp(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid stk_auction availability in {path}: {value!r}") from exc
+        if pd.isna(available) or available.tzinfo is None:
+            raise ValueError(f"stk_auction availability must be timezone-aware in {path}: {value!r}")
+        available = available.tz_convert(CN_TZ)
+        matched = pd.Timestamp(
+            f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}T09:25:00+08:00"
+        )
+        if available < matched:
+            raise ValueError(
+                f"stk_auction availability precedes the 09:25 match in {path}: {available.isoformat()}"
+            )
+        return available.isoformat()
 
     _CORPORATE_ACTION_COLUMNS = (
         "ts_code", "ex_date", "record_date", "pay_date", "div_listdate",
@@ -1091,7 +1135,12 @@ class SnapshotBuilder:
                           config.screen_min_price, config.screen_max_price)
         )
         if needs_basic:
-            basic_dates = [d for d in self.store.trade_dates("daily_basic") if d <= day]
+            contract = self.contracts["daily_basic"]
+            basic_dates = [
+                d
+                for d in self.store.trade_dates("daily_basic")
+                if d <= day and contract.available_at(datetime.strptime(d, "%Y%m%d").date()) <= decision_time
+            ]
             if not basic_dates:
                 raise FileNotFoundError(f"universe screening needs a daily_basic partition at or before {day}")
             basic = self.store.read_trade_date("daily_basic", basic_dates[-1], columns=["ts_code", "close", "circ_mv"])

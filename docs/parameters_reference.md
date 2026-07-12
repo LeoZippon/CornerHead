@@ -154,7 +154,7 @@
 | `max_backtests_per_fold` | 30 | 单 Fold 回测次数上限（独立计时豁免的上限） |
 | `auction_enabled` | True | 盘前/收盘集合竞价决策 tick |
 | `auction_preopen_time` | `09:15` | 盲信息 tick（成交于 09:30 开盘竞价）；`None` 关闭 |
-| `auction_decision_time` | `09:25` | 撮合开盘 tick（成交于首根连续 bar） |
+| `auction_decision_time` | `09:25` | 盲提交 tick（不暴露竞价结果，成交于首根连续 bar） |
 | `auction_close_time` | `14:57` | 收盘竞价决策 tick（成交于 15:00 bar 收盘）；`None` 关闭 |
 | `afterhours_decision_time` | `15:05` | 盘后固定价格 tick：可见已确认收盘价，合资格订单立即按收盘价结算；`short`/`fin_buy` 不支持；`None` 关闭 |
 | `offsession_tick_minutes` | 30 min | 盘外研究 tick 间距（`0` 关闭；盘外不下单） |

@@ -47,7 +47,8 @@ def _crontab_job_times() -> dict[str, time]:
         match = _CRON_LINE.match(line)
         if match:
             minute, hour, name = int(match.group(1)), int(match.group(2)), match.group(3)
-            times[name] = time(hour, minute)
+            launch = time(hour, minute)
+            times[name] = min(times.get(name, launch), launch)
     return times
 
 
@@ -111,6 +112,12 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
             for key, node_names in mapping.items():
                 for name in node_names:
                     self.assertIn(name, REFRESH_NODES, f"{key!r} maps to unknown node {name!r}")
+
+    def test_auction_has_no_conflicting_fixed_refresh_cutoff(self) -> None:
+        self.assertEqual(DOMAIN_REFRESH_NODES["auction"], ())
+        self.assertIsNone(
+            domain_visible_cutoff("auction", datetime(2022, 1, 5, 20, 0, tzinfo=CN_TZ))
+        )
 
     def test_dataset_refresh_overrides_are_landed_by_their_jobs(self) -> None:
         jobs = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))["jobs"]

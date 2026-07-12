@@ -1422,3 +1422,9 @@
 - 新增 `ops/qmt/qmt_readonly_bridge.py`、远端账户配置样例和导入说明；QMT 内部每 15 秒查询 ACCOUNT/POSITION/ORDER/DEAL，原子写入 `C:\xquant\outbox\account_snapshot.json`。
 - 示例不含协议版本号、`passorder`、撤单、线程、阻塞循环或网络服务，只用于模拟模式下验证大 QMT→文件→本机的只读链路。
 - Validation: Python 3.6 语法解析、桩 QMT 对象查询/快照写入、ASCII/GBK 源码兼容检查和 `git diff --check` 通过；未上传远端、未导入 QMT、未执行交易操作。
+
+2026-07-13 Opening-auction observed-availability PIT fix
+
+- 新增09:27盘前 `stk_auction` 完整性轮询、09:31重试和晚间精确恢复；按业务键、稳定读、上一交易日行数下界验证，未就绪且未写盘时恢复原 committed generation，节假日在 generation fence 前跳过。
+- Snapshot/Timeview 使用分区首次实际落地时间；旧历史保守记09:29，内容修订推进可见时间。09:25改为盲 tick，删除从未来09:30/09:31分钟条反推开盘价；盘前结果 tick 仅研究唤醒，Broker 隐藏清算真值仍可执行09:15委托。
+- 同步 Prompt、模板和 living docs；相关 data/environment/tool 回归共374项通过，`git diff --check` 通过。生产 crontab 留待本提交后安装并复核。

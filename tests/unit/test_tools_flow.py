@@ -57,7 +57,7 @@ import pandas as pd
 
 def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
-        if ctx.cur_time != "09:25":  # decide once pre-open; fills next bar
+        if ctx.cur_time != "09:30":  # decide once on a priced bar; fills later
             return
         snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
         daily = pd.read_parquet(snapshot_dir / "daily.parquet")
@@ -154,7 +154,7 @@ INTRA_MINUTE_MAIN = '''
 def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         code = "000001.SZ"
-        if ctx.cur_time != "09:25":  # optimistic dedup needs a priced tick
+        if ctx.cur_time != "09:25":  # fixed blind submission tick; this test does not size from price
             return
         if ctx.broker.position(code) == 0:
             ctx.broker.buy(code, amount=1000, reason="first_amount_buy")
@@ -170,7 +170,7 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         print("strategy call noise")
         code = "000001.SZ"
-        if ctx.cur_time != "09:25":  # noise prints every tick; order once
+        if ctx.cur_time != "09:30":  # noise prints every tick; order once
             return
         if ctx.broker.position(code) == 0 and ctx.price(code) is not None:
             ctx.broker.buy(code, amount=1000, reason="noisy_buy")
@@ -280,7 +280,7 @@ import pandas as pd
 
 def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
-        if ctx.cur_time != "09:25":  # decide once pre-open; fills next bar
+        if ctx.cur_time != "09:30":  # decide once on a priced bar; fills later
             return
         snapshot_dir = Path(str(ctx.snapshot_dir or os.environ.get("AT_SNAPSHOT_DIR")))
         daily = pd.read_parquet(snapshot_dir / "daily.parquet")

@@ -22,8 +22,8 @@ Shows the recommended cadence for a heavier strategy under the 24h tick model:
   that management substep's ``ready_at``.
   Ordinary off-session ticks must not submit broker orders; use them to update the
   plan, then submit from an explicit orderable tick or a tick with a live bar. This
-  template's ``manage`` keeps a ``ctx.price(code) is None`` guard, so it naturally
-  waits until 09:25 or continuous trading. If a strategy intentionally uses blind
+  template's ``manage`` keeps a ``ctx.price(code) is None`` guard plus the
+  09:25-09:30 no-submission gap, so it waits until continuous trading. If a strategy intentionally uses blind
   09:15 auction orders, adapt that guard deliberately and ensure sizing is valid
   without a current price.
 
@@ -86,6 +86,8 @@ def manage(ctx) -> None:
             entry["status"] = "filled"
             changed = True
             continue
+        if "09:25" < ctx.cur_time < "09:30":
+            continue  # an observed auction result is research-only in this gap
         if ctx.broker.pending(code) or ctx.price(code) is None:
             continue  # an order is already in flight, or no price to size/submit yet
         cash_fraction = float(entry.get("cash_fraction") or 0.0)

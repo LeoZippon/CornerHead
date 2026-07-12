@@ -29,6 +29,7 @@ def write_parquet(
     params: dict[str, Any],
     fields: list[str],
     source_hash: str,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Write the parquet and its sidecar as a verifiable pair.
 
@@ -41,18 +42,45 @@ def write_parquet(
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     df.to_parquet(tmp, index=False)
+    meta_path = path.with_suffix(path.suffix + ".meta.json")
+    previous_meta: dict[str, Any] = {}
+    if meta_path.exists():
+        try:
+            previous_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous_meta = {}
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    parquet_sha256 = file_sha256(tmp)
     meta = {
         "api_name": api_name,
         "params": params,
         "fields": fields,
         "row_count": int(len(df)),
         "source_hash": source_hash,
-        "parquet_sha256": file_sha256(tmp),
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "parquet_sha256": parquet_sha256,
+        "fetched_at": fetched_at,
         "format": "parquet",
     }
+    if extra_metadata:
+        meta.update(extra_metadata)
+    # Preserve first-landing evidence only while the payload is byte-identical.
+    # A source revision was not knowable at the old timestamp, so a caller that
+    # does not provide fresh evidence is conservatively visible from this fetch.
+    previous_availability = previous_meta.get("availability")
+    if previous_availability and previous_meta.get("parquet_sha256") == parquet_sha256:
+        meta["availability"] = previous_availability
+    elif previous_availability and "availability" not in (extra_metadata or {}):
+        revised = dict(previous_availability)
+        revised.update(
+            {
+                "available_at": fetched_at,
+                "rule": "observed:content_revision_fetch",
+                "row_count": int(len(df)),
+                "content_hash": parquet_sha256,
+            }
+        )
+        meta["availability"] = revised
     os.replace(tmp, path)
-    meta_path = path.with_suffix(path.suffix + ".meta.json")
     meta_tmp = meta_path.with_suffix(meta_path.suffix + ".tmp")
     meta_tmp.write_text(
         json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False),

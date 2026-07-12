@@ -38,6 +38,14 @@ EVENT_FLOW_STATUS_PATH = "results/data_quality/event_flow_status.json"
 
 BOARD_TRADING_STATUS_PATH = "results/data_quality/board_trading_status.json"
 
+# From this deployment date onward a missing observed stk_auction availability
+# must fall back to the sidecar fetch time, not the historical 09:29 imputation.
+STK_AUCTION_OBSERVED_AVAILABILITY_START = "20260713"
+
+# Child-process contract: validation/polling ended before any raw write began.
+# The cron runner may restore the previous committed generation and retry later.
+NO_MUTATION_RETRY_EXIT_CODE = 75
+
 def resolve_revision_ledger(
     raw_dir: Path | str,
     revision_ledger: Path | str | None = REVISION_EVENTS_PATH,
@@ -1582,6 +1590,7 @@ def write_parquet_revision_aware(
     source: str = "force_refresh",
     allow_empty_revision_overwrite: bool = False,
     allow_key_removal_overwrite: bool = False,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> bool:
     if path.exists():
         old_df = pd.read_parquet(path)
@@ -1623,7 +1632,15 @@ def write_parquet_revision_aware(
                 "skipped_key_removal_overwrite (delete the partition to accept a source retraction)"
             )
             return False
-    write_parquet(path, df, api_name=api_name, params=params, fields=fields, source_hash=source_hash)
+    write_parquet(
+        path,
+        df,
+        api_name=api_name,
+        params=params,
+        fields=fields,
+        source_hash=source_hash,
+        extra_metadata=extra_metadata,
+    )
     return True
 
 def load_stock_codes(raw_dir: Path) -> list[str]:

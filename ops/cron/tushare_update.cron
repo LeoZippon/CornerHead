@@ -48,3 +48,13 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # Refresh event/flow status after margin retry so 09:25 pre-open gates do not
 # see the stale 02:30 status for T+1 margin sources.
 20 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_event_flow_audit_0920 >> logs/tushare_cron_dispatch.log 2>&1
+
+# Opening-auction results publish between 09:27 and 09:29. The first run polls
+# through that window; the same job retries at 09:31 only if the first did not
+# finish successfully (skip_if_already_ok prevents a second generation publish).
+27 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927 >> logs/tushare_cron_dispatch.log 2>&1
+31 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927 >> logs/tushare_cron_dispatch.log 2>&1
+
+# Final same-job recovery before the evening full refresh. It normally skips;
+# after a morning timeout it completes the exact generation transaction first.
+20 23 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927 >> logs/tushare_cron_dispatch.log 2>&1

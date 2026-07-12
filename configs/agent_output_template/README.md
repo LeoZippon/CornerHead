@@ -51,8 +51,8 @@ The Environment calls `main(ctx)` across the WHOLE day on a 24h tick grid (intra
 bars at 1-minute granularity plus a configurable off-session grid for research/state
 only), so the same loop also drives live trading. Do not submit new broker orders
 from ordinary off-session ticks. To prepare a pre-open order, write the plan to
-`ctx.state_dir` inside an off-session `ctx.substep`, then submit from the 09:15 info tick, the 09:25
-matched-open tick, or a later live-bar tick. A 14:57 close-auction tick fills at the
+`ctx.state_dir` inside an off-session `ctx.substep`, then submit from the blind 09:15/09:25
+ticks or a later live-bar tick. An observed auction-result tick between 09:25 and 09:30 is research-only. A 14:57 close-auction tick fills at the
 15:00 close. The after-hours fixed-price tick (default 15:05, when enabled) shows the
 confirmed close in `ctx.bars` and settles orders **immediately at that close** (no
 slippage, no lag; a limit worse than the close is an invalid submission) — only for
@@ -96,8 +96,8 @@ def main(ctx):
                                       # the plan lands in ctx.state_dir after ready_at
 ```
 
-The sample `candidate.manage()` skips ticks where `ctx.price(code)` is `None`, so it
-will naturally wait for 09:25 or a continuous live-bar tick. If you intentionally
+The sample `candidate.manage()` skips ticks where `ctx.price(code)` is `None` and the
+09:25–09:30 no-submission gap, so it waits for a continuous live-bar tick. If you intentionally
 want blind 09:15 auction orders, adapt the guard deliberately and make sure sizing is
 valid without a current price.
 

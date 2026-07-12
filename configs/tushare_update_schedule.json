@@ -208,6 +208,31 @@
       "end_date_mode": "sse_open_on_or_before",
       "lock_wait_seconds": 240,
       "skip_if_already_ok": true
+    },
+    "cn_open_auction_capture_0927": {
+      "description": "Poll the same-day stk_auction endpoint until the full-market result is stable, then atomically publish its first observed availability.",
+      "operation": "auction_capture",
+      "end_date_offset_days": 0,
+      "start_date_lookback_days": 0,
+      "only_if_sse_open_date": true,
+      "extra_args": [
+        "--max-wait-seconds",
+        "170",
+        "--retry-delay-seconds",
+        "10",
+        "--stable-reads",
+        "2",
+        "--min-rows",
+        "1000",
+        "--min-previous-day-ratio",
+        "0.995",
+        "--max-previous-day-drop",
+        "10",
+        "--timeout-seconds",
+        "15"
+      ],
+      "lock_wait_seconds": 240,
+      "skip_if_already_ok": true
     }
   },
   "interfaces": [
@@ -223,7 +248,7 @@
     {"dataset": "adj_factor", "api": "adj_factor", "domain": "base_research", "frequency": "trade_date", "official_update": "盘前09:15-09:20完成当日复权因子入库。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=28"},
     {"dataset": "daily_basic", "api": "daily_basic", "domain": "base_research", "frequency": "trade_date", "official_update": "交易日每日15:00-17:00之间更新。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=32"},
     {"dataset": "stk_limit", "api": "stk_limit", "domain": "base_research", "frequency": "trade_date", "official_update": "每个交易日08:40左右更新当日涨跌停价格；权限表记为交易日09:00。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=183"},
-    {"dataset": "stk_auction", "api": "stk_auction", "domain": "base_research", "frequency": "trade_date", "official_update": "交易日09:26-09:29可获取当日最终开盘集合竞价成交；历史从2025-01-16起可用。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=369"},
+    {"dataset": "stk_auction", "api": "stk_auction", "domain": "base_research", "frequency": "trade_date", "official_update": "交易日09:27-09:29可获取当日最终开盘集合竞价成交；历史从2025-01-16起可用。", "cron_policy": "same_day_poll_0927_then_retry_0931_and_2320_recovery_plus_evening_revision_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=369"},
     {"dataset": "suspend_d", "api": "suspend_d", "domain": "base_research", "frequency": "event_driven", "official_update": "不定期。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=214"},
     {"dataset": "limit_list_d", "api": "limit_list_d", "domain": "base_research", "frequency": "trade_date", "official_update": "每日涨跌停、炸板数据；官方页面未标具体入库时刻。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=298"},
 
