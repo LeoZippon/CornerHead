@@ -152,15 +152,18 @@ def _benchmark_entry(bench: dict[str, float], dates: list[str]) -> dict[str, obj
 def fold_equity_payload(
     experiments_root: Path, experiment_id: str, epoch_id: str, fold_id: str
 ) -> dict[str, object]:
-    from .registry import read_ledger_records, latest_fold_records, resolve_experiment_dir
+    from .registry import read_ledger_records, latest_fold_records, resolve_experiment_dir, test_results_revealed
 
     experiment_dir = resolve_experiment_dir(experiments_root, experiment_id)
     record = latest_fold_records(read_ledger_records(experiment_dir)).get((epoch_id, fold_id))
     if record is None:
         raise KeyError(f"fold {epoch_id}/{fold_id} has no ledger record")
     run_id = str(record.get("run_id") or "")
+    # P1-7: test curves stay hidden until the researcher reveals (seals) the
+    # experiment; the UI's collapsed test section never renders without them.
+    prefixes = ("valid", "test") if test_results_revealed(experiment_dir) else ("valid",)
     payload: dict[str, object] = {}
-    for prefix in ("valid", "test"):
+    for prefix in prefixes:
         window = fold_valid_window(record) if prefix == "valid" else None
         strategy = run_series(experiment_dir, run_id, prefix, window=window)
         if prefix == "valid" and window is None:
@@ -179,13 +182,15 @@ def experiment_equity_payload(experiments_root: Path, experiment_id: str) -> dic
         latest_fold_records,
         latest_heldout_records,
         resolve_experiment_dir,
+        test_results_revealed,
     )
 
     experiment_dir = resolve_experiment_dir(experiments_root, experiment_id)
     records = read_ledger_records(experiment_dir)
     folds = list(latest_fold_records(records).values())
     folds.sort(key=lambda r: (str(r.get("epoch_id")), str(r.get("test_period") or r.get("fold_id"))))
-    heldout = latest_heldout_records(records)
+    revealed = test_results_revealed(experiment_dir)
+    heldout = latest_heldout_records(records) if revealed else []
     heldout_runs = sorted({str(r.get("run_id") or "") for r in heldout if r.get("run_id")})
 
     chains = {
@@ -194,7 +199,7 @@ def experiment_equity_payload(experiments_root: Path, experiment_id: str) -> dic
             for r in folds
             if (window := fold_valid_window(r)) is not None
         ]),
-        "test": _chain([run_series(experiment_dir, str(r.get("run_id") or ""), "test") for r in folds]),
+        "test": _chain([run_series(experiment_dir, str(r.get("run_id") or ""), "test") for r in folds]) if revealed else [],
         "heldout": _chain([run_series(experiment_dir, run_id, "heldout") for run_id in heldout_runs]),
     }
     series = [
@@ -204,7 +209,7 @@ def experiment_equity_payload(experiments_root: Path, experiment_id: str) -> dic
     bench: dict[str, float] = {}
     for record in folds:
         run_id = str(record.get("run_id") or "")
-        for prefix in ("valid", "test"):
+        for prefix in ("valid", "test") if revealed else ("valid",):
             bench.update(_rollup_benchmark(experiment_dir, run_id, prefix))
     for run_id in heldout_runs:
         bench.update(_rollup_benchmark(experiment_dir, run_id, "heldout"))

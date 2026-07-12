@@ -39,7 +39,7 @@ class ReplayResult:
     # Managed ctx.state_dir staging ledger: one record per sub-step-staged write with
     # its ready_at and merge status (some may stay unmerged past the region end).
     state_staging_audit: list[dict[str, object]] | None = None
-    # Per-phase replay wall-time (strategy_compute / nl_service / timeview_build /
+    # Per-phase replay wall-time (strategy_compute / nl_service / timeview_init / timeview_roll /
     # state_merge / broker_match), so the 24h replay's added cost is auditable.
     phase_seconds: dict[str, float] | None = None
 
@@ -160,6 +160,10 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "dividend_cash_received": float(broker.dividend_cash_received),
         "dividend_compensation_paid": float(broker.dividend_compensation_paid),
         "forced_close_events": sum(1 for e in broker.events if e["event_type"] == "forced_close_triggered"),
+        # Positions the HOST liquidated at region end (mandatory exit): a high
+        # count means the strategy never sold on its own — it measured
+        # "buy once, hold, host closes", not a sustainable rebalancing policy.
+        "host_exit_liquidation_count": sum(1 for e in broker.events if e["event_type"] == "exit_liquidated_by_host"),
         "liquidation_complete": not unliquidated,
         "unliquidated_positions": unliquidated,
         "remaining_liabilities": float(broker.outstanding_liabilities()),

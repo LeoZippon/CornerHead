@@ -233,6 +233,12 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(fields["first_test_period"]["type"], "period")
         self.assertEqual(fields["heldout_first_period"]["default"], "2024Q2")
 
+    def _reveal(self, experiment_id: str = "exp_hitl") -> None:
+        response = self.client.post(
+            f"/api/experiments/{experiment_id}/control", json={"action": "reveal_test_results"}
+        )
+        self.assertEqual(response.status_code, 200)
+
     def test_list_experiments_marks_kind_state_and_metrics(self) -> None:
         payload = self.client.get("/api/experiments").json()
         by_id = {entry["experiment_id"]: entry for entry in payload["experiments"]}
@@ -240,6 +246,13 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(hitl["kind"], "hitl")
         # Recorded pid is dead -> the active state degrades to interrupted.
         self.assertEqual(hitl["state"], "interrupted")
+        # P1-7: test metrics hidden until the researcher reveals (seals).
+        self.assertFalse(hitl["test_revealed"])
+        self.assertIsNone(hitl["metrics"]["cum_test_return"])
+        self._reveal()
+        payload = self.client.get("/api/experiments").json()
+        hitl = {entry["experiment_id"]: entry for entry in payload["experiments"]}["exp_hitl"]
+        self.assertTrue(hitl["test_revealed"])
         self.assertAlmostEqual(hitl["metrics"]["cum_test_return"], 0.20)
         self.assertEqual(hitl["folds_recorded"], 1)
         legacy = by_id["exp_legacy"]
@@ -259,6 +272,10 @@ class WebuiBackendTest(unittest.TestCase):
     def test_fold_detail_separates_test_audit_from_record(self) -> None:
         detail = self.client.get("/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1").json()
         self.assertNotIn("test_result", detail["record"])
+        # Hidden until revealed; revealing seals the experiment.
+        self.assertEqual(detail["test_audit"], {"hidden": True})
+        self._reveal()
+        detail = self.client.get("/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1").json()
         self.assertEqual(detail["test_audit"]["test_result"]["total_return"], 0.20)
         # Downloads are ZIP-only: no per-file listing or file endpoint.
         self.assertNotIn("strategy_files", detail)
@@ -669,6 +686,20 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(off.json()["control"]["step_gate"], {})
 
+    def test_reveal_seals_learning_actions(self) -> None:
+        self._reveal()
+        for action in ("approve", "rerun_fold", "rollback_fold", "approve_step",
+                       "reply_question", "set_step_gate", "set_directive", "resume"):
+            refused = self.client.post(
+                "/api/experiments/exp_hitl/control",
+                json={"action": action, "session_key": "epoch_001/fold_2022Q2", "directive": "x"},
+            )
+            self.assertEqual(refused.status_code, 400, action)
+            self.assertIn("封存", refused.json()["detail"])
+        # Lifecycle controls stay available on a sealed experiment.
+        ok = self.client.post("/api/experiments/exp_hitl/control", json={"action": "stop"})
+        self.assertEqual(ok.status_code, 200)
+
     def test_reply_question_controls(self) -> None:
         # Requires the worker to actually be holding on a question.
         refused = self.client.post(
@@ -828,6 +859,10 @@ class WebuiBackendTest(unittest.TestCase):
         (results / "style_valid.json").write_text(
             json.dumps({"benchmark_daily": [["20220104", 0.005], ["20220106", -0.002]]}), encoding="utf-8"
         )
+        # Hidden until revealed: the equity payload carries no test series.
+        hidden = self.client.get("/api/experiments/exp_hitl/equity").json()
+        self.assertNotIn("test", {series["key"] for series in hidden["series"]})
+        self._reveal()
         payload = self.client.get("/api/experiments/exp_hitl/equity").json()
         by_key = {series["key"]: series for series in payload["series"]}
         valid = by_key["valid"]
@@ -846,7 +881,11 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(fold["test"]["benchmark"]["dates"], [])  # no rollup for the test chain
         self.assertEqual(len(fold["test"]["series"][0]["dates"]), 1)
 
-    def test_equity_legacy_run_falls_back_to_raw_benchmark(self) -> None:
+    def test_equity_never_reads_mutable_raw_for_missing_benchmark(self) -> None:
+        # P2-3: historical charts use frozen rollups ONLY. A run without a
+        # style rollup degrades to a strategy-only curve even when the raw
+        # lake could supply the benchmark (raw is mutable; charts must not
+        # change when it is revised).
         import pandas as pd
 
         results = self.experiments_root / "exp_hitl" / "artifacts" / "run_001" / "results"
@@ -856,15 +895,13 @@ class WebuiBackendTest(unittest.TestCase):
             json.dumps({"initial_cash": 1_000_000.0, "equity_curve": {"20220106": 1_020_000.0}}),
             encoding="utf-8",
         )
-        rollup = results / "style_valid.json"
-        rollup.unlink(missing_ok=True)
+        (results / "style_valid.json").unlink(missing_ok=True)
         raw = self.repo_root / "data" / "raw" / "index_daily" / "ts_code=000300.SH"
         raw.mkdir(parents=True)
         pd.DataFrame([{"trade_date": "20220106", "pct_chg": 1.5}]).to_parquet(raw / "year=2022.parquet")
 
         payload = self.client.get("/api/experiments/exp_hitl/equity").json()
-        self.assertEqual(payload["benchmark"]["dates"], ["20220106"])
-        self.assertAlmostEqual(payload["benchmark"]["final"], 0.015)
+        self.assertEqual(payload["benchmark"]["dates"], [])
 
     def test_delete_requires_confirm_and_no_live_worker(self) -> None:
         missing_confirm = self.client.delete("/api/experiments/exp_legacy")
@@ -937,6 +974,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertIsNone(dataset_coverage(raw, "stk_mins_1min_by_date"))
 
     def test_summary_carries_per_period_heldout_returns(self) -> None:
+        self._reveal()
         payload = self.client.get("/api/experiments").json()
         hitl = next(e for e in payload["experiments"] if e["experiment_id"] == "exp_hitl")
         self.assertEqual(hitl["heldout_returns"], [{"label": "2023Q1", "return": -0.03}])

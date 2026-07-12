@@ -63,9 +63,9 @@ class BacktestTool:
             "first run a small replay_window pass, read the returned replay_wall_seconds + replayed_trade_days, "
             "extrapolate to the full validation period, and only run the full backtest once it fits. "
             "replay_window passes are debug-only (complete_validation=false): freezing and finish_fold "
-            "both require a successful full-window run of the current artifacts. Probe P&L covers only "
-            "the FIRST N days - a biased sample, NOT comparable to full-window results; never tune "
-            "strategy quality against probe returns/sharpe, only runtime."
+            "both require a successful full-window run of the current artifacts. Probes return ONLY "
+            "runtime/lifecycle statistics - no returns, fills or attribution are produced (the probed "
+            "window is the strategy's future); use them purely to budget the full run."
         ),
         fields=(
             ActionField(
@@ -380,6 +380,9 @@ class BacktestTool:
             "trade_count": int(stats["trade_count"]),
             "margin_secs_reject_count": stats["margin_secs_reject_count"],
             "max_holdings_reject_count": stats["max_holdings_reject_count"],
+            # Lifecycle signal (also on probes): how many positions the HOST
+            # had to liquidate at region end because the strategy never exited.
+            "host_exit_liquidation_count": stats["host_exit_liquidation_count"],
             "nl_tool_dir": self.ctx.executor.map_path(nl_tool_dir),
             "host_nl_tool_dir": str(nl_tool_dir),
             "modification_delta_summary": _modification_delta_summary(modification_check),

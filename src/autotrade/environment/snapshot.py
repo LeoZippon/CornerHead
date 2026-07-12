@@ -1209,7 +1209,21 @@ def to_cn_timestamps(series: pd.Series) -> pd.Series:
     Raw datasets mix tz-aware ISO strings (e.g. margin) and tz-naive Beijing
     wall-clock strings (e.g. anns_d rec_time); naive values must be localized
     to CN, never treated as UTC.
+
+    Fast path first: replay/snapshot columns are usually uniform
+    "YYYY-MM-DDTHH:MM:SS+08:00" strings, and pandas' generic tz-aware parser
+    costs ~5µs/row — a quarter of minute bars is tens of millions of rows.
+    The fixed-format naive parse plus one localize is ~10x faster and applies
+    only when a vectorized suffix check proves the offset is uniform CN.
     """
+    if series.dtype == object and len(series):
+        text = series.astype(str)
+        if text.str.endswith("+08:00").all():
+            fast = pd.to_datetime(text.str.slice(0, 19), format="%Y-%m-%dT%H:%M:%S", errors="coerce")
+            if not fast.isna().any():
+                # Localize via a UTC shift: tz_localize(CN_TZ) with a ZoneInfo
+                # walks rows one by one, the UTC route is metadata-only.
+                return (fast - pd.Timedelta(hours=8)).dt.tz_localize("UTC").dt.tz_convert(CN_TZ)
     try:
         parsed = pd.to_datetime(series, errors="coerce")
     except (ValueError, TypeError):

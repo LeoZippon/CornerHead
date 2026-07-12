@@ -479,6 +479,10 @@ def run_main_ctx_replay(
     outside declared substeps (with a small overhead grace), so heavy unwrapped work
     cannot hide in the tick's aggregate wall time.
     """
+    # Wall clock covers the FULL replay lifecycle (market/broker/Timeview
+    # construction included): a quarter of minute data makes init a first-class
+    # cost, and the probe extrapolation must not hide it.
+    replay_start = time.monotonic()
     market = MarketData(replay_daily)
     if len(market.trade_dates) < 2:
         raise BacktestError("replay region needs at least two trade dates for entry/exit")
@@ -497,6 +501,7 @@ def run_main_ctx_replay(
         corporate_actions_by_date=corporate_actions_by_date,
         auction_prints_by_date=auction_prints_by_date,
     )
+    _tv_init_t0 = time.monotonic()
     timeview = (
         Timeview(
             host_dir=main_policy.paths.workspace / ".asof",
@@ -508,6 +513,7 @@ def run_main_ctx_replay(
         if timeview_enabled and snapshot_dir is not None and getattr(main_policy, "paths", None) is not None
         else None
     )
+    timeview_init_seconds = time.monotonic() - _tv_init_t0 if timeview is not None else 0.0
     # Managed ctx.state_dir: sub-step writes stage to a hidden dir and merge into the
     # visible dir at ready_at = tick + B. Reset per backtest for reproducibility.
     stager = (
@@ -519,12 +525,14 @@ def run_main_ctx_replay(
         else None
     )
     equity_by_date: dict[str, float] = {}
-    replay_start = time.monotonic()  # wall-clock start, reported as replay_wall_seconds
     substep_runtime: dict[str, dict[str, float]] = {}
     # Per-phase wall-time so the 24h replay's added cost is visible (W9): the agent
     # main(ctx) step, the Timeview rebuilds, the state-staging merges, and the Broker
     # matching. The NL-service share of step wall is split out from strategy compute.
-    phase_wall = {"strategy_step": 0.0, "timeview_build": 0.0, "state_merge": 0.0, "broker_match": 0.0}
+    phase_wall = {
+        "strategy_step": 0.0, "timeview_init": timeview_init_seconds,
+        "timeview_roll": 0.0, "state_merge": 0.0, "broker_match": 0.0,
+    }
     tick_counts = {"total": 0, "intraday": 0, "offsession": 0}
     delayed_actions: list[_DelayedAction] = []
     delayed_seq = 0
@@ -585,7 +593,7 @@ def run_main_ctx_replay(
                     if timeview is not None:
                         _tv_t0 = time.monotonic()
                         asof_dir, asof_version = timeview.refresh(when)
-                        phase_wall["timeview_build"] += time.monotonic() - _tv_t0
+                        phase_wall["timeview_roll"] += time.monotonic() - _tv_t0
                     else:
                         asof_dir, asof_version = None, None
                     if timeview is not None and main_policy.nl_service is not None:
@@ -931,7 +939,8 @@ def _phase_seconds(phase_wall: dict[str, float], nl_wall: float) -> dict[str, fl
     return {
         "strategy_compute": round(max(0.0, phase_wall["strategy_step"] - nl), 3),
         "nl_service": round(nl, 3),
-        "timeview_build": round(phase_wall["timeview_build"], 3),
+        "timeview_init": round(phase_wall["timeview_init"], 3),
+        "timeview_roll": round(phase_wall["timeview_roll"], 3),
         "state_merge": round(phase_wall["state_merge"], 3),
         "broker_match": round(phase_wall["broker_match"], 3),
     }

@@ -1,3 +1,13 @@
+2026-07-12 用户裁决落地：P1-6 性能 / P1-7 测试封存 / P1-8 最小化 / P2-3 删回退 + 沙箱清理（feat/step-tree-rollback）
+
+- **P1-6 Timeview 性能**：roll 从整列布尔掩码（每次节点跨越 O(行数)，分钟域 4400 万行）改为 available_at 排序游标 + searchsorted（O(log n)，分片内容与原实现逐行一致）；冻结域空表/schema 探测改读 parquet footer（不再整读 GB 级文件）；`to_cn_timestamps` 加统一 +08:00 快路径（避开 ZoneInfo 逐行 tz_localize，5M 行 32.8s→3.0s，≈11×）；phase_seconds 拆分 `timeview_init`/`timeview_roll`，回放墙钟起点移到构建之前（覆盖完整生命周期）。合成基准：5M 行 roll 701 tick 共 0.06s，可见行数与暴力参考一致。
+- **P1-7 测试结果封存**：控制台默认全隐藏测试/Held-out（首页汇总、逐 Fold 摘要、测试明细 test_audit、测试/Held-out 权益曲线全走 `test_results_revealed` 单闸）；新增「揭示测试结果」动作（确认弹窗）——揭示不可逆、实验封存，13 类学习类控制动作（批准/重跑/回滚/逐 Step 放行/答复提问/指令/Prompt 覆盖/父产物覆盖/提前收官/resume/restart 等）统一拒绝，查看/停止/删除保留；legacy 实验（无控制面）只读全示。
+- **P1-8 最小修复（按用户裁决不加硬验收门槛）**：broker 区间末 close_all 逐仓位记 `exit_liquidated_by_host` 事件 → 统计 `host_exit_liquidation_count` 进 detailed_return 与回测 summary（探针也返回，属生命周期统计）；提示词新增跨周期生命周期指引（计划带调仓周期键、对照 Broker 真相源做卖出/再平衡、宿主强平只是安全网）。
+- **P2-3**：请求时读 mutable raw 的 `_legacy_benchmark_year` 回退整体删除（含 server 线程参数与旧测试）；历史图表只读冻结 rollup，缺失基准=仅策略曲线。旧实验已全部清理，无迁移对象。
+- **沙箱清理**：delete_experiment 的 work_root 删除改 `_remove_sandbox_tree`——rmtree 残留（rootless docker subuid 文件宿主删不掉）时经沙箱镜像容器（userns root）rm -rf 后重删，未删净则报错；work_root 缺 params 时也按实验名推导删除。实测：经 API 删除 lap-test2/lzp-test（旧代码留下 subuid 残留），新清理器把 `.runtime/sandboxes` 下 8 个目录全部清空（含 8.6G lap-test2）。
+- **原则复核**（最小护栏/最大自由/精简）：本批与前两批的新增约束均为 PIT/宿主安全/数据完整性必需（探针脱敏、staging 收容、删键阻断）；P1-8 明确不加验收硬门槛、只加可见性；P1-7 是用户点名的产品级隔离；未发现可再削减的 Agent 侧限制。
+- full suite 647 OK；PROMPTS.md 重导出；控制台重启+静态同步。
+
 2026-07-12 lap-test2 逐 Step 门控无提示排查 + ask_user 工具 + 过期代码徽标（feat/step-tree-rollback）
 
 - **排查结论（trace 实证）**：lap-test2 的 worker 于 bbebfd3（复活 step 模式的修复批次，00:34 落地）之前约 36 分钟启动，长驻进程全程运行旧代码——门控序号按全部回测计数（#7）、stop 在门控处被旧 catch-all 吞掉两次（19:38、21:18 两个 ExperimentStopped 变成喂回模型的工具错误），Fold 照常 finish + 冻结测试跑到 22:51 才停。且用户按 stop（01:25）时 Agent 只跑了 6 个探针（replay_window=5）——探针按设计不触发门控，所以此前确实"从未提示"。当前代码行为已验证正确：正式验证必挂起、stop 立即中止、序号只计成功正式验证。

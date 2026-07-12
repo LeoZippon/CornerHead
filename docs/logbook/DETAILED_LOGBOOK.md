@@ -17060,3 +17060,31 @@ Fixes:
 - Option 1 (force-hold after EVERY successful backtest incl. probes) deliberately not adopted: post-P1-1 probes return only cost/lifecycle stats (nothing reviewable), so forced holds would be pure interruption; deterministic holds on formal validations already exist via the step gate.
 
 Validation: full suite 646 OK (4 new tests: runner reply-injection + unattended, interactive hook wait/auto/stop, manager reply_question API); PROMPTS.md re-exported; prompts table row + env/pipeline doc updates. Console restarted and static synced. Surgical staging kept the user's in-flight server.py (trace tail, equity repo_root) and doc-pass hunks uncommitted.
+
+
+## 2026-07-12 User-ruled batch: Timeview performance, test sealing, lifecycle visibility, raw-fallback removal, sandbox cleanup
+
+Task: implement the user's rulings on the four remaining check.md items plus the sandbox-cleanup requirement, under the stated principles (minimal guardrails, maximal agent autonomy, streamlined).
+
+P1-6 Timeview performance (src/autotrade/environment/timeview.py, snapshot.py, main_ctx_engine.py):
+- `_SortedCursor`: rows sorted once by available_at at init; each node crossing advances by binary search and slices only newly-visible positions (indices re-sorted ascending so part contents match the old mask implementation row-for-row). Whole-series boolean masks eliminated (were O(rows) per crossing; a quarter of minutes is ~44M rows).
+- `_init_frozen_part` probes emptiness/schema from the parquet footer (pyarrow ParquetFile) instead of reading multi-GB frozen domains whole.
+- `to_cn_timestamps` fast path: when every value is a uniform "...+08:00" string, parse naive with a fixed format and localize via a UTC shift (ZoneInfo tz_localize walks rows one by one). 5M rows: 32.8s -> 3.0s. Mixed/naive inputs keep the generic path (behavior verified identical to HEAD, including the pre-existing mixed-aware NaT quirk).
+- phase_seconds now splits `timeview_init` / `timeview_roll`; the engine wall clock starts before market/broker/Timeview construction so replay_wall_seconds covers the full lifecycle (probe extrapolation no longer hides init).
+- Synthetic benchmark (5M minute rows, 701 ticks, 8 node crossings): roll total 0.06s; visible row count equals brute-force reference.
+
+P1-7 test sealing (hitl_state, registry, equity, manager, app.js):
+- `ControlState.test_revealed`; `registry.test_results_revealed()` is the single gate. Hidden by default: homepage cum-test/heldout metrics + per-fold test returns, heldout_returns, session heldout records, fold_detail test_audit (returns {"hidden": true}), fold/experiment equity test+heldout series. Legacy experiments (no control plane) remain fully visible (read-only history).
+- Manager action `reveal_test_results` (irreversible); `_SEALED_BLOCKED_ACTIONS` deny-list rejects approve/resume/restart/set_directive/set_prompt_override/set_step_gate/approve_step/reply_question/set_parent_override/skip_to_heldout/cancel_skip/rollback_fold/rerun_fold on sealed experiments; pause/stop/terminate/delete/set_mode stay. UI: 揭示测试结果 button + confirm modal + 已揭示测试（封存） badge.
+- Tests updated to the new contract (hidden -> reveal -> visible) + new seal-guard test.
+
+P1-8 minimal (broker.py, replay_stats.py, tools/backtest.py, prompts.py):
+- `exit_liquidated_by_host` broker event per position the HOST closes at region end (mandatory exit, forced=False path); `host_exit_liquidation_count` in stats and backtest summaries (probes included — lifecycle, not P&L). Prompt gains a cross-cycle lifecycle bullet (plans keyed by rebalance period; reconcile against Broker truth; host exit is a safety net). Per the user's ruling NO acceptance gate was added.
+
+P2-3 (webui/equity.py, server.py, test_webui_backend.py): `_legacy_benchmark_year`/`_fill_legacy_benchmark` and the repo_root threading removed entirely; the fallback test rewritten to assert the frozen-only contract (missing rollup -> strategy-only chart even when raw could supply the benchmark). With all legacy experiments deleted there was nothing to migrate.
+
+Sandbox cleanup (webui/manager.py): `_remove_sandbox_tree` escalates through `docker run --user 0 -v <dir>:/purge autotrade-sandbox rm -rf` when plain rmtree leaves subuid-owned residue (rootless docker maps the container agent to a host subuid the host user cannot delete); delete_experiment derives the expected sandbox dir from the experiment id even without params.json and raises if residue survives. Live verification: deleting lap-test2/lzp-test via the (old-code) console left subuid residue exactly as predicted; the new remover purged all 8 dirs under .runtime/sandboxes including the 8.6G lap-test2 tree. experiments/ is now empty.
+
+Principles review (user request): the retained guardrails are PIT/host-security/data-integrity necessities (probe redaction, staging containment, key-removal write block, unified substep contract); P1-8 deliberately adds visibility only; P1-7 is the user-ordered product-level isolation; no agent-side restriction was found reducible this pass.
+
+Validation: full suite 647 OK; PROMPTS.md re-exported; docs (environment phase keys, pipeline 5.3 console policy) updated; console restarted + static synced.

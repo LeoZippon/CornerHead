@@ -78,6 +78,17 @@ LAUNCH_GRACE_SECONDS = 180.0
 TEST_FIELDS = ("test_result",)
 
 
+def test_results_revealed(experiment_dir: Path) -> bool:
+    """P1-7: test/held-out results are hidden from the console until the
+    researcher explicitly reveals them (which seals the experiment against
+    further learning). Legacy experiments without a control plane are
+    read-only history — nothing can leak forward, so they show everything."""
+    control_path = experiment_dir / HITL_DIR_NAME / CONTROL_NAME
+    if not control_path.exists():
+        return True
+    return read_control(control_path).test_revealed
+
+
 def read_ledger_records(experiment_dir: Path) -> list[dict[str, object]]:
     path = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
     if not path.exists():
@@ -162,11 +173,13 @@ def summarize_experiment(experiment_dir: Path) -> dict[str, object]:
         sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else None
         completed_sessions = len(folds) + len({str(m.get("epoch_id")) for m in meta}) + (1 if heldout else 0)
         status = state.get("status") or {}
+        revealed = test_results_revealed(experiment_dir)
         summary.update(
             {
                 "folds_recorded": len(folds),
                 "meta_recorded": len(meta),
                 "heldout_recorded": len(heldout),
+                "test_revealed": revealed,
                 "total_sessions": (status.get("total_sessions") if isinstance(status, Mapping) else None)
                 or (len(sessions) if sessions else None),
                 "completed_sessions": (status.get("completed_sessions") if isinstance(status, Mapping) else None)
@@ -174,9 +187,9 @@ def summarize_experiment(experiment_dir: Path) -> dict[str, object]:
                 "current_session": status.get("session_key") if isinstance(status, Mapping) else None,
                 "metrics": {
                     "cum_valid_return": _compound(_metric_series(folds, "validation_result", "total_return")),
-                    "cum_test_return": _compound(_metric_series(folds, "test_result", "total_return")),
-                    "mean_test_sharpe": _mean(_metric_series(folds, "test_result", "sharpe")),
-                    "cum_heldout_return": _compound(_metric_series(heldout, "test_result", "total_return")),
+                    "cum_test_return": _compound(_metric_series(folds, "test_result", "total_return")) if revealed else None,
+                    "mean_test_sharpe": _mean(_metric_series(folds, "test_result", "sharpe")) if revealed else None,
+                    "cum_heldout_return": _compound(_metric_series(heldout, "test_result", "total_return")) if revealed else None,
                 },
                 "fold_returns": [
                     {
@@ -184,14 +197,14 @@ def summarize_experiment(experiment_dir: Path) -> dict[str, object]:
                         "fold_id": record.get("fold_id"),
                         "fold_status": record.get("fold_status"),
                         "valid_return": _first_metric(record, "validation_result", "total_return"),
-                        "test_return": _first_metric(record, "test_result", "total_return"),
+                        "test_return": _first_metric(record, "test_result", "total_return") if revealed else None,
                         # Trade-type decomposition (long vs short P&L returns) as
                         # recorded by the replay summary; finer splits (融资 vs
                         # 担保品) are not attributed by the broker yet.
                         "valid_long": _first_metric(record, "validation_result", "long_return"),
                         "valid_short": _first_metric(record, "validation_result", "short_return"),
-                        "test_long": _first_metric(record, "test_result", "long_return"),
-                        "test_short": _first_metric(record, "test_result", "short_return"),
+                        "test_long": _first_metric(record, "test_result", "long_return") if revealed else None,
+                        "test_short": _first_metric(record, "test_result", "short_return") if revealed else None,
                     }
                     for record in folds
                 ],
@@ -201,7 +214,7 @@ def summarize_experiment(experiment_dir: Path) -> dict[str, object]:
                         "return": _first_metric(record, "test_result", "total_return"),
                     }
                     for record in sorted(heldout, key=lambda r: str(r.get("fold_id")))
-                ],
+                ] if revealed else [],
                 "created_at": _created_at(experiment_dir),
             }
         )
@@ -258,6 +271,7 @@ def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, o
         str(record.get("epoch_id")): record for record in records if record.get("record_type") == "meta_learning"
     }
     heldout_records = latest_heldout_records(records)
+    revealed = test_results_revealed(experiment_dir)
     schedule = read_json(hitl_dir / SCHEDULE_NAME)
     sessions_plan = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
     control = read_control(hitl_dir / CONTROL_NAME) if (hitl_dir / CONTROL_NAME).exists() else None
@@ -278,7 +292,7 @@ def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, o
                     entry["record"] = _public_meta_view(record)
             elif kind == "heldout":
                 if heldout_records:
-                    entry["records"] = [_public_heldout_view(record) for record in heldout_records]
+                    entry["records"] = [_public_heldout_view(record, revealed) for record in heldout_records]
             sessions.append(entry)
     else:
         # Legacy experiment: synthesize session rows from ledger records only.
@@ -299,14 +313,14 @@ def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, o
             elif kind == "meta_learning":
                 entry["record"] = _public_meta_view(record)
             else:
-                entry["record"] = _public_heldout_view(record)
+                entry["record"] = _public_heldout_view(record, revealed)
             sessions.append(entry)
     detail.update(
         {
             "sessions": sessions,
             "control": control.to_record() if control is not None else None,
             "params": _public_params(read_json(hitl_dir / PARAMS_NAME)),
-            "heldout_records": [_public_heldout_view(record) for record in heldout_records],
+            "heldout_records": [_public_heldout_view(record, revealed) for record in heldout_records],
         }
     )
     return detail
@@ -326,9 +340,12 @@ def fold_detail(experiments_root: Path, experiment_id: str, epoch_id: str, fold_
         "epoch_id": epoch_id,
         "fold_id": fold_id,
         "record": guarded_fold_view(record),
-        # Guarded test view: test-period evidence rides in a separate, clearly
-        # labelled block the UI keeps collapsed with a leakage warning.
-        "test_audit": {field: record.get(field) for field in TEST_FIELDS},
+        # Guarded test view: hidden entirely until the researcher reveals (and
+        # thereby seals) the experiment; then shown collapsed with a warning.
+        "test_audit": (
+            {field: record.get(field) for field in TEST_FIELDS}
+            if test_results_revealed(experiment_dir) else {"hidden": True}
+        ),
         # Frozen artifacts are downloaded as ONE zip package (strategy.zip);
         # the console deliberately offers no per-file listing/download.
         "strategy_dir": str(strategy_dir) if strategy_dir else None,
@@ -353,8 +370,10 @@ def _public_meta_view(record: Mapping[str, object]) -> dict[str, object]:
     return view
 
 
-def _public_heldout_view(record: Mapping[str, object]) -> dict[str, object]:
-    return dict(record)
+def _public_heldout_view(record: Mapping[str, object], revealed: bool = True) -> dict[str, object]:
+    if revealed:
+        return dict(record)
+    return {key: value for key, value in record.items() if key not in TEST_FIELDS}
 
 
 def _public_params(params: Mapping[str, object]) -> dict[str, object]:

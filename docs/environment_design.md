@@ -900,7 +900,7 @@ substep 的声明预算 `B` 同时定义三件事：
 | 清算摘要 | `liquidation_complete`、`unliquidated_position_count` |
 | 状态写入 | `state_staged_writes` / `state_unmerged_writes` |
 | substep 统计 | `substep_runtime`，含 count、total_real_wall_s、max_real_wall_s |
-| 阶段耗时 | `phase_seconds`，含 `strategy_compute`、`nl_service`、`timeview_build`、`state_merge`、`broker_match` |
+| 阶段耗时 | `phase_seconds`，含 `strategy_compute`、`nl_service`、`timeview_init`、`timeview_roll`、`state_merge`、`broker_match`；回放墙钟覆盖完整生命周期（含构建） |
 
 **逐窗口归因（Barra-lite，全部回放模式）**
 

@@ -271,6 +271,10 @@ class ControlState:
     # ask_user tool: "<session>#q<n>" -> researcher reply. Presence releases the
     # waiting question (empty string = proceed without guidance).
     user_replies: dict[str, str] = field(default_factory=dict)
+    # Human-in-the-loop OOS discipline: test/held-out results stay hidden in the
+    # console until the researcher explicitly reveals them; revealing SEALS the
+    # experiment (no further approvals/directives/reruns/rollbacks).
+    test_revealed: bool = False
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -288,6 +292,7 @@ class ControlState:
             "step_go": dict(self.step_go),
             "step_directives": dict(self.step_directives),
             "user_replies": dict(self.user_replies),
+            "test_revealed": self.test_revealed,
             "updated_at": utc_now_iso(),
         }
 
@@ -318,6 +323,7 @@ def read_control(path: Path) -> ControlState:
         step_go=_int_map(payload.get("step_go")),
         step_directives={str(k): str(v) for k, v in payload.get("step_directives", {}).items()} if isinstance(payload.get("step_directives"), dict) else {},
         user_replies={str(k): str(v) for k, v in payload.get("user_replies", {}).items()} if isinstance(payload.get("user_replies"), dict) else {},
+        test_revealed=bool(payload.get("test_revealed")),
     )
 
 

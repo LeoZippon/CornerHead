@@ -1551,6 +1551,14 @@ class SimBroker:
         price = self.profile.slipped_price(raw_price, is_buy=pos.side == "short")
         side = pos.side
         fill = self._reduce_position(state, pos, sellable, price, trade_date, forced=forced, price_label="close")
+        if not forced:
+            # Mandatory region-end exit: the HOST closed this position, not the
+            # strategy. Counted into replay stats so a buy-and-forget strategy
+            # cannot hide behind the exit-day safety net.
+            self._event(
+                "exit_liquidated_by_host", ts_code=ts_code, side=side,
+                trade_date=trade_date, quantity=sellable, account=state.name,
+            )
         if forced and state.name == "credit" and side == "long" and fill is not None:
             # 强平所得偿还融资负债 (interest first, oldest first): the broker keeps
             # the liquidation proceeds against outstanding 融资 debt rather than

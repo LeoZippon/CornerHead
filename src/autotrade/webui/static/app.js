@@ -717,6 +717,28 @@ function heroPanel(item) {
   return panel;
 }
 
+function confirmRevealTests(experimentId) {
+  showModal("揭示测试结果", el("div", {},
+    el("p", {}, "揭示后本实验封存：不能再批准会话、重跑、回滚、逐 Step 放行或注入任何指令（研究者一旦看到样本外结果，之后的每个决定都不再是样本外的）。"),
+    el("p", {}, "查看/停止/删除仍然可用。此操作不可撤销。"),
+  ), [
+    el("button", { class: "btn", onclick: closeModal }, "取消"),
+    el("button", {
+      class: "btn danger",
+      onclick: async () => {
+        try {
+          await api(`/api/experiments/${encodeURIComponent(experimentId)}/control`, {
+            method: "POST", body: JSON.stringify({ action: "reveal_test_results" }),
+          });
+          toast("测试结果已揭示，实验已封存");
+          closeModal();
+          route();
+        } catch (error) { toast(error.message, true); }
+      },
+    }, "揭示并封存"),
+  ]);
+}
+
 function confirmDeleteExperiment(experimentId) {
   const input = el("input", { type: "text", placeholder: experimentId });
   showModal("删除实验", el("div", {},
@@ -1011,6 +1033,9 @@ async function renderDetailPage(experimentId, selectedKey) {
             title: `worker 启动于 ${status.code_version}，仓库已是 ${detail.repo_code_version}：长驻进程仍在运行旧代码，重启 worker 生效` },
             "代码过期")
         : null,
+      detail.kind === "hitl" && (detail.control || {}).test_revealed
+        ? el("span", { class: "badge state-waiting_user", title: "测试/Held-out 结果已揭示：实验已封存，不能再批准、重跑、回滚或注入指令" }, "已揭示测试（封存）")
+        : null,
     ),
     el("div", { class: "sub" },
       `进度 ${detail.completed_sessions ?? 0}/${detail.total_sessions ?? "?"}`,
@@ -1027,6 +1052,12 @@ async function renderDetailPage(experimentId, selectedKey) {
       class: "btn small", style: "margin-left:0.4rem",
       onclick: () => openParamsModal(detail),
     }, "创建参数"));
+  }
+  if (detail.kind === "hitl" && detail.control && !detail.control.test_revealed) {
+    head.querySelector("h2").append(el("button", {
+      class: "btn small", style: "margin-left:0.4rem",
+      onclick: () => confirmRevealTests(detail.experiment_id),
+    }, "揭示测试结果"));
   }
   container.append(head);
   if (detail.kind === "hitl") {

@@ -29,7 +29,9 @@ import os
 import shutil
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from autotrade.environment.data.contracts import (
     domain_visible_cutoff,
@@ -37,6 +39,52 @@ from autotrade.environment.data.contracts import (
     text_dataset_visible_cutoff,
 )
 from autotrade.environment.snapshot import to_cn_timestamps
+
+_EMPTY_INDICES = np.array([], dtype=np.int64)
+
+
+def _utc_ns(values: pd.Series) -> np.ndarray:
+    """tz-aware timestamps as UTC-naive datetime64[ns] (searchsorted keys)."""
+    return values.dt.tz_convert("UTC").dt.tz_localize(None).to_numpy(dtype="datetime64[ns]")
+
+
+def _cutoff_ns(cutoff: object) -> np.datetime64:
+    ts = pd.Timestamp(cutoff)
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+    return np.datetime64(ts, "ns")
+
+
+class _SortedCursor:
+    """Visibility only grows forward, so each cutoff advance is a binary search
+    over available_at-sorted row positions instead of a whole-series boolean
+    mask (the mask was O(rows) per node crossing — ~44M rows for a quarter of
+    minute bars)."""
+
+    __slots__ = ("indices", "keys", "pos")
+
+    def __init__(self, indices: np.ndarray, keys: np.ndarray) -> None:
+        order = np.argsort(keys, kind="stable")
+        self.indices = indices[order]
+        self.keys = keys[order]
+        self.pos = 0
+
+    def advance(self, cutoff: np.datetime64) -> np.ndarray:
+        new_pos = int(np.searchsorted(self.keys, cutoff, side="right"))
+        if new_pos <= self.pos:
+            return _EMPTY_INDICES
+        newly = self.indices[self.pos:new_pos]
+        self.pos = new_pos
+        return newly
+
+
+def _dataset_cursors(datasets: np.ndarray, valid_indices: np.ndarray, keys_all: np.ndarray) -> dict[str, _SortedCursor]:
+    cursors: dict[str, _SortedCursor] = {}
+    valid_datasets = datasets[valid_indices]
+    for name in np.unique(valid_datasets):
+        selection = valid_indices[valid_datasets == name]
+        cursors[str(name)] = _SortedCursor(selection, keys_all[selection])
+    return cursors
 
 # Agent-readable parquet domains: (view name, snapshot/replay file, whole-domain
 # cutoff key or None for the per-dataset events domain).
@@ -129,23 +177,21 @@ class _DomainView:
         # A replay frame can only roll if it carries the row-level available_at the
         # node gate needs; without it the domain stays frozen-only (conservative).
         if replay.empty or "available_at" not in replay.columns:
-            self.replay = pd.DataFrame()
-            self._available_at = pd.Series([], dtype="datetime64[ns, Asia/Shanghai]")
-            self._written = pd.Series([], dtype=bool)
-        else:
-            self.replay = replay
-            self._available_at = to_cn_timestamps(replay["available_at"])
-            self._written = pd.Series(False, index=replay.index)
+            replay = pd.DataFrame()
+        self.replay = replay
         self._part_seq = 0
         self._last_signature: object = object()  # sentinel: force the first roll
-        # Events-domain caches: the dataset labels are fixed for the replay, so
-        # the per-tick signature never re-scans the frame.
-        if cutoff_key is None and not self.replay.empty and "dataset" in self.replay.columns:
-            self._datasets_str = self.replay["dataset"].astype(str)
-            self._dataset_names: list[str] = sorted(self._datasets_str.unique())
-        else:
-            self._datasets_str = None
-            self._dataset_names = []
+        self._cursor: _SortedCursor | None = None
+        self._cursors: dict[str, _SortedCursor] = {}
+        if not replay.empty:
+            available_at = to_cn_timestamps(replay["available_at"])
+            valid = np.flatnonzero(available_at.notna().to_numpy())  # NaT rows never become visible
+            keys = _utc_ns(available_at)
+            if cutoff_key is not None:
+                self._cursor = _SortedCursor(valid, keys[valid])
+            elif "dataset" in replay.columns:
+                self._cursors = _dataset_cursors(replay["dataset"].astype(str).to_numpy(), valid, keys)
+        self._dataset_names: list[str] = sorted(self._cursors)
         self._columns = self._init_frozen_part(frozen_file)
 
     def _init_frozen_part(self, frozen_file: Path) -> list[str]:
@@ -155,16 +201,23 @@ class _DomainView:
         canonical schema. An empty/absent frozen writes NO part: an empty parquet
         always lands null-typed columns that can no longer unify with the typed
         replay parts appended later, whereas an empty directory simply reads back as
-        an empty frame. The domain stays empty until its first replay part rolls in."""
-        frozen = pd.read_parquet(frozen_file) if frozen_file.exists() else pd.DataFrame()
-        if not frozen.empty:
-            _link_or_copy(frozen_file, self.out_dir / "part_0000.parquet")
-            self._part_seq = 1
-            return list(frozen.columns)
+        an empty frame. The domain stays empty until its first replay part rolls in.
+
+        Emptiness and schema come from the parquet FOOTER (num_rows + arrow
+        schema): the frozen daily/minute domains run to gigabytes and reading
+        them whole here dominated Timeview init."""
+        frozen_columns: list[str] = []
+        if frozen_file.exists():
+            footer = pq.ParquetFile(frozen_file)
+            frozen_columns = list(footer.schema_arrow.names)
+            if footer.metadata.num_rows > 0:
+                _link_or_copy(frozen_file, self.out_dir / "part_0000.parquet")
+                self._part_seq = 1
+                return frozen_columns
         # The agent-facing schema drops the gating-only available_at unless the frozen
         # domain already carries it (events/macro/fundamentals do; daily does not).
-        columns = list(frozen.columns) or list(self.replay.columns)
-        if "available_at" not in frozen.columns and "available_at" in columns:
+        columns = frozen_columns or list(self.replay.columns)
+        if "available_at" not in frozen_columns and "available_at" in columns:
             columns = [c for c in columns if c != "available_at"]
         return columns
 
@@ -176,27 +229,26 @@ class _DomainView:
         if signature == self._last_signature:
             return False  # this domain's covering node(s) have not advanced
         self._last_signature = signature
-        cutoffs = self._row_cutoffs(when)
-        visible = self._available_at <= cutoffs if cutoffs is not None else pd.Series(False, index=self.replay.index)
-        newly = visible & ~self._written
-        if not newly.any():
+        newly = self._newly_visible(when)
+        if newly.size == 0:
             return False
-        self._written = self._written | newly
-        part = self.replay.loc[newly].reindex(columns=self._columns)
+        newly.sort()  # original frame order: parts read back exactly as the frame slice
+        part = self.replay.iloc[newly].reindex(columns=self._columns)
         part.to_parquet(self.out_dir / f"part_{self._part_seq:04d}.parquet", index=False)
         self._part_seq += 1
         return True
 
-    def _row_cutoffs(self, when: pd.Timestamp):
-        """Per-row availability cutoff at ``when`` (a scalar for whole-domain
-        nodes, a per-row Series for the per-dataset events domain)."""
-        if self.cutoff_key is not None:
+    def _newly_visible(self, when: pd.Timestamp) -> np.ndarray:
+        if self._cursor is not None:
             cutoff = domain_visible_cutoff(self.cutoff_key, when)
-            return pd.Series(pd.Timestamp(cutoff), index=self.replay.index) if cutoff is not None else None
-        if self._datasets_str is None:
-            return None
-        cmap = {d: event_dataset_visible_cutoff(d, when) for d in self._dataset_names}
-        return self._datasets_str.map(lambda d: pd.Timestamp(cmap[d]) if cmap[d] is not None else pd.NaT)
+            return self._cursor.advance(_cutoff_ns(cutoff)) if cutoff is not None else _EMPTY_INDICES
+        parts = [
+            indices
+            for name, cursor in self._cursors.items()
+            if (cutoff := event_dataset_visible_cutoff(name, when)) is not None
+            and (indices := cursor.advance(_cutoff_ns(cutoff))).size
+        ]
+        return np.concatenate(parts) if parts else _EMPTY_INDICES
 
     def _signature(self, when: pd.Timestamp) -> object:
         if self.cutoff_key is not None:
@@ -233,18 +285,15 @@ class _TextView:
         self._last_signature: object = object()
         required = {"available_at", "dataset", "text_id"}
         if self.replay_index.empty or not required.issubset(self.replay_index.columns):
-            self._available_at = pd.Series([], dtype="datetime64[ns, Asia/Shanghai]")
-            self._written = pd.Series([], dtype=bool)
             self.replay_index = pd.DataFrame()
-        else:
-            self._available_at = to_cn_timestamps(self.replay_index["available_at"])
-            self._written = pd.Series(False, index=self.replay_index.index)
-        if not self.replay_index.empty and "dataset" in self.replay_index.columns:
-            self._datasets_str = self.replay_index["dataset"].astype(str)
-            self._dataset_names = sorted(self._datasets_str.unique())
-        else:
-            self._datasets_str = pd.Series([], dtype=str)
-            self._dataset_names = []
+        self._cursors: dict[str, _SortedCursor] = {}
+        if not self.replay_index.empty:
+            available_at = to_cn_timestamps(self.replay_index["available_at"])
+            valid = np.flatnonzero(available_at.notna().to_numpy())
+            self._cursors = _dataset_cursors(
+                self.replay_index["dataset"].astype(str).to_numpy(), valid, _utc_ns(available_at)
+            )
+        self._dataset_names = sorted(self._cursors)
         self._init_frozen(frozen_index_file, frozen_library_dir)
 
     def _init_frozen(self, frozen_index_file: Path, frozen_library_dir: Path) -> None:
@@ -262,14 +311,17 @@ class _TextView:
         if signature == self._last_signature:
             return False
         self._last_signature = signature
-        cmap = {d: text_dataset_visible_cutoff(d, when) for d in self._dataset_names}
-        cutoffs = self._datasets_str.map(lambda d: pd.Timestamp(cmap[d]) if cmap[d] is not None else pd.NaT)
-        visible = self._available_at <= cutoffs
-        newly = visible & ~self._written
-        if not newly.any():
+        parts = [
+            indices
+            for name, cursor in self._cursors.items()
+            if (cutoff := text_dataset_visible_cutoff(name, when)) is not None
+            and (indices := cursor.advance(_cutoff_ns(cutoff))).size
+        ]
+        if not parts:
             return False
-        self._written = self._written | newly
-        rows = self.replay_index.loc[newly].copy()
+        newly = np.concatenate(parts)
+        newly.sort()  # original frame order: parts read back exactly as the frame slice
+        rows = self.replay_index.iloc[newly].copy()
         if "library_file" not in rows.columns:
             rows["library_file"] = rows["dataset"].astype(str) + ".parquet"
         library_files: dict[tuple[str, str], str] = {}

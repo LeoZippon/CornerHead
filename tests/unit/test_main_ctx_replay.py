@@ -1245,7 +1245,7 @@ def main(ctx):
         # Per-phase wall-time is reported for the 24h replay's cost breakdown (W9).
         self.assertEqual(
             set(result.phase_seconds),
-            {"strategy_compute", "nl_service", "timeview_build", "state_merge", "broker_match"},
+            {"strategy_compute", "nl_service", "timeview_init", "timeview_roll", "state_merge", "broker_match"},
         )
         self.assertGreaterEqual(result.phase_seconds["strategy_compute"], 0.0)
 

@@ -42,6 +42,30 @@ _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 _TERMINAL_RESUMABLE_STATES = ("stopped", "failed", "interrupted", "created")
 
 
+def _remove_sandbox_tree(path: Path) -> bool:
+    """Remove a per-experiment sandbox dir, escalating through docker when
+    plain rmtree leaves residue: under rootless docker the container agent's
+    files map to a host subuid, so directories it created cannot be removed
+    by the host user directly. A root-in-userns container maps those subuids
+    and can delete them. Returns True when the tree is gone."""
+    shutil.rmtree(path, ignore_errors=True)
+    if not path.exists():
+        return True
+    try:
+        from autotrade.environment.sandbox import DEFAULT_IMAGE
+
+        subprocess.run(
+            ["docker", "run", "--rm", "--user", "0", "--network=none",
+             "-v", f"{path}:/purge", DEFAULT_IMAGE,
+             "sh", "-c", "rm -rf /purge/* /purge/.[!.]* /purge/..?*"],
+            capture_output=True, text=True, timeout=300,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+    shutil.rmtree(path, ignore_errors=True)
+    return not path.exists()
+
+
 def _reclaim_sandbox_containers(experiment_id: str) -> list[str]:
     """Force-remove sandbox containers labelled for this experiment.
 
@@ -59,6 +83,16 @@ def _reclaim_sandbox_containers(experiment_id: str) -> list[str]:
         return containers
     except (OSError, subprocess.SubprocessError):
         return []
+
+
+# Once test results are revealed the researcher's knowledge can steer any
+# further learning, so everything that starts or shapes future sessions is
+# blocked. pause/stop/terminate/delete/set_mode stay available.
+_SEALED_BLOCKED_ACTIONS = frozenset({
+    "approve", "resume", "restart", "set_directive", "set_prompt_override",
+    "set_step_gate", "approve_step", "reply_question", "set_parent_override",
+    "skip_to_heldout", "cancel_skip_to_heldout", "rollback_fold", "rerun_fold",
+})
 
 
 class ManagerError(RuntimeError):
@@ -252,7 +286,13 @@ class ExperimentManager:
             raise ManagerError(f"experiment {experiment_id!r} is legacy/read-only")
         control_path = hitl_dir / CONTROL_NAME
         control = read_control(control_path)
-        if action == "pause":
+        if control.test_revealed and action in _SEALED_BLOCKED_ACTIONS:
+            raise ManagerError("测试结果已揭示，实验已封存：不能再进行影响后续学习的控制操作")
+        if action == "reveal_test_results":
+            # One-way: showing OOS results to the researcher makes every later
+            # directive/rerun/rollback informed by them — seal the experiment.
+            control.test_revealed = True
+        elif action == "pause":
             control.request = "pause"
         elif action == "resume":
             # Clears a pause; if the worker died, relaunch it (ledger resume).
@@ -675,14 +715,15 @@ class ExperimentManager:
         removed_work_root: str | None = None
         params = read_json(experiment_dir / HITL_DIR_NAME / PARAMS_NAME)
         work_root = params.get("work_root")
-        if work_root:
-            work_path = Path(str(work_root)).resolve()
-            # Only remove a work root that is unambiguously this experiment's own
-            # per-experiment sandbox dir, never a shared root.
-            expected = (self.repo_root / ".runtime" / "sandboxes" / experiment_id).resolve()
-            if work_path == expected and work_path.is_dir():
-                shutil.rmtree(work_path, ignore_errors=True)
-                removed_work_root = str(work_path)
+        # The per-experiment sandbox dir is derived from the experiment id, so
+        # it is removed even when params.json is unreadable/legacy; an explicit
+        # work_root is honored only when it IS that dir (never a shared root).
+        expected = (self.repo_root / ".runtime" / "sandboxes" / experiment_id).resolve()
+        work_path = Path(str(work_root)).resolve() if work_root else expected
+        if work_path == expected and work_path.is_dir():
+            if not _remove_sandbox_tree(work_path):
+                raise ManagerError(f"sandbox 目录未能完全删除：{work_path}")
+            removed_work_root = str(work_path)
         shutil.rmtree(experiment_dir)
         _reclaim_sandbox_containers(experiment_id)
         return {"deleted": experiment_id, "removed_work_root": removed_work_root}
