@@ -6,9 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from autotrade.live import QmtLiveMonitor, format_deal_message
+from autotrade.live import QmtLiveMonitor, format_deal_card
 from autotrade.notify import FeishuBot, load_dotenv_values
-from autotrade.pipelines.interactive import _decision_alert_text
+from autotrade.pipelines.interactive import _decision_alert_card
 
 
 class FeishuBotTest(unittest.TestCase):
@@ -32,6 +32,27 @@ class FeishuBotTest(unittest.TestCase):
         self.assertEqual(send_calls[0][1]["receive_id"], "oc_chat")
         self.assertEqual(json.loads(send_calls[0][1]["content"])["text"], "hello")
 
+    def test_send_card_builds_interactive_payload(self):
+        bot = FeishuBot("app", "secret", "oc_chat")
+        calls = []
+
+        def fake_call(url, payload, token=None):
+            calls.append((url, payload))
+            if url.endswith("internal"):
+                return {"code": 0, "tenant_access_token": "tok", "expire": 7200}
+            return {"code": 0}
+
+        with patch.object(FeishuBot, "_call", side_effect=fake_call):
+            self.assertTrue(bot.send_card("标题", "**k** v", color="red",
+                                          button_text="打开", button_url="http://x"))
+        send = next(p for u, p in calls if "im/v1/messages" in u)
+        self.assertEqual(send["msg_type"], "interactive")
+        card = json.loads(send["content"])
+        self.assertEqual(card["header"]["template"], "red")
+        self.assertEqual(card["header"]["title"]["content"], "标题")
+        self.assertEqual(card["elements"][0]["text"]["content"], "**k** v")
+        self.assertEqual(card["elements"][1]["actions"][0]["url"], "http://x")
+
     def test_send_failure_is_swallowed(self):
         bot = FeishuBot("app", "secret", "oc_chat")
         with patch.object(FeishuBot, "_call", side_effect=OSError("network down")):
@@ -52,25 +73,28 @@ class FeishuBotTest(unittest.TestCase):
             self.assertEqual(load_dotenv_values(env), {"A": "1", "B": "spaced"})
 
 
-class DecisionAlertTextTest(unittest.TestCase):
-    def test_states_map_to_messages(self):
-        step = _decision_alert_text("exp1", "waiting_step_user", {
+class DecisionAlertCardTest(unittest.TestCase):
+    def test_states_map_to_cards(self):
+        step = _decision_alert_card("exp1", "waiting_step_user", {
             "session_key": "epoch_001/fold_2025Q1", "awaiting_step": 3,
             "step_summary": {"total_return": 0.0123},
             "completed_sessions": 2, "total_sessions": 9,
         })
-        self.assertIn("Step 3 待批准", step)
-        self.assertIn("1.23%", step)
-        self.assertIn("实验 exp1", step)
-        self.assertIn("进度 2/9", step)
-        question = _decision_alert_text("exp1", "waiting_user_reply", {
+        self.assertIn("Step 3 待批准", step["title"])
+        self.assertEqual(step["color"], "orange")
+        self.assertIn("1.23%", step["body"])
+        self.assertIn("**实验** exp1", step["body"])
+        self.assertIn("**进度** 2/9", step["body"])
+        question = _decision_alert_card("exp1", "waiting_user_reply", {
             "session_key": "s", "awaiting_question": {"index": 2, "question": "方案A还是B？"},
         })
-        self.assertIn("提问 #2", question)
-        self.assertIn("方案A还是B", question)
-        self.assertIn("等待批准", _decision_alert_text("exp1", "waiting_user", {"session_key": "s"}))
-        self.assertIn("失败", _decision_alert_text("exp1", "failed", {"error": "boom"}))
-        self.assertIsNone(_decision_alert_text("exp1", "running_session", {}))
+        self.assertIn("提问 #2", question["title"])
+        self.assertIn("方案A还是B", question["body"])
+        self.assertIn("等待批准", _decision_alert_card("exp1", "waiting_user", {"session_key": "s"})["title"])
+        failed = _decision_alert_card("exp1", "failed", {"error": "boom"})
+        self.assertEqual(failed["color"], "red")
+        self.assertIn("boom", failed["body"])
+        self.assertIsNone(_decision_alert_card("exp1", "running_session", {}))
 
 
 class StatusReporterNotifyTest(unittest.TestCase):
@@ -111,7 +135,12 @@ class QmtLiveMonitorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             local = Path(tmp)
             sent = []
-            monitor = QmtLiveMonitor(local_dir=local, notify=lambda text: sent.append(text) or True, ssh_dest="test@host")
+
+            def notify(title, body, *, color="blue"):
+                sent.append((title, body, color))
+                return True
+
+            monitor = QmtLiveMonitor(local_dir=local, notify=notify, ssh_dest="test@host")
             deals = local / f"deals_{today}.jsonl"
             deals.write_text(json.dumps(self._deal("T1")) + "\n", encoding="utf-8")
             (local / "account_snapshot.json").write_text(json.dumps({
@@ -121,8 +150,11 @@ class QmtLiveMonitorTest(unittest.TestCase):
 
             result = monitor.run_once(pull=False)
             self.assertEqual(result["notified"], 1)
-            self.assertIn("600000.SH 买入 100股 @ 10.5", sent[0])
-            self.assertIn("总资产 1,000,000.00", sent[0])
+            title, body, color = sent[0]
+            self.assertIn("实盘成交 · 买入", title)
+            self.assertEqual(color, "red")  # A-share: buys red
+            self.assertIn("**600000.SH** 买入 **100股 @ 10.5**", body)
+            self.assertIn("总资产 1,000,000.00", body)
 
             # Same deal again -> no re-notification; a new one notifies.
             with deals.open("a", encoding="utf-8") as handle:
@@ -136,13 +168,14 @@ class QmtLiveMonitorTest(unittest.TestCase):
                 json.dumps({"ok": False, "error": "MiniQMT connect failed"}), encoding="utf-8")
             monitor.run_once(pull=False)
             monitor.run_once(pull=False)
-            alerts = [t for t in sent if "实盘链路告警" in t]
+            alerts = [entry for entry in sent if "实盘链路告警" in entry[0]]
             self.assertEqual(len(alerts), 1)
+            self.assertEqual(alerts[0][2], "red")
 
-    def test_format_deal_message_without_snapshot(self):
-        text = format_deal_message(self._deal("T9"), None)
-        self.assertIn("【实盘成交】", text)
-        self.assertNotIn("账户：", text)
+    def test_format_deal_card_without_snapshot(self):
+        card = format_deal_card(self._deal("T9"), None)
+        self.assertIn("实盘成交", card["title"])
+        self.assertNotIn("**账户**", card["body"])
 
 
 if __name__ == "__main__":

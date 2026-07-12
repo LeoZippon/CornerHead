@@ -27,8 +27,10 @@ def _fmt_amount(value: object) -> str:
         return str(value or "—")
 
 
-def format_deal_message(deal: dict, snapshot: dict | None) -> str:
-    """One fill -> one group message: order details + account status."""
+def format_deal_card(deal: dict, snapshot: dict | None) -> dict[str, str]:
+    """One fill -> one interactive card: order details + account status.
+
+    A-share color convention: buys red, sells green."""
     record = deal.get("record") if isinstance(deal.get("record"), dict) else deal
     side_raw = str(record.get("order_type", ""))
     # Counter encodings vary by API surface: xtquant order_type 23/24, in-client
@@ -38,24 +40,27 @@ def format_deal_message(deal: dict, snapshot: dict | None) -> str:
         "24": "卖出", "1": "卖出", "49": "卖出", "SELL": "卖出",
     }.get(side_raw.upper(), side_raw or "成交")
     lines = [
-        "【实盘成交】"
-        f"{record.get('stock_code', '?')} {side} "
-        f"{record.get('traded_volume', '?')}股 @ {record.get('traded_price', '?')}",
-        f"金额 {_fmt_amount(record.get('traded_amount'))}"
-        f" ｜ 委托号 {record.get('order_id', '?')} ｜ 成交时间 {record.get('traded_time', '?')}",
+        f"**{record.get('stock_code', '?')}** {side} "
+        f"**{record.get('traded_volume', '?')}股 @ {record.get('traded_price', '?')}**",
+        f"**金额** {_fmt_amount(record.get('traded_amount'))}"
+        f" ｜ **委托号** {record.get('order_id', '?')} ｜ **时间** {record.get('traded_time', '?')}",
     ]
     remark = str(record.get("order_remark") or record.get("strategy_name") or "").strip()
     if remark:
-        lines.append(f"策略标记 {remark}")
+        lines.append(f"**策略标记** {remark}")
     asset = (snapshot or {}).get("asset") if isinstance((snapshot or {}).get("asset"), dict) else {}
     if asset:
         lines.append(
-            f"账户：总资产 {_fmt_amount(asset.get('total_asset'))}"
+            f"**账户** 总资产 {_fmt_amount(asset.get('total_asset'))}"
             f" ｜ 可用 {_fmt_amount(asset.get('cash'))}"
             f" ｜ 持仓市值 {_fmt_amount(asset.get('market_value'))}"
             f" ｜ 持仓 {(snapshot or {}).get('position_count', '?')} 只"
         )
-    return "\n".join(lines)
+    return {
+        "title": f"💰 实盘成交 · {side}",
+        "color": "red" if side == "买入" else "green" if side == "卖出" else "blue",
+        "body": "\n".join(lines),
+    }
 
 
 class QmtLiveMonitor:
@@ -65,7 +70,7 @@ class QmtLiveMonitor:
         self,
         *,
         local_dir: Path,
-        notify,  # callable(str) -> bool (FeishuBot.send_text) or None
+        notify,  # callable(title, body, *, color) -> bool (FeishuBot.send_card) or None
         ssh_dest: str,
         remote_outbox: str = "C:/xquant/outbox",
         scp_timeout_seconds: float = 60.0,
@@ -151,7 +156,8 @@ class QmtLiveMonitor:
                 if not traded_id or traded_id in state["notified_deals"]:
                     continue
                 if self.notify is not None:
-                    self.notify(format_deal_message(deal, snapshot))
+                    card = format_deal_card(deal, snapshot)
+                    self.notify(card["title"], card["body"], color=card["color"])
                 state["notified_deals"].add(traded_id)
                 notified += 1
 
@@ -159,7 +165,7 @@ class QmtLiveMonitor:
         # distinct error, so a broken live link is never silent.
         error = str((snapshot or {}).get("error") or "") if snapshot and not snapshot.get("ok", True) else ""
         if error and error != state["last_error"] and self.notify is not None:
-            self.notify(f"【实盘链路告警】QMT 实时导出异常：{error}")
+            self.notify("⚠️ 实盘链路告警", f"QMT 实时导出异常：{error}", color="red")
         state["last_error"] = error
         self._save_state(state)
         return {"notified": notified, "snapshot_ok": bool(snapshot and snapshot.get("ok", True)), "error": error}

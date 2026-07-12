@@ -17180,3 +17180,14 @@ Task: user deprecated the xtquant/miniQMT path in favor of the documented full-Q
 4. Review: deleted qmt_realtime_export.py + qmt_readonly_bridge.py (absorbed by the bridge's read-only default), swept all references (monitor docstring, deployment doc x4, README); notify/live layering confirmed single-purpose (feishu=transport, qmt_monitor=sync+dedup+format, scripts=thin shells).
 
 Validation: full suite 656 OK; deployment doc §2.1/§2.2/§6 aligned (rides the user's in-flight doc pass, unstaged). Trading-day test is user-side (fill account id in config, import strategy, follow README §5).
+
+
+## 2026-07-13 Feishu notifications upgraded to interactive cards
+
+Task: deliver notifications as Feishu interactive cards.
+
+- `FeishuBot.send_card(title, body, color, button_text/button_url)` builds a `msg_type="interactive"` card (colored header template + lark_md body + optional primary URL button) over the shared `_send`; display-only cards need no callback infra (write-back buttons would require a public callback endpoint — deliberately out of scope, noted in the docstring).
+- Decision alerts (`_decision_alert_card`): orange for waiting_user/waiting_step_user, blue for ask_user questions, red for failures; body uses bold lark_md fields (实验/会话/进度/验证收益/问题原文); optional 打开控制台 button when `CONSOLE_BASE_URL` is set in .env (unset by default — the frontend sits behind the tunnel/access-control setup).
+- QMT fill cards (`format_deal_card`): A-share coloring (buy red / sell green), bold fields for code/side/volume/price/amount/order id/time/strategy remark + account summary line; link alerts red. `QmtLiveMonitor.notify` contract widened to `(title, body, *, color)` = `FeishuBot.send_card`.
+- Live verification: one sample step-gate card (alerts bot) and one sample fill card (dedicated bot) delivered to the real group; monitor daemon restarted on the new code.
+- Tests: new card-payload structure assertion (msg_type/template/lark_md/button URL); all prior text assertions migrated to the card contract. Full suite 657 OK.

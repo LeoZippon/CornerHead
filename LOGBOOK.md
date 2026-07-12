@@ -1,3 +1,9 @@
+2026-07-13 飞书通知升级为交互式卡片（feat/step-tree-rollback）
+
+- FeishuBot 新增 send_card（interactive 卡片：彩色标题 + lark_md 正文 + 可选 URL 按钮；纯展示型，无需回调基础设施——带回写动作的按钮需要公网回调端点，刻意不做）。
+- 三类通知全部转卡片：决策提醒（待批准橙/提问蓝/失败红，正文 实验/会话/进度 加粗字段；.env 配 CONSOLE_BASE_URL 后附「打开控制台」按钮）；成交通知（A 股配色：买入红/卖出绿，量价金额加粗）；链路告警（红）。两张样例卡片已实测送达群。
+- 监控守护已重启生效；full suite 657 OK（新增卡片 payload 结构断言，原文本断言全部迁移到卡片契约）。
+
 2026-07-13 客户端内文件桥（弃用 miniQMT）+ 提醒消息增强 + 模块精简复查（feat/step-tree-rollback）
 
 - **qmt_client_bridge.py（大 QMT 内置 Python 3.6、仅标准库、单脚本）**：一个 5 秒 run_time 回调同时完成 ①实时导出（恒开启：原子快照 + 增量 orders/deals JSONL，m_ 字段归一化为监控端消费的键，去重状态持久化重启不重发）；②订单执行（配置闸门默认关：轮询 inbox 显式订单 payload（schema_version 2），校验白名单/当日/整手/名义上限/交易时段，三重独立闸门 enabled ∧ execute ∧ confirm==payload_id 全真才 passorder，幂等 remark 对照柜台当日委托，结果回写 execute_/error_，payload 归档）。**仓位测算留在决策侧**（本机已有同步账户快照），客户端只收显式 code/side/volume/price——符合部署文档"决策侧生成、执行侧落地"分工。柜台 opType/prType 映射全部配置化（开放问题 #4，实测不符只改配置）。已部署 C:\xquant 并双端语法验证；标准配置骨架已放 config\qmt_bridge.json（待填真实账户 ID）。README 重写为完整导入/配置/payload/交易日测试指南（含建议测试顺序：只读验收→dry_run→最小单实测→幂等重投验证）。

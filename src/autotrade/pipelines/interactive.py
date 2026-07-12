@@ -569,43 +569,54 @@ def _decision_alert_hook(experiment_id: str):
     reporter's transition thread — best-effort by construction."""
     from autotrade.notify import FeishuBot, load_dotenv_values
 
-    bot = FeishuBot.from_env(load_dotenv_values())
+    env = load_dotenv_values()
+    bot = FeishuBot.from_env(env)
     if bot is None:
         return None
+    console_url = str(env.get("CONSOLE_BASE_URL", "")).rstrip("/")
 
     def hook(state: str, snapshot: dict[str, object]) -> None:
-        text = _decision_alert_text(experiment_id, state, snapshot)
-        if text:
-            bot.send_text(text)
+        card = _decision_alert_card(experiment_id, state, snapshot)
+        if card is None:
+            return
+        button = {}
+        if console_url:
+            button = {"button_text": "打开控制台", "button_url": f"{console_url}/#/exp/{experiment_id}"}
+        bot.send_card(card["title"], card["body"], color=card["color"], **button)
 
     return hook
 
 
-def _decision_alert_text(experiment_id: str, state: str, snapshot: dict[str, object]) -> str | None:
-    """Group-alert body: headline, then experiment/session/progress context so
-    a message is actionable without opening the console first."""
+def _decision_alert_card(experiment_id: str, state: str, snapshot: dict[str, object]) -> dict[str, str] | None:
+    """Group-alert card: colored headline + experiment/session/progress context
+    so a message is actionable without opening the console first."""
     session = str(snapshot.get("session_key") or "")
     completed = snapshot.get("completed_sessions")
     total = snapshot.get("total_sessions")
-    progress = f"进度 {completed}/{total}" if completed is not None and total else ""
-    context = " ｜ ".join(part for part in (f"实验 {experiment_id}", f"会话 {session}" if session else "", progress) if part)
+    context = f"**实验** {experiment_id}"
+    if session:
+        context += f"\n**会话** {session}"
+    if completed is not None and total:
+        context += f"\n**进度** {completed}/{total}"
     if state == "waiting_user":
-        return f"⏸️ 会话等待批准\n{context}\n请在控制台放行（可附研究指令）。"
+        return {"title": "⏸ 会话等待批准", "color": "orange",
+                "body": f"{context}\n请在控制台放行（可附研究指令）。"}
     if state == "waiting_step_user":
         summary = snapshot.get("step_summary") if isinstance(snapshot.get("step_summary"), dict) else {}
         ret = summary.get("total_return")
-        metric = f"验证收益 {float(ret) * 100:.2f}% ｜ " if isinstance(ret, (int, float)) else ""
-        return (f"🛑 Step {snapshot.get('awaiting_step')} 待批准\n{context}\n"
-                f"{metric}请在控制台批准，可注入 Step 指令。")
+        metric = f"\n**验证收益** {float(ret) * 100:.2f}%" if isinstance(ret, (int, float)) else ""
+        return {"title": f"🛑 Step {snapshot.get('awaiting_step')} 待批准", "color": "orange",
+                "body": f"{context}{metric}\n请在控制台批准，可注入 Step 指令。"}
     if state == "waiting_user_reply":
         question = snapshot.get("awaiting_question") if isinstance(snapshot.get("awaiting_question"), dict) else {}
         body = str(question.get("question") or "")
         if len(body) > 300:
             body = body[:300] + "……"
-        return (f"❓ Agent 提问 #{question.get('index')}\n{context}\n{body}\n"
-                f"请在控制台答复（留空=由 Agent 自行决策）。")
+        return {"title": f"❓ Agent 提问 #{question.get('index')}", "color": "blue",
+                "body": f"{context}\n{body}\n请在控制台答复（留空=由 Agent 自行决策）。"}
     if state == "failed":
-        return f"❌ 实验失败\n{context}\n{snapshot.get('error')}"
+        return {"title": "❌ 实验失败", "color": "red",
+                "body": f"{context}\n{snapshot.get('error')}"}
     return None
 
 

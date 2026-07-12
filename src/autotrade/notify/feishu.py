@@ -61,11 +61,42 @@ class FeishuBot:
 
     def send_text(self, text: str) -> bool:
         """Best-effort text message to the pinned group; True on delivery."""
+        return self._send("text", {"text": text})
+
+    def send_card(
+        self,
+        title: str,
+        body: str,
+        *,
+        color: str = "blue",
+        button_text: str | None = None,
+        button_url: str | None = None,
+    ) -> bool:
+        """Interactive card: colored header + lark_md body + optional URL button.
+
+        ``color`` is a Feishu header template (blue/orange/red/green/grey/
+        turquoise...). Display-only cards need no callback infrastructure;
+        action buttons that write back would require a public callback
+        endpoint and are deliberately out of scope."""
+        elements: list[dict[str, object]] = [{"tag": "div", "text": {"tag": "lark_md", "content": body}}]
+        if button_text and button_url:
+            elements.append({"tag": "action", "actions": [{
+                "tag": "button", "type": "primary",
+                "text": {"tag": "plain_text", "content": button_text}, "url": button_url,
+            }]})
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": title}, "template": color},
+            "elements": elements,
+        }
+        return self._send("interactive", card)
+
+    def _send(self, msg_type: str, content: dict[str, object]) -> bool:
         try:
             payload = {
                 "receive_id": self.chat_id,
-                "msg_type": "text",
-                "content": json.dumps({"text": text}, ensure_ascii=False),
+                "msg_type": msg_type,
+                "content": json.dumps(content, ensure_ascii=False),
             }
             result = self._call(
                 f"{_BASE}/im/v1/messages?receive_id_type=chat_id", payload, token=self._tenant_token()

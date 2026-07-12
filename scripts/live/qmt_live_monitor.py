@@ -45,7 +45,7 @@ def main() -> int:
         print("QMT_SSH_DEST missing (.env or --ssh-dest), e.g. <user>@<qmt-host>", file=sys.stderr)
         return 1
     monitor = QmtLiveMonitor(
-        local_dir=args.local_dir, notify=bot.send_text,
+        local_dir=args.local_dir, notify=bot.send_card,
         ssh_dest=ssh_dest, remote_outbox=args.remote_outbox,
     )
     print(f"qmt_live_monitor: {ssh_dest}:{args.remote_outbox} -> {args.local_dir} every {args.interval_seconds}s")
