@@ -1,3 +1,8 @@
+2026-07-13 修复 Meta ask_user 公开入口透传（fix/auction-pit-performance）
+
+- ExperimentPipeline.run_meta_learning 现在把 user_question_hook 原样传入内部 Meta 会话；此前内部接线完整，但公开 wrapper 漏参，交互模式会错误退化为 unattended。
+- 新增真实公开入口回归，验证同一 hook 进入 ToolContext、可被调用并返回研究者答复；定向测试 1 OK。
+
 2026-07-13 飞书通知升级为交互式卡片（feat/step-tree-rollback）
 
 - FeishuBot 新增 send_card（interactive 卡片：彩色标题 + lark_md 正文 + 可选 URL 按钮；纯展示型，无需回调基础设施——带回写动作的按钮需要公网回调端点，刻意不做）。

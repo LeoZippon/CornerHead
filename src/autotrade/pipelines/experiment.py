@@ -558,6 +558,7 @@ class ExperimentPipeline:
                 visible_fold=visible_fold,
                 directive_override=directive_override,
                 system_prompt_override=system_prompt_override,
+                user_question_hook=user_question_hook,
             )
         except Exception as exc:
             self._record_attempt_failure(

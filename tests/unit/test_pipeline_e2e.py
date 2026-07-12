@@ -1078,6 +1078,40 @@ class PipelineEndToEndTest(unittest.TestCase):
             meta = pipeline.ledger.read("meta_learning")[0]
             self.assertEqual(meta["meta_learning_directive"], directive)
 
+    def test_meta_learning_public_entry_forwards_user_question_hook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+            calls: list[tuple[int, str]] = []
+
+            def question_hook(step_index: int, question: str) -> str:
+                calls.append((step_index, question))
+                return "继续验证"
+
+            def inspect_meta_learner(ctx: ToolContext) -> None:
+                hook = ctx.extra.get("user_question_hook")
+                self.assertIs(hook, question_hook)
+                self.assertEqual(hook(2, "是否继续？"), "继续验证")
+                (ctx.paths.workspace / "taste.md").write_text("hook checked", encoding="utf-8")
+
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, fold, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+                meta_learner=inspect_meta_learner,
+            )
+
+            frozen, taste = pipeline.run_meta_learning(
+                epoch_id="epoch_001",
+                parent=None,
+                user_question_hook=question_hook,
+            )
+
+            self.assertIsNone(frozen)
+            self.assertEqual(taste, "hook checked")
+            self.assertEqual(calls, [(2, "是否继续？")])
+
     def test_meta_learning_workspace_includes_sandbox_environment_example_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

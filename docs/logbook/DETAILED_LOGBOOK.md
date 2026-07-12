@@ -17191,3 +17191,17 @@ Task: deliver notifications as Feishu interactive cards.
 - QMT fill cards (`format_deal_card`): A-share coloring (buy red / sell green), bold fields for code/side/volume/price/amount/order id/time/strategy remark + account summary line; link alerts red. `QmtLiveMonitor.notify` contract widened to `(title, body, *, color)` = `FeishuBot.send_card`.
 - Live verification: one sample step-gate card (alerts bot) and one sample fill card (dedicated bot) delivered to the real group; monitor daemon restarted on the new code.
 - Tests: new card-payload structure assertion (msg_type/template/lark_md/button URL); all prior text assertions migrated to the card contract. Full suite 657 OK.
+
+
+## 2026-07-13 Meta ask_user public-entry forwarding fix
+
+Task: repair the confirmed Meta-learning HITL hook drop before the broader auction/PIT/performance work.
+
+Implementation:
+- ExperimentPipeline.run_meta_learning now forwards user_question_hook to _run_meta_learning_impl. The internal ToolContext injection was already correct, so no new abstraction or compatibility path was added.
+- Added a Pipeline end-to-end unit test that calls the public entry, verifies object identity in ToolContext.extra, invokes the hook, and checks its reply and call record.
+- The authoritative pipeline/environment docs already describe ask_user as available to interactive sessions; no contract text changed.
+
+Validation:
+- /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_public_entry_forwards_user_question_hook: 1 OK.
+- No Docker sandbox, experiment, data update, LLM call, or external mutation was run.
