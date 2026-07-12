@@ -10,6 +10,10 @@
 - 控制台与 QMT 实盘边界见 [部署文档](deployment_documentation.md)。
 - 参数默认值速查见 [参数参考](parameters_reference.md)。
 
+**职责边界**
+
+数据层负责下载和落盘 raw 数据，保存来源、请求、单位、可见时间和内容身份，并执行质量审计与源端修正追踪。数据层不负责构造 PIT Snapshot、生成投资策略、执行回测或编排实验。
+
 **术语说明**
 
 | 中文名 | 代码/英文名 | 含义 |
@@ -21,18 +25,6 @@
 | 修正账本 | `revision ledger` | 源端回写或本地/远端不一致事件账本 |
 | 触顶风险 | `source cap risk` | 接口命中返回行数上限，可能被截断 |
 | 按时点可见 | PIT | 按决策时点过滤未来信息；数据层只保存支撑该规则的原始时间字段 |
-
-**职责边界**
-
-**数据层负责**
-
-- 调用 TuShare 和本地脚本下载原始数据。
-- 保存每个文件的请求参数、来源和 hash。
-- 记录单位、分区、分页、触顶、空响应和源端修正。
-- 输出六个 raw 数据域质量报告，以及一个财务事件索引质量报告。
-- 说明原始数据是否足以支持后续按时间可见性构造。
-
-数据层不负责：构造最终交易信号或策略字段、选择股票、做回测、生成大模型提示词、判断 Agent 决策是否合理。
 
 **导航**
 
@@ -54,6 +46,8 @@
 - [4. 数据风险、修正账本与官方索引](#4-数据风险修正账本与官方索引)
 
 ## 1. 数据域与原始口径
+
+本章说明各数据域的覆盖内容、原始单位、落盘形态和来源口径。
 
 ### 1.1 数据域总览
 
@@ -132,10 +126,11 @@ flowchart LR
 | 复权因子 | `adj_factor` | 按交易日 | 复权价格构造和收益校验 |
 | 每日指标 | `daily_basic` | 按交易日 | 估值、市值、换手率、股本 |
 | 涨跌停价格 | `stk_limit` | 按交易日 | 交易约束 |
+| 开盘集合竞价 | `stk_auction` | 按交易日（2025-01-16 起） | 最终竞价成交价、成交量和成交额；覆盖期内用于 Broker 开盘竞价撮合和研究 |
 | 停复牌 | `suspend_d` | 按交易日或日期区间 | 停复牌约束 |
 | 涨跌停/炸板列表 | `limit_list_d` | 按交易日 | 日终涨跌停和炸板标签 |
 
-`daily`、`daily_basic`、`stk_limit` 覆盖口径不同，Environment snapshot 必须显式处理缺失或连接方式。`limit_list_d` 虽被打板研究复用，但主归属仍是日频交易约束。
+`daily`、`daily_basic`、`stk_limit` 覆盖口径不同，Environment Snapshot 必须显式处理缺失或连接方式。开盘竞价结果写入独立 `auction.parquet`，行级可见时间是09:25撮合完成时刻，晚间刷新节点表示本地下载时间；2025-01-16以前使用明确标记的分钟代理。收盘集合竞价直接采用15:00官方收盘价，不需要重复数据源。`limit_list_d` 虽被打板研究复用，但主归属仍是日频交易约束。
 
 **财务与基本面**
 
@@ -188,7 +183,7 @@ flowchart LR
 |---|---|---|---|
 | 历史 1 分钟源 | `stk_mins` | 全 A，按 `ts_code + year` | 可追溯源层 |
 | 按日分钟最终层 | 本地整理 | 每交易日全市场文件 | 日内回放和增量更新 |
-| 开/收盘竞价 | `stk_auction` / `stk_auction_c` | 不做历史全量 | 历史由 09:30/15:00 分钟条承载 |
+| 开盘竞价 | `stk_auction` | 2025-01-16 起按交易日全量 | 更早历史由09:30分钟条按代理口径承载 |
 
 源层路径：`data/raw/stk_mins_1min/ts_code=<TS_CODE>/year=<YYYY>.parquet`。
 最终层路径：`data/raw/stk_mins_1min_by_date/trade_date=<YYYYMMDD>.parquet`。
@@ -205,6 +200,18 @@ flowchart LR
 | 两融明细 | `margin_detail` | 按交易日 | 个股融资融券压力 |
 | 融资融券标的 | `margin_secs` | 按交易日 | 交易所标的资格；源表不区分担保品、融资和融券标的 |
 | 个股资金流 | `moneyflow` | 按交易日 | 资金行为 |
+| 东财个股资金流 | `moneyflow_dc` | 按交易日（2023-12 起） | 分档资金行为（超大/大/中/小单，含占比） |
+| 同花顺个股资金流 | `moneyflow_ths` | 按交易日（2025 起） | 分档资金行为 + 5 日净额 |
+| 东财板块资金流 | `moneyflow_ind_dc` | 按交易日（2023-12 起） | 行业/概念板块资金轮动（键含 content_type） |
+| 同花顺行业/概念资金流 | `moneyflow_ind_ths` / `moneyflow_cnt_ths` | 按交易日（2025 起） | 板块级资金轮动 |
+| 筹码分布汇总 | `cyq_perf` | 按交易日（2018 起） | 获利盘比例与成本分位（5/15/50/85/95%） |
+| 备用日行情 | `bak_daily` | 按交易日（2017 起） | 31 列衍生行情（量比/强弱度/活跃度等） |
+| 盘前静态表 | `stk_premarket` | 按交易日（当日 09:00 可见） | 盘前股本与涨跌停价 |
+| 转融通余额 | `slb_len` / `slb_len_mm` | 按交易日（2024-07 转融券暂停后部分为零） | 券源供给背景 |
+| 前十大股东 | `top10_holders` / `top10_floatholders` | 按公告月（季频披露） | 股权集中度与变动 |
+| 股权质押明细 | `pledge_detail` | 按公告月 | 质押风险事件（`pledge_stat` 无批量拉取路径，已缓采） |
+| 机构调研 | `stk_surv` | 按交易日（2022 起） | 机构关注度软信号 |
+| IPO 新股 | `new_share` | 按公告月（ipo_date EOD 保守可见） | 新股日历与供给 |
 | 股东人数 | `stk_holdernumber` | 按公告月 | 筹码集中度 |
 | 股东增减持 | `stk_holdertrade` | 按公告月 | 治理和事件 |
 | 回购 | `repurchase` | 按公告月 | 资本配置 |
@@ -226,11 +233,13 @@ flowchart LR
 | 开盘啦榜单 | `kpl_list` | 按交易日 + `tag` | 开盘啦涨停、炸板、跌停、竞价标签 |
 | 连板高度 | `limit_step` | 按交易日 | 连板高度 |
 | 连板概念 | `limit_cpt_list` | 按交易日 | 概念聚类和板块强度 |
-| 同花顺榜单 | `limit_list_ths` | 按交易日 + `limit_type`，官方历史从 `20231101` 起 | 同花顺涨停池、炸板池、跌停池 |
+| 同花顺榜单 | `limit_list_ths` | 按交易日 + `limit_type`，官方历史从 2023-11-01 起 | 同花顺涨停池、炸板池、跌停池 |
 | 龙虎榜 | `top_list` | 按交易日 | 龙虎榜资金性质和上榜原因 |
+| 开盘啦概念成分 | `kpl_concept_cons` | 按交易日（2025 起，次日 08:30 可见） | 概念成员与热度 |
+| 东财板块指数/成分 | `dc_index` / `dc_member` | 按交易日（2025 起，当日 20:00 可见） | 板块轮动与成员图谱 |
 | 机构席位 | `top_inst` | 按交易日 | 机构席位买卖和净额 |
 | 游资名单 | `hm_list` | 静态全量 | 游资席位参考表 |
-| 游资明细 | `hm_detail` | 按交易日，官方历史从 `20220801` 起 | 游资席位映射和交易痕迹 |
+| 游资明细 | `hm_detail` | 按交易日，官方历史从 2022-08-01 起 | 游资席位映射和交易痕迹 |
 | 同花顺热榜 | `ths_hot` | 按交易日 + `market` + `is_new` | 人气、概念和行业热度 |
 | 东方财富热榜 | `dc_hot` | 按交易日 + `market` + `type` + `is_new` | 人气、概念和行业热度 |
 | 分钟触板/开板 | `stk_mins_1min_by_date` + `stk_limit` | 按交易日分钟文件和涨跌停价格联动推导 | 用已走完分钟 bar 推导盘中触板/开板 |
@@ -268,6 +277,8 @@ flowchart LR
 
 ## 2. 下载、更新与落库任务
 
+本章说明 raw 数据的首次下载、日常更新、调度顺序、限频和落库流程。
+
 ### 2.1 初始下载与日常更新
 
 **初始建库顺序**
@@ -279,17 +290,7 @@ flowchart LR
 5. 打板专题数据：`board_trading`。
 6. 文本数据：`text_evidence`。
 
-统一数据命令按 `download --tier <数据域>` 建库；分钟线下载后还需整理为按日层，解禁数据还需生成完整 union。实际参数以命令帮助为准，例如：
-
-```bash
-~/miniconda3/bin/conda run -n quant python scripts/data/tushare_download.py --help
-```
-
-**日常更新入口**
-
-```bash
-~/miniconda3/bin/conda run -n quant python scripts/data/tushare_download.py update --start-date <YYYYMMDD> --end-date <YYYYMMDD>
-```
+统一数据任务按数据域建库；分钟线下载后还需整理为按日层，解禁数据还需生成完整 union。日常更新接收开始和结束日期，并覆盖该闭区间内需要新增或刷新的分区。
 
 **通用规则**
 
@@ -338,16 +339,7 @@ TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_sched
 
 runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw；落库类任务成功后在锁内原子更新 `data/raw/.raw_generation.json` 世代戳（纯审计任务不更新）。快照构造全程持同一把锁的共享模式并把世代写入 manifest 与快照缓存键，构造期间世代变化立即失败。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
 
-当前 crontab 必须通过 `ops/cron/install_tushare_cron.py` 安装，使用 `/home/lzp/miniconda3/envs/quant/bin/python` 和 `scripts/data/tushare_cron_update.py`。
-
-**安装或刷新 cron**
-
-```bash
-/home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py
-crontab -l
-```
-
-不要直接 `crontab ops/cron/tushare_update.cron`，否则会替换当前用户整份 crontab。
+当前 crontab 必须通过专用安装器合并更新，并在安装后复核现有任务；不得直接用静态 cron 文件替换当前用户的整份 crontab。
 
 **限频和分页**
 
@@ -364,6 +356,8 @@ crontab -l
 - 定时配置是任务时间、回看窗口和限频参数的操作事实源；设计正文不依赖内部模块或私有变量名。
 
 ## 3. 状态文件、审计与可见时间
+
+本章定义数据质量状态、审计规则、可见时间和 Timeview 刷新节点。
 
 ### 3.1 状态文件与审计规则
 
@@ -432,13 +426,7 @@ crontab -l
 | 打板专题 | `scripts/data/tushare_audit.py board-trading` | `board_trading_status.json` | tag/type/market 分区、榜单字段、可见时间、重复键 | 日终标签不能用于盘中；同花顺和 TuShare 涨跌停口径不同 |
 | 文本数据 | `scripts/data/tushare_audit.py base --include-text` | `text_evidence_status.json` | 月/日期/source 分区、时间字段、重复文本键、触顶风险 | 重复推送和转载是 warning；快照层生成本次快照内唯一标识和正文引用 |
 
-**分钟线竞价口径专项检查**
-
-```bash
-~/miniconda3/bin/conda run -n quant python scripts/data/tushare_audit.py auction-alignment --start-date <YYYYMMDD> --end-date <YYYYMMDD>
-```
-
-专项报告只用于过程排查，不写入顶层状态文件。
+分钟线竞价口径专项检查只用于过程排查，不写入顶层状态文件。
 
 ### 3.2 原始数据时间可见性合同
 
@@ -466,6 +454,7 @@ crontab -l
 | 文本 | 优先 `rec_time/pub_time/pubtime/datetime/create_time`；有日期基准的字段须通过 -1~+3 天合理性检查，否则按日期保守回退（见 §1.7）；`cctv_news/news` 盘前另由 `cn_preopen_text_backfill_0855` 回补 |
 | 两融 | `margin/margin_detail` 行级 `available_at` 为下一日 09:00，Timeview 经盘前 `cn_preopen_margin_backfill_0905`/`_retry_0915` 落库；`margin_secs` 为当日盘前 09:00，经 `cn_preopen_margin_secs_backfill_0903`/`_retry_0913` 落库 |
 | 资金/大宗 | `moneyflow` 当日 19:00、`block_trade` 当日 21:00 为行级 `available_at`；Timeview 实际随 `cn_evening_full`（约次日 02:05）落库，故当日盘中不可见 |
+| 其他扩展域 | 精确开盘竞价自2025-01-16起按09:25可见；事件面板族行级通常为19:00，盘前静态表当日09:00；宏观市场级数据保守按日终可见；互动问答按实际发布时间；参考静态表定期强刷维护 |
 
 ### 3.3 Timeview 刷新节点与环境层交接
 
@@ -505,9 +494,11 @@ crontab -l
 
 ## 4. 数据风险、修正账本与官方索引
 
+本章汇总已知数据风险、修正账本的记录规则和官方来源索引。
+
 | 风险项 | 影响 | 当前处理 |
 |---|---|---|
-| 深圳 09:30 分钟条与开盘竞价接口口径不一致 | 历史竞价近似列 | 原始数据不改写；环境层负责生成口径校正列并记录规则版本 |
+| 深圳09:30分钟条与最终开盘竞价量额口径不一致 | 2025-01-16以前的竞价代理 | 原始数据不改写；环境层生成带规则标记的校正列，覆盖期内直接使用 `stk_auction` |
 | 日线和分钟线单位不同 | 横向校验和 snapshot 拼接 | `daily.vol=手`、`daily.amount=千元`；分钟 `vol=股`、`amount=元` |
 | `share_float_complete` 可能仍有触顶风险 | 解禁供给压力 | 专用入口补全并生成 union；exact-6000 标记 `source_cap_risk` |
 | 历史分钟线与日线股票池不完全一致 | 早期 NEEQ/BSE 迁移、停牌退市 | 正式分钟审计用本地分钟覆盖口径；daily 覆盖对比只做专项 |

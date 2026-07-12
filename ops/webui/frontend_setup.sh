@@ -13,6 +13,9 @@ FRONTEND="${FRONTEND:-root@121.41.5.179}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 HUB_PUBKEY="$(cat "${HUB_PUBKEY_FILE:-$HOME/.ssh/id_ed25519.pub}")"
 MAC_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEQeydwT+R05m4vwfgWN3Sw0PdQILVqqvgbDpdGogx/q lzp2002@icloud.com"
+ZHANG_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOF0lC4bwkNjciT5HWyN2IDVWA+vGmx+ozDg3lHsJxRw zishen.zhang@foxmail.com"
+LUTHIRAN_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID8byKdtaBIvu4azUMphYm0mP0ONh2/nvBP2eMiEcl8E luthiran@bogon"
+LYZ_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHuPSUrl1k7gEZ5wy1nkw3S+AqLhbPQAg9OSrBzAEkqm lyzlyz0351@163.com"
 
 ssh "$FRONTEND" bash -s <<REMOTE
 set -euo pipefail
@@ -30,6 +33,12 @@ cat > /etc/ssh/authorized_keys.d/cornerhead <<'KEYS'
 restrict,port-forwarding,permitlisten="127.0.0.1:38889" ${HUB_PUBKEY}
 # researcher MacBook: local forward to the console only
 restrict,port-forwarding,permitopen="127.0.0.1:8080" ${MAC_PUBKEY}
+# authorized researcher: local forward to the console only
+restrict,port-forwarding,permitopen="127.0.0.1:8080" ${ZHANG_PUBKEY}
+# authorized researcher: local forward to the console only
+restrict,port-forwarding,permitopen="127.0.0.1:8080" ${LUTHIRAN_PUBKEY}
+# authorized researcher: local forward to the console only
+restrict,port-forwarding,permitopen="127.0.0.1:8080" ${LYZ_PUBKEY}
 KEYS
 chmod 644 /etc/ssh/authorized_keys.d/cornerhead
 cat > /etc/ssh/sshd_config.d/10-designated-keys.conf <<'CONF'

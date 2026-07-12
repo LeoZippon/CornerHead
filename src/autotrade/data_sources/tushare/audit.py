@@ -2920,7 +2920,7 @@ def audit_intraday_only(args: argparse.Namespace) -> int:
         "conclusions": [
             "Intraday minute data is stored as stock-year Parquet partitions and sidecar metadata under data/raw/stk_mins_1min.",
             "TuShare stk_mins uses shares for vol and CNY for amount; do not mix it with daily.amount or bak_daily.amount without unit conversion.",
-            "For historical minute rows, 09:30 and 15:00 bars are the auction-inclusive source; separate stk_auction/stk_auction_c downloads are unnecessary unless live auction validation is needed.",
+            "Before stk_auction coverage begins, 09:30 minute rows remain the explicitly labelled opening-auction proxy; 15:00 close is the closing-auction clearing price.",
         ],
     }
     output.parent.mkdir(parents=True, exist_ok=True)

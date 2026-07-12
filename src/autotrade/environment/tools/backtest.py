@@ -90,6 +90,7 @@ class BacktestTool:
     def __init__(self, ctx: ToolContext) -> None:
         self.ctx = ctx
         self._backtest_started = False
+        self._backtest_started_monotonic: float | None = None
 
     def run(
         self, *, mode: str, result_name: str | None = None, replay_window: int | None = None
@@ -105,6 +106,7 @@ class BacktestTool:
             self.ctx.require_phase(PHASE_FROZEN, tool=self.name)
             replay_window = None  # frozen_eval always replays the full region
         self._backtest_started = False
+        self._backtest_started_monotonic = None
         try:
             return self._execute(mode=mode, result_name=result_name, replay_window=replay_window)
         except (BacktestError, ArtifactError) as exc:
@@ -191,6 +193,7 @@ class BacktestTool:
             step_id=self.ctx.current_step_id,
         )
         self._backtest_started = True  # bracket open: any later failure must emit a terminal event
+        self._backtest_started_monotonic = time.monotonic()
 
         def _on_progress(date: str, idx: int, total: int, elapsed: float, orders: int) -> None:
             self.ctx.trace.emit(
@@ -220,8 +223,8 @@ class BacktestTool:
         # final scores are not comparable to validation. Only the coarse wall caps
         # below stay generous for frozen evals (kill true hangs, don't gate
         # acceptance).
-        valid_decision_cap = float(manifest.get("backtest_max_seconds_per_decision", 300))
-        valid_per_day_cap = _optional_float(manifest.get("backtest_max_seconds_per_trading_day", 900))
+        valid_decision_cap = float(manifest.get("backtest_max_seconds_per_decision", 1800))
+        valid_per_day_cap = _optional_float(manifest.get("backtest_max_seconds_per_trading_day", 3600))
         if mode == "valid":
             decision_cap = valid_decision_cap
             per_day_cap = valid_per_day_cap
@@ -538,6 +541,10 @@ class BacktestTool:
             "status": status,
             "error": error,
             "finished_at": utc_now_iso(),
+            "replay_wall_seconds": (
+                time.monotonic() - self._backtest_started_monotonic
+                if self._backtest_started_monotonic is not None else None
+            ),
         }
         self.ctx.manifest.append_backtest_summary(summary)
         self.ctx.trace.emit("backtest", summary, step_id=self.ctx.current_step_id)

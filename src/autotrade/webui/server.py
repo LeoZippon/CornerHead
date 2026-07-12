@@ -26,7 +26,7 @@ from .analysis import AnalysisService
 from .manager import ExperimentManager, ManagerError, MAX_RUNNING_EXPERIMENTS
 from .params_schema import parameter_schema
 from .prompt_preview import build_prompt_preview
-from .traces import read_trace_page, resolve_trace_path, stream_trace, trace_stats
+from .traces import read_trace_page, read_trace_tail, resolve_trace_path, stream_trace, trace_stats
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -355,12 +355,14 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         experiment_id: str,
         run_id: str | None = Query(None),
         offset: int = Query(0, ge=0),
+        tail_events: int | None = Query(None, ge=1, le=400),
     ) -> dict[str, object]:
         experiment_dir = _experiment_dir(experiment_id)
         path = resolve_trace_path(experiment_dir, run_id)
         if path is None:
             raise HTTPException(status_code=404, detail="no trace available for this run")
-        return {"trace_path": str(path), **read_trace_page(path, offset=offset)}
+        page = read_trace_tail(path, max_events=tail_events) if tail_events is not None else read_trace_page(path, offset=offset)
+        return {"trace_path": str(path), **page}
 
     @app.get("/api/experiments/{experiment_id}/trace/stream")
     def get_trace_stream(

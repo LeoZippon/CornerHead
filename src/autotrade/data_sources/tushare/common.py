@@ -81,7 +81,7 @@ REFERENCE_DATASETS = [
     "index_weight",
 ]
 
-DAILY_REQUIRED_DATASETS = ["daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d", "stk_auction_o", "stk_auction_c"]
+DAILY_REQUIRED_DATASETS = ["daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d", "stk_auction"]
 
 DAILY_OPTIONAL_DATASETS = ["limit_list_d"]
 
@@ -406,8 +406,7 @@ INTEGRATED_DOC_REFS = {
     "stk_premarket": "https://tushare.pro/document/2?doc_id=284",
     "slb_len": "https://tushare.pro/document/2?doc_id=332",
     "slb_len_mm": "https://tushare.pro/document/2?doc_id=333",
-    "stk_auction_o": "https://tushare.pro/document/2?doc_id=353",
-    "stk_auction_c": "https://tushare.pro/document/2",
+    "stk_auction": "https://tushare.pro/document/2?doc_id=369",
     "margin": "https://tushare.pro/document/2?doc_id=58",
     "margin_detail": "https://tushare.pro/document/2?doc_id=59",
     "margin_secs": "https://tushare.pro/document/2?doc_id=326",
@@ -1241,20 +1240,12 @@ DAILY_SPECS = {
         zero_rows_ok=True,
         key_columns=("trade_date", "ts_code", "suspend_type", "suspend_timing"),
     ),
-    # Full-market call-auction prints (both back to 20100104). The broker uses
-    # them for auction-order fills on days where rows exist; the exchange
-    # publishes the print at matching time (09:25 / 15:00), so same-day broker
-    # use is PIT-correct even though TuShare batch delivery is evening.
-    "stk_auction_o": TradeDateDataset(
-        api_name="stk_auction_o",
-        fields="ts_code,trade_date,close,open,high,low,vol,amount,vwap",
-        start_date="20100104",
-        dedup_exact=True,
-    ),
-    "stk_auction_c": TradeDateDataset(
-        api_name="stk_auction_c",
-        fields="ts_code,trade_date,close,open,high,low,vol,amount,vwap",
-        start_date="20100104",
+    # Exact opening call-auction result. TuShare's usable history begins on
+    # 2025-01-16; older replays retain the explicitly labelled minute proxy.
+    "stk_auction": TradeDateDataset(
+        api_name="stk_auction",
+        fields="ts_code,trade_date,vol,price,amount,pre_close,turnover_rate,volume_ratio,float_share",
+        start_date="20250116",
         dedup_exact=True,
     ),
     "limit_list_d": TradeDateDataset(
