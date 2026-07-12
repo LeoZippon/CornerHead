@@ -388,6 +388,30 @@ class AgentSessionRunner:
                 allowed_modes=("fold", "meta_learning"),
             ),
             ActionSpec(
+                action="ask_user",
+                tool_name="ask_user",
+                description=(
+                    "暂停执行，向研究者提交一个方向性问题并附上简要现状总结（发现、可选方案、你的建议），"
+                    "等待其文字答复后继续；等待不消耗推理预算。无人值守（auto 模式或 CLI 运行）会立即返回 "
+                    "unattended，由你自主决策。用于关键分叉点，不要用于可自行判断的小事。"
+                ),
+                fields=(
+                    ActionField(
+                        "question",
+                        "string",
+                        required=True,
+                        description=(
+                            "One directional question plus a concise status summary "
+                            "(findings, options considered, your recommendation). 中文优先。"
+                        ),
+                    ),
+                ),
+                read_only=True,
+                destructive=False,
+                concurrency_safe=False,
+                allowed_modes=("fold", "meta_learning"),
+            ),
+            ActionSpec(
                 action="done",
                 tool_name="meta_learning_done",
                 description=(
@@ -420,6 +444,7 @@ class AgentSessionRunner:
             "backtest": self._do_backtest,
             "step_rollback": self._do_step_rollback,
             "finish_fold": self._do_finish_fold,
+            "ask_user": self._do_ask_user,
             "web_search": self._do_web_search,
             "web_fetch": self._do_web_fetch,
             "explore": self._do_explore,
@@ -503,6 +528,47 @@ class AgentSessionRunner:
 
     def _do_finish_fold(self, args: dict[str, object]) -> dict[str, object]:
         return {"observation": "finish_fold", **self.finish_fold.run()}
+
+    def _do_ask_user(self, args: dict[str, object]) -> dict[str, object]:
+        question = str(args.get("question") or "").strip()
+        if not question:
+            return {"observation": "ask_user", "status": "error", "error": "question must be non-empty"}
+        if len(question) > 4000:
+            return {"observation": "ask_user", "status": "error",
+                    "error": "question too long (max 4000 chars); summarize before asking"}
+        hook = self.ctx.extra.get("user_question_hook")
+        unattended = {
+            "observation": "ask_user", "status": "unattended",
+            "note": "无人值守运行：没有研究者在线。按你自己的判断决策并继续，不要重复提问。",
+        }
+        if hook is None:
+            return unattended
+        self._question_count = getattr(self, "_question_count", 0) + 1
+        started = time.monotonic()
+        # The hook holds until the researcher replies (or returns None when
+        # nobody is attending); a stop request raises through it.
+        reply = hook(self._question_count, question)
+        waited_seconds = time.monotonic() - started
+        self._excluded_backtest_seconds += waited_seconds
+        self.ctx.trace.emit(
+            "ask_user",
+            {
+                "index": self._question_count,
+                "question": question,
+                "reply": reply,
+                "waited_seconds": round(waited_seconds, 1),
+            },
+            step_id=self.ctx.current_step_id,
+        )
+        if reply is None:
+            return unattended
+        if not str(reply).strip():
+            return {"observation": "ask_user", "status": "ok",
+                    "note": "研究者选择不给具体指引：按你的建议或判断继续。"}
+        return {
+            "observation": "ask_user", "status": "ok",
+            "researcher_reply": "研究者答复（用户注入的方向指引，不放宽任何硬约束）：" + str(reply).strip(),
+        }
 
     def _do_web_search(self, args: dict[str, object]) -> dict[str, object]:
         if self.web_search is None:
@@ -995,6 +1061,11 @@ class AgentSessionRunner:
             )
         elif action == "finish_fold":
             item.update(fold_status=observation.get("fold_status"), write_locked=observation.get("write_locked"))
+        elif action == "ask_user":
+            item.update(
+                researcher_reply=_shorten(observation.get("researcher_reply"), 240),
+                note=_shorten(observation.get("note"), 120),
+            )
         self._observation_digests.append({key: value for key, value in item.items() if value is not None})
         if len(self._observation_digests) > 120:
             self._observation_digests = self._observation_digests[-120:]

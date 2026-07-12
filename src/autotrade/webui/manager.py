@@ -325,6 +325,23 @@ class ExperimentManager:
             if directive and str(directive).strip():
                 control.step_directives[f"{session_key}#{step_index}"] = str(directive).strip()
             control.step_go[session_key] = max(int(control.step_go.get(session_key, 0)), step_index)
+        elif action == "reply_question":
+            # Answer the ask_user question the worker is holding on. An empty
+            # directive releases without guidance (the Agent decides).
+            if not session_key:
+                raise ManagerError("reply_question requires session_key")
+            status = read_status(hitl_dir / STATUS_NAME)
+            question = status.get("awaiting_question") if isinstance(status.get("awaiting_question"), dict) else None
+            if (
+                str(status.get("state")) != "waiting_user_reply"
+                or str(status.get("session_key")) != session_key
+                or not question
+            ):
+                raise ManagerError("该会话当前没有等待答复的提问")
+            index = int(question.get("index") or 0)
+            if index <= 0:
+                raise ManagerError("status.json 缺少提问序号")
+            control.user_replies[f"{session_key}#q{index}"] = str(directive or "").strip()
         elif action == "set_parent_override":
             if not session_key:
                 raise ManagerError("set_parent_override requires session_key")
@@ -372,9 +389,10 @@ class ExperimentManager:
             # first N step holds, stale per-step directives would replay.
             control.approved_sessions = tuple(k for k in control.approved_sessions if k != session_key)
             control.step_go.pop(session_key, None)
-            for key in list(control.step_directives):
-                if key.split("#", 1)[0] == session_key:
-                    control.step_directives.pop(key, None)
+            for mapping in (control.step_directives, control.user_replies):
+                for key in list(mapping):
+                    if key.split("#", 1)[0] == session_key:
+                        mapping.pop(key, None)
             control.request = None
             write_control(control_path, control)
             return {"control": control.to_record(), **self.start_worker(experiment_id)}
@@ -529,9 +547,10 @@ class ExperimentManager:
             for key in list(mapping):
                 if key in dropped_session_keys:
                     mapping.pop(key, None)
-        for key in list(control.step_directives):
-            if key.split("#", 1)[0] in dropped_session_keys:
-                control.step_directives.pop(key, None)
+        for mapping in (control.step_directives, control.user_replies):
+            for key in list(mapping):
+                if key.split("#", 1)[0] in dropped_session_keys:
+                    mapping.pop(key, None)
         return {
             "rolled_back_to": session_key,
             "dropped_records": len(dropped_records),

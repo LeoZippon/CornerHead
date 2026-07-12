@@ -628,6 +628,8 @@ experiments/<experiment_id>/
 - **提前收官**：至少有一个冻结 Fold 后，可跳过剩余 development，以最新冻结产物进入 held-out；逐步模式仍需批准 held-out。
 - **资源分配**：批准 Fold 前可以查看资源状态并设置 GPU 数，自动选择仍按空闲显存分配具体设备。
 - **继承创建**：新实验可以复制另一实验最新冻结产物作为起点。复制时校验内容身份，之后不依赖源实验继续存在。
+- **Agent 主动提问（`ask_user` 工具）**：Agent 在关键分叉点可暂停并提交一个方向性问题 + 现状总结（status `waiting_user_reply` + 问题原文），研究者在详情页答复（`reply_question`，空答复=放行由 Agent 自行决策），答复作为研究者方向指引注入工具观察（不放宽硬约束）；等待时间回补推理预算，stop 请求在等待处立即生效。auto 模式或 CLI 无人值守运行立即返回 unattended，由 Agent 自主决策。控制字段 `user_replies["<session>#q<n>"]`；重跑/回滚会清除对应会话的历史答复。
+- **过期代码提示**：worker 启动时把当时的仓库 HEAD 写入 status（`code_version`）；长驻进程在代码更新后仍运行旧实现，控制台在 worker 存活且与当前 HEAD 不一致时显示「代码过期」徽标（重启 worker 生效；提交粒度，不感知未提交改动）。
 
 ### 5.2 续跑与状态恢复
 

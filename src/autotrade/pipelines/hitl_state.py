@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import threading
 import time
 from dataclasses import MISSING, dataclass, field, fields
@@ -267,6 +268,9 @@ class ControlState:
     step_gate: dict[str, bool] = field(default_factory=dict)
     step_go: dict[str, int] = field(default_factory=dict)
     step_directives: dict[str, str] = field(default_factory=dict)
+    # ask_user tool: "<session>#q<n>" -> researcher reply. Presence releases the
+    # waiting question (empty string = proceed without guidance).
+    user_replies: dict[str, str] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -283,6 +287,7 @@ class ControlState:
             "step_gate": dict(self.step_gate),
             "step_go": dict(self.step_go),
             "step_directives": dict(self.step_directives),
+            "user_replies": dict(self.user_replies),
             "updated_at": utc_now_iso(),
         }
 
@@ -312,6 +317,7 @@ def read_control(path: Path) -> ControlState:
         step_gate={str(k): bool(v) for k, v in payload.get("step_gate", {}).items()} if isinstance(payload.get("step_gate"), dict) else {},
         step_go=_int_map(payload.get("step_go")),
         step_directives={str(k): str(v) for k, v in payload.get("step_directives", {}).items()} if isinstance(payload.get("step_directives"), dict) else {},
+        user_replies={str(k): str(v) for k, v in payload.get("user_replies", {}).items()} if isinstance(payload.get("user_replies"), dict) else {},
     )
 
 
@@ -327,6 +333,21 @@ def _int_map(value: object) -> dict[str, int]:
         if count > 0:
             out[str(key)] = count
     return out
+
+
+def repo_code_version(repo_root: Path | None = None) -> str:
+    """Short git HEAD of the running code. Long-lived workers import code at
+    spawn: the console compares this stamp against the repo's current HEAD to
+    flag workers running stale code (restart to pick up fixes). Uncommitted
+    edits do not change the stamp — commit-level granularity only."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_root or Path.cwd(), capture_output=True, text=True, timeout=10,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
 
 def write_control(path: Path, state: ControlState) -> None:

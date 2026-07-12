@@ -9,6 +9,7 @@ non-local binds should only be used behind a trusted reverse proxy.
 from __future__ import annotations
 
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from autotrade.pipelines.fold_analysis import analysis_paths
-from autotrade.pipelines.hitl_state import ANALYSIS_DIR_NAME, HITL_DIR_NAME, STATUS_NAME, read_json, read_status
+from autotrade.pipelines.hitl_state import ANALYSIS_DIR_NAME, HITL_DIR_NAME, STATUS_NAME, read_json, read_status, repo_code_version
 
 from . import equity, registry, steps
 from .analysis import AnalysisService
@@ -43,6 +44,17 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         if "days" not in trading_days_cache:
             trading_days_cache["days"] = registry.clamped_trading_days(repo_root)
         return trading_days_cache["days"] or []
+
+    code_version_cache: dict[str, object] = {"at": 0.0, "value": ""}
+
+    def _repo_code_version() -> str:
+        """Current repo HEAD, 30s-cached: the UI compares it against each live
+        worker's start-time stamp to flag workers running stale code."""
+        now = time.monotonic()
+        if now - float(code_version_cache["at"]) > 30.0:
+            code_version_cache["value"] = repo_code_version(repo_root)
+            code_version_cache["at"] = now
+        return str(code_version_cache["value"])
 
     def _experiment_dir(experiment_id: str) -> Path:
         try:
@@ -96,6 +108,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             "experiments": registry.list_experiments(manager.experiments_root),
             "running": manager.running_experiments(),
             "max_running_experiments": MAX_RUNNING_EXPERIMENTS,
+            "repo_code_version": _repo_code_version(),
         }
 
     @app.post("/api/experiments")
@@ -109,7 +122,9 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.get("/api/experiments/{experiment_id}")
     def get_experiment(experiment_id: str) -> dict[str, object]:
         _experiment_dir(experiment_id)
-        return registry.experiment_detail(manager.experiments_root, experiment_id)
+        detail = registry.experiment_detail(manager.experiments_root, experiment_id)
+        detail["repo_code_version"] = _repo_code_version()
+        return detail
 
     @app.delete("/api/experiments/{experiment_id}")
     def delete_experiment(experiment_id: str, confirm: str = Query("")) -> dict[str, object]:

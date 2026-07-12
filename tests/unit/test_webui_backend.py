@@ -669,6 +669,38 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(off.json()["control"]["step_gate"], {})
 
+    def test_reply_question_controls(self) -> None:
+        # Requires the worker to actually be holding on a question.
+        refused = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "reply_question", "session_key": "epoch_001/fold_2022Q2", "directive": "x"},
+        )
+        self.assertEqual(refused.status_code, 400)
+        write_json_atomic(
+            self.experiments_root / "exp_hitl" / "hitl" / "status.json",
+            {"pid": 999_999_999, "state": "waiting_user_reply",
+             "session_key": "epoch_001/fold_2022Q2",
+             "awaiting_question": {"index": 2, "question": "方案A还是B？"}},
+        )
+        ok = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "reply_question", "session_key": "epoch_001/fold_2022Q2", "directive": "方案A，控制换手"},
+        )
+        control = ok.json()["control"]
+        self.assertEqual(control["user_replies"], {"epoch_001/fold_2022Q2#q2": "方案A，控制换手"})
+        # Empty reply still releases (recorded as "").
+        write_json_atomic(
+            self.experiments_root / "exp_hitl" / "hitl" / "status.json",
+            {"pid": 999_999_999, "state": "waiting_user_reply",
+             "session_key": "epoch_001/fold_2022Q2",
+             "awaiting_question": {"index": 3, "question": "继续？"}},
+        )
+        released = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "reply_question", "session_key": "epoch_001/fold_2022Q2", "directive": ""},
+        )
+        self.assertEqual(released.json()["control"]["user_replies"]["epoch_001/fold_2022Q2#q3"], "")
+
     def test_launching_stub_bridges_spawn_to_first_worker_status(self) -> None:
         from types import SimpleNamespace
 

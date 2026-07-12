@@ -1500,6 +1500,68 @@ class AgentSessionRunnerTest(unittest.TestCase):
             self.assertIn("researcher_step_directive", rendered)
             self.assertIn("行业中性化", rendered)
 
+    def test_ask_user_tool_waits_for_reply_and_injects_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            questions: list[tuple[int, str]] = []
+
+            def hook(index, question):
+                questions.append((index, question))
+                return "先做多因子对比，别急着上模型"
+
+            ctx.extra["user_question_hook"] = hook
+            proxy = ScriptedLLM([
+                tool_call_response(tool_call("ask_user", question="探针耗时超预期：方案A缩小股票池 / 方案B降频。建议A，是否同意？")),
+                tool_call_response(tool_call("backtest")),
+                tool_call_response(tool_call("finish_fold")),
+            ])
+            ctx.proxy = proxy
+            runner = AgentSessionRunner(
+                ctx,
+                proxy,
+                AgentSessionConfig(
+                    fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+                    per_call_timeout_seconds=60,
+                ),
+                fold_info={"fold_id": "fold_2022Q1"},
+                acceptance_rules={"min_return": 0.0},
+            )
+            summary = runner.run()
+            self.assertEqual(summary["finish_status"], "fold_finished")
+            self.assertEqual(len(questions), 1)
+            self.assertEqual(questions[0][0], 1)
+            self.assertIn("方案A", questions[0][1])
+            rendered = json.dumps(proxy.calls[-1]["messages"], ensure_ascii=False, default=str)
+            self.assertIn("researcher_reply", rendered)
+            self.assertIn("多因子对比", rendered)
+            events = [e for e in ctx.trace.read_events() if e["event_type"] == "ask_user"]
+            self.assertEqual(len(events), 1)
+            self.assertIn("先做多因子对比", str(events[0].get("reply")))
+
+    def test_ask_user_tool_is_unattended_without_hook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            proxy = ScriptedLLM([
+                tool_call_response(tool_call("ask_user", question="没人值守时怎么办？")),
+                tool_call_response(tool_call("backtest")),
+                tool_call_response(tool_call("finish_fold")),
+            ])
+            ctx.proxy = proxy
+            runner = AgentSessionRunner(
+                ctx,
+                proxy,
+                AgentSessionConfig(
+                    fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+                    per_call_timeout_seconds=60,
+                ),
+                fold_info={"fold_id": "fold_2022Q1"},
+                acceptance_rules={"min_return": 0.0},
+            )
+            summary = runner.run()
+            self.assertEqual(summary["finish_status"], "fold_finished")
+            rendered = json.dumps(proxy.calls[1]["messages"], ensure_ascii=False, default=str)
+            self.assertIn("unattended", rendered)
+
     def test_agent_and_nl_can_use_different_model_proxies(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))

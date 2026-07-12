@@ -127,6 +127,7 @@ FOLD_ACTION_SECTION = """\
 | `explore` | task, max_rounds? | 委托只读数据探查 Sub Agent（更便宜模型）调查一个具体问题并返回简洁摘要，把大量 shell/grep 探查移出主上下文 |
 | `modification_check` | （无） | 主动检查正式产物改动是否在约束内；`backtest` 执行前也会自动复核 |
 | `backtest` | replay_window? | 验证回测；Environment 逐 tick 回放当前 `output/main.py` 的 `main(ctx)`；可选 `replay_window` 只回放前 N 个交易日做运行成本/生命周期试探（只返回耗时、tick/substep 与订单生命周期统计，不产生收益指标和成交明细；标记非完整验证、不可冻结、不满足 `finish_fold`），默认整段回放 |
+| `ask_user` | question | 暂停执行，把一个方向性问题连同简要现状总结（发现、可选方案、你的建议）提交给研究者，等待其答复后继续；等待不消耗推理预算。仅用于关键分叉点（如探针成本超预期需取舍、指令之间冲突、验证结果与指令方向矛盾），可自行判断的小事不要提问。无人值守运行会立即返回 `unattended`，此时自主决策、不要重复提问 |
 | `finish_fold` | （无） | 结束本 Fold；调用前先按“提交合同”自检；成功后 `output/` 和 `models/` 只读锁定，Sandbox 内 Agent 后台进程会被清理 |
 
 一轮可以发起多个工具调用：相互独立的只读检索（如多个 grep/glob）应在同一轮并行发起以省时；`write_file`/`edit_file`/`explore`/`modification_check`/`backtest`/`finish_fold` 等有状态工具按因果顺序单独调用。每个工具调用都会单独返回一条结果。

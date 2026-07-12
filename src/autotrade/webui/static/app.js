@@ -7,7 +7,7 @@ const $toastRoot = document.getElementById("toast-root");
 
 const STATE_LABELS = {
   launching: "启动中", starting: "初始化", running_session: "运行中", waiting_user: "等待批准",
-  waiting_step_user: "等待 Step 批准", paused: "已暂停",
+  waiting_step_user: "等待 Step 批准", waiting_user_reply: "等待答复提问", paused: "已暂停",
   completed: "已完成", stopped: "已停止", failed: "失败", interrupted: "已中断",
   created: "未启动", legacy: "历史实验", unreadable: "不可解析", unknown: "未知",
 };
@@ -1005,6 +1005,12 @@ async function renderDetailPage(experimentId, selectedKey) {
       detail.experiment_id,
       stateBadge(detail.state),
       detail.kind === "legacy" ? el("span", { class: "badge kind" }, "只读") : null,
+      detail.worker_alive && status.code_version && detail.repo_code_version
+        && status.code_version !== detail.repo_code_version
+        ? el("span", { class: "badge state-failed",
+            title: `worker 启动于 ${status.code_version}，仓库已是 ${detail.repo_code_version}：长驻进程仍在运行旧代码，重启 worker 生效` },
+            "代码过期")
+        : null,
     ),
     el("div", { class: "sub" },
       `进度 ${detail.completed_sessions ?? 0}/${detail.total_sessions ?? "?"}`,
@@ -1221,6 +1227,8 @@ function sessionListPanel(detail, selectedKey) {
         : el("span", { class: "ret" },
             isCurrent && status.state === "waiting_step_user"
               ? `Step ${status.awaiting_step ?? "?"} 待批准`
+              : isCurrent && status.state === "waiting_user_reply"
+              ? "提问待答复"
               : isWaiting ? "待批准" : isCurrent ? "运行中" : ""),
     );
     list.append(item);
@@ -1238,7 +1246,8 @@ function sessionDetailPanel(detail, selectedKey) {
   }
   const status = detail.status || {};
   const isCurrent = status.session_key === session.key;
-  const running = isCurrent && detail.worker_alive && (detail.state === "running_session" || detail.state === "waiting_step_user");
+  const running = isCurrent && detail.worker_alive
+    && ["running_session", "waiting_step_user", "waiting_user_reply"].includes(detail.state);
   const waiting = isCurrent && detail.state === "waiting_user";
   const done = Boolean(session.record || (session.records || []).length);
 
@@ -1247,7 +1256,7 @@ function sessionDetailPanel(detail, selectedKey) {
   if (detail.kind === "hitl" && (!done || waiting) && !running) {
     panel.append(directivePanel(detail, session, waiting));
   }
-  if (running) panel.append(stepGatePanel(detail, session), liveTracePanel(detail, session));
+  if (running) panel.append(askUserPanel(detail, session), stepGatePanel(detail, session), liveTracePanel(detail, session));
   if (session.kind === "fold" && done) {
     panel.append(foldResultPanel(detail, session));
     // The LLM strategy review gets its own card, peer to the fold result.
@@ -1535,6 +1544,37 @@ function statsChipsRow(stats) {
     row.append(el("span", { class: "stat-chip" }, `Σ ${fmtTokens(stats.llm_total_tokens)}`));
   }
   return row;
+}
+
+/* ask_user tool: when the Agent pauses on a question (state=waiting_user_reply),
+   show it and send the researcher's reply (empty reply = proceed, Agent decides).
+   The wait is excluded from the Agent's reasoning budget. */
+function askUserPanel(detail, session) {
+  const status = detail.status || {};
+  const question = status.awaiting_question || null;
+  if (detail.kind !== "hitl" || status.state !== "waiting_user_reply"
+      || status.session_key !== session.key || !question) return el("span", {});
+  const textarea = el("textarea", { class: "directive",
+    placeholder: "方向性指引（作为研究者答复注入对话；留空=让 Agent 自行决策）……" });
+  const send = async (reply, message) => {
+    try {
+      await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`, {
+        method: "POST",
+        body: JSON.stringify({ action: "reply_question", session_key: session.key, directive: reply }),
+      });
+      toast(message);
+      refreshDetail();
+    } catch (error) { toast(error.message, true); }
+  };
+  return el("div", { class: "panel section-gap" },
+    el("h4", { class: "subsection-title" }, `Agent 提问 #${question.index ?? "?"}（等待不消耗推理预算）`),
+    el("div", { class: "ask-user-question" }, String(question.question || "")),
+    textarea,
+    el("div", { class: "control-bar" },
+      el("button", { class: "btn primary", onclick: () => send(textarea.value, "已答复，Agent 继续") }, "答复并继续"),
+      el("button", { class: "btn", onclick: () => send("", "已放行（无指引）") }, "不给指引，继续"),
+    ),
+  );
 }
 
 /* Step-level HITL: toggle per-session gating and, when the worker is holding

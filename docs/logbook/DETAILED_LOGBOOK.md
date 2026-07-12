@@ -17027,3 +17027,36 @@ Changes (same surgical-staging discipline: the user's in-flight hunks in backtes
 - Deferred to the user: P2-3 (the `_legacy_benchmark_year` request-time raw read is the user's own uncommitted code; recommended alternative = one-time frozen migration), P1-8 (multi-cycle acceptance contract), P1-7 (HITL test-result display policy), P1-6 (Timeview performance batch). P1-4 keeps the standing partial-fill deferral.
 
 Validation: full unit suite 642 OK; PROMPTS.md re-exported byte-consistent with prompts.py; no sandbox image rebuild needed (in-container driver untouched). check.md P1/P2 headers annotated with dispositions.
+
+## 2026-07-12 CornerHead researcher SSH key authorization
+
+Task: authorize the supplied ED25519 public key for the dedicated no-shell `cornerhead` tunnel account without broadening its console access.
+
+Implementation:
+- Validated the key as ED25519; fingerprint `SHA256:Yrf1ner18N/lR630/a4gVz23lYPKsNYOPYlO7V8ry6c`.
+- Added one exact entry to frontend `121.41.5.179:/etc/ssh/authorized_keys.d/cornerhead` with `restrict,port-forwarding,permitopen="127.0.0.1:8080"`.
+- Preserved the root-owned central-key design and created pre-change backup `/etc/ssh/authorized_keys.d/cornerhead.bak.20260712T023842Z`.
+- Added the same managed key to `ops/webui/frontend_setup.sh`; updated deployment documentation to describe authorized researcher devices as per-key central whitelist entries.
+
+Validation:
+- Live key file remains `root:root`, mode `0644`; the exact restricted entry occurs once.
+- `sshd -t` passed; effective sshd config still uses `/etc/ssh/authorized_keys.d/%u`, public-key authentication and the designated user allowlist.
+- `bash -n ops/webui/frontend_setup.sh` and `git diff --check` passed. No sshd reload was required because authorized key files are read for each authentication attempt.
+
+
+## 2026-07-12 HITL step-gate no-prompt investigation; ask_user tool; stale-worker badge
+
+Task: user reported no decision prompt after Agent Step backtests in lap-test2's step mode; diagnose and fix.
+
+Diagnosis (agent_trace.jsonl of run_8383830541aa, all UTC):
+- Worker process started ~15:58 (experiment creation); bbebfd3 — the batch that made step mode first-class (SessionInterrupt, formal-only gate numbering, hold-state UI) — landed 16:34. The long-lived worker kept pre-fix imports all night.
+- 16:52-17:55 the agent ran SIX replay_window=5 probes (valid_000..005) — probes never gate (by design), so nothing prompted; the user pressed stop at 17:25 during this probe phase.
+- First formal validation valid_006 finished 19:38 -> gate engaged with OLD numbering (#7 counts probes) and the pending stop raised ExperimentStopped — which the pre-bbebfd3 catch-all swallowed as a tool failure. Same at valid_007/#8 (21:18). The fold then finish_fold'ed, froze, and ran the frozen test eval until 22:51 before the stop finally took effect at the next session gate.
+- Current code verified correct: failed backtests raise before the hook (numbering = successful formal validations only), holds set waiting_step_user, stop aborts via SessionInterrupt, waits credited to the deadline.
+
+Fixes:
+1. Stale-worker guard: `repo_code_version()` (hitl_state, short git HEAD) stamped into status.json at worker start; server exposes the repo's current HEAD (30s cache) on list+detail; app.js shows a "代码过期" badge when a live worker's stamp mismatches (tooltip: restart to pick up; commit granularity only).
+2. `ask_user` agent tool (user's option 2): ActionSpec+handler in AgentSessionRunner (fold + meta_learning modes; question required, <=4000 chars). Host bridge `_user_question_hook` in InteractiveExperimentRunner mirrors the step gate: holds with status waiting_user_reply + awaiting_question{index,question}; polls control.user_replies["<session>#q<n>"]; empty reply = proceed without guidance; mode=auto (or hook absent in CLI runs) -> immediate "unattended" response telling the agent to decide autonomously and not re-ask; stop raises ExperimentStopped through the wait; wait time added to _excluded_backtest_seconds (deadline credit) and an ask_user trace event records question/reply/waited_seconds. Console: reply_question manager action (validates the hold, writes the reply), question panel with 答复并继续 / 不给指引继续, rail badge 提问待答复, waiting_user_reply state label; rerun_fold/rollback clear the session's user_replies (the step_directives lesson). Threaded through ExperimentPipeline.run_fold AND run_meta_learning via ctx.extra["user_question_hook"].
+- Option 1 (force-hold after EVERY successful backtest incl. probes) deliberately not adopted: post-P1-1 probes return only cost/lifecycle stats (nothing reviewable), so forced holds would be pure interruption; deterministic holds on formal validations already exist via the step gate.
+
+Validation: full suite 646 OK (4 new tests: runner reply-injection + unattended, interactive hook wait/auto/stop, manager reply_question API); PROMPTS.md re-exported; prompts table row + env/pipeline doc updates. Console restarted and static synced. Surgical staging kept the user's in-flight server.py (trace tail, equity repo_root) and doc-pass hunks uncommitted.

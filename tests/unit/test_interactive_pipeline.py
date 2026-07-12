@@ -98,7 +98,7 @@ class FakePipeline:
 
     # -- pipeline surface ---------------------------------------------------
     def run_meta_learning(self, *, epoch_id, parent, previous_taste="", visible_fold=None, directive_override=None,
-                          system_prompt_override=""):
+                          system_prompt_override="", user_question_hook=None):
         self.calls.append(("meta", epoch_id, previous_taste, directive_override, system_prompt_override))
         taste = f"taste-{epoch_id}"
         meta_dir = Path(self.config.experiment_dir) / "meta_learning" / epoch_id
@@ -119,7 +119,8 @@ class FakePipeline:
         return parent, taste
 
     def run_fold(self, fold, *, epoch_id, parent, taste_prompt="", fold_directive="",
-                 system_prompt_override="", rerun_id=None, sandbox_gpu_count=None, step_gate_hook=None):
+                 system_prompt_override="", rerun_id=None, sandbox_gpu_count=None, step_gate_hook=None,
+                 user_question_hook=None):
         self.calls.append(("fold", epoch_id, fold.fold_id, taste_prompt, fold_directive,
                            parent.artifact_id if parent else None, system_prompt_override, rerun_id))
         self.gpu_counts_seen = getattr(self, "gpu_counts_seen", []) + [sandbox_gpu_count]
@@ -313,6 +314,39 @@ class InteractiveRunnerTest(unittest.TestCase):
         self._control(mode="auto", step_gate={key: True}, request="stop")
         with self.assertRaises(ExperimentStopped):
             hook(3, {})
+
+    def test_user_question_hook_waits_for_reply_and_is_unattended_in_auto(self) -> None:
+        pipeline = FakePipeline(self.config)
+        key = fold_session_key("epoch_001", "fold_2022Q1")
+        runner = self._runner(pipeline)
+        hook = runner._user_question_hook(key)
+        # auto mode: nobody is attending -> None immediately (Agent decides).
+        self._control(mode="auto")
+        self.assertIsNone(hook(1, "先做什么？"))
+        # manual mode: holds until the reply lands, then returns it verbatim.
+        self._control(mode="manual")
+
+        def reply() -> None:
+            time.sleep(0.15)
+            self._control(mode="manual", user_replies={f"{key}#q2": "优先流动性筛选"})
+
+        thread = threading.Thread(target=reply)
+        thread.start()
+        try:
+            answer = hook(2, "方案A还是方案B？")
+        finally:
+            thread.join()
+        self.assertEqual(answer, "优先流动性筛选")
+        status = read_status(self.hitl_dir / STATUS_NAME)
+        self.assertEqual(status["state"], "running_session")
+        self.assertIsNone(status.get("awaiting_question"))
+        # Empty reply releases without guidance.
+        self._control(mode="step", user_replies={f"{key}#q3": ""})
+        self.assertEqual(hook(3, "继续吗？"), "")
+        # Stop request raises out of the wait.
+        self._control(mode="manual", request="stop")
+        with self.assertRaises(ExperimentStopped):
+            hook(4, "还在吗？")
 
     def test_parent_override_rejects_failed_node(self) -> None:
         from autotrade.environment.step_tree import StepTree

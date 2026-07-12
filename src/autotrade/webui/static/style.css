@@ -521,3 +521,15 @@ details.advanced .form-grid { margin-top: 0.55rem; }
   #toast-root { left: 12px; right: 12px; bottom: 12px; }
   .toast { max-width: none; }
 }
+
+/* ask_user question card */
+.ask-user-question {
+  white-space: pre-wrap;
+  background: color-mix(in srgb, var(--accent, #3572e8) 7%, transparent);
+  border-left: 3px solid var(--accent, #3572e8);
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  margin: 0.45rem 0 0.55rem;
+  font-size: 0.92rem;
+  line-height: 1.55;
+}

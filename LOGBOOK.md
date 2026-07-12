@@ -1,3 +1,11 @@
+2026-07-12 lap-test2 逐 Step 门控无提示排查 + ask_user 工具 + 过期代码徽标（feat/step-tree-rollback）
+
+- **排查结论（trace 实证）**：lap-test2 的 worker 于 bbebfd3（复活 step 模式的修复批次，00:34 落地）之前约 36 分钟启动，长驻进程全程运行旧代码——门控序号按全部回测计数（#7）、stop 在门控处被旧 catch-all 吞掉两次（19:38、21:18 两个 ExperimentStopped 变成喂回模型的工具错误），Fold 照常 finish + 冻结测试跑到 22:51 才停。且用户按 stop（01:25）时 Agent 只跑了 6 个探针（replay_window=5）——探针按设计不触发门控，所以此前确实"从未提示"。当前代码行为已验证正确：正式验证必挂起、stop 立即中止、序号只计成功正式验证。
+- **修复 1：过期代码徽标**：worker 启动时把仓库 HEAD 写入 status.code_version；服务端暴露当前 HEAD（30s 缓存）；详情页在 worker 存活且版本不一致时显示「代码过期」徽标（悬停提示重启生效）。防止"改了代码但长驻进程没重启"再次无声发生。
+- **修复 2：`ask_user` 工具（用户方案 2）**：Agent 可在关键分叉点暂停，提交方向性问题+现状总结（≤4000 字符），status=waiting_user_reply；研究者详情页答复（reply_question，空答复=放行自决），答复以"研究者答复"标注注入工具观察；等待回补推理预算并写 ask_user trace 事件；stop 在等待处立即生效；auto 模式/CLI 无人值守立即返回 unattended。控制字段 user_replies["<session>#q<n>"]，重跑/回滚清除对应会话答复；会话列表挂起徽标「提问待答复」。fold 与元学习会话均可用。
+- 方案 1（每次成功回测强制挂起含探针）未采用：P1-1 后探针只返回耗时/生命周期统计，无可评审内容，强制挂起只有打断成本；正式验证的确定性挂起已由 step 门控覆盖（等待同样不计预算）。
+- full suite 646 OK；PROMPTS.md 重导出；控制台重启 + 静态同步。
+
 2026-07-12 check.md 审计 P1/P2 修复批次（feat/step-tree-rollback）
 
 - **P1-1 探针脱敏**：replay_window 探针回放的是决策时点的未来窗口，此前完整返回收益五项+benchmark 并把 detailed_return/style/orders/positions 写进 Agent 可读结果目录（真实 Agent 已据此调参）。现探针只返回耗时/tick/substep/订单生命周期统计；结果目录除 nl_tool 外为空；prompts + PROMPTS.md + env 文档同步。
@@ -1337,3 +1345,9 @@
 
 - `test7` 首次元学习在构造文本 Snapshot 时失败：新接入的上证/深证互动问答使用 `q/a` 字段，通用文本映射未识别。增加数据集专属结构映射，以问题为标题、问题和回答为正文，并加入回归测试。
 - 重启 `test7` 后已越过原失败点，完成 Snapshot 构造并进入元学习 Agent 会话；worker 心跳和截止时间正常。针对性17项测试及 `git diff --check` 通过。
+
+2026-07-12 CornerHead researcher SSH key authorization
+
+- 前端 root-owned 中央白名单新增研究者 key 指纹 `SHA256:Yrf1ner18N/lR630/a4gVz23lYPKsNYOPYlO7V8ry6c`。
+- 该 key 仅允许本地转发到 `127.0.0.1:8080`，不授予 shell、exec、PTY、agent forwarding 或任意目标转发能力。
+- `frontend_setup.sh` 已同步，确保后续幂等 provisioning 不会移除授权；`sshd -t`、文件属主/权限、精确条目和脚本语法检查通过。

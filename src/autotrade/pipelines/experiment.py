@@ -285,6 +285,7 @@ class ExperimentPipeline:
         rerun_id: str | None = None,
         sandbox_gpu_count: int | None = None,
         step_gate_hook=None,
+        user_question_hook=None,
     ) -> FoldOutcome:
         run_id = new_id("run")
         try:
@@ -299,6 +300,7 @@ class ExperimentPipeline:
                 rerun_id=rerun_id,
                 sandbox_gpu_count=sandbox_gpu_count,
                 step_gate_hook=step_gate_hook,
+                user_question_hook=user_question_hook,
             )
         except Exception as exc:
             self._record_attempt_failure(epoch_id=epoch_id, fold_id=fold.fold_id, run_id=run_id, exc=exc)
@@ -317,6 +319,7 @@ class ExperimentPipeline:
         rerun_id: str | None = None,
         sandbox_gpu_count: int | None = None,
         step_gate_hook=None,
+        user_question_hook=None,
     ) -> FoldOutcome:
         run_started = time.monotonic()
         sandbox, docker = self._start_sandbox(run_id, gpu_count=sandbox_gpu_count)
@@ -446,6 +449,9 @@ class ExperimentPipeline:
                 # Step-level HITL: the runner calls this after every formal
                 # validation backtest (see AgentSessionRunner._do_backtest).
                 ctx.extra["step_gate_hook"] = step_gate_hook
+            if user_question_hook is not None:
+                # ask_user tool bridge (see AgentSessionRunner._do_ask_user).
+                ctx.extra["user_question_hook"] = user_question_hook
             agent = self.agent_factory(ctx, fold, dict(manifest.data))
             session_summary = agent.run()
 
@@ -538,6 +544,7 @@ class ExperimentPipeline:
         visible_fold: FoldSpec | None = None,
         directive_override: str | None = None,
         system_prompt_override: str = "",
+        user_question_hook=None,
     ) -> tuple[FrozenArtifact | None, str]:
         if self.meta_learner is None:
             raise RuntimeError("no meta learner configured")
@@ -568,6 +575,7 @@ class ExperimentPipeline:
         visible_fold: FoldSpec | None = None,
         directive_override: str | None = None,
         system_prompt_override: str = "",
+        user_question_hook=None,
     ) -> tuple[FrozenArtifact | None, str]:
         sandbox, docker = self._start_sandbox(run_id, kind="meta_learning")
         paths = sandbox.paths
@@ -712,6 +720,8 @@ class ExperimentPipeline:
                 executor=self._executor_for(docker, sandbox),
             )
             ctx.extra["allow_backtest"] = False
+            if user_question_hook is not None:
+                ctx.extra["user_question_hook"] = user_question_hook
             if managed_proxy.env:
                 ctx.extra["web_fetch_proxy_env"] = dict(managed_proxy.env)
 

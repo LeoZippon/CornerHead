@@ -57,6 +57,7 @@ from .hitl_state import (
     read_control,
     read_json,
     read_status,
+    repo_code_version,
     resolve_options,
     status_pid_alive,
     write_control,
@@ -257,6 +258,7 @@ class InteractiveExperimentRunner:
                         visible_fold=folds[0] if folds else None,
                         directive_override=directive if directive.strip() else None,
                         system_prompt_override=control.prompt_overrides.get(key, ""),
+                        user_question_hook=self._user_question_hook(key),
                     )
                 completed += 1
                 self.status.set(completed_sessions=completed)
@@ -299,6 +301,7 @@ class InteractiveExperimentRunner:
                         rerun_id=rerun_id if needs_rerun else None,
                         sandbox_gpu_count=control.gpu_counts.get(key),
                         step_gate_hook=self._step_gate_hook(key),
+                        user_question_hook=self._user_question_hook(key),
                     )
                     parent = outcome.frozen
                     if needs_rerun:
@@ -480,6 +483,40 @@ class InteractiveExperimentRunner:
 
         return hook
 
+    def _user_question_hook(self, key: str):
+        """ask_user tool bridge, evaluated live from control.json.
+
+        Holds the session (state=waiting_user_reply) until the researcher
+        answers via the console (control.user_replies["<session>#q<n>"]),
+        then returns the reply text ("" = proceed without guidance). Returns
+        None immediately when nobody is attending (mode=auto), so the Agent
+        decides autonomously. Wait time is credited back to the fold deadline
+        by the runner."""
+
+        def hook(question_index: int, question: str) -> str | None:
+            control = read_control(self.control_path)
+            if control.mode == "auto":
+                return None
+            reply_key = f"{key}#q{int(question_index)}"
+            self.status.set(
+                state="waiting_user_reply", session_key=key,
+                awaiting_question={"index": int(question_index), "question": str(question)},
+            )
+            try:
+                while True:
+                    control = read_control(self.control_path)
+                    if control.request == "stop":
+                        raise ExperimentStopped(f"stop requested at user question {reply_key}")
+                    if control.mode == "auto":
+                        return None
+                    if reply_key in control.user_replies:
+                        return str(control.user_replies.get(reply_key) or "")
+                    time.sleep(self.poll_seconds)
+            finally:
+                self.status.set(state="running_session", awaiting_question=None)
+
+        return hook
+
     def _parent_from_step_node(self, node_id: str) -> FrozenArtifact:
         """Build the session parent from a validated step-tree node snapshot."""
         tree = StepTree(Path(self.config.experiment_dir) / "steps")
@@ -599,6 +636,9 @@ def run_interactive_worker(experiment_dir: Path, *, repo_root: Path, poll_second
             )
 
     status = StatusReporter(hitl_dir / STATUS_NAME, work_root=Path(config.work_root))
+    # Long-lived worker: code is imported NOW. The console flags this stamp
+    # against the repo's current HEAD so stale workers are visible.
+    status.set(code_version=repo_code_version())
     status.start()
     runner = InteractiveExperimentRunner(
         pipeline,
