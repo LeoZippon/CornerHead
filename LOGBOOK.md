@@ -1,3 +1,10 @@
+2026-07-12 中文选项标签 + 值守语义澄清 + 冗余复查（feat/step-tree-rollback）
+
+- **中文选项标签**：`choice` 字段补 Chinese `choice_labels`——NL 失败策略（"返回可审计错误，策略自行降级（推荐）"/"任一 NL 调用失败即终止回测"）、Fold 周期、推理力度、元学习联网；模型名保留原文。数据集子集 chips 也评估后采用中文名：标签取自 tushare_update_schedule.json 每接口描述的首个分句（注册表本就是数据集运维事实源，零新增维护面；覆盖 100%，缺失时自动回退 API 名），chip 悬停提示保留 API 名便于对照文档；板块 chips 同步中文（主板/创业板/科创板/北交所）。
+- **值守语义**：Agent 无法预知研究者是否在线——判定在环境侧：ask_user 钩子只存在于交互式运行；调用时宿主读 control.json，mode=auto → 立即返回 unattended，manual/step → 挂起等研究者答复（选择了值守模式=承诺值守）。CLI 运行无钩子恒 unattended。例程指引措辞已按此机制改写（"直接提问，环境判定值守"，替代"研究者在线时提问"）。
+- **冗余复查**（本会话全部改动）：interactive.py 两个死导入（Mapping/SnapshotConfig）删除；registry.experiment_detail 三次读 control.json 去重（复用已读对象）；app.js 六处重复的 control-POST 闭包合并为 sendControlAction 单一助手（含 reveal 弹窗）。其余新增经复查均为必需（PIT/安全/数据完整性），未见可削减项。
+- full suite 648 OK；PROMPTS.md 重导出；控制台重启+同步。
+
 2026-07-12 四项跟进：筛选布局 / NL 失败反馈 / 数据域过滤 / ask_user 核查（feat/step-tree-rollback）
 
 - **ask_user 核查（lzp-testauto trace 实证）**：接线全部正确——worker 运行最新代码（code_version=1ee3e8c），首次 llm_call 的工具表已含 ask_user，step 模式钩子在位。未提问的原因：①回测执行中 Agent 结构上无法调用任何工具（backtest 同步阻塞，属设计）；②该 run 至今只跑了探针（replay_window=5，其一失败），尚无成功完整验证 → step 门控还没到触发点；③ask_user 是 Agent 自主选择，模型偏保守。已在 Fold 例程加一条轻量指引（真正的方向分叉→附分析建议提问一次；unattended 不再问），不强制。注意：运行中的 lzp-testauto worker 用的是旧提示词，重启后生效。

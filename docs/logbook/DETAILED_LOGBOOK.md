@@ -17100,3 +17100,14 @@ Task: four user follow-ups after the rulings batch.
 4. Screening layout: multi fields accept "wide": false (app.js renders in a normal grid cell instead of field-wide); screen_boards opts in, so 剔除 ST (checkbox) and 板块范围 (4 chips) share one row. Trade-offs considered: semantic pairing (both membership filters) and row savings vs chip wrapping — 4 short chips fit half width; the narrow-screen breakpoint already collapses to one column, so no wrap regression.
 
 Validation: full suite 648 OK; PROMPTS.md re-exported; console restarted + static synced. parameters_reference edits left unstaged (file is mid-restructure in the user's doc pass); environment_design staged via HEAD-anchored blob.
+
+
+## 2026-07-12 Chinese option labels, attendance semantics, redundancy review
+
+Task: (1) human-readable Chinese labels for the NL-failure-policy options (user clarification: that was the intended target) and evaluation of Chinese names for dataset-subset chips; (2) explain how the Agent knows the researcher is online; (3) full redundancy/over-engineering review of the session's changes.
+
+1. Labels: `choice_labels` added to nl_failure_policy / fold_period / reasoning_effort / meta_learning_network (model-name choices stay verbatim). Dataset-subset chips adopted Chinese names after evaluation: labels derive at import from configs/tushare_update_schedule.json (each interface descriptor's leading clause; >12 chars trimmed at "（"). Rationale: the registry is already the operational dataset fact source, so no second mapping to maintain; 100% coverage today, silent fallback to the raw API name otherwise; the API name stays as the chip tooltip for cross-referencing docs. Boards chips labeled 主板/创业板/科创板/北交所. app.js multi renderer honors choice_labels + title.
+2. Attendance semantics: the Agent cannot know a priori; the environment resolves it at ask_user time — interactive runs inject the hook, the host reads control.json (mode=auto -> immediate "unattended"; manual/step -> hold for the reply; switching to auto mid-wait releases unattended); CLI runs have no hook (always unattended). The routine bullet was reworded to state this mechanism explicitly (ask at the fork; the environment decides attendance; unattended -> proceed, don't re-ask this session).
+3. Redundancy review over the session diff (5 commits + this batch): removed two pre-existing dead imports in interactive.py (Mapping, SnapshotConfig); deduplicated experiment_detail's triple control.json read; consolidated six duplicated control-POST closures in app.js into sendControlAction (incl. the reveal modal, which now refreshes in place instead of a full route()). AST-based unused-import scan over all touched modules found nothing else; the remaining additions were re-checked against the minimal-guardrail principle and stand as PIT/host-security/data-integrity necessities.
+
+Validation: full suite 648 OK; PROMPTS.md re-exported; console restarted + static synced.

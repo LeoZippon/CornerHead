@@ -271,10 +271,10 @@ def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, o
         str(record.get("epoch_id")): record for record in records if record.get("record_type") == "meta_learning"
     }
     heldout_records = latest_heldout_records(records)
-    revealed = test_results_revealed(experiment_dir)
     schedule = read_json(hitl_dir / SCHEDULE_NAME)
     sessions_plan = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
     control = read_control(hitl_dir / CONTROL_NAME) if (hitl_dir / CONTROL_NAME).exists() else None
+    revealed = control.test_revealed if control is not None else True  # legacy: read-only history
     sessions: list[dict[str, object]] = []
     if sessions_plan:
         for planned in sessions_plan:

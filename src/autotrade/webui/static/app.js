@@ -725,16 +725,8 @@ function confirmRevealTests(experimentId) {
     el("button", { class: "btn", onclick: closeModal }, "取消"),
     el("button", {
       class: "btn danger",
-      onclick: async () => {
-        try {
-          await api(`/api/experiments/${encodeURIComponent(experimentId)}/control`, {
-            method: "POST", body: JSON.stringify({ action: "reveal_test_results" }),
-          });
-          toast("测试结果已揭示，实验已封存");
-          closeModal();
-          route();
-        } catch (error) { toast(error.message, true); }
-      },
+      onclick: () => sendControlAction(
+        experimentId, { action: "reveal_test_results" }, "测试结果已揭示，实验已封存", { modal: true }),
     }, "揭示并封存"),
   ]);
 }
@@ -864,8 +856,14 @@ function fieldNode(field, inputs) {
       box.checked = (field.default || []).includes(choice);
       return box;
     });
+    // Chip text prefers the Chinese display label; the raw API name stays on
+    // the tooltip for cross-referencing docs/data contracts.
     const groupNode = el("div", { class: "check-group" },
-      ...boxes.map((box, index) => el("label", { class: "check-item" }, box, field.choices[index])));
+      ...boxes.map((box, index) => {
+        const choice = field.choices[index];
+        const label = (field.choice_labels || {})[choice];
+        return el("label", { class: "check-item", title: label ? choice : "" }, box, label || choice);
+      }));
     inputs.set(field.key, { field, getValue: () => boxes.filter((box) => box.checked).map((box) => box.value) });
     wrap.append(groupNode, el("div", { class: "help" }, field.help || ""));
     return wrap;
@@ -1159,13 +1157,7 @@ function controlBar(detail) {
   const control = detail.control || { mode: "manual", request: null };
   const state = detail.state;
   const alive = detail.worker_alive;
-  const send = async (payload, note) => {
-    try {
-      await api(`/api/experiments/${encodeURIComponent(id)}/control`, { method: "POST", body: JSON.stringify(payload) });
-      if (note) toast(note);
-      refreshDetail();  // in-place: a full route() rebuild flashes the page
-    } catch (error) { toast(error.message, true); }
-  };
+  const send = (payload, note) => sendControlAction(id, payload, note);
   const bar = el("div", { class: "panel control-bar section-gap" });
   bar.append(el("span", { class: "mode-note" }, "运行模式："));
   const modeSelect = el("select", {
@@ -1345,13 +1337,7 @@ function directivePanel(detail, session, waiting) {
       "指令会注入系统提示词并记入账本。请勿写入测试期/Held-out 结果或具体日历日期——那会破坏 walk-forward 的样本外有效性。"));
   }
   const buttons = el("div", { class: "control-bar section-gap" });
-  const send = async (payload, note) => {
-    try {
-      await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`, { method: "POST", body: JSON.stringify(payload) });
-      toast(note);
-      refreshDetail();
-    } catch (error) { toast(error.message, true); }
-  };
+  const send = (payload, note) => sendControlAction(detail.experiment_id, payload, note);
   if (session.kind !== "heldout") {
     if (session.kind === "fold" || session.kind === "meta_learning") {
       buttons.append(el("button", {
@@ -1446,6 +1432,19 @@ function gpuAllocationRow(detail, session, send) {
   return wrap;
 }
 
+/* POST one control action, then refresh the detail page in place (a full
+   route() rebuild flashes the page). Shared by every control-sending panel. */
+async function sendControlAction(experimentId, payload, note, { modal = false } = {}) {
+  try {
+    await api(`/api/experiments/${encodeURIComponent(experimentId)}/control`, {
+      method: "POST", body: JSON.stringify(payload),
+    });
+    if (note) toast(note);
+    if (modal) closeModal();
+    refreshDetail();
+  } catch (error) { toast(error.message, true); }
+}
+
 /* Re-fetch the experiment payload and swap both detail panels in place —
    control-state changes update without a page rebuild or scroll jump. */
 async function refreshDetail() {
@@ -1480,14 +1479,7 @@ async function openPromptEditor(detail, session, directive) {
   }
   const editor = el("textarea", { class: "directive prompt-editor", spellcheck: "false" });
   editor.value = text;
-  const send = async (payload, note) => {
-    try {
-      await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`, { method: "POST", body: JSON.stringify(payload) });
-      toast(note);
-      closeModal();
-      refreshDetail();
-    } catch (error) { toast(error.message, true); }
-  };
+  const send = (payload, note) => sendControlAction(detail.experiment_id, payload, note, { modal: true });
   const footer = [el("button", { class: "btn", onclick: closeModal }, "取消")];
   if (existing) {
     footer.push(el("button", {
@@ -1589,16 +1581,8 @@ function askUserPanel(detail, session) {
       || status.session_key !== session.key || !question) return el("span", {});
   const textarea = el("textarea", { class: "directive",
     placeholder: "方向性指引（作为研究者答复注入对话；留空=让 Agent 自行决策）……" });
-  const send = async (reply, message) => {
-    try {
-      await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`, {
-        method: "POST",
-        body: JSON.stringify({ action: "reply_question", session_key: session.key, directive: reply }),
-      });
-      toast(message);
-      refreshDetail();
-    } catch (error) { toast(error.message, true); }
-  };
+  const send = (reply, message) => sendControlAction(
+    detail.experiment_id, { action: "reply_question", session_key: session.key, directive: reply }, message);
   return el("div", { class: "panel section-gap" },
     el("h4", { class: "subsection-title" }, `Agent 提问 #${question.index ?? "?"}（等待不消耗推理预算）`),
     el("div", { class: "ask-user-question" }, String(question.question || "")),
@@ -1619,15 +1603,7 @@ function stepGatePanel(detail, session) {
   const status = (detail.status || {});
   const override = (control.step_gate || {})[session.key];
   const enabled = override === undefined ? control.mode === "step" : Boolean(override);
-  const send = async (payload, message) => {
-    try {
-      await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/control`, {
-        method: "POST", body: JSON.stringify(payload),
-      });
-      toast(message);
-      refreshDetail();  // in-place: full route() rebuild flashes the page
-    } catch (error) { toast(error.message, true); }
-  };
+  const send = (payload, message) => sendControlAction(detail.experiment_id, payload, message);
   const panel = el("div", { class: "panel section-gap" },
     el("h4", { class: "subsection-title" }, "逐 Step 门控"),
     el("div", { class: "hint" },

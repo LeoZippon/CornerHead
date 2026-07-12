@@ -20,12 +20,39 @@ text inputs.
 from __future__ import annotations
 
 import bisect
+import json
+from pathlib import Path
 
 import pandas as pd
 
 from autotrade.environment.snapshot import SnapshotConfig
 from autotrade.pipelines.folds import MIN_REGION_TRADE_DAYS, period_bounds
 from autotrade.pipelines.hitl_state import PARAM_DEFAULTS
+
+_SCHEDULE_REGISTRY = Path(__file__).resolve().parents[3] / "configs" / "tushare_update_schedule.json"
+
+
+def _dataset_labels() -> dict[str, str]:
+    """Chinese display names for dataset chips, derived from the schedule
+    registry's per-interface descriptor (its leading clause) — the registry is
+    already the operational fact source for datasets, so there is no second
+    mapping to maintain. Missing/unreadable registry -> chips fall back to the
+    raw API names (display-only concern)."""
+    try:
+        interfaces = json.loads(_SCHEDULE_REGISTRY.read_text(encoding="utf-8"))["interfaces"]
+    except (OSError, ValueError, KeyError):
+        return {}
+    labels: dict[str, str] = {}
+    for row in interfaces:
+        text = str(row.get("official_update", "")).split("；")[0].split("。")[0]
+        if len(text) > 12:
+            text = text.split("（")[0]
+        if text:
+            labels[str(row.get("dataset", ""))] = text
+    return labels
+
+
+_DATASET_LABELS = _dataset_labels()
 
 SERVER_MANAGED_KEYS = ("experiments_root", "work_root")
 HIDDEN_KEYS = (
@@ -52,6 +79,7 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "experiment_id", "group": "基本与排程", "label": "实验名称（ID）", "type": "string", "required": True,
      "help": "唯一实验标识，仅限字母、数字、下划线和连字符；对应 experiments/<id>/ 目录。"},
     {"key": "fold_period", "group": "基本与排程", "label": "Fold 周期", "type": "choice",
+     "choice_labels": {"week": "周", "month": "月", "quarter": "季度", "year": "年"},
      "choices": ["week", "month", "quarter", "year"],
      "help": "每个 Fold 的验证/测试周期粒度。验证区间取测试区间的前一个同频周期；切换后下方周期选项随之变化。"},
     {"key": "first_test_period", "group": "基本与排程", "label": "首个测试周期（Fold 以测试周期命名）", "type": "period", "required": True,
@@ -99,6 +127,7 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "max_backtests_per_fold", "group": "预算与验收", "label": "单 Fold 回测次数上限", "type": "int",
      "help": "回测独立计时（墙钟回补推理 deadline），该值限制其总次数。"},
     {"key": "nl_failure_policy", "group": "预算与验收", "label": "NL 失败策略", "type": "choice",
+     "choice_labels": {"return_error_with_audit": "返回可审计错误，策略自行降级（推荐）", "fail": "任一 NL 调用失败即终止回测"},
      "choices": ["return_error_with_audit", "fail"],
      "help": "策略内 ctx.nl() 调用失败时：返回带审计的错误结果（默认）或使回测失败。"},
     {"key": "finalize_before_deadline_seconds", "group": "预算与验收", "label": "收尾提示窗口（秒）", "type": "int", "advanced": True,
@@ -138,15 +167,19 @@ _FIELDS: list[dict[str, object]] = [
      "help": "历史分钟线（决策快照窗口 + 回放分钟撮合）；关闭后回放退化为日线粒度。"},
     {"key": "events_datasets", "group": "数据域", "label": "事件数据集子集", "type": "multi", "optional": True,
      "default": [], "advanced": True, "choices": list(SnapshotConfig().events_datasets),
+     "choice_labels": {name: _DATASET_LABELS[name] for name in SnapshotConfig().events_datasets if name in _DATASET_LABELS},
      "help": "只加载所选事件数据集；全不选 = 全部默认数据集。"},
     {"key": "macro_datasets", "group": "数据域", "label": "宏观数据集子集", "type": "multi", "optional": True,
      "default": [], "advanced": True, "choices": list(SnapshotConfig().macro_datasets),
+     "choice_labels": {name: _DATASET_LABELS[name] for name in SnapshotConfig().macro_datasets if name in _DATASET_LABELS},
      "help": "只加载所选宏观数据集；全不选 = 全部默认数据集。"},
     {"key": "text_datasets", "group": "数据域", "label": "文本数据集子集", "type": "multi", "optional": True,
      "default": [], "advanced": True, "choices": list(SnapshotConfig().text_datasets),
+     "choice_labels": {name: _DATASET_LABELS[name] for name in SnapshotConfig().text_datasets if name in _DATASET_LABELS},
      "help": "只加载所选文本数据集；全不选 = 全部默认数据集。"},
     {"key": "fundamental_datasets", "group": "数据域", "label": "财务数据集子集", "type": "multi", "optional": True,
      "default": [], "advanced": True, "choices": list(SnapshotConfig().fundamental_datasets),
+     "choice_labels": {name: _DATASET_LABELS[name] for name in SnapshotConfig().fundamental_datasets if name in _DATASET_LABELS},
      "help": "只加载所选财务事件数据集；全不选 = 全部默认数据集。"},
     # 股票筛选（研究宇宙）：全部条件按决策锚点前的已知信息计算，冻结整个区间；
     # 缩小宇宙可显著减少数据量与回测耗时。默认全部关闭 = 全市场。
@@ -155,6 +188,7 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "screen_boards", "group": "股票筛选", "label": "板块范围", "type": "multi", "optional": True, "default": [],
      "wide": False,  # 4 chips fit half width -> shares the row with 剔除 ST
      "choices": ["main", "gem", "star", "bj"],
+     "choice_labels": {"main": "主板", "gem": "创业板", "star": "科创板", "bj": "北交所"},
      "help": "只保留所选板块（main=主板 gem=创业板 star=科创板 bj=北交所）；全不选 = 全部板块。"},
     {"key": "screen_exclude_new_listed_days", "group": "股票筛选", "label": "剔除新股（上市天数 <）", "type": "int",
      "help": "剔除锚点前 N 天内上市的新股；0 = 不剔除。"},
@@ -211,6 +245,7 @@ _FIELDS: list[dict[str, object]] = [
      "choices": ["deepseek-v4-flash", "deepseek-v4-pro"],
      "help": "语义压缩长会话所用的低成本模型（无 thinking）。"},
     {"key": "reasoning_effort", "group": "模型与上下文", "label": "推理强度", "type": "choice",
+     "choice_labels": {"max": "最高", "xhigh": "极高", "high": "高", "medium": "中", "low": "低"},
      "choices": ["max", "xhigh", "high", "medium", "low"],
      "help": "启用 thinking 时 Agent 与 NL 调用的 DeepSeek 推理强度。"},
     {"key": "no_thinking", "group": "模型与上下文", "label": "禁用 thinking", "type": "bool", "advanced": True,
@@ -230,6 +265,7 @@ _FIELDS: list[dict[str, object]] = [
      "choices": ["tavily", "semantic_scholar"],
      "help": "开放给元学习会话的搜索引擎（普通 Fold 不联网）。"},
     {"key": "meta_learning_network", "group": "元学习联网", "label": "元学习 Docker 网络", "type": "choice",
+     "choice_labels": {"bridge": "桥接网络（受控代理）", "host": "宿主网络", "none": "禁用联网"},
      "choices": ["bridge", "host", "none"],
      "help": "仅元学习会话的容器网络模式；bridge 直连公网，none 完全断网。"},
     {"key": "disable_meta_sandbox_rebuild", "group": "元学习联网", "label": "禁用派生镜像构建", "type": "bool", "advanced": True,

@@ -30,11 +30,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable, Mapping
+from typing import Callable
 
 from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
-from autotrade.environment.snapshot import SnapshotConfig
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools.base import SessionInterrupt
 
