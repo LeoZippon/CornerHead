@@ -361,6 +361,10 @@ class NLBudgetTest(unittest.TestCase):
             self.assertNotEqual(first["state"], "budget_exhausted")
             self.assertEqual(second["state"], "budget_exhausted")
             self.assertEqual(second["status"], "error")
+            # Failed calls carry explanatory feedback (cause + degrade path),
+            # not just a bare error string.
+            self.assertIn("配额已用完", second["feedback"])
+            self.assertIn("退化路径", first["feedback"])  # proxy=None -> failed_with_policy guidance
 
 
 class CompanyContextStoreTest(unittest.TestCase):

@@ -1,3 +1,11 @@
+2026-07-12 四项跟进：筛选布局 / NL 失败反馈 / 数据域过滤 / ask_user 核查（feat/step-tree-rollback）
+
+- **ask_user 核查（lzp-testauto trace 实证）**：接线全部正确——worker 运行最新代码（code_version=1ee3e8c），首次 llm_call 的工具表已含 ask_user，step 模式钩子在位。未提问的原因：①回测执行中 Agent 结构上无法调用任何工具（backtest 同步阻塞，属设计）；②该 run 至今只跑了探针（replay_window=5，其一失败），尚无成功完整验证 → step 门控还没到触发点；③ask_user 是 Agent 自主选择，模型偏保守。已在 Fold 例程加一条轻量指引（真正的方向分叉→附分析建议提问一次；unattended 不再问），不强制。注意：运行中的 lzp-testauto worker 用的是旧提示词，重启后生效。
+- **NL 失败反馈**：失败的 nl() 返回解释性 `feedback`（原因+退化建议，按 state 区分：配额耗尽/未配置代理不要重试，超时/偶发失败可后续 tick 重试一次），status/state/error 保持稳定；提示词与 env 文档同步。
+- **数据域过滤**：创建表单新增「数据域」组——5 个域开关（事件/宏观/文本/财务/分钟，关闭=决策快照与回放槽均不加载，分钟关闭回放退化日线）+ 4 个高级数据集子集多选（全不选=该域全部默认集，未知名称 fail-fast）。build_snapshot_config 统一派生（域关→空集+replay_include_*=False）。
+- **筛选布局**：multi 字段支持 `wide: false`——板块范围（4 chips）改占半行，与「剔除 ST」同排（权衡：两者同属成员资格筛选、语义配对，4 个短 chip 半宽不换行；窄屏本就单列无回退问题）。
+- full suite 648 OK（新增域过滤+NL feedback 断言）；PROMPTS.md 重导出；控制台重启+同步。
+
 2026-07-12 用户裁决落地：P1-6 性能 / P1-7 测试封存 / P1-8 最小化 / P2-3 删回退 + 沙箱清理（feat/step-tree-rollback）
 
 - **P1-6 Timeview 性能**：roll 从整列布尔掩码（每次节点跨越 O(行数)，分钟域 4400 万行）改为 available_at 排序游标 + searchsorted（O(log n)，分片内容与原实现逐行一致）；冻结域空表/schema 探测改读 parquet footer（不再整读 GB 级文件）；`to_cn_timestamps` 加统一 +08:00 快路径（避开 ZoneInfo 逐行 tz_localize，5M 行 32.8s→3.0s，≈11×）；phase_seconds 拆分 `timeview_init`/`timeview_roll`，回放墙钟起点移到构建之前（覆盖完整生命周期）。合成基准：5M 行 roll 701 tick 共 0.06s，可见行数与暴力参考一致。

@@ -93,6 +93,38 @@ class CachingSnapshotProviderGenerationTest(unittest.TestCase):
             self.assertEqual(provider.builds, 2)  # new generation -> rebuild
 
 
+class SnapshotDomainFilterTest(unittest.TestCase):
+    def test_domain_switches_and_dataset_subsets(self):
+        from types import SimpleNamespace
+
+        from autotrade.environment.snapshot import SnapshotConfig
+        from autotrade.pipelines.assembly import build_snapshot_config
+        from autotrade.pipelines.hitl_state import PARAM_DEFAULTS, resolve_options
+
+        base = SnapshotConfig()
+        defaults = SimpleNamespace(**PARAM_DEFAULTS)
+        config = build_snapshot_config(defaults)
+        self.assertEqual(config.events_datasets, base.events_datasets)  # empty subset = full default
+        self.assertTrue(config.include_intraday)
+
+        filtered = SimpleNamespace(**{
+            **PARAM_DEFAULTS,
+            "include_events": False,
+            "include_intraday": False,
+            "macro_datasets": ["cn_gdp", "index_daily"],
+        })
+        config = build_snapshot_config(filtered)
+        self.assertEqual(config.events_datasets, ())          # domain off everywhere
+        self.assertFalse(config.replay_include_events)
+        self.assertFalse(config.include_intraday)
+        self.assertFalse(config.replay_include_minutes)
+        self.assertEqual(config.macro_datasets, ("cn_gdp", "index_daily"))
+        self.assertTrue(config.replay_include_macro)
+
+        with self.assertRaisesRegex(ValueError, "unknown macro_datasets"):
+            build_snapshot_config(SimpleNamespace(**{**PARAM_DEFAULTS, "macro_datasets": ["nope"]}))
+
+
 class ExperimentConfigValidationTest(unittest.TestCase):
     def test_budget_knobs_must_be_positive_finite(self):
         with tempfile.TemporaryDirectory() as tmp:

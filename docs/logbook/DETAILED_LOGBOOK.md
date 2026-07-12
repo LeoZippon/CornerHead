@@ -17088,3 +17088,15 @@ Sandbox cleanup (webui/manager.py): `_remove_sandbox_tree` escalates through `do
 Principles review (user request): the retained guardrails are PIT/host-security/data-integrity necessities (probe redaction, staging containment, key-removal write block, unified substep contract); P1-8 deliberately adds visibility only; P1-7 is the user-ordered product-level isolation; no agent-side restriction was found reducible this pass.
 
 Validation: full suite 647 OK; PROMPTS.md re-exported; docs (environment phase keys, pipeline 5.3 console policy) updated; console restarted + static synced.
+
+
+## 2026-07-12 Follow-ups: screening-row layout, NL failure feedback, data-domain filtering, ask_user verification
+
+Task: four user follow-ups after the rulings batch.
+
+1. ask_user verification (lzp-testauto, run_30752e82506d): worker stamps code_version=1ee3e8c (current); the FIRST llm_call payload contains the ask_user tool; mode=step so the hook is live. No prompt appeared because (a) tool calls are structurally impossible while a backtest replays (synchronous tool), (b) the run has only executed replay_window=5 probes so far (one errored) — no successful formal validation, hence no step-gate hold yet, and (c) ask_user is agent-initiated and the model is conservative. Added one routine bullet nudging a single ask_user at genuine direction forks when attended (unattended -> decide, don't re-ask). Note: the live worker imported the old prompt; restart to pick it up.
+2. NL failure feedback (nl/service.py): `_FAILURE_FEEDBACK` per state (budget_exhausted / failed_with_policy / timeout / failed) with cause + degrade guidance; `failure_feedback()` attached to `_error_result` AND to engine failure records post `to_record()`. status/state/error unchanged for programmatic branching. Prompt nl bullet + environment_design + parameters_reference updated; test asserts feedback on budget-exhausted and no-proxy paths.
+3. Data-domain filtering: PARAM_DEFAULTS gains include_events/macro/text/fundamentals/intraday (True) + events/macro/text/fundamental_datasets subsets (()); `build_snapshot_config` derives: domain off -> empty datasets + replay_include_*=False (+include_intraday/replay_include_minutes for minutes); subset validated against SnapshotConfig defaults (unknown -> ValueError). Creation form gains a 「数据域」 group (5 bools + 4 advanced multi chip fields with choices from SnapshotConfig defaults). Test: defaults passthrough, domain-off, subset, unknown-name rejection.
+4. Screening layout: multi fields accept "wide": false (app.js renders in a normal grid cell instead of field-wide); screen_boards opts in, so 剔除 ST (checkbox) and 板块范围 (4 chips) share one row. Trade-offs considered: semantic pairing (both membership filters) and row savings vs chip wrapping — 4 short chips fit half width; the narrow-screen breakpoint already collapses to one column, so no wrap regression.
+
+Validation: full suite 648 OK; PROMPTS.md re-exported; console restarted + static synced. parameters_reference edits left unstaged (file is mid-restructure in the user's doc pass); environment_design staged via HEAD-anchored blob.

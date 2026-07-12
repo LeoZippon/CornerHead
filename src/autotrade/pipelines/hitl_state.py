@@ -74,6 +74,17 @@ PARAM_DEFAULTS: dict[str, object] = {
     "macro_window_months": None,
     "text_window_months": None,
     "intraday_trade_days": SnapshotConfig().intraday_trade_days,
+    # Data-domain filtering: domain off = excluded from decision snapshots AND
+    # replay slots; empty dataset tuples = the domain's full default set.
+    "include_events": True,
+    "include_macro": True,
+    "include_text": True,
+    "include_fundamentals": True,
+    "include_intraday": True,
+    "events_datasets": (),
+    "macro_datasets": (),
+    "text_datasets": (),
+    "fundamental_datasets": (),
     "screen_exclude_st": False,
     "screen_exclude_new_listed_days": 0,
     "screen_min_circ_mv_yi": None,

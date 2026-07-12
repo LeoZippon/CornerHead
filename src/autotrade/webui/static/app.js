@@ -834,7 +834,9 @@ function fieldGrid(fields, inputs) {
 function fieldNode(field, inputs) {
   const wrap = el("div", { class: "field" });
   if (field.key === "gpu_count") wrap.classList.add("field-wide", "gpu-field");
-  if (field.type === "multi") wrap.classList.add("field-wide");
+  // multi defaults to a full row (long chip lists); "wide": false opts a short
+  // chip group into a normal grid cell so it can share a row (e.g. 板块范围).
+  if (field.type === "multi" && field.wide !== false) wrap.classList.add("field-wide");
   const labelText = field.required ? `${field.label} *` : field.label;
   if (field.type === "bool") {
     const input = el("input", { type: "checkbox" });

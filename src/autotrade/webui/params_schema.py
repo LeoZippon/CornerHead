@@ -23,6 +23,7 @@ import bisect
 
 import pandas as pd
 
+from autotrade.environment.snapshot import SnapshotConfig
 from autotrade.pipelines.folds import MIN_REGION_TRADE_DAYS, period_bounds
 from autotrade.pipelines.hitl_state import PARAM_DEFAULTS
 
@@ -123,11 +124,36 @@ _FIELDS: list[dict[str, object]] = [
      "help": "文本域单独窗口；留空回退基础窗口。"},
     {"key": "intraday_trade_days", "group": "数据窗口", "label": "分钟线交易日窗口", "type": "int",
      "help": "决策输入快照包含的最近可见分钟线交易日数。"},
+    # 数据域：域开关同时作用于决策快照与回放槽；数据项子集留空 = 该域全部默认数据集。
+    # 关闭不需要的域/数据项可显著缩短快照构建与回放耗时。
+    {"key": "include_events", "group": "数据域", "label": "事件/资金域", "type": "bool",
+     "help": "两融、资金流、股东、龙虎榜、打板情绪等事件面板；关闭后决策快照与回放均不加载。"},
+    {"key": "include_macro", "group": "数据域", "label": "宏观/指数域", "type": "bool",
+     "help": "宏观指标、利率、宽基指数、行业指数等市场背景；关闭后不加载。"},
+    {"key": "include_text", "group": "数据域", "label": "文本域", "type": "bool",
+     "help": "公告、新闻、研报、互动问答等文本证据；关闭后不加载（ctx.nl 检索也无文本可用）。"},
+    {"key": "include_fundamentals", "group": "数据域", "label": "财务/基本面域", "type": "bool",
+     "help": "财报、业绩预告/快报、分红等 PIT 财务事件；关闭后不加载。"},
+    {"key": "include_intraday", "group": "数据域", "label": "分钟线域", "type": "bool",
+     "help": "历史分钟线（决策快照窗口 + 回放分钟撮合）；关闭后回放退化为日线粒度。"},
+    {"key": "events_datasets", "group": "数据域", "label": "事件数据集子集", "type": "multi", "optional": True,
+     "default": [], "advanced": True, "choices": list(SnapshotConfig().events_datasets),
+     "help": "只加载所选事件数据集；全不选 = 全部默认数据集。"},
+    {"key": "macro_datasets", "group": "数据域", "label": "宏观数据集子集", "type": "multi", "optional": True,
+     "default": [], "advanced": True, "choices": list(SnapshotConfig().macro_datasets),
+     "help": "只加载所选宏观数据集；全不选 = 全部默认数据集。"},
+    {"key": "text_datasets", "group": "数据域", "label": "文本数据集子集", "type": "multi", "optional": True,
+     "default": [], "advanced": True, "choices": list(SnapshotConfig().text_datasets),
+     "help": "只加载所选文本数据集；全不选 = 全部默认数据集。"},
+    {"key": "fundamental_datasets", "group": "数据域", "label": "财务数据集子集", "type": "multi", "optional": True,
+     "default": [], "advanced": True, "choices": list(SnapshotConfig().fundamental_datasets),
+     "help": "只加载所选财务事件数据集；全不选 = 全部默认数据集。"},
     # 股票筛选（研究宇宙）：全部条件按决策锚点前的已知信息计算，冻结整个区间；
     # 缩小宇宙可显著减少数据量与回测耗时。默认全部关闭 = 全市场。
     {"key": "screen_exclude_st", "group": "股票筛选", "label": "剔除 ST 股", "type": "bool",
      "help": "按锚点在市名称剔除含 ST 的股票（含 *ST）。"},
     {"key": "screen_boards", "group": "股票筛选", "label": "板块范围", "type": "multi", "optional": True, "default": [],
+     "wide": False,  # 4 chips fit half width -> shares the row with 剔除 ST
      "choices": ["main", "gem", "star", "bj"],
      "help": "只保留所选板块（main=主板 gem=创业板 star=科创板 bj=北交所）；全不选 = 全部板块。"},
     {"key": "screen_exclude_new_listed_days", "group": "股票筛选", "label": "剔除新股（上市天数 <）", "type": "int",
@@ -224,7 +250,7 @@ _FIELDS: list[dict[str, object]] = [
      "help": "本实验保留的派生沙箱镜像数，更旧的尽力 GC。"},
 ]
 
-_GROUP_ORDER = ("基本与排程", "数据窗口", "股票筛选", "预算与验收", "Broker 账户", "回放执行", "运行控制", "模型与上下文", "元学习联网")
+_GROUP_ORDER = ("基本与排程", "数据窗口", "数据域", "股票筛选", "预算与验收", "Broker 账户", "回放执行", "运行控制", "模型与上下文", "元学习联网")
 
 
 def build_period_options(trading_days: list[str]) -> dict[str, list[str]]:

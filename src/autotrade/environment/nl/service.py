@@ -111,6 +111,8 @@ class StrategyNLService:
         result = engine.run(ts_code=ts_code, prompt=prompt, request_kwargs=kwargs, config=config)
         self.nl_wall_seconds += time.monotonic() - _nl_t0
         record = result.to_record()
+        if record.get("status") == "error":
+            record["feedback"] = failure_feedback(str(record.get("state")), str(record.get("error") or ""))
         self._write_result(request, record)
         _append_jsonl(
             self.log_dir / "search_requests.jsonl",
@@ -183,6 +185,22 @@ def cleanup_nl_rpc_files(requests_host: Path, responses_host: Path) -> None:
         runtime_dir.chmod(0o555)
 
 
+# Failed nl() calls return EXPLANATORY feedback, not a bare error: the strategy
+# (and the Agent debugging it) sees why the call failed and which degrade path
+# to take, while status/state/error stay stable for programmatic branching.
+_FAILURE_FEEDBACK = {
+    "budget_exhausted": "本次回测的 nl() 配额已用完：本条无结论。请降低 NL 调用频率（批量合并问题、缓存已得结论），改用数值信号继续本次回放。",
+    "failed_with_policy": "本运行未配置 NL 代理：nl() 在此环境不可用。请走无文本的退化路径（纯数值信号），不要重试。",
+    "timeout": "本决策 tick 的墙钟剩余不足，NL 请求未执行或未完成：本条无结论。请减少该 tick 的计算量或降低 nl() 频率，稍后 tick 可重试。",
+    "failed": "NL 服务调用失败（见 error 详情）：本条无结论。偶发失败可在后续 tick 重试一次；连续失败请走数值信号退化路径。",
+}
+
+
+def failure_feedback(state: str, error: str) -> str:
+    base = _FAILURE_FEEDBACK.get(str(state), _FAILURE_FEEDBACK["failed"])
+    return f"{base}（state={state}，error={error}）" if error else f"{base}（state={state}）"
+
+
 def _error_result(ts_code: str, *, state: str, error: str) -> dict[str, object]:
     code = str(ts_code or "").strip()
     return {
@@ -193,6 +211,7 @@ def _error_result(ts_code: str, *, state: str, error: str) -> dict[str, object]:
         "state": state,
         "content": "",
         "error": error,
+        "feedback": failure_feedback(state, error),
         "rounds": 0,
         "tool_calls": [],
         "evidence": [],

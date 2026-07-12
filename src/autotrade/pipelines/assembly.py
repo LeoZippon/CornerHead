@@ -152,6 +152,24 @@ def load_dotenv_into_environ(path: Path, *, keys: tuple[str, ...]) -> tuple[str,
 # shared config / proxy / provider builders
 # ---------------------------------------------------------------------------
 def build_snapshot_config(args) -> SnapshotConfig:
+    base = SnapshotConfig()
+
+    def domain_datasets(name: str, include: bool, default: tuple[str, ...]) -> tuple[str, ...]:
+        """Domain off = empty tuple (excluded everywhere); empty selection =
+        the full default set; a subset must name known datasets (fail fast)."""
+        if not include:
+            return ()
+        selected = tuple(getattr(args, name, ()) or ())
+        unknown = sorted(set(selected) - set(default))
+        if unknown:
+            raise ValueError(f"unknown {name}: {unknown}")
+        return selected or default
+
+    include_events = bool(getattr(args, "include_events", True))
+    include_macro = bool(getattr(args, "include_macro", True))
+    include_text = bool(getattr(args, "include_text", True))
+    include_fundamentals = bool(getattr(args, "include_fundamentals", True))
+    include_intraday = bool(getattr(args, "include_intraday", True))
     return SnapshotConfig(
         window_months=args.window_months,
         daily_window_months=args.daily_window_months,
@@ -160,6 +178,16 @@ def build_snapshot_config(args) -> SnapshotConfig:
         macro_window_months=args.macro_window_months,
         text_window_months=args.text_window_months,
         intraday_trade_days=args.intraday_trade_days,
+        events_datasets=domain_datasets("events_datasets", include_events, base.events_datasets),
+        macro_datasets=domain_datasets("macro_datasets", include_macro, base.macro_datasets),
+        text_datasets=domain_datasets("text_datasets", include_text, base.text_datasets),
+        fundamental_datasets=domain_datasets("fundamental_datasets", include_fundamentals, base.fundamental_datasets),
+        include_intraday=include_intraday,
+        replay_include_events=include_events,
+        replay_include_macro=include_macro,
+        replay_include_text=include_text,
+        replay_include_fundamentals=include_fundamentals,
+        replay_include_minutes=include_intraday,
         screen_exclude_st=bool(getattr(args, "screen_exclude_st", False)),
         screen_exclude_new_listed_days=int(getattr(args, "screen_exclude_new_listed_days", 0) or 0),
         screen_min_circ_mv_yi=getattr(args, "screen_min_circ_mv_yi", None),
