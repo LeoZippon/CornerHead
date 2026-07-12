@@ -1,3 +1,10 @@
+2026-07-13 客户端内文件桥（弃用 miniQMT）+ 提醒消息增强 + 模块精简复查（feat/step-tree-rollback）
+
+- **qmt_client_bridge.py（大 QMT 内置 Python 3.6、仅标准库、单脚本）**：一个 5 秒 run_time 回调同时完成 ①实时导出（恒开启：原子快照 + 增量 orders/deals JSONL，m_ 字段归一化为监控端消费的键，去重状态持久化重启不重发）；②订单执行（配置闸门默认关：轮询 inbox 显式订单 payload（schema_version 2），校验白名单/当日/整手/名义上限/交易时段，三重独立闸门 enabled ∧ execute ∧ confirm==payload_id 全真才 passorder，幂等 remark 对照柜台当日委托，结果回写 execute_/error_，payload 归档）。**仓位测算留在决策侧**（本机已有同步账户快照），客户端只收显式 code/side/volume/price——符合部署文档"决策侧生成、执行侧落地"分工。柜台 opType/prType 映射全部配置化（开放问题 #4，实测不符只改配置）。已部署 C:\xquant 并双端语法验证；标准配置骨架已放 config\qmt_bridge.json（待填真实账户 ID）。README 重写为完整导入/配置/payload/交易日测试指南（含建议测试顺序：只读验收→dry_run→最小单实测→幂等重投验证）。
+- **消息增强**：决策提醒全部改为多行结构（标题 emoji + 实验/会话/进度 completed/total + 详情行）；监控端成交方向映射兼容 xtquant(23/24)、客户端内(m_nOffsetFlag 0/1/48/49)与 BUY/SELL 三种编码。
+- **精简复查（miniQMT/飞书/连通模块）**：删除 qmt_realtime_export.py（xtquant 方案废弃，远端副本一并清除）与 qmt_readonly_bridge.py（被新桥只读默认态完全吸收）；全仓库引用清扫（monitor docstring、deployment 文档 4 处）；notify/live 模块职责单一（feishu=发送、qmt_monitor=同步+去重+格式化、脚本仅是薄壳），未见冗余。
+- full suite 656 OK；deployment 文档 §2/§6 对齐新架构（随用户在途文档批次提交）。
+
 2026-07-12 强制终止反馈 + 飞书决策提醒 + QMT 实时导出/同步/成交通知（feat/step-tree-rollback）
 
 - **强制终止反馈**：SIGKILL 升级后管理端在 status.json 落 `terminated` 终态（新徽标「已强制终止」，纳入可恢复状态）；终止按钮先提示"正在终止（宽限约 10 秒）"，完成后按响应提示优雅退出或强杀（sendControlAction 支持结果函数式提示）。此前 SIGKILL 后状态残留 running、无任何回馈。

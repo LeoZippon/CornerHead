@@ -1,94 +1,91 @@
-# 大 QMT 只读文件桥示例
+# 大 QMT 客户端内文件桥（qmt_client_bridge.py）
 
-`qmt_readonly_bridge.py` 是全功能 QMT 客户端内置 Python 3.6 策略示例。它每 15 秒读取配置中的普通/信用账户 `ACCOUNT`、`POSITION`、`ORDER` 和 `DEAL`，再把快照原子写到：
+`qmt_client_bridge.py` 是唯一的客户端内策略脚本（全功能 QMT 内置 Python 3.6，仅标准库，不自建网络通道），在一个 5 秒定时回调里同时承担：
 
-```text
-C:\xquant\outbox\account_snapshot.json
-```
+1. **实时导出（恒开启）**：原子写 `C:\xquant\outbox\account_snapshot.json`（资产/持仓全量快照），并按增量追加 `orders_YYYYMMDD.jsonl`（新委托或状态/成交量变化）与 `deals_YYYYMMDD.jsonl`（新成交，traded_id 去重）；去重与幂等状态持久化在 `C:\xquant\state\bridge_state.json`，客户端重启不重发。
+2. **订单执行（配置闸门，默认关闭）**：轮询 `C:\xquant\inbox` 的信号 payload，校验后经 `passorder` 提交（幂等 remark，重复到达不重复下单），结果写 `outbox\execute_*.json` / `error_*.json`，payload 移入 `archive\`。**仓位测算属于决策侧**（本机持有同步回来的账户快照）；客户端侧只接受显式 code/side/volume/price。
 
-示例没有 `passorder`、`cancel` 或其他写交易状态的调用，不能下单。
+历史 xtquant/miniQMT 方案（qmt_executor.py 会话式执行、qmt_realtime_export.py 导出）已废弃；`C:\xquant` 下的遗留文件仅作归档。
 
-## 1. 准备 Windows 配置
+## 1. 标准配置
 
-从本机上传配置样例和策略源码：
+从本机上传配置样例与策略源码：
 
 ```bash
 ssh Administrator@39.105.46.212 \
-  'powershell -NoProfile -Command "New-Item -ItemType Directory -Force C:\xquant\config,C:\xquant\outbox | Out-Null"'
+  'powershell -NoProfile -Command "New-Item -ItemType Directory -Force C:\xquant\config,C:\xquant\inbox,C:\xquant\outbox,C:\xquant\archive,C:\xquant\state | Out-Null"'
 scp ops/qmt/qmt_bridge_config.example.json \
   Administrator@39.105.46.212:C:/xquant/config/qmt_bridge.json
-scp ops/qmt/qmt_readonly_bridge.py \
-  Administrator@39.105.46.212:C:/xquant/qmt_readonly_bridge.py
+scp ops/qmt/qmt_client_bridge.py \
+  Administrator@39.105.46.212:C:/xquant/qmt_client_bridge.py
 ```
 
-在 Windows 上编辑 `C:\xquant\config\qmt_bridge.json`，把占位符替换为大 QMT 界面显示的真实普通账户和信用账户 ID；没有的账户条目直接删除。账号配置只留在远端，不要提交回仓库。
+在 Windows 上编辑 `C:\xquant\config\qmt_bridge.json`：
+
+- `accounts[0].account_id` 换成大 QMT 界面显示的真实普通账户 ID（当前执行只路由第一个账户；信用账户支持落地前不要添加 CREDIT 条目）。
+- `execution.enabled` 保持 `false` 完成只读验收；交易日测试下单前才改 `true`。
+- `op_type_buy/op_type_sell/order_type/pr_type_limit` 是国金柜台映射（文档开放问题 #4），默认 23/24/1101/11；实测不符时只改配置、不改代码。
+- `max_order_notional` / `max_payload_notional` 是硬风控上限；`trading_windows` 之外的 live payload 一律拒绝。
+
+账号配置只留在远端，不要提交回仓库。
 
 ## 2. 导入大 QMT
 
-1. 通过 RDP 进入大 QMT，保持“行情+交易”登录。
-2. 进入“模型研究”，新建“Python 策略”。
-3. 打开 `C:\xquant\qmt_readonly_bridge.py`，把全文复制到 QMT 策略编辑器。
-4. 编译策略；编译错误必须先解决，不能继续到模型交易。
-5. 进入“模型交易”，选择该策略、主图代码、周期和正确账户。
-6. 运行模式选择“模拟”，再启动策略。此示例本身不含下单函数，但仍统一从模拟模式开始验收。
+1. RDP 进入大 QMT，保持“行情+交易”登录。
+2. “模型研究”→ 新建“Python 策略”，把 `C:\xquant\qmt_client_bridge.py` 全文复制进策略编辑器并编译（编译错误必须先解决）。
+3. “模型交易”：选择该策略、任意主图代码与周期、正确账户；运行模式先选“模拟”启动。
+4. 不要把源码直接复制进 QMT 的内部目录（`.rzrk`、`formulas`、`python`、`bin.x64\Lib`）；文件存在不等于策略已注册编译。
 
-不要把源码直接复制进 QMT 的 `.rzrk`、`formulas`、`python` 或 `bin.x64\Lib` 内部目录；文件出现不等于策略已经被客户端注册和编译。
+## 3. 只读验收（execution.enabled=false）
 
-## 3. 验收
-
-启动后等待约 15 秒，在本机读取快照：
+启动约 10 秒后在本机确认快照与同步链路：
 
 ```bash
-ssh Administrator@39.105.46.212 \
-  'powershell -NoProfile -Command "Get-Content -Raw C:\xquant\outbox\account_snapshot.json"'
+ssh Administrator@39.105.46.212 "type C:\\xquant\\outbox\\account_snapshot.json"
+ops/qmt/qmt_monitor.sh status     # 计算服务器守护：20 秒拉回 data/qmt_live/ 并推送飞书成交/告警
 ```
 
-成功输出必须包含：
+`ok=true` 且 `source="qmt_client_bridge"` 即导出链路就绪；此时 inbox 中的 payload 只会被校验并以 dry_run 结果回写，不会触碰 passorder。
+
+## 4. 信号 payload（schema_version 2）
+
+决策侧生成**显式订单**，先写临时名再原子改名进 inbox（例：`signal_20260713_093000.json`）：
 
 ```json
 {
-  "ok": true,
-  "mode": "read_only",
-  "accounts": []
+  "schema_version": 2,
+  "payload_id": "wfB_q50_agree60_20260713_buy_0930",
+  "strategy_id": "wfB_q50_agree60",
+  "trade_date": "20260713",
+  "execute": false,
+  "confirm": "",
+  "orders": [
+    {"code": "600000.SH", "side": "BUY", "volume": 100, "price": 10.50}
+  ]
 }
 ```
 
-实际 `accounts` 应包含配置的账户以及账户、持仓、委托和成交对象。若 `ok=false`，查看 JSON 中的 `error`，并检查 QMT 日志：
+执行语义：
 
-```text
-C:\国金证券QMT交易端\userdata\log\XtClient_Formula_YYYYMMDD.log
-C:\国金证券QMT交易端\userdata\log\XtClient_FormulaOutput_YYYYMMDD.log
-```
+- 三重独立闸门：配置 `execution.enabled` ∧ payload `execute` ∧ `confirm == payload_id`，全部为真才会 `passorder`；任一为假即 dry_run（校验+回写，不下单）。
+- 校验：schema/白名单 strategy_id/当日 trade_date/SH·SZ 代码/BUY 100 股整手/正数量价/单笔与整包名义金额上限/交易时段。
+- 幂等：每单 remark = `MQ:<payload_id>:<序号或自定义 remark>`；提交前对照柜台当日委托 remark 与本地已处理记录，重复到达不重复下单。同一 payload_id 永远只处理一次。
+- 结果：`outbox\execute_<时间戳>.json`（逐单 submitted/skipped/note）或 `error_<时间戳>.json`（校验失败原因）；原 payload 归档至 `archive\`。
 
-## 4. 边界
+## 5. 交易日测试建议顺序
 
-- 这是只读连通性样例，不是实盘执行器。
-- QMT 返回的是客户端本地交易缓存；提交后的委托/成交不能假定立即可见。
-- 定时回调必须快速返回；禁止阻塞循环、线程、网络服务器和 `sleep`。
-- 后续订单桥必须另行实现输入校验、幂等、双授权、预算/持仓/交易规则重校验、回调去重和重启恢复，不能直接在本示例中加一行 `passorder` 后投入实盘。
+1. 只读验收（第 3 节）通过、飞书群能看到链路告警/恢复。
+2. 投一个 `execute=false` 的 payload → 收到 dry_run 结果回写。
+3. 配置 `enabled=true`，投 `execute=true, confirm=payload_id` 的**单股最小单**（100 股低价股，勿超 `max_order_notional`）→ 确认柜台委托出现、成交后飞书收到成交通知、`deals_*.jsonl` 有记录。
+4. 重复投递同一 payload → 确认被幂等拒绝（"payload already processed"）。
+5. 测试完把 `enabled` 改回 `false`。
 
-## 实时导出 + 同步 + 飞书通知（2026-07-12 起）
+## 6. 计算服务器侧（同步 + 飞书通知）
 
-链路：`qmt_realtime_export.py`（Windows，只读，无网络）→ scp 拉回（计算服务器）→ 飞书成交/告警通知。
-
-Windows 侧（需 QMT 客户端已登录 MiniQMT）：
-
-```powershell
-C:\xquant\Python38\python.exe C:\xquant\qmt_realtime_export.py
-# 开机自启（可选）：
-schtasks /Create /TN xquant_realtime_export /SC ONLOGON `
-  /TR "C:\xquant\Python38\python.exe C:\xquant\qmt_realtime_export.py"
-```
-
-产物（C:\xquant\outbox）：`account_snapshot.json`（原子全量快照）、
-`orders_YYYYMMDD.jsonl`（新委托/状态变化增量）、`deals_YYYYMMDD.jsonl`（新成交增量）。
-多账户需设 `CQ_EXPECTED_ACCOUNT_ID`；去重状态在 `state\realtime_export_seen.json`。
-
-计算服务器侧（.env 需 FEISHU_QMT_APP_ID/APP_SECRET/CHAT_ID + QMT_SSH_DEST）：
+`.env` 需 `FEISHU_QMT_APP_ID/APP_SECRET/CHAT_ID` 与 `QMT_SSH_DEST`：
 
 ```bash
-ops/qmt/qmt_monitor.sh start|stop|status   # 同步到 data/qmt_live/ 并逐成交推送飞书
+ops/qmt/qmt_monitor.sh start|stop|status
 ```
 
-每笔新成交推送一条消息（代码/方向/量价/金额/委托号 + 账户总资产/可用/持仓市值/持仓数）；
-导出端异常（如 MiniQMT 断开）按错误内容去重后推送一次链路告警。
+每笔新成交推送一条群消息（代码/方向/量价/金额/委托号/时间/策略标记 + 账户总资产/可用/持仓市值/持仓数）；导出端异常按错误内容去重推送一次链路告警。同步产物落 `data/qmt_live/`，已通知状态在 `data/qmt_live/.monitor_state.json`。

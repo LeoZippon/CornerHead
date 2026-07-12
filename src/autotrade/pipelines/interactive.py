@@ -582,22 +582,30 @@ def _decision_alert_hook(experiment_id: str):
 
 
 def _decision_alert_text(experiment_id: str, state: str, snapshot: dict[str, object]) -> str | None:
+    """Group-alert body: headline, then experiment/session/progress context so
+    a message is actionable without opening the console first."""
     session = str(snapshot.get("session_key") or "")
+    completed = snapshot.get("completed_sessions")
+    total = snapshot.get("total_sessions")
+    progress = f"进度 {completed}/{total}" if completed is not None and total else ""
+    context = " ｜ ".join(part for part in (f"实验 {experiment_id}", f"会话 {session}" if session else "", progress) if part)
     if state == "waiting_user":
-        return f"【{experiment_id}】会话 {session} 等待批准——请在控制台放行（可附指令）。"
+        return f"⏸️ 会话等待批准\n{context}\n请在控制台放行（可附研究指令）。"
     if state == "waiting_step_user":
         summary = snapshot.get("step_summary") if isinstance(snapshot.get("step_summary"), dict) else {}
         ret = summary.get("total_return")
-        metric = f"，验证收益 {float(ret) * 100:.2f}%" if isinstance(ret, (int, float)) else ""
-        return f"【{experiment_id}】{session} Step {snapshot.get('awaiting_step')} 待批准{metric}——请在控制台批准并可注入 Step 指令。"
+        metric = f"验证收益 {float(ret) * 100:.2f}% ｜ " if isinstance(ret, (int, float)) else ""
+        return (f"🛑 Step {snapshot.get('awaiting_step')} 待批准\n{context}\n"
+                f"{metric}请在控制台批准，可注入 Step 指令。")
     if state == "waiting_user_reply":
         question = snapshot.get("awaiting_question") if isinstance(snapshot.get("awaiting_question"), dict) else {}
         body = str(question.get("question") or "")
         if len(body) > 300:
             body = body[:300] + "……"
-        return f"【{experiment_id}】{session} Agent 提问 #{question.get('index')}：{body}\n请在控制台答复（留空=由 Agent 自行决策）。"
+        return (f"❓ Agent 提问 #{question.get('index')}\n{context}\n{body}\n"
+                f"请在控制台答复（留空=由 Agent 自行决策）。")
     if state == "failed":
-        return f"【{experiment_id}】实验失败：{snapshot.get('error')}"
+        return f"❌ 实验失败\n{context}\n{snapshot.get('error')}"
     return None
 
 

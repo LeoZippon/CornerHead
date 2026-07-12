@@ -57,9 +57,12 @@ class DecisionAlertTextTest(unittest.TestCase):
         step = _decision_alert_text("exp1", "waiting_step_user", {
             "session_key": "epoch_001/fold_2025Q1", "awaiting_step": 3,
             "step_summary": {"total_return": 0.0123},
+            "completed_sessions": 2, "total_sessions": 9,
         })
         self.assertIn("Step 3 待批准", step)
         self.assertIn("1.23%", step)
+        self.assertIn("实验 exp1", step)
+        self.assertIn("进度 2/9", step)
         question = _decision_alert_text("exp1", "waiting_user_reply", {
             "session_key": "s", "awaiting_question": {"index": 2, "question": "方案A还是B？"},
         })

@@ -1,6 +1,6 @@
 """QMT live-state sync + per-fill Feishu notifications (Linux decision host).
 
-Pulls the realtime exporter's outbox files (see ops/qmt/qmt_realtime_export.py)
+Pulls the in-client bridge's outbox files (see ops/qmt/qmt_client_bridge.py)
 over scp from the QMT Windows node into ``data/qmt_live/`` and sends one group
 message per NEW fill, with the latest account snapshot attached. The Windows
 side stays network-free; credentials stay in this host's .env.
@@ -31,7 +31,12 @@ def format_deal_message(deal: dict, snapshot: dict | None) -> str:
     """One fill -> one group message: order details + account status."""
     record = deal.get("record") if isinstance(deal.get("record"), dict) else deal
     side_raw = str(record.get("order_type", ""))
-    side = {"23": "买入", "24": "卖出"}.get(side_raw, side_raw or "成交")
+    # Counter encodings vary by API surface: xtquant order_type 23/24, in-client
+    # m_nOffsetFlag '0'/'1' (or 48/49), plus plain BUY/SELL from payload echoes.
+    side = {
+        "23": "买入", "0": "买入", "48": "买入", "BUY": "买入",
+        "24": "卖出", "1": "卖出", "49": "卖出", "SELL": "卖出",
+    }.get(side_raw.upper(), side_raw or "成交")
     lines = [
         "【实盘成交】"
         f"{record.get('stock_code', '?')} {side} "
