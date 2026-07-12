@@ -8,7 +8,7 @@ const $toastRoot = document.getElementById("toast-root");
 const STATE_LABELS = {
   launching: "启动中", starting: "初始化", running_session: "运行中", waiting_user: "等待批准",
   waiting_step_user: "等待 Step 批准", waiting_user_reply: "等待答复提问", paused: "已暂停",
-  completed: "已完成", stopped: "已停止", failed: "失败", interrupted: "已中断",
+  completed: "已完成", stopped: "已停止", failed: "失败", interrupted: "已中断", terminated: "已强制终止",
   created: "未启动", legacy: "历史实验", unreadable: "不可解析", unknown: "未知",
 };
 const KIND_LABELS = { fold: "Fold", meta_learning: "元学习", heldout: "Held-out" };
@@ -1203,7 +1203,18 @@ function controlBar(detail) {
       onclick: () => {
         showModal("强制终止", el("p", {}, "立即向 worker 发送 SIGTERM。正在运行的 Fold 会被中断且不写入账本（恢复时将重跑该 Fold）。确定？"), [
           el("button", { class: "btn", onclick: closeModal }, "取消"),
-          el("button", { class: "btn danger", onclick: () => { closeModal(); send({ action: "terminate" }, "已终止（超时未退将升级 SIGKILL）"); } }, "强制终止"),
+          el("button", {
+            class: "btn danger",
+            onclick: () => {
+              closeModal();
+              // The request blocks through the 10s SIGTERM grace; say so up
+              // front, then report the actual outcome from the response.
+              toast("正在终止 worker（优雅退出宽限最长约 10 秒）…");
+              send({ action: "terminate" }, (result) => result.escalated
+                ? `已强制终止（SIGKILL，pid ${result.terminated_pid}）`
+                : `worker 已优雅退出（pid ${result.terminated_pid}）`);
+            },
+          }, "强制终止"),
         ]);
       },
     }, "强制终止"));
@@ -1436,10 +1447,10 @@ function gpuAllocationRow(detail, session, send) {
    route() rebuild flashes the page). Shared by every control-sending panel. */
 async function sendControlAction(experimentId, payload, note, { modal = false } = {}) {
   try {
-    await api(`/api/experiments/${encodeURIComponent(experimentId)}/control`, {
+    const result = await api(`/api/experiments/${encodeURIComponent(experimentId)}/control`, {
       method: "POST", body: JSON.stringify(payload),
     });
-    if (note) toast(note);
+    if (note) toast(typeof note === "function" ? note(result) : note);
     if (modal) closeModal();
     refreshDetail();
   } catch (error) { toast(error.message, true); }

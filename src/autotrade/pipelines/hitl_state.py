@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import MISSING, dataclass, field, fields
@@ -380,10 +381,16 @@ class StatusReporter:
     live agent_trace.jsonl without hooking into run_fold internals.
     """
 
-    def __init__(self, path: Path, *, work_root: Path, interval_seconds: float = 3.0) -> None:
+    def __init__(
+        self, path: Path, *, work_root: Path, interval_seconds: float = 3.0, on_state_change=None
+    ) -> None:
         self.path = path
         self.work_root = Path(work_root)
         self.interval_seconds = interval_seconds
+        # Fired (in a daemon thread) with (new_state, status_snapshot) whenever
+        # ``state`` actually changes; used for researcher notifications. Must
+        # be best-effort: a failing callback never breaks the worker.
+        self.on_state_change = on_state_change
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -419,8 +426,23 @@ class StatusReporter:
 
     def set(self, **fields: object) -> None:
         with self._lock:
+            previous = self._data.get("state")
             self._data.update(fields)
             self._write_locked()
+            state = self._data.get("state")
+            changed = "state" in fields and state != previous
+            snapshot = dict(self._data) if changed else None
+        if changed and self.on_state_change is not None:
+            threading.Thread(
+                target=self._notify_state_change, args=(str(state), snapshot),
+                name="hitl-status-notify", daemon=True,
+            ).start()
+
+    def _notify_state_change(self, state: str, snapshot: dict[str, object]) -> None:
+        try:
+            self.on_state_change(state, snapshot)
+        except Exception as exc:  # noqa: BLE001 - notifications never break the worker
+            print(f"status notify failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
     def _write(self) -> None:
         with self._lock:

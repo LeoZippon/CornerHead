@@ -561,6 +561,46 @@ class InteractiveExperimentRunner:
 # ---------------------------------------------------------------------------
 # worker entrypoint
 # ---------------------------------------------------------------------------
+def _decision_alert_hook(experiment_id: str):
+    """Feishu group alerts for states that need the researcher (docs §5.3 HITL).
+
+    Opt-in via FEISHU_APP_ID/APP_SECRET/CHAT_ID in the gitignored .env; absent
+    credentials disable notifications entirely. Fired from the status
+    reporter's transition thread — best-effort by construction."""
+    from autotrade.notify import FeishuBot, load_dotenv_values
+
+    bot = FeishuBot.from_env(load_dotenv_values())
+    if bot is None:
+        return None
+
+    def hook(state: str, snapshot: dict[str, object]) -> None:
+        text = _decision_alert_text(experiment_id, state, snapshot)
+        if text:
+            bot.send_text(text)
+
+    return hook
+
+
+def _decision_alert_text(experiment_id: str, state: str, snapshot: dict[str, object]) -> str | None:
+    session = str(snapshot.get("session_key") or "")
+    if state == "waiting_user":
+        return f"【{experiment_id}】会话 {session} 等待批准——请在控制台放行（可附指令）。"
+    if state == "waiting_step_user":
+        summary = snapshot.get("step_summary") if isinstance(snapshot.get("step_summary"), dict) else {}
+        ret = summary.get("total_return")
+        metric = f"，验证收益 {float(ret) * 100:.2f}%" if isinstance(ret, (int, float)) else ""
+        return f"【{experiment_id}】{session} Step {snapshot.get('awaiting_step')} 待批准{metric}——请在控制台批准并可注入 Step 指令。"
+    if state == "waiting_user_reply":
+        question = snapshot.get("awaiting_question") if isinstance(snapshot.get("awaiting_question"), dict) else {}
+        body = str(question.get("question") or "")
+        if len(body) > 300:
+            body = body[:300] + "……"
+        return f"【{experiment_id}】{session} Agent 提问 #{question.get('index')}：{body}\n请在控制台答复（留空=由 Agent 自行决策）。"
+    if state == "failed":
+        return f"【{experiment_id}】实验失败：{snapshot.get('error')}"
+    return None
+
+
 def run_interactive_worker(experiment_dir: Path, *, repo_root: Path, poll_seconds: float = 2.0) -> dict[str, object]:
     """Load hitl/params.json, rebuild the pipeline, and run the gated loop.
 
@@ -634,7 +674,11 @@ def run_interactive_worker(experiment_dir: Path, *, repo_root: Path, poll_second
                 max_tokens=int(options.analysis_max_tokens),
             )
 
-    status = StatusReporter(hitl_dir / STATUS_NAME, work_root=Path(config.work_root))
+    status = StatusReporter(
+        hitl_dir / STATUS_NAME,
+        work_root=Path(config.work_root),
+        on_state_change=_decision_alert_hook(config.experiment_id),
+    )
     # Long-lived worker: code is imported NOW. The console flags this stamp
     # against the repo's current HEAD so stale workers are visible.
     status.set(code_version=repo_code_version())

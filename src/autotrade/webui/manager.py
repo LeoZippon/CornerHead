@@ -39,7 +39,7 @@ from .registry import ACTIVE_STATES, experiment_state, resolve_experiment_dir
 
 MAX_RUNNING_EXPERIMENTS = 5
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
-_TERMINAL_RESUMABLE_STATES = ("stopped", "failed", "interrupted", "created")
+_TERMINAL_RESUMABLE_STATES = ("stopped", "failed", "interrupted", "terminated", "created")
 
 
 def _remove_sandbox_tree(path: Path) -> bool:
@@ -476,6 +476,12 @@ class ExperimentManager:
             except (ProcessLookupError, PermissionError):
                 os.kill(pid, signal.SIGKILL)
             reclaimed = _reclaim_sandbox_containers(experiment_id)
+            # SIGKILL leaves no worker to stamp a terminal state; without this
+            # the page shows a stale running state until pid-liveness kicks in
+            # and the user cannot tell whether termination worked.
+            status = read_status(hitl_dir / STATUS_NAME)
+            status.update({"state": "terminated", "error": None, "terminated_at": utc_now_iso()})
+            write_json_atomic(hitl_dir / STATUS_NAME, status)
             return {"terminated_pid": pid, "escalated": True, "reclaimed_containers": reclaimed}
         else:
             raise ManagerError(f"unknown control action: {action!r}")

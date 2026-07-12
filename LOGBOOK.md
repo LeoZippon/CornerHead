@@ -1,3 +1,11 @@
+2026-07-12 强制终止反馈 + 飞书决策提醒 + QMT 实时导出/同步/成交通知（feat/step-tree-rollback）
+
+- **强制终止反馈**：SIGKILL 升级后管理端在 status.json 落 `terminated` 终态（新徽标「已强制终止」，纳入可恢复状态）；终止按钮先提示"正在终止（宽限约 10 秒）"，完成后按响应提示优雅退出或强杀（sendControlAction 支持结果函数式提示）。此前 SIGKILL 后状态残留 running、无任何回馈。
+- **飞书决策提醒（bot cli_aad99084d2b9dce9，已实测连通）**：StatusReporter 新增状态迁移钩子（守护线程、best-effort）；交互式 worker 在 waiting_user（会话待批准）、waiting_step_user（Step 门控，附验证收益）、waiting_user_reply（Agent 提问，附原文）、failed（附错误）时向群 oc_8c39…e30c 推送。凭据在 .env（FEISHU_*），缺失自动禁用。已向群发送两条连通性测试消息确认双 bot 可达。
+- **QMT 实时导出+同步+成交通知（bot cli_aad9886d7a381cef）**：实测确认 QMT 节点为用户自建 xtquant/miniQMT 执行体系（C:\xquant\qmt_executor.py，Python 3.8）。新增：① `ops/qmt/qmt_realtime_export.py` 部署至 C:\xquant（沿用其 CQ_* 约定，只读、无网络、敏感字段脱敏），周期原子写 account_snapshot.json + 增量 orders/deals JSONL（traded_id/状态变化去重，重启不重发），MiniQMT 断开写 ok=false 快照退避重连——已远端语法验证 + 12s 实跑（当前客户端未登录，正确产出错误快照）；② B 侧 `qmt_monitor.sh` 守护（scripts/live/qmt_live_monitor.py，核心在 src/autotrade/live/qmt_monitor.py）：20s scp 拉回 data/qmt_live/ + 每笔新成交推送（量价/金额/委托号+账户资产/持仓摘要）+ 链路告警按错误去重推一次——已实测拉回真实错误快照并向群推送告警，守护已启动；③ ssh 身份外置 .env（QMT_SSH_DEST），仓库不存节点身份。
+- 待用户操作：QMT 客户端登录后在 Windows 侧启动 `C:\xquant\Python38\python.exe C:\xquant\qmt_realtime_export.py`（可 schtasks 自启，见 ops/qmt/README.md）；多账户需设 CQ_EXPECTED_ACCOUNT_ID。
+- full suite 656 OK（新增 8 项：飞书 token 缓存/失败吞噬/from_env、监控去重/告警去重/消息格式、StatusReporter 迁移钩子、决策文案）；控制台重启+同步；deployment 文档新增 §6（随用户在途文档批次提交）。
+
 2026-07-12 中文选项标签 + 值守语义澄清 + 冗余复查（feat/step-tree-rollback）
 
 - **中文选项标签**：`choice` 字段补 Chinese `choice_labels`——NL 失败策略（"返回可审计错误，策略自行降级（推荐）"/"任一 NL 调用失败即终止回测"）、Fold 周期、推理力度、元学习联网；模型名保留原文。数据集子集 chips 也评估后采用中文名：标签取自 tushare_update_schedule.json 每接口描述的首个分句（注册表本就是数据集运维事实源，零新增维护面；覆盖 100%，缺失时自动回退 API 名），chip 悬停提示保留 API 名便于对照文档；板块 chips 同步中文（主板/创业板/科创板/北交所）。
@@ -235,7 +243,7 @@
 
 2026-07-08 前端 sshd 指定 key 白名单（feat/hitl-webui 线）
 
-- 核查：前端虽已 key-only，但 `AuthorizedKeysFile` 是各用户自有 dotfile（被入侵账户可自我加 key 持久化）、无 AllowUsers；指定 key 全集 8 条（root 4：hub、windows-jump×2、Mac；admin 2；cornerhead 2 受限 key）。发现 windows-jump 两把无限制 root key 实为 QMT 中继隧道（现持 127.0.0.1:2222）、Mac key 有 root shell——收紧项已提议，用户选择只做核心三层。
+- 核查：前端虽已 key-only，但 `AuthorizedKeysFile` 是各用户自有 dotfile（被入侵账户可自我加 key 持久化）、无 AllowUsers；指定 key 全集 8 条（root 4、admin 2、cornerhead 2 受限 key）。部分既有 root key 权限过宽，Mac key 可获 root shell；收紧项已提议，用户选择只做核心三层。
 - 方案落地：`AuthorizedKeysFile /etc/ssh/authorized_keys.d/%u`（key 指定权收归 root，dotfile 全部失效）+ `AllowUsers root admin cornerhead` + `AuthenticationMethods publickey`；8 条 key 原样迁入；`frontend_setup.sh` 幂等管理（cornerhead 文件重写，root/admin 仅缺失时自举）。
 - 实施带 120s 自动回滚保险丝（reload 后新连接验证成功才解除）。验证：新 root 连接 OK；把 cornerhead 的 home dotfile 移走后重启隧道仍认证成功（证明中央目录唯一生效）；非白名单用户 `sync` 被拒；provisioning 重跑幂等；前端端到端健康。Mac 侧登录待用户自验。
 
@@ -1376,3 +1384,17 @@
 - 前端 root-owned 中央白名单新增研究者 key 指纹 `SHA256:Yrf1ner18N/lR630/a4gVz23lYPKsNYOPYlO7V8ry6c`。
 - 该 key 仅允许本地转发到 `127.0.0.1:8080`，不授予 shell、exec、PTY、agent forwarding 或任意目标转发能力。
 - `frontend_setup.sh` 已同步，确保后续幂等 provisioning 不会移除授权；`sshd -t`、文件属主/权限、精确条目和脚本语法检查通过。
+
+2026-07-12 QMT 节点边界与 SSH 接入文档纠正
+
+- 确认 QMT Windows 节点为 `39.105.46.212`；`22/SSH`、`3389/RDP` 可达，SSH 服务为 OpenSSH for Windows 9.5 且仅接受公钥，本机现有密钥未获授权。
+- 删除历史日志中把无关反向隧道归为 QMT 的错误表述；保留 `121.41.5.179`，其唯一项目职责是当前仍在线的 CornerHead 前端。
+- `deployment_documentation.md` 补充复用本机前端 SSH 身份、Windows 管理员/普通用户 key 路径、ACL、主机指纹固定、本机 `qmt-node` 直连别名和只读验收步骤；仓库不保存远端账号、私钥或口令。
+- Validation: 全仓运行时路径无旧跳板别名或端口依赖；`git diff --check`、Shell 语法和旧关联词检查通过。
+
+2026-07-12 大 QMT 只读文件桥示例
+
+- 实机确认大 QMT 内置 Python 库已安装：`bin.x64\Lib` 与 `site-packages` 均存在，`XtItClient` 正常响应。
+- 新增 `ops/qmt/qmt_readonly_bridge.py`、远端账户配置样例和导入说明；QMT 内部每 15 秒查询 ACCOUNT/POSITION/ORDER/DEAL，原子写入 `C:\xquant\outbox\account_snapshot.json`。
+- 示例不含协议版本号、`passorder`、撤单、线程、阻塞循环或网络服务，只用于模拟模式下验证大 QMT→文件→本机的只读链路。
+- Validation: Python 3.6 语法解析、桩 QMT 对象查询/快照写入、ASCII/GBK 源码兼容检查和 `git diff --check` 通过；未上传远端、未导入 QMT、未执行交易操作。

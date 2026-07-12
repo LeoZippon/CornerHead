@@ -1,0 +1,12 @@
+{
+  "accounts": [
+    {
+      "account_id": "<stock-account-id>",
+      "account_type": "STOCK"
+    },
+    {
+      "account_id": "<credit-account-id>",
+      "account_type": "CREDIT"
+    }
+  ]
+}

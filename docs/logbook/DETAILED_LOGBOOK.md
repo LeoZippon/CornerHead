@@ -17111,3 +17111,57 @@ Task: (1) human-readable Chinese labels for the NL-failure-policy options (user 
 3. Redundancy review over the session diff (5 commits + this batch): removed two pre-existing dead imports in interactive.py (Mapping, SnapshotConfig); deduplicated experiment_detail's triple control.json read; consolidated six duplicated control-POST closures in app.js into sendControlAction (incl. the reveal modal, which now refreshes in place instead of a full route()). AST-based unused-import scan over all touched modules found nothing else; the remaining additions were re-checked against the minimal-guardrail principle and stand as PIT/host-security/data-integrity necessities.
 
 Validation: full suite 648 OK; PROMPTS.md re-exported; console restarted + static synced.
+
+
+## 2026-07-12 QMT node boundary correction and SSH access runbook
+
+Task: remove stale compute-node/QMT associations from the repository and document the verified direct SSH path to the actual QMT Windows node.
+
+Facts and decisions:
+- The QMT node is `39.105.46.212`. Live probes confirmed TCP 22 and 3389 reachable; SSH identifies as `OpenSSH_for_Windows_9.5`, offers public-key authentication only, and currently presents ED25519 host fingerprint `SHA256:tbYZOSygvTsHNSnqguAANXyVSxEQQSGfUrWHFaq5u24`.
+- All existing non-GitHub local identities were rejected for the two previously assumed Windows usernames. No repository-managed SSH alias or authenticated session to the QMT node exists yet; the actual Windows account must be verified through the cloud console or RDP before authorization.
+- `121.41.5.179` remains the active CornerHead frontend. The live autossh reverse tunnel, cron keepalive, health check, and static sync depend on it, so its deployment and ops references were intentionally retained.
+- The two old log statements that assigned an unrelated reverse listener to QMT were reduced to the security facts that were actually established: some pre-existing root keys were unrestricted and the Mac key had root shell access. Shared Git history was not rewritten.
+
+Documentation:
+- `docs/deployment_documentation.md` now separates the CornerHead frontend from the QMT node and records the QMT address without storing credentials.
+- Added a first-access runbook, then aligned it with the user's decision to reuse the existing frontend ED25519 identity (fingerprint `SHA256:PTtwQxes6zm4ynrGFyc7lIEP1BKfSkVO3cfjRqrmNBE`): verify the server host key out of band, install the public key in the correct Windows OpenSSH file (`administrators_authorized_keys` for administrators or the profile `authorized_keys` for ordinary users), apply the Microsoft-required administrator ACL, pin the host key, configure the direct `qmt-node` alias, and verify hostname/user/QMT path read-only.
+- Existing standby status/reconcile and SCP examples now use `qmt-node`; they remain explicitly outside the currently implemented live-trading path.
+
+Validation:
+- Repository-wide tracked search found no runtime dependency on the removed aliases, listener, or key labels.
+- `git diff --check` passed. No experiment, data-processing job, remote mutation, or live order action was run.
+
+
+## 2026-07-12 Full-QMT read-only file-bridge example
+
+Task: provide a minimal example that can be pasted into the full QMT in-client editor after the user completed the built-in Python-library download.
+
+Live checks:
+- `C:\国金证券QMT交易端\bin.x64\Lib` and `Lib\site-packages` now exist (202 and 232 immediate children respectively); `XtItClient` is running and responsive.
+- With full QMT active and MiniQMT stopped, the legacy external `C:\xquant\qmt_executor.py status` fails with `MiniQMT connect failed: -1`. The full-QMT bridge must therefore run inside `XtItClient`; the Linux host only exchanges files.
+
+Implementation:
+- Added `ops/qmt/qmt_readonly_bridge.py`, an ASCII-only source file marked GBK and limited to Python 3.6 standard-library features. `ContextInfo.run_time()` calls a short callback every 15 seconds; the callback queries ACCOUNT/POSITION/ORDER/DEAL via the QMT-injected `get_trade_detail_data` and atomically replaces `C:\xquant\outbox\account_snapshot.json`.
+- Added `ops/qmt/qmt_bridge_config.example.json`; real account IDs remain only in `C:\xquant\config\qmt_bridge.json` on the Windows node and are not committed.
+- Added `ops/qmt/README.md` with SCP preparation, manual QMT model-research creation/paste/compile, simulated model-trading startup, snapshot acceptance, log locations, and explicit non-trading boundaries.
+- Per user correction, the example carries no schema/protocol version field. It contains no passorder/cancel call, thread, blocking loop, sleep, or network server.
+- Updated deployment documentation to distinguish this manual read-only example from the still-unimplemented production order bridge and live executor.
+
+Validation:
+- Parsed the source with Python 3.6 grammar, loaded it under a stub QMT object, queried all four data types, and verified atomic JSON output (`ok=true`, `mode=read_only`, no version field).
+- Source is ASCII-only and therefore byte-compatible with the QMT editor's GBK source requirement; `git diff --check` passed.
+- Nothing was uploaded to Windows or imported into QMT, and no order, cancellation, account mutation, experiment, or data job was executed.
+
+
+## 2026-07-12 Terminate feedback, Feishu decision alerts, QMT realtime export + fill notifications
+
+Task: (1) confirmable forced termination; (2) Feishu group alerts for every human-decision event across experiments; (3) QMT runtime writes orders/account realtime, syncs back, dedicated bot notifies per fill.
+
+1. Terminate: after SIGKILL escalation the manager stamps status.json state="terminated" (+terminated_at; safe — the worker is dead, no writer conflict); "terminated" joins _TERMINAL_RESUMABLE_STATES and STATE_LABELS (已强制终止). UI: immediate "正在终止（宽限约 10 秒）" toast, then an outcome toast derived from the response (graceful pid exit vs SIGKILL escalation) via sendControlAction's new function-note support. Graceful path already self-stamps "stopped" via the worker's SIGTERM handler.
+2. Decision alerts: `src/autotrade/notify/feishu.py` (stdlib-only FeishuBot: cached tenant token, best-effort send_text that never raises; load_dotenv_values). StatusReporter gains on_state_change (fires in a daemon thread ONLY on actual state transitions). run_interactive_worker wires `_decision_alert_hook` (per-experiment bot from .env FEISHU_*): waiting_user / waiting_step_user (+total_return) / waiting_user_reply (+question, 300-char clamp) / failed (+error). Verified live: both bots' tenant tokens OK; bot 1 lists the target group oc_8c394b39d3463c228cdd743b8dffe30c; two connectivity test messages delivered to the real group. Bot 2 lacks the chat-LIST scope (im:chat:read) but sending works — no action needed since the chat_id is pinned in .env.
+3. QMT: the node runs the user's own xtquant/miniQMT stack (C:\xquant\qmt_executor.py, Python 3.8, CQ_* envs, execute_*.json outbox), NOT the in-client 3.6 runtime — integrated with that reality:
+   - `ops/qmt/qmt_realtime_export.py` deployed to C:\xquant (scp): persistent read-only xtquant session (no order APIs, no network), 10s cycles -> atomic account_snapshot.json (asset/positions/counts, sensitive ids masked) + incremental orders_YYYYMMDD.jsonl (new order or status/traded_volume change) + deals_YYYYMMDD.jsonl (traded_id dedup); seen-state persisted (restart-safe); MiniQMT disconnect -> ok=false snapshot + 30s reconnect backoff. Remote-verified: syntax check via C:\xquant\Python38, 12s live run produced the correct error snapshot (client not logged in).
+   - B side: `src/autotrade/live/qmt_monitor.py` + scripts/live/qmt_live_monitor.py + ops/qmt/qmt_monitor.sh {start|stop|status} (pid .runtime/qmt/monitor.pid, log logs/qmt_live_monitor.log): 20s cycles scp-pull (per-file, missing tolerated) into data/qmt_live/; per NEW fill -> dedicated-bot message (code/side/volume/price/amount/order id/time/strategy remark + account total/cash/market value/position count); exporter errors alert once per distinct error. End-to-end verified against the real node: pulled the genuine error snapshot and delivered the link alert to the group. Daemon started.
+   - Secrets/identity: FEISHU_*/FEISHU_QMT_*/QMT_SSH_DEST all in gitignored .env; the monitor refuses to run without them; no node identity in repo code (deployment-doc contract).
+Validation: full suite 656 OK (8 new tests across notify/monitor/status hook/alert text); console redeployed; ops/qmt README + deployment doc §6 written (doc rides the user's in-flight doc pass, unstaged).
