@@ -1,3 +1,9 @@
+2026-07-13 数据 generation 失败封锁与刷新合同修复（fix/auction-pit-performance）
+
+- `.raw_generation.json` 升级为兼容旧格式的 v2 状态机：mutating job 先标 updating，失败为 dirty，只有同 job/区间/命令可精确恢复；Snapshot/cache 对非 committed fail-closed。下载子进程继承 flock，runner 被杀后不再失锁继续写。
+- revision sentinel 不再推进 generation；08:50 job 补抓 kpl_concept_cons，并新增“刷新映射必须由对应 job 实际下载”的漂移测试；02:30 text audit 使用保守截止日，避免在 08:55 回补前固定报红。
+- 数据源、Snapshot 与刷新节点定向测试 102 OK；JSON 与 diff check 通过。未运行真实数据更新。
+
 2026-07-13 修复 Meta ask_user 公开入口透传（fix/auction-pit-performance）
 
 - ExperimentPipeline.run_meta_learning 现在把 user_question_hook 原样传入内部 Meta 会话；此前内部接线完整，但公开 wrapper 漏参，交互模式会错误退化为 unattended。

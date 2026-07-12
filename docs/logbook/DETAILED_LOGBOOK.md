@@ -17205,3 +17205,20 @@ Implementation:
 Validation:
 - /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_e2e.PipelineEndToEndTest.test_meta_learning_public_entry_forwards_user_question_hook: 1 OK.
 - No Docker sandbox, experiment, data update, LLM call, or external mutation was run.
+
+
+## 2026-07-13 Data-generation failure fencing and refresh-contract repair
+
+Task: close the high-severity partial-update/cache ambiguity without introducing a full immutable transaction lake.
+
+Implementation:
+- `.raw_generation.json` now supports schema v2 states. A mutating cron job publishes `updating` before its first child command, `dirty` after any non-zero result, and a new `committed` generation only after the complete command sequence succeeds. Legacy records without `state` remain committed.
+- A dirty/updating lake can only be recovered by the same job, date range, and command hash. SnapshotBuilder and CachingSnapshotProvider fail closed through the shared generation reader; an unrelated successful job cannot bless partial data.
+- Data child processes inherit the runner's flock fd through `pass_fds`, so killing the runner no longer releases the write lock while a child keeps mutating files.
+- Removed the read-only revision sentinel from mutating operations. Added kpl_concept_cons to the real 08:50 board backfill and a drift test requiring every non-evening dataset override to appear in the mapped job's `--datasets` arguments.
+- The 02:30 full audit now checks short-text sources through a one-day-earlier conservative cutoff, matching their 08:55 next-morning backfill instead of producing a permanent expected error.
+
+Validation:
+- `python -m unittest tests.unit.test_data_sources_tushare.TuShareDownloadUpdateGuardsTest tests.unit.test_snapshot_builder.SnapshotBuilderTest tests.unit.test_refresh_nodes`: 102 OK.
+- Schedule JSON parsing and `git diff --check` passed.
+- No production cron installation, data mutation, experiment, Docker sandbox, or external API call was run.

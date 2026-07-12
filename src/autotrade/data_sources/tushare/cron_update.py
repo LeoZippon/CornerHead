@@ -27,7 +27,10 @@ DISPATCH_LOG_PATH = Path("logs/tushare_cron_dispatch.log")
 DEFAULT_LOCK_WAIT_SECONDS = 900
 # Job operations that mutate the raw/PIT lake and therefore publish a new
 # generation on success; audit-only jobs must not churn snapshot cache keys.
-MUTATING_OPERATIONS = {"update", "download_tier", "download_event_flow", "pit_event_pipeline", "revision_sentinel"}
+MUTATING_OPERATIONS = {"update", "download_tier", "download_event_flow", "pit_event_pipeline"}
+GENERATION_SCHEMA_VERSION = 2
+GENERATION_COMMITTED = "committed"
+GENERATION_IN_PROGRESS = {"updating", "dirty"}
 
 
 @dataclass
@@ -134,6 +137,10 @@ def build_context(args: argparse.Namespace) -> RunContext:
 def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
     raw_dir = ctx.config.get("default_raw_dir", "data/raw")
     event_flow_end_date = resolve_event_flow_audit_end_date(ctx, raw_dir)
+    text_end_date = (
+        datetime.strptime(ctx.end_date, "%Y%m%d").date()
+        - timedelta(days=int(ctx.job.get("text_end_extra_offset_days", 0)))
+    ).strftime("%Y%m%d")
     return [
         [
             ctx.python,
@@ -219,7 +226,7 @@ def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
             "--text-start-date",
             ctx.start_date,
             "--text-end-date",
-            ctx.end_date,
+            text_end_date,
             "--raw-dir",
             raw_dir,
         ],
@@ -447,17 +454,91 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def write_raw_generation(raw_dir: Path) -> None:
-    """Publish a new raw-lake generation after a fully-successful mutation run,
-    while still holding the exclusive tushare_update flock. Snapshot builds key
-    caches/manifests on generation_id and fail if it changes mid-build."""
+def _read_raw_generation_file(raw_dir: Path) -> dict:
+    path = raw_dir / ".raw_generation.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid raw generation record: {path}: {exc}") from exc
+
+
+def _write_raw_generation_file(raw_dir: Path, payload: dict) -> None:
     raw_dir.mkdir(parents=True, exist_ok=True)
     path = raw_dir / ".raw_generation.json"
-    payload = {"generation_id": uuid.uuid4().hex, "completed_at": utc_now()}
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
-    print(f"raw generation {payload['generation_id']} published at {path}")
+
+
+def write_raw_generation(raw_dir: Path, *, transaction: dict | None = None) -> dict:
+    """Publish a committed generation after one fully-successful mutating job."""
+    payload = {
+        "schema_version": GENERATION_SCHEMA_VERSION,
+        "state": GENERATION_COMMITTED,
+        "generation_id": uuid.uuid4().hex,
+        "completed_at": utc_now(),
+    }
+    if transaction:
+        payload["transaction"] = dict(transaction)
+    _write_raw_generation_file(raw_dir, payload)
+    print(f"raw generation {payload['generation_id']} published at {raw_dir / '.raw_generation.json'}")
+    return payload
+
+
+def begin_raw_generation_update(raw_dir: Path, transaction: dict) -> dict:
+    """Mark the lake unavailable before the first child process can mutate it.
+
+    A dirty/updating transaction may only be recovered by an exact rerun of the
+    same job window and command. An unrelated successful job must never bless a
+    partially-updated lake left by an earlier failure.
+    """
+    previous = _read_raw_generation_file(raw_dir)
+    previous_state = str(previous.get("state", GENERATION_COMMITTED))
+    previous_transaction = previous.get("transaction") or {}
+    identity_keys = ("job", "start_date", "end_date", "command_hash")
+    if previous_state in GENERATION_IN_PROGRESS and any(
+        str(previous_transaction.get(key, "")) != str(transaction.get(key, ""))
+        for key in identity_keys
+    ):
+        failed_job = str(previous_transaction.get("job", "unknown"))
+        raise RuntimeError(
+            "raw lake has an unfinished mutation; rerun the original job before any other mutation: "
+            f"job={failed_job} state={previous_state}"
+        )
+    recovering = previous_state in GENERATION_IN_PROGRESS
+    transaction = dict(transaction)
+    transaction["transaction_id"] = str(
+        previous_transaction.get("transaction_id") if recovering else uuid.uuid4().hex
+    )
+    transaction["started_at"] = str(
+        previous_transaction.get("started_at") if recovering else utc_now()
+    )
+    payload = {
+        "schema_version": GENERATION_SCHEMA_VERSION,
+        "state": "updating",
+        "generation_id": str(previous.get("generation_id", "")),
+        "completed_at": str(previous.get("completed_at", "")),
+        "updated_at": utc_now(),
+        "transaction": transaction,
+    }
+    _write_raw_generation_file(raw_dir, payload)
+    return transaction
+
+
+def mark_raw_generation_dirty(raw_dir: Path, transaction: dict, *, error: str) -> None:
+    previous = _read_raw_generation_file(raw_dir)
+    payload = {
+        "schema_version": GENERATION_SCHEMA_VERSION,
+        "state": "dirty",
+        "generation_id": str(previous.get("generation_id", "")),
+        "completed_at": str(previous.get("completed_at", "")),
+        "updated_at": utc_now(),
+        "transaction": dict(transaction),
+        "error": str(error)[:1000],
+    }
+    _write_raw_generation_file(raw_dir, payload)
 
 
 def append_dispatch(message: str) -> None:
@@ -472,7 +553,7 @@ def run_probe(command: list[str], log_handle) -> None:
     subprocess.run(command, cwd=Path.cwd(), stdout=log_handle, stderr=subprocess.STDOUT, check=False)
 
 
-def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path) -> int:
+def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path, *, lock_fd: int | None = None) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = utc_now()
     returncodes: list[int] = []
@@ -487,7 +568,15 @@ def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path) -> in
             src_path = str(ctx.repo_root / "src")
             env["PYTHONPATH"] = src_path if not env.get("PYTHONPATH") else f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
             env["PYTHONUNBUFFERED"] = "1"
-            process = subprocess.run(command, cwd=ctx.repo_root, stdout=log, stderr=subprocess.STDOUT, check=False, env=env)
+            process = subprocess.run(
+                command,
+                cwd=ctx.repo_root,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                check=False,
+                env=env,
+                pass_fds=(lock_fd,) if lock_fd is not None else (),
+            )
             returncodes.append(process.returncode)
             log.write(f"\ncommand_index={index}\nreturncode={process.returncode}\n")
             if process.returncode != 0 and ctx.job.get("fail_fast", True):
@@ -528,6 +617,8 @@ def main() -> int:
         "log_path": str(log_path),
         "timezone": ctx.timezone_name,
     }
+    mutates_lake = ctx.job.get("operation", "update") in MUTATING_OPERATIONS
+    raw_dir = ctx.repo_root / ctx.config.get("default_raw_dir", "data/raw")
     if args.dry_run:
         print(json.dumps({"status": "dry_run", **payload}, ensure_ascii=False, indent=2))
         return 0
@@ -535,7 +626,9 @@ def main() -> int:
     os.chdir(ctx.repo_root)
     state = read_state()
     job_state = state.get(ctx.job_name, {})
-    if should_skip_completed(ctx, args, job_state, payload):
+    generation = _read_raw_generation_file(raw_dir) if mutates_lake else {}
+    generation_committed = str(generation.get("state", GENERATION_COMMITTED)) == GENERATION_COMMITTED
+    if should_skip_completed(ctx, args, job_state, payload) and generation_committed:
         message = json.dumps({"status": "skipped_already_ok", **payload}, ensure_ascii=False)
         append_dispatch(f"{utc_now()} {message}")
         print(message)
@@ -568,14 +661,36 @@ def main() -> int:
     try:
         state = read_state()
         job_state = state.get(ctx.job_name, {})
-        if should_skip_completed(ctx, args, job_state, payload):
+        generation = _read_raw_generation_file(raw_dir) if mutates_lake else {}
+        generation_committed = str(generation.get("state", GENERATION_COMMITTED)) == GENERATION_COMMITTED
+        if should_skip_completed(ctx, args, job_state, payload) and generation_committed:
             message = json.dumps({"status": "skipped_already_ok_after_lock", **payload}, ensure_ascii=False)
             append_dispatch(f"{utc_now()} {message}")
             print(message)
             return 0
-        returncode = run_update(ctx, commands, log_path)
-        if returncode == 0 and ctx.job.get("operation", "update") in MUTATING_OPERATIONS:
-            write_raw_generation(ctx.repo_root / ctx.config.get("default_raw_dir", "data/raw"))
+        transaction = None
+        if mutates_lake:
+            transaction = begin_raw_generation_update(
+                raw_dir,
+                {
+                    "job": ctx.job_name,
+                    "start_date": ctx.start_date,
+                    "end_date": ctx.end_date,
+                    "command_hash": payload["command_hash"],
+                    "config_hash": payload["config_hash"],
+                },
+            )
+        try:
+            returncode = run_update(ctx, commands, log_path, lock_fd=lock.fd)
+        except Exception as exc:
+            if transaction is not None:
+                mark_raw_generation_dirty(raw_dir, transaction, error=f"runner_exception: {exc}")
+            raise
+        if transaction is not None:
+            if returncode == 0:
+                write_raw_generation(raw_dir, transaction=transaction)
+            else:
+                mark_raw_generation_dirty(raw_dir, transaction, error=f"job_returncode={returncode}")
         status = "ok" if returncode == 0 else "error"
         state[ctx.job_name] = {
             "status": status,

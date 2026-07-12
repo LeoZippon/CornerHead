@@ -1306,7 +1306,15 @@ def read_raw_generation(raw_dir: str | Path | None) -> dict[str, object] | None:
     path = Path(raw_dir) / ".raw_generation.json"
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    state = str(payload.get("state", "committed"))
+    if state != "committed":
+        transaction = payload.get("transaction") or {}
+        raise RuntimeError(
+            "raw lake generation is not committed: "
+            f"state={state} job={transaction.get('job', 'unknown')} path={path}"
+        )
+    return payload
 
 
 def _partition_overlaps(stem: str, start_day: str, end_day: str) -> bool:

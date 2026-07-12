@@ -52,6 +52,18 @@ def _crontab_job_times() -> dict[str, time]:
 
 
 class RefreshNodeDriftGuardTest(unittest.TestCase):
+    @staticmethod
+    def _job_datasets(job: dict) -> set[str]:
+        args = list(job.get("extra_args", []))
+        if "--datasets" not in args:
+            return set()
+        datasets: list[str] = []
+        for value in args[args.index("--datasets") + 1:]:
+            if str(value).startswith("--"):
+                break
+            datasets.append(str(value))
+        return set(datasets)
+
     def test_every_node_is_a_real_cron_job(self) -> None:
         jobs = _cron_jobs()
         for name in REFRESH_NODES:
@@ -99,6 +111,19 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
             for key, node_names in mapping.items():
                 for name in node_names:
                     self.assertIn(name, REFRESH_NODES, f"{key!r} maps to unknown node {name!r}")
+
+    def test_dataset_refresh_overrides_are_landed_by_their_jobs(self) -> None:
+        jobs = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))["jobs"]
+        for mapping in (EVENT_DATASET_REFRESH_NODES, TEXT_DATASET_REFRESH_NODES):
+            for dataset, node_names in mapping.items():
+                for node_name in node_names:
+                    if node_name == "cn_evening_full":
+                        continue
+                    self.assertIn(
+                        dataset,
+                        self._job_datasets(jobs[node_name]),
+                        f"{dataset!r} claims {node_name!r}, but that job does not download it",
+                    )
 
 
 class VisibilityCutoffTest(unittest.TestCase):

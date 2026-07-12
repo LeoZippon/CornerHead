@@ -762,6 +762,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         raw = self.root / "genraw"
         cron_update.write_raw_generation(raw)
         first = json.loads((raw / ".raw_generation.json").read_text(encoding="utf-8"))
+        self.assertEqual(first["schema_version"], 2)
+        self.assertEqual(first["state"], "committed")
         self.assertTrue(first["generation_id"])
         self.assertTrue(first["completed_at"])
         cron_update.write_raw_generation(raw)
@@ -769,13 +771,40 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertNotEqual(first["generation_id"], second["generation_id"])
         self.assertEqual(list((raw).glob(".raw_generation.json.tmp*")), [])
 
+    def test_raw_generation_failed_mutation_is_dirty_and_only_same_job_can_recover(self):
+        raw = self.root / "genraw"
+        cron_update.write_raw_generation(raw)
+        transaction = {
+            "job": "cn_evening_full",
+            "start_date": "20260601",
+            "end_date": "20260630",
+            "command_hash": "command-a",
+            "config_hash": "config-a",
+        }
+        active = cron_update.begin_raw_generation_update(raw, transaction)
+        cron_update.mark_raw_generation_dirty(raw, active, error="step 2 failed")
+        dirty = json.loads((raw / ".raw_generation.json").read_text(encoding="utf-8"))
+        self.assertEqual(dirty["state"], "dirty")
+        self.assertEqual(dirty["transaction"]["job"], "cn_evening_full")
+
+        with self.assertRaisesRegex(RuntimeError, "rerun the original job"):
+            cron_update.begin_raw_generation_update(raw, {**transaction, "job": "another_job"})
+
+        recovered = cron_update.begin_raw_generation_update(raw, transaction)
+        committed = cron_update.write_raw_generation(raw, transaction=recovered)
+        self.assertEqual(committed["state"], "committed")
+        self.assertNotEqual(committed["generation_id"], dirty["generation_id"])
+
+    def test_revision_sentinel_is_not_a_mutating_operation(self):
+        self.assertNotIn("revision_sentinel", cron_update.MUTATING_OPERATIONS)
+
     def test_cron_full_audit_builds_all_formal_status_commands(self):
         ctx = cron_update.RunContext(
             config={"default_raw_dir": "raw"},
             repo_root=self.root,
             python="/env/python",
             job_name="cn_nightly_full_audit",
-            job={"operation": "audit_full", "event_flow_end_extra_offset_days": 1},
+            job={"operation": "audit_full", "event_flow_end_extra_offset_days": 1, "text_end_extra_offset_days": 1},
             start_date="20200101",
             end_date="20260601",
             timezone_name="Asia/Shanghai",
@@ -794,6 +823,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn("--end-date 20260531", command_text[3])
         self.assertIn("scripts/data/tushare_audit.py board-trading", command_text[4])
         self.assertIn("--include-text", command_text[5])
+        self.assertIn("--text-end-date 20260531", command_text[5])
         self.assertTrue(all("--start-date 20200101" in text for text in command_text))
         self.assertTrue(all("--raw-dir raw" in text for text in command_text))
 

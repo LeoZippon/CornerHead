@@ -337,7 +337,7 @@ TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_sched
 
 回测的逐 tick 数据视图按真实落库任务的约定完成时间放行数据；纯审计任务不落新数据，也不能成为可见性节点。完整门禁语义见 §3.3。
 
-runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw；落库类任务成功后在锁内原子更新 `data/raw/.raw_generation.json` 世代戳（纯审计任务不更新）。快照构造全程持同一把锁的共享模式并把世代写入 manifest 与快照缓存键，构造期间世代变化立即失败。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
+runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw，下载子进程继承同一 flock，避免 runner 异常退出后残留写进程失锁。落库任务在第一条写命令前把 `data/raw/.raw_generation.json` 标为 `updating`，全部成功后发布新的 `committed` 世代；失败为 `dirty`，只能由同 job、区间和命令精确重跑恢复。Snapshot 与缓存拒绝读取非 committed 数据湖。纯审计任务不改变世代。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
 
 当前 crontab 必须通过专用安装器合并更新，并在安装后复核现有任务；不得直接用静态 cron 文件替换当前用户的整份 crontab。
 

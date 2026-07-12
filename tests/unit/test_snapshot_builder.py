@@ -513,6 +513,23 @@ class SnapshotBuilderTest(unittest.TestCase):
                         encoding="utf-8",
                     )
 
+    def test_non_committed_raw_generation_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            build_raw(raw)
+            (raw / ".raw_generation.json").write_text(
+                json.dumps({
+                    "schema_version": 2,
+                    "state": "dirty",
+                    "generation_id": "old",
+                    "transaction": {"job": "cn_evening_full"},
+                }),
+                encoding="utf-8",
+            )
+            builder = SnapshotBuilder(raw, Path(tmp) / "fund_events")
+            with self.assertRaisesRegex(RuntimeError, "generation is not committed"):
+                builder.build_decision_snapshot(DECISION, Path(tmp) / "snap", CONFIG)
+
     def test_replay_slot_builds_corporate_actions_from_dividend_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"

@@ -91,6 +91,7 @@
       "operation": "audit_full",
       "end_date_offset_days": 1,
       "event_flow_end_date_mode": "sse_open_on_or_before",
+      "text_end_extra_offset_days": 1,
       "fail_fast": false,
       "skip_if_already_ok": true
     },
@@ -123,6 +124,7 @@
       "extra_args": [
         "--datasets",
         "kpl_list",
+        "kpl_concept_cons",
         "limit_step",
         "limit_cpt_list",
         "--force"
@@ -265,7 +267,7 @@
     {"dataset": "block_trade", "api": "block_trade", "domain": "event_flow", "frequency": "trade_date", "official_update": "大宗交易；权限表为每日21:00更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=161"},
 
     {"dataset": "kpl_list", "api": "kpl_list", "domain": "board_trading", "frequency": "trade_date", "official_update": "开盘啦榜单数据；官方页面标注次日08:30更新。", "cron_policy": "next_morning_force_refresh_0850", "doc_ref": "https://tushare.pro/document/2?doc_id=347"},
-    {"dataset": "kpl_concept_cons", "api": "kpl_concept_cons", "domain": "board_trading", "frequency": "trade_date", "official_update": "开盘啦概念成分与热度；次日 08:30 前更新。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=351"},
+    {"dataset": "kpl_concept_cons", "api": "kpl_concept_cons", "domain": "board_trading", "frequency": "trade_date", "official_update": "开盘啦概念成分与热度；次日 08:30 前更新。", "cron_policy": "evening_plus_next_day_preopen_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=351"},
     {"dataset": "dc_index", "api": "dc_index", "domain": "board_trading", "frequency": "trade_date", "official_update": "东财概念/行业板块指数日行情；盘后更新。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=362"},
     {"dataset": "dc_member", "api": "dc_member", "domain": "board_trading", "frequency": "trade_date", "official_update": "东财板块成分（分页大表）；盘后更新。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=363"},
     {"dataset": "ths_daily", "api": "ths_daily", "domain": "macro", "frequency": "trade_date", "official_update": "同花顺概念/行业指数日行情；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=260"},
