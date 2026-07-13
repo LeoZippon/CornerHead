@@ -7,6 +7,8 @@ from datetime import date, datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from autotrade.data_sources.tushare import cron_update
+
 from autotrade.environment.data.contracts import (
     DOMAIN_REFRESH_NODES,
     EVENT_DATASET_REFRESH_NODES,
@@ -74,6 +76,40 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
     def test_audit_only_jobs_are_not_nodes(self) -> None:
         for job in AUDIT_ONLY_JOBS:
             self.assertNotIn(job, REFRESH_NODES, f"audit-only job {job!r} must not be a refresh node")
+
+    def test_nightly_audit_does_not_expect_next_morning_event_data(self) -> None:
+        schedule = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))
+        job = schedule["jobs"]["cn_nightly_full_audit"]
+        self.assertEqual(job["end_date_offset_days"], 1)
+        self.assertEqual(job["event_flow_end_extra_offset_days"], 1)
+        self.assertNotIn("event_flow_end_date_mode", job)
+
+    def test_nightly_audit_event_boundary_covers_weekdays_and_weekends(self) -> None:
+        schedule = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))
+        job = schedule["jobs"]["cn_nightly_full_audit"]
+        cases = (
+            # 02:30 launch, generic end_date (D-1), expected event-flow end (D-2).
+            ("Tuesday", "20260713", "20260712"),
+            ("Wednesday", "20260714", "20260713"),
+            ("Saturday", "20260717", "20260716"),
+            ("Sunday", "20260718", "20260717"),
+        )
+        for launch_day, end_date, expected in cases:
+            with self.subTest(launch_day=launch_day):
+                ctx = cron_update.RunContext(
+                    config=schedule,
+                    repo_root=REPO_ROOT,
+                    python="python",
+                    job_name="cn_nightly_full_audit",
+                    job=job,
+                    start_date="20200101",
+                    end_date=end_date,
+                    timezone_name="Asia/Shanghai",
+                )
+                self.assertEqual(
+                    cron_update.resolve_event_flow_audit_end_date(ctx, "data/raw"),
+                    expected,
+                )
 
     def test_node_start_times_match_crontab(self) -> None:
         # Node ``start`` must equal the real installed crontab launch time, so the

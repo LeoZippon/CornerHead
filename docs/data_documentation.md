@@ -329,7 +329,7 @@ TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_sched
 | 任务 | 时间 | 目的 |
 |---|---:|---|
 | `cn_evening_full` | 23:35 | 滚动更新全域 raw 和近期开放窗口 |
-| `cn_nightly_full_audit` | 02:30 | 刷新 6 个顶层状态文件 |
+| `cn_nightly_full_audit` | 02:30 | 刷新 6 个顶层状态文件；事件/资金域统一按最晚发布的次晨两融边界审计 |
 | `cn_nightly_pit_event_build` | 03:35 | 构造并审计财务事件 PIT 可见性索引 `fundamental_events`（状态文件为 `fundamental_events_status.json`，不属于 6 个 raw 状态文件） |
 | `cn_daily_revision_sentinel` | 04:00 | 抽样检查历史分区是否被源端回写 |
 | `cn_preopen_board_backfill_0850` | 08:50 | 回补前一日打板专题关键榜单 |

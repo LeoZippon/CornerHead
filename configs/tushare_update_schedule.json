@@ -93,10 +93,10 @@
       "skip_if_already_ok": true
     },
     "cn_nightly_full_audit": {
-      "description": "Refresh the six formal data-quality status files over the full retained research window after the evening update.",
+      "description": "Refresh the six formal data-quality status files; event/flow quality uses the latest-publishing next-morning margin boundary for the whole domain.",
       "operation": "audit_full",
       "end_date_offset_days": 1,
-      "event_flow_end_date_mode": "sse_open_on_or_before",
+      "event_flow_end_extra_offset_days": 1,
       "text_end_extra_offset_days": 1,
       "fail_fast": false,
       "skip_if_already_ok": true
