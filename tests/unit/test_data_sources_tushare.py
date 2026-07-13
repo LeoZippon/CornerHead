@@ -949,6 +949,59 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertEqual(common.file_sha256(target), original_hash)
 
+    def test_capture_open_auction_polls_on_fixed_start_times(self):
+        self._write_trade_cal("20260713")
+        fields = common.DAILY_SPECS["stk_auction"].fields.split(",")
+        items = [
+            ["000001.SZ", "20260713", 1000.0, 10.0, 10000.0, 9.9, 0.1, 1.0, 100000.0],
+        ]
+        result = common.ApiResult(fields, items, common.stable_hash(items))
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            trade_date="20260713",
+            page_limit=10000,
+            max_wait_seconds=30.0,
+            retry_delay_seconds=10.0,
+            stable_reads=3,
+            min_rows=1,
+            min_previous_day_ratio=0.98,
+            max_previous_day_drop=10,
+            revision_ledger=str(self.root / "revision_events.jsonl"),
+            min_interval_seconds=0.0,
+            timeout_seconds=1.0,
+        )
+
+        class Clock:
+            def __init__(self):
+                self.now = 0.0
+                self.query_starts = []
+                self.sleeps = []
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.sleeps.append(seconds)
+                self.now += seconds
+
+            def query(self, *_args, **_kwargs):
+                self.query_starts.append(self.now)
+                self.now += 3.0
+                return result, 1
+
+        clock = Clock()
+        with (
+            patch.object(download, "load_token", return_value="token"),
+            patch.object(download, "TuShareClient"),
+            patch.object(download, "query_paged", side_effect=clock.query),
+            patch.object(download.time, "monotonic", side_effect=clock.monotonic),
+            patch.object(download.time, "sleep", side_effect=clock.sleep),
+        ):
+            self.assertEqual(download.capture_open_auction(args), 0)
+
+        self.assertEqual(clock.query_starts, [0.0, 10.0, 20.0])
+        self.assertEqual(clock.sleeps, [7.0, 7.0])
+
     def test_auction_capture_rejects_duplicate_business_keys(self):
         row = {
             "ts_code": "000001.SZ",

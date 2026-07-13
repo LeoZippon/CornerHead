@@ -455,7 +455,10 @@ def capture_open_auction(args: argparse.Namespace) -> int:
             ratio=args.min_previous_day_ratio,
             max_previous_day_drop=args.max_previous_day_drop,
         )
-        deadline = time.monotonic() + max(0.0, float(args.max_wait_seconds))
+        polling_started = time.monotonic()
+        deadline = polling_started + max(0.0, float(args.max_wait_seconds))
+        poll_interval = max(0.0, float(args.retry_delay_seconds))
+        next_poll_at = polling_started
         required_stable_reads = max(1, int(args.stable_reads))
         stable_count = 0
         last_fingerprint = ""
@@ -487,14 +490,21 @@ def capture_open_auction(args: argparse.Namespace) -> int:
                 else:
                     stable_count = 0
                     last_fingerprint = ""
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+            remaining = deadline - now
             if remaining <= 0:
                 break
             print(
                 f"stk_auction trade_date={trade_date} not ready; errors={last_errors} "
                 f"stable={stable_count}/{required_stable_reads}; retrying"
             )
-            time.sleep(min(float(args.retry_delay_seconds), remaining))
+            if poll_interval <= 0:
+                continue
+            next_poll_at += poll_interval
+            if next_poll_at <= now:
+                skipped_slots = math.floor((now - next_poll_at) / poll_interval) + 1
+                next_poll_at += skipped_slots * poll_interval
+            time.sleep(min(next_poll_at - now, remaining))
     except Exception as exc:
         print(json.dumps({
             "status": "not_ready_no_mutation",
