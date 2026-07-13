@@ -17411,3 +17411,21 @@ Validation and resources:
 
 Decision:
 - Keep one-day prefetch and the existing single-file Parquet contract. Do not add more read parallelism yet: measured prefetch wait is already negligible, while shared-host I/O pressure and strategy/IPC dominate the remaining replay wall time.
+
+
+## 2026-07-13 Default new experiments to Step mode and live startup monitoring
+
+Task: make `step` the default initial control mode for newly created experiments and monitor the newly launched `lzp-test10` without mutating its live control state.
+
+Implementation and validation:
+- Changed only `PARAM_DEFAULTS["initial_control_mode"]` from `manual` to `step`; the `ControlState` fallback remains `manual` for missing or malformed control files.
+- Updated the parameter reference and added WebUI regressions for both schema exposure and the created `control.json` value.
+- Restarted the WebUI console/tunnel and verified the live `/api/parameter-schema` reports `step`.
+- `tests.unit.test_webui_backend tests.unit.test_interactive_pipeline`: 74 tests passed in 2.615 seconds.
+
+Live observation:
+- `lzp-test10` was created with `initial_control_mode=step`. Its live control was later changed to `auto` at `2026-07-13T11:57:36.964038+00:00`; monitoring did not overwrite that newer runtime choice.
+- Decision Snapshot materialization took about 260.85 seconds and Replay cache materialization about 150.67 seconds, both within the previous observed range.
+- The largest observed Snapshot event temporary stage put worker RSS near 26.7 GiB. During the minute Replay stream, RSS declined from about 14.2 GiB at 886 MiB output to about 9.6 GiB at 1.45 GiB output.
+- The worker entered `epoch_001/meta_learning`; heartbeat remained current and the trace contained no failed/timed-out tool or LLM events at the checkpoint.
+- Host load was roughly 9--12 on 192 logical CPUs with at least 427 GiB available RAM. CPU, memory, and prefetch wait are not limiting this startup, so no higher data-load parallelism is justified.

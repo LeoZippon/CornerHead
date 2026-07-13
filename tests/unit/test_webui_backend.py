@@ -190,6 +190,7 @@ class WebuiBackendTest(unittest.TestCase):
         fields = {field["key"]: field for group in schema["groups"] for field in group["fields"]}
         self.assertEqual(fields["epochs"]["default"], PARAM_DEFAULTS["epochs"])
         self.assertEqual(fields["model"]["default"], PARAM_DEFAULTS["model"])
+        self.assertEqual(fields["initial_control_mode"]["default"], "step")
         self.assertEqual(fields["gpu_count"]["default"], 1)
         self.assertEqual(fields["gpu_count"]["min"], 1)
         self.assertEqual(fields["gpu_count"]["max"], 4)
@@ -366,7 +367,10 @@ class WebuiBackendTest(unittest.TestCase):
         params = json.loads((self.experiments_root / "exp_new" / "hitl" / "params.json").read_text(encoding="utf-8"))
         self.assertEqual(params["epochs"], 2)
         self.assertTrue(params["work_root"].endswith("/.runtime/sandboxes/exp_new"))
-        self.assertTrue((self.experiments_root / "exp_new" / "hitl" / "control.json").exists())
+        control = json.loads(
+            (self.experiments_root / "exp_new" / "hitl" / "control.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(control["mode"], "step")
         # Duplicate and invalid ids are rejected before touching the disk.
         duplicate = self.client.post("/api/experiments", json={"params": params})
         self.assertEqual(duplicate.status_code, 400)

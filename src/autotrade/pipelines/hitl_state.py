@@ -153,7 +153,7 @@ PARAM_DEFAULTS: dict[str, object] = {
     "meta_learning_xray_startup_timeout": 15.0,
     "disable_meta_sandbox_rebuild": False,
     # HITL-only knobs (not run_experiment CLI dests).
-    "initial_control_mode": "manual",
+    "initial_control_mode": "step",
     "gpu_count": SandboxSpec().gpu_count,
     "analysis_enabled": True,
     "analysis_model": "deepseek-v4-pro",
