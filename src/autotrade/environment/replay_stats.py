@@ -142,6 +142,12 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
             "margin_secs_data_missing",
         )
     )
+    unsubmitted_action_reason_counts: dict[str, int] = {}
+    for event in broker.events:
+        if event.get("event_type") != "main_actions_unfilled":
+            continue
+        reason = str(event.get("reason") or "unspecified")
+        unsubmitted_action_reason_counts[reason] = unsubmitted_action_reason_counts.get(reason, 0) + 1
 
     return {
         "initial_cash": initial,
@@ -162,6 +168,8 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "margin_secs_reject_count": margin_secs_reject_count,
         "broker_inventory_reject_count": broker.reject_counts.get("broker_inventory_unavailable", 0),
         "max_holdings_reject_count": broker.reject_counts.get("max_holdings_reached", 0),
+        "unsubmitted_action_count": sum(unsubmitted_action_reason_counts.values()),
+        "unsubmitted_action_reason_counts": dict(sorted(unsubmitted_action_reason_counts.items())),
         "fees_paid": float(broker.fees_paid),
         "stamp_duty_paid": float(broker.stamp_duty_paid),
         "slippage_bps_assumed": broker.profile.slippage_bps,

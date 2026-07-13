@@ -9,7 +9,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autotrade.agent import AgentSessionConfig, AgentSessionRunner
-from autotrade.environment.executor import DockerExecutor, ExecutorError, LocalExecutor, docker_available
+from autotrade.environment.executor import (
+    DockerExecutor,
+    ExecutorError,
+    FormalDockerExecutor,
+    LocalExecutor,
+    docker_available,
+)
 from autotrade.environment.llm.proxy import ScriptedLLM, tool_call, tool_call_response
 from autotrade.environment.runtime import SandboxPaths
 from autotrade.environment.sandbox import (
@@ -1123,6 +1129,38 @@ class MetaLearningSessionTest(unittest.TestCase):
 
 
 class ExecutorTest(unittest.TestCase):
+    def test_local_executor_defaults_python_hash_seed_but_allows_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SandboxPaths(Path(tmp))
+            executor = LocalExecutor(paths)
+            self.assertEqual(executor._base_env(None)["PYTHONHASHSEED"], "0")
+            self.assertEqual(executor._base_env({"PYTHONHASHSEED": "17"})["PYTHONHASHSEED"], "17")
+
+    def test_docker_executor_defaults_python_hash_seed_but_allows_override(self):
+        self.assertEqual(DockerExecutor._merged_env(None)["PYTHONHASHSEED"], "0")
+        self.assertEqual(DockerExecutor._merged_env({"PYTHONHASHSEED": "17"})["PYTHONHASHSEED"], "17")
+
+    def test_formal_executor_defaults_python_hash_seed_but_allows_override(self):
+        self.assertEqual(FormalDockerExecutor._merged_env(None)["PYTHONHASHSEED"], "0")
+        self.assertEqual(FormalDockerExecutor._merged_env({"PYTHONHASHSEED": "17"})["PYTHONHASHSEED"], "17")
+
+    def test_local_executor_hash_order_is_reproducible_across_processes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = SandboxPaths(Path(tmp))
+            paths.workspace.mkdir(parents=True)
+            executor = LocalExecutor(paths)
+            script = (
+                "import os; "
+                "print(os.environ['PYTHONHASHSEED']); "
+                "print(','.join(set(['301603.SZ', '603368.SH', '002035.SZ', '603391.SH'])))"
+            )
+            first = executor.run([executor.python, "-c", script], timeout_seconds=10)
+            second = executor.run([executor.python, "-c", script], timeout_seconds=10)
+            self.assertEqual(first.exit_code, 0)
+            self.assertEqual(second.exit_code, 0)
+            self.assertEqual(first.stdout.splitlines()[0], "0")
+            self.assertEqual(first.stdout, second.stdout)
+
     def test_local_executor_runs_and_maps_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = SandboxPaths(Path(tmp))

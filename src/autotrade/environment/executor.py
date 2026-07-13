@@ -27,6 +27,11 @@ from autotrade.environment.runtime import SandboxPaths
 # slightly-longer backstop in case the container-side guard ever fails.
 _HOST_TIMEOUT_BUFFER_SECONDS = 15.0
 
+# A strategy is started in a fresh Python process for every replay. Pinning the
+# interpreter's string/bytes hash seed keeps unordered containers repeatable
+# across those processes without changing an explicit caller override.
+_DEFAULT_PYTHON_HASH_SEED = "0"
+
 # Where the sandbox image bakes the trusted host-side runtime module (the de-stringed
 # main_ctx driver). Must match ops/docker/sandbox.Dockerfile.
 CONTAINER_RUNTIME_DIR = "/opt/at_runtime"
@@ -88,6 +93,7 @@ class LocalExecutor:
             "PIP_USER": "1",
             "npm_config_prefix": str(self.paths.workspace / ".npm-global"),
             "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONHASHSEED": _DEFAULT_PYTHON_HASH_SEED,
         }
         if "PYTHONPATH" in os.environ:
             base_env["PYTHONPATH"] = os.environ["PYTHONPATH"]
@@ -202,6 +208,7 @@ class DockerExecutor:
             "PIP_USER": "1",
             "npm_config_prefix": "/mnt/agent/workspace/.npm-global",
             "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONHASHSEED": _DEFAULT_PYTHON_HASH_SEED,
             **(env or {}),
         }
 
@@ -346,6 +353,7 @@ class FormalDockerExecutor(DockerExecutor):
             "PIP_USER": "0",
             "npm_config_prefix": "/tmp/formal_home/.npm-global",
             "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONHASHSEED": _DEFAULT_PYTHON_HASH_SEED,
             **(env or {}),
         }
 

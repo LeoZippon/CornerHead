@@ -985,6 +985,99 @@ class FillRealismTest(unittest.TestCase):
         self.assertEqual(float(lookup["1"]["open"]), 11.0)
         self.assertEqual(float(lookup["1"]["close"]), 11.1)
 
+    def test_same_bar_fifo_releases_settled_cash_orders(self):
+        for op_type, account, cash_kwargs in (
+            (optype.STOCK_BUY, "stock", {"stock_initial_cash": 31_000.0, "credit_initial_cash": 1.0}),
+            (optype.CREDIT_BUY, "credit", {"stock_initial_cash": 1.0, "credit_initial_cash": 31_000.0}),
+        ):
+            with self.subTest(account=account):
+                broker = self.make_broker(**cash_kwargs)
+                for index in range(3):
+                    broker.passorder(
+                        op_type, 1101, "", "000001.SZ", prtype.PEER, 0, 1000,
+                        reserve_price=10.0, user_order_id=f"{account}-{index}",
+                    )
+                broker.match_bar("20220104", "09:31", self.bar_group(10.0, 10.1, 9.9, 10.0))
+                self.assertEqual(broker.position_quantity("000001.SZ", account=account), 3000)
+                self.assertEqual([order.status for order in broker.orders], ["filled"] * 3)
+                self.assertTrue(all(order.price == BrokerProfile().slipped_price(10.0, is_buy=True) for order in broker.orders))
+                self.assertGreater(broker.fees_paid, 0.0)
+                self.assertLess(broker.accounts[account].cash, 1000.0)
+
+    def test_same_bar_fifo_first_order_wins_when_batch_exceeds_cash(self):
+        broker = self.make_broker(stock_initial_cash=15_000.0, credit_initial_cash=1.0)
+        for order_id in ("first", "second"):
+            broker.passorder(
+                optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 1000,
+                reserve_price=10.0, user_order_id=order_id,
+            )
+        broker.match_bar("20220104", "09:31", self.bar_group(10.0, 10.1, 9.9, 10.0))
+        self.assertEqual([(o.order_id, o.status) for o in broker.orders], [
+            ("first", "filled"), ("second", "rejected"),
+        ])
+        self.assertEqual(broker.orders[-1].reject_reason, "insufficient_cash")
+
+    def test_same_bar_rejected_predecessor_releases_cash(self):
+        broker = self.make_broker(stock_initial_cash=15_000.0, credit_initial_cash=1.0)
+        broker.passorder(
+            optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 2000,
+            reserve_price=10.0, user_order_id="too-large",
+        )
+        broker.passorder(
+            optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 1000,
+            reserve_price=10.0, user_order_id="fits",
+        )
+        broker.match_bar("20220104", "09:31", self.bar_group(10.0, 10.1, 9.9, 10.0))
+        self.assertEqual([(o.order_id, o.status) for o in broker.orders], [
+            ("too-large", "rejected"), ("fits", "filled"),
+        ])
+
+    def test_earlier_resting_limit_reserves_cash_until_cancelled(self):
+        broker = self.make_broker(stock_initial_cash=15_000.0, credit_initial_cash=1.0)
+        broker.passorder(
+            optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.5, 1000,
+            user_order_id="resting",
+        )
+        broker.passorder(
+            optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 1000,
+            reserve_price=10.0, user_order_id="blocked",
+        )
+        broker.match_bar("20220104", "09:31", self.bar_group(10.0, 10.1, 9.8, 10.0))
+        self.assertEqual([(o.order_id, o.status) for o in broker.orders], [("blocked", "rejected")])
+        self.assertTrue(broker.cancel("resting"))
+        broker.passorder(
+            optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 1000,
+            reserve_price=10.0, user_order_id="released",
+        )
+        broker.match_bar("20220104", "09:32", self.bar_group(10.0, 10.1, 9.8, 10.0))
+        self.assertEqual(broker.orders[-1].status, "filled")
+
+    def test_same_bar_reduce_orders_share_sellable_quantity_in_fifo_order(self):
+        broker = self.make_broker()
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.roll_to_date("20220105")
+        for order_id in ("sell-1", "sell-2"):
+            broker.passorder(
+                optype.STOCK_SELL, 1101, "", "000001.SZ", prtype.PEER, 0, 500,
+                reserve_price=10.5, user_order_id=order_id,
+            )
+        broker.match_bar("20220105", "09:31", self.bar_group(10.5, 10.6, 10.4, 10.5))
+        self.assertEqual(broker.position_quantity("000001.SZ", account="stock"), 0)
+        self.assertEqual([o.status for o in broker.orders[-2:]], ["filled", "filled"])
+
+    def test_same_bar_fin_buy_uses_bail_balance_in_fifo_order(self):
+        broker = self.make_broker(stock_initial_cash=1.0, credit_initial_cash=50_000.0)
+        for order_id in ("fin-1", "fin-2"):
+            broker.passorder(
+                optype.FIN_BUY, 1101, "", "000001.SZ", prtype.PEER, 0, 3000,
+                reserve_price=10.0, user_order_id=order_id,
+            )
+        broker.match_bar("20220104", "09:31", self.bar_group(10.0, 10.1, 9.9, 10.0))
+        self.assertEqual([(o.order_id, o.status) for o in broker.orders], [
+            ("fin-1", "filled"), ("fin-2", "rejected"),
+        ])
+        self.assertEqual(broker.orders[-1].reject_reason, "insufficient_bail_balance")
+
     def test_limit_buy_needs_strict_trade_through(self):
         broker = self.make_broker()
         broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.8, 1000)

@@ -47,6 +47,14 @@ to cancel stale unfilled orders. Cross-minute `ctx.substep` actions are not brok
 orders until `ready_at`, so they do not appear in `pending()` before submission.
 After submission they enter the normal submit-lag / working-order flow.
 
+`ctx.account`, `ctx.positions`, `ctx.broker.stock`, and `ctx.broker.credit` are
+snapshots from tick entry. A same-tick action enters the action queue (submitted
+light actions also appear in `pending()`) but does not rewrite those snapshots. For
+a batch, read the budget once, decrement it locally, and leave room for costs.
+Within one bar the Broker matches FIFO: filled/rejected predecessors release their
+reservation immediately; only earlier orders that remain working keep resources
+frozen.
+
 The Environment calls `main(ctx)` across the WHOLE day on a 24h tick grid (intraday
 bars at 1-minute granularity plus a configurable off-session grid for research/state
 only), so the same loop also drives live trading. Do not submit new broker orders
@@ -71,12 +79,15 @@ def main(ctx):
             return
         daily = pd.read_parquet(Path(str(ctx.asof_dir)) / "daily")  # a domain is a directory
         codes = sorted(daily["ts_code"].astype(str).unique())[:10]  # placeholder signal
-        for code in codes:
+        remaining_budget = float(ctx.broker.stock["available_cash"]) * 0.95
+        for index, code in enumerate(codes):
             price = ctx.price(code)
             if price is not None and not ctx.broker.pending(code):
-                amount = int((ctx.broker.stock["available_cash"] / 10) / price // 100 * 100)
+                target_budget = remaining_budget / (len(codes) - index)
+                amount = int(target_budget / price // 100 * 100)
                 if amount > 0:
                     ctx.broker.buy(code, amount=amount)
+                    remaining_budget -= amount * price
 ```
 
 For finer control, the **optional** recommended cadence (in `candidate.py` /
@@ -128,7 +139,7 @@ then 1-share increments, and size is never inferred from `weight`.
 | `cancel(order_id, reason=None)` | Cancel an order returned by `pending()` |
 | `pending(ts_code=None)` | Submitted, unfilled, cancellable orders; no argument returns all |
 | `position(ts_code, account=None)` | Filled position only; default nets across accounts |
-| `stock` / `credit` / `account` / `positions` | Account and position snapshots; `stock`/`credit` are dict properties (no parentheses); `cash`/`quantity` are filled truth, while available cash/bail/sellable shares reserve submitted pending orders |
+| `stock` / `credit` / `account` / `positions` | Tick-entry account and position snapshots; `stock`/`credit` are dict properties (no parentheses); same-tick actions do not rewrite them, while submitted earlier pending orders are already reserved |
 | `debt_contracts(ts_code=None)` | Open financing/short debt contracts and accrued interest |
 
 Common mistakes: broker actions outside `ctx.substep` are rejected; `short`
@@ -154,7 +165,7 @@ therefore do not appear in `pending()` before submission.
 | `ctx.asof_dir` | Per-tick PIT view: dataset directories such as `daily`, plus the single file `universe.parquet` and `text_library` |
 | `ctx.asof_version` | Changes only when Timeview actually rolls; cache as-of reads by this value |
 | `ctx.snapshot_dir` | Frozen research baseline snapshot; does not roll during replay |
-| `ctx.state_dir` | Managed cross-tick state directory; only available inside `ctx.substep`, with writes staged until `ready_at` |
+| `ctx.state_dir` | Managed cross-tick state directory; only available inside `ctx.substep`; first access copies visible state, then writes stage until `ready_at` |
 | `ctx.model_dir` | Read-only persisted model artifact directory; data that must persist across backtests belongs in `models/` before replay |
 
 For direct text processing, read `pd.read_parquet(Path(str(ctx.asof_dir)) / "text_index")`
@@ -185,7 +196,9 @@ with ctx.substep("cancel_stale_pending", budget_minutes=0.5):
 
 `ctx.state_dir` holds your own cross-tick state, not a position/order ledger;
 it is only available inside `ctx.substep(name, B)`. Reads see the visible state from
-the start of that sub-step; writes are STAGED and become visible only after `B`
+the start of that sub-step; the copy is created lazily on first access, so a
+broker-only sub-step creates no state staging tree. Writes are STAGED and become
+visible only after `B`
 minutes (`ready_at = tick + B`), so write a plan in one tick and read it in a later
 one. Broker actions issued inside `0 < B < 1` light sub-steps are submitted in the
 current decision minute; actions inside `B>=1` sub-steps are delayed to `ready_at`
@@ -201,6 +214,10 @@ inference, and `ctx.nl()` — should run only on the few ticks you choose (e.g.
 pre-open or near close), never every tick, or API cost and wall-clock blow up.
 Load or cache model parameters from `ctx.model_dir` once; do not write or
 retrain into `ctx.model_dir` during replay.
+
+Formal strategy processes use a fixed Python hash seed for repeatable unordered
+container iteration across runs. Still sort candidates explicitly whenever order
+expresses investment priority; reproducibility is not a substitute for intent.
 
 `ctx.nl(ts_code?, prompt="...")` (equivalently `from at_tools import nl`) starts a
 host-side NL Sub Agent. Passing `ts_code` requests single-stock PIT text analysis;

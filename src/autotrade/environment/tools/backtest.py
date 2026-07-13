@@ -585,6 +585,7 @@ class BacktestTool:
                 encoding="utf-8",
             )
 
+        strategy_reject_category_counts = _strategy_reject_category_counts(stats["reject_counts"])
         summary = {
             "tool": self.name,
             "tool_spec": self.spec.to_record(),
@@ -608,8 +609,10 @@ class BacktestTool:
             "nl_outcome_counts": dict(sorted(nl_service.outcome_counts.items())),
             "nl_max_calls_per_backtest": nl_service.max_calls,
             "trade_count": int(stats["trade_count"]),
-            "margin_secs_reject_count": stats["margin_secs_reject_count"],
-            "max_holdings_reject_count": stats["max_holdings_reject_count"],
+            "unsubmitted_action_count": int(stats["unsubmitted_action_count"]),
+            "unsubmitted_action_reason_counts": stats["unsubmitted_action_reason_counts"],
+            "strategy_reject_count": sum(strategy_reject_category_counts.values()),
+            "strategy_reject_category_counts": strategy_reject_category_counts,
             # Lifecycle signal (also on probes): how many positions the HOST
             # had to liquidate at region end because the strategy never exited.
             "host_exit_liquidation_count": stats["host_exit_liquidation_count"],
@@ -665,6 +668,8 @@ class BacktestTool:
             )
         if not probe:
             summary.update({
+                "margin_secs_reject_count": stats["margin_secs_reject_count"],
+                "max_holdings_reject_count": stats["max_holdings_reject_count"],
                 "total_return": stats["total_return"],
                 "long_return": stats["long_return"],
                 "short_return": stats["short_return"],
@@ -916,6 +921,58 @@ def _probe_substep_runtime(value: object) -> dict[str, dict[str, float]]:
     }
 
 
+_STRATEGY_REJECT_REASONS = {
+    "request_contract": frozenset({
+        "invalid_amount",
+        "amount_below_lot_size",
+        "amount_not_lot_aligned",
+        "slo_sell_requires_limit_price",
+        "transfer_same_account",
+        "transfer_amount_not_positive",
+    }),
+    "position_contract": frozenset({
+        "opposite_side_position_open",
+        "max_holdings_reached",
+        "no_position",
+        "no_fin_debt",
+        "financed_shares_require_sell_repay",
+        "t_plus_one_no_sellable",
+        "amount_exceeds_sellable",
+        "amount_below_minimum",
+        "amount_exceeds_fin_debt",
+    }),
+    "account_capacity": frozenset({
+        "insufficient_cash",
+        "insufficient_bail_balance",
+        "fin_quota_exceeded",
+        "slo_quota_exceeded",
+        "single_name_weight_cap",
+        "credit_withdraw_blocked_by_maintenance",
+    }),
+}
+
+
+def _strategy_reject_category_counts(value: object) -> dict[str, int]:
+    """Reduce safe strategy-side rejects without exposing market eligibility."""
+    if not isinstance(value, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for raw_reason, raw_count in value.items():
+        reason = str(raw_reason)
+        category = next(
+            (name for name, reasons in _STRATEGY_REJECT_REASONS.items() if reason in reasons),
+            None,
+        )
+        if category is None and reason.startswith(("unsupported_action:", "side_mismatch:")):
+            category = "request_contract"
+        if category is None:
+            continue
+        count = int(raw_count or 0)
+        if count > 0:
+            counts[category] = counts.get(category, 0) + count
+    return dict(sorted(counts.items()))
+
+
 def _diagnostic_warnings(stats: dict[str, object]) -> list[str]:
     """Return non-blocking strategy feedback without exposing private state."""
     warnings: list[str] = []
@@ -926,6 +983,19 @@ def _diagnostic_warnings(stats: dict[str, object]) -> list[str]:
             f"Backtest called main(ctx) {decisions} times, received {actions} broker actions, and completed "
             "with zero orders. This is not rejected; inspect empty/date-stale plans and exceptions caught "
             "by strategy code before accepting the result."
+        )
+    elif "trade_count" in stats and int(stats.get("trade_count") or 0) == 0:
+        categories = _strategy_reject_category_counts(stats.get("reject_counts"))
+        category_note = (
+            " Safe strategy-side rejection categories: "
+            + ", ".join(f"{name}={count}" for name, count in categories.items())
+            + "."
+            if categories else ""
+        )
+        warnings.append(
+            f"Backtest created {int(stats.get('order_count') or 0)} orders but completed with zero trades."
+            f"{category_note} Inspect order sizing, account/position state, and submission timing before "
+            "accepting the result."
         )
     peak = int(stats.get("agent_peak_rss_bytes") or 0)
     if peak >= _AGENT_MEMORY_ADVISORY_BYTES:

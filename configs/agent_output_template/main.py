@@ -34,6 +34,11 @@ Orders fill a LATER bar (``execution_lag_bars`` ahead), never within the decisio
 bar. Broker actions and ``ctx.state_dir`` access must run inside a positive-budget
 ``ctx.substep``; even light per-tick management should use a small budget such as
 0.5 minutes so runtime and submit latency are accounted uniformly.
+
+Account/position views are snapshots from tick entry: same-tick actions do not
+reduce those views (submitted light actions also appear in ``pending()``). Batch
+orders therefore keep a local remaining budget and leave a fee/slippage buffer.
+Same-bar matching is FIFO; only earlier orders still working reserve resources.
 """
 
 from __future__ import annotations
@@ -67,11 +72,15 @@ def main(ctx) -> None:
     with ctx.substep("main_tick", budget_minutes=0.5):
         if ctx.positions:  # already holding the basket — hold to final-day liquidation
             return
-        for code in _screen(ctx):
+        codes = _screen(ctx)
+        remaining_budget = float(ctx.broker.stock["available_cash"]) * 0.95
+        for index, code in enumerate(codes):
             # Skip a code with a price unavailable this tick or an order still in flight
             # (the fill lands a later bar, so re-submitting before then would double-buy).
             price = ctx.price(code)
             if price is not None and not ctx.broker.pending(code):
-                amount = int((float(ctx.broker.stock["available_cash"]) / TOP_N) / float(price) // 100 * 100)
+                target_budget = remaining_budget / (len(codes) - index)
+                amount = int(target_budget / float(price) // 100 * 100)
                 if amount > 0:
                     ctx.broker.buy(code, amount=amount, reason="equal_amount_basket")
+                    remaining_budget -= amount * float(price)

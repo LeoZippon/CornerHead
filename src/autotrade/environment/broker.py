@@ -951,8 +951,12 @@ class SimBroker:
         )
         bars_by_code = _bars_for_codes(minute_group, relevant_codes)
         self._mark_positions_to_bars(bars_by_code, at_open=True)
-        survivors: list[WorkingOrder] = []
-        for order in self._book:
+        # Move the current queue out before matching. Admission checks reserve
+        # only orders that have already survived in FIFO order: a filled/rejected
+        # predecessor must no longer freeze cash/shares, while a later order must
+        # not reserve resources ahead of the order currently being settled.
+        pending_orders, self._book = self._book, []
+        for order in pending_orders:
             bar = bars_by_code.get(str(order.ts_code))
             if bar is None:
                 # The code printed no bar this minute. A market order keeps working
@@ -963,7 +967,7 @@ class SimBroker:
                 if not order.is_limit:
                     order.is_auction = False
                     order.auction_close = False
-                survivors.append(order)
+                self._book.append(order)
                 continue
             auction_price = self._auction_print(trade_date, order)
             if order.is_auction and auction_price == 0.0:
@@ -972,7 +976,7 @@ class SimBroker:
                 # unmatched order enters continuous trading instead.
                 if not order.auction_close:
                     order.is_auction = False
-                survivors.append(order)
+                self._book.append(order)
                 continue
             if order.action == "short" and not order.uptick_checked:
                 # 融券卖出申报价不得低于最新成交价: checked once, when the order first
@@ -1023,8 +1027,7 @@ class SimBroker:
                     # referencing the auction print). A close-auction order has
                     # no session left to roll into; the day-end sweep voids it.
                     order.is_auction = False
-                survivors.append(order)
-        self._book = survivors
+                self._book.append(order)
         self._mark_positions_to_bars(bars_by_code, at_open=False)
 
     def _auction_print(self, trade_date: object, order: "WorkingOrder") -> float | None:

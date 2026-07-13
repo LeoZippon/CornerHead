@@ -810,6 +810,52 @@ class MainCtxReplayTest(unittest.TestCase):
                 **replay_kwargs,
             )
 
+    def test_broker_only_substeps_do_not_create_state_copies(self) -> None:
+        (self.sandbox.paths.agent_output / "main.py").write_text(
+            '''
+def main(ctx):
+    with ctx.substep("broker_only", budget_minutes=0.5):
+        ctx.broker.pending()
+''',
+            encoding="utf-8",
+        )
+        result = self._run_with(
+            _ohlc_replay(), _dense_minutes(), auction_enabled=False,
+            offsession_tick_minutes=0,
+        )
+        self.assertEqual(result.state_staging_audit, [])
+        self.assertEqual(list((self.sandbox.paths.workspace / ".state_staging").iterdir()), [])
+
+    def test_nested_state_access_restores_outer_path_after_exception(self) -> None:
+        (self.sandbox.paths.agent_output / "main.py").write_text(
+            '''
+from pathlib import Path
+
+def main(ctx):
+    if ctx.cur_date != "20220104" or ctx.cur_time != "09:30":
+        return
+    with ctx.substep("outer", budget_minutes=0.5):
+        outer = Path(str(ctx.state_dir))
+        try:
+            with ctx.substep("inner", budget_minutes=0.5):
+                inner = Path(str(ctx.state_dir))
+                assert inner != outer
+                (inner / "inner.txt").write_text("inner")
+                raise ValueError("expected")
+        except ValueError:
+            pass
+        assert Path(str(ctx.state_dir)) == outer
+        (outer / "outer.txt").write_text("outer")
+''',
+            encoding="utf-8",
+        )
+        result = self._run_with(
+            _ohlc_replay(), _dense_minutes(), auction_enabled=False,
+            offsession_tick_minutes=0,
+        )
+        audit = {(record["substep"], record["state_rel"]) for record in result.state_staging_audit or []}
+        self.assertEqual(audit, {("inner", "inner.txt"), ("outer", "outer.txt")})
+
     def test_auction_entry_fills_at_first_continuous_bar(self) -> None:
         # A result observed at 09:28:36 becomes visible at the conservative 09:29
         # tick and fills at the 09:31 first-continuous bar under next-bar execution.

@@ -113,6 +113,23 @@ def main(ctx):
         (model_dir / "params.json").write_text(json.dumps({"threshold": 0.42}, sort_keys=True), encoding="utf-8")
 '''
 
+PROBE_LIFECYCLE_FEEDBACK_MAIN = '''
+_REJECTED = False
+_UNSUBMITTED = False
+
+
+def main(ctx):
+    global _REJECTED, _UNSUBMITTED
+    if ctx.cur_time == "09:30" and not _REJECTED:
+        _REJECTED = True
+        with ctx.substep("invalid_lot", budget_minutes=0.5):
+            ctx.broker.buy("000001.SZ", amount=1, reason="invalid_lot")
+    if ctx.cur_time == "15:00" and not _UNSUBMITTED:
+        _UNSUBMITTED = True
+        with ctx.substep("too_late", budget_minutes=0.5):
+            ctx.broker.buy("000001.SZ", amount=100, reason="too_late")
+'''
+
 MODEL_SUBPROCESS_WRITE_STRATEGY_MAIN = '''
 import subprocess
 
@@ -1165,6 +1182,72 @@ def main(ctx):
             self.assertEqual(list(result_dir.iterdir()), [])
             self.assertNotIn("nl_tool_dir", summary)
             self.assertNotIn("host_nl_tool_dir", summary)
+
+    def test_probe_returns_only_safe_action_lifecycle_feedback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(
+                PROBE_LIFECYCLE_FEEDBACK_MAIN,
+                encoding="utf-8",
+            )
+
+            summary = BacktestTool(ctx).run(mode="valid", replay_window=2)
+
+            self.assertEqual(summary["order_count"], 1)
+            self.assertEqual(summary["trade_count"], 0)
+            self.assertEqual(summary["unsubmitted_action_count"], 1)
+            self.assertEqual(summary["unsubmitted_action_reason_counts"], {"no_fill_bar_ahead": 1})
+            self.assertEqual(summary["strategy_reject_count"], 1)
+            self.assertEqual(summary["strategy_reject_category_counts"], {"request_contract": 1})
+            self.assertNotIn("margin_secs_reject_count", summary)
+            self.assertNotIn("max_holdings_reject_count", summary)
+            self.assertTrue(any("zero trades" in warning for warning in summary["diagnostic_warnings"]))
+
+            public_manifest = json.loads(ctx.paths.run_manifest.read_text(encoding="utf-8"))
+            public_summary = public_manifest["backtest_summaries"][-1]
+            self.assertEqual(public_summary["unsubmitted_action_count"], 1)
+            self.assertEqual(public_summary["strategy_reject_category_counts"], {"request_contract": 1})
+            self.assertNotIn("margin_secs_reject_count", public_summary)
+            self.assertEqual(list(Path(summary["host_result_path"]).iterdir()), [])
+
+    def test_probe_reject_categories_exclude_market_eligibility(self):
+        from autotrade.environment.tools.backtest import _strategy_reject_category_counts
+
+        categories = _strategy_reject_category_counts({
+            "invalid_amount": 2,
+            "side_mismatch:sell:short": 1,
+            "max_holdings_reached": 3,
+            "insufficient_cash": 4,
+            "margin_secs_not_finable": 5,
+            "limit_up_blocked_buy": 6,
+            "broker_inventory_unavailable": 7,
+            "code_not_in_universe": 8,
+        })
+
+        self.assertEqual(
+            categories,
+            {"account_capacity": 4, "position_contract": 3, "request_contract": 3},
+        )
+
+    def test_full_replay_keeps_raw_reject_statistics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(
+                PROBE_LIFECYCLE_FEEDBACK_MAIN,
+                encoding="utf-8",
+            )
+
+            summary = BacktestTool(ctx).run(mode="valid")
+
+            self.assertIn("margin_secs_reject_count", summary)
+            self.assertIn("max_holdings_reject_count", summary)
+            detailed = json.loads(
+                (Path(summary["result_path"]) / "detailed_return.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(detailed["reject_counts"], {"amount_below_lot_size": 1})
+            rejected = [event for event in detailed["broker_events"] if event["event_type"] == "order_rejected"]
+            self.assertEqual([event["reason"] for event in rejected], ["amount_below_lot_size"])
+            self.assertEqual(detailed["unsubmitted_action_reason_counts"], {"no_fill_bar_ahead": 1})
 
     def test_probe_daily_predicate_matches_full_read_then_filter(self):
         from autotrade.environment.tools.backtest import (

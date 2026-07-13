@@ -12,7 +12,7 @@ This module imports only the Python standard library (no ``autotrade``, ``pandas
 ``broker_core`` import), so it runs unchanged in the dependency-light sandbox image.
 """
 
-import builtins, contextlib, filecmp, importlib.util, json, math, os, re, resource, shutil, sys, time, traceback, types, uuid
+import builtins, contextlib, filecmp, importlib.util, json, math, os, re, resource, shutil, sys, threading, time, traceback, types, uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -824,10 +824,11 @@ class _Broker:
 
 class _Ctx(types.SimpleNamespace):
     """main(ctx) view. ``state_dir`` is available only inside ctx.substep(), where
-    it resolves to a hidden staging directory seeded from the visible state.
+    its first access resolves to a hidden staging directory seeded from visible state.
     Writing via ctx.state_dir therefore stages a block's output regardless of the
     write mechanism (json, parquet, native), and the host merges it into the
-    visible directory only once the declared duration has elapsed."""
+    visible directory only once the declared duration has elapsed. Broker-only
+    blocks never pay for a directory copy."""
 
     @property
     def state_dir(self):
@@ -838,7 +839,7 @@ class _Ctx(types.SimpleNamespace):
                 "wrap state reads/writes in a positive-budget substep so visibility latency "
                 "and wall time are accounted consistently"
             )
-        return holder["active"]
+        return holder["active"]()
 
 
 def _safe_name(text):
@@ -1004,44 +1005,54 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir, staging_root):
         prev = broker._cur_substep
         prev_active = state_holder["active"]
         prev_active_roots = tuple(_STATE_GUARD.get("active") or ())
-        # ctx.state_dir resolves to this staging dir inside the block. Seed it with a
-        # copy of the current visible state so reads see the old visible value (the
-        # contract: reads always see the visible directory); writes land here and the
-        # host merges them into the visible state dir once ready_at = this tick + B.
         start = time.monotonic()
         staging_subdir = os.path.join(staging_root, tick_key, _safe_name(step_name))
         visible_dir = state_holder["visible"]
-        with _internal_state_access():
-            os.makedirs(staging_subdir, exist_ok=True)
-            _chmod_dirs_for_host_cleanup(staging_subdir, staging_root)
-            if visible_dir and os.path.isdir(visible_dir):
-                shutil.copytree(visible_dir, staging_subdir, dirs_exist_ok=True)
-                _chmod_dirs_for_host_cleanup(staging_subdir, staging_root)
-        _STATE_GUARD["active"] = prev_active_roots + _path_aliases(staging_subdir)
-        state_holder["active"] = staging_subdir
+        state_seeded = {"value": False}
+        state_seed_lock = threading.Lock()
+
+        def resolve_state_dir():
+            if not state_seeded["value"]:
+                with state_seed_lock:
+                    if not state_seeded["value"]:
+                        # Seed only when the strategy actually asks for state. Reads
+                        # see the old visible value; writes land in the block-local
+                        # copy and merge at ready_at = tick + B.
+                        with _internal_state_access():
+                            os.makedirs(staging_subdir, exist_ok=True)
+                            _chmod_dirs_for_host_cleanup(staging_subdir, staging_root)
+                            if visible_dir and os.path.isdir(visible_dir):
+                                shutil.copytree(visible_dir, staging_subdir, dirs_exist_ok=True)
+                            _chmod_dirs_for_host_cleanup(staging_subdir, staging_root)
+                        _STATE_GUARD["active"] = prev_active_roots + _path_aliases(staging_subdir)
+                        state_seeded["value"] = True
+            return staging_subdir
+
+        state_holder["active"] = resolve_state_dir
         broker._cur_substep = step_name
         _RUNTIME["active_substeps"] += 1
         try:
             yield
         finally:
             try:
-                # Stage only files the block created or changed vs the visible copy; the
-                # unchanged seeded copies are not writes and must not re-merge.
-                with _internal_state_access():
-                    for _root, _dirs, _files in os.walk(staging_subdir):
-                        for _fn in _files:
-                            _abs = os.path.join(_root, _fn)
-                            _state_rel = os.path.relpath(_abs, staging_subdir)
-                            _visible = os.path.join(visible_dir, _state_rel) if visible_dir else ""
-                            if _visible and os.path.exists(_visible) and filecmp.cmp(_abs, _visible, shallow=False):
-                                continue
-                            broker._staged.append({
-                                "staging_rel": os.path.relpath(_abs, staging_root),
-                                "state_rel": _state_rel,
-                                "substep": step_name,
-                                "budget_minutes": budget,
-                            })
-                    _chmod_dirs_for_host_cleanup(staging_subdir, staging_root)
+                if state_seeded["value"]:
+                    # Stage only files the block created or changed vs the visible
+                    # copy; unchanged seeded files are reads, not writes.
+                    with _internal_state_access():
+                        for _root, _dirs, _files in os.walk(staging_subdir):
+                            for _fn in _files:
+                                _abs = os.path.join(_root, _fn)
+                                _state_rel = os.path.relpath(_abs, staging_subdir)
+                                _visible = os.path.join(visible_dir, _state_rel) if visible_dir else ""
+                                if _visible and os.path.exists(_visible) and filecmp.cmp(_abs, _visible, shallow=False):
+                                    continue
+                                broker._staged.append({
+                                    "staging_rel": os.path.relpath(_abs, staging_root),
+                                    "state_rel": _state_rel,
+                                    "substep": step_name,
+                                    "budget_minutes": budget,
+                                })
+                        _chmod_dirs_for_host_cleanup(staging_subdir, staging_root)
             finally:
                 _RUNTIME["active_substeps"] -= 1
                 broker._substeps.append({

@@ -17492,6 +17492,36 @@ Decision:
 - Re-run the same experiment configuration before claiming end-to-end wall-time improvement. Keep one-day minute prefetch, one-shot formal Docker, and per-Tick Timeview visibility; do not add loader threads, a read-optimized lake, cross-Fold prefetch, or container reuse.
 
 
+## 2026-07-14 lzp-test13 replay lifecycle remediation
+
+Task: stop an invalid live replay, fix Environment defects exposed by the Q1 case study, preserve Agent autonomy, and prepare a clean 1-Meta/2-Fold rerun.
+
+Observed case:
+- `lzp-test13` pinned research generation `4346853b403a4eaeadb9a3cfe71aa939`. Typed-empty `auction.parquet`, PIT Timeview samples, read-only Formal mounts, modification checks and state merges were all correct; no Arrow, future-data or mixed-generation error occurred.
+- Q1 `valid_006` placed 38 orders but completed only three trades; 28 rejects were `insufficient_cash`. `valid_007` fell to zero trades and `valid_008` again filled only the first order in each monthly batch. Agent-side cash buffers and local accounting could not repair it.
+- Root cause: `SimBroker.match_bar()` left every current-Bar order in `_book` until the whole loop ended. Settlement admission therefore counted filled/rejected predecessors again and let later orders reserve against earlier FIFO orders.
+- The invalid Q1 worker was terminated gracefully (`escalated=false`) while `valid_009` was partial. Only Meta (820.6 s) entered the ledger; Q1/Q2/Held-out did not. All experiment and Trace artifacts remain on disk.
+
+Implementation:
+- Move the current order queue out before matching and rebuild `_book` only from earlier survivors. Same-Bar cash/credit buys, financing bail and reduce quantities now settle FIFO; filled/rejected orders release immediately and resting predecessors keep their reservation.
+- Add Probe-only actionable aggregates: fixed `main_actions_unfilled` reason counts and allowlisted `request_contract` / `position_contract` / `account_capacity` reject categories. Market, limit, suspension, missing-price, margin eligibility, inventory and universe reasons remain hidden; Probe no longer returns `margin_secs_reject_count`. Full replay keeps raw rejects/events.
+- Reset inherited `SIGCHLD=SIG_IGN` at the interactive worker entry so subprocess failures keep their real exit status.
+- Default `PYTHONHASHSEED=0` in Local, development Docker and Formal Docker executors, while retaining explicit internal overrides. This removes cross-process `set` iteration drift; investment priority still requires explicit sorting.
+- Seed a substep state staging copy on first `ctx.state_dir` access rather than on substep entry. Blocks that only query/cancel/order through Broker now create no state subtree; read-old/write-delayed, nested and exception restoration semantics are unchanged.
+- Update Environment/Agent contracts, generated Prompt and default strategy examples. Tick account/position views are snapshots; batch examples read cash once, decrement a local remainder and reserve 5% for costs.
+
+Validation and resources:
+- FIFO regressions cover under-budget and over-budget stock/credit batches, rejected-predecessor release, earlier resting-limit reservation/cancel, two same-Bar reduces and financing bail. Lazy-state regressions cover zero staging for Broker-only blocks and nested exception restoration.
+- Affected combined suite: 376 tests passed in 43.785 s. Full suite: 787 tests passed in 95.525 s. Real Docker E2E: 2 tests passed in 10.501 s. Prompt export and `git diff --check` passed.
+- Rebuilt `autotrade-sandbox:latest` as `sha256:af95fb629d7bc303be07218fcecc4478db40d7b293db1bf7ac6a202f21fa97ca`. Baked and source driver SHA-256 both equal `cc2fe3e61e3167ec9ecf44316bd35f74079e649157089653e814da8af061c012`.
+- Before validation, 452 GiB RAM was available, load was about 6.45 on 192 logical CPUs, and all eight L20 GPUs were idle. No higher data-loader parallelism was used.
+
+Decision:
+- Start a clean same-scope experiment after commit and console restart, then stop before Held-out. Compare Snapshot/Replay/backtest phase time under recorded host load and audit FIFO fills, Probe feedback, state staging count and deterministic order sequence.
+- Keep one-day minute prefetch and one-shot Formal Docker. Measured prefetch wait is about 0.001 s and Formal startup about 0.113 s, so more loader threads, container reuse and a second read-optimized data layer do not justify their complexity.
+- Do not delete experiments, runtime artifacts or old images during the experiment series; deletion candidates remain in ignored `check.md` for one final user decision.
+
+
 ## 2026-07-14 Research-release data/update decoupling
 
 Task: let experiments start and continue during raw/PIT/audit updates without changing cron timing or reading a mixed generation.

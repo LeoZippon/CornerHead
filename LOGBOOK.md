@@ -1505,3 +1505,10 @@
 - `replay_window=N` 现为 N 个策略日另加 1 个退出日，并分别报告 `replayed_trade_days` / `replayed_exit_days`；错误的 Timeview `.parquet` 路径返回安全 `asof_path_mismatch` 提示。
 - Broker 每 Tick 只建立一次相关代码行情索引；行情数值列改为保持旧异常语义的向量化编码；主 RPC 使用紧凑 JSON。微基准分别约快 8.9 倍、6.6 倍，合成载荷缩小 6.5%。
 - Timeview 不改：普通无边界调用约 4.9 微秒，条件刷新收益不足且会扩大合同风险。相关模块 272 tests、全量 756 tests 通过，`git diff --check` 通过。
+
+2026-07-14 lzp-test13 回放生命周期修复
+
+- `lzp-test13` 在 Q1 确认 Broker 同 Bar 重复冻结缺陷后正常终止，保留全部产物；仅 Meta 入账，未进入 Q2/Held-out。数据全程固定 generation `4346853b403a4eaeadb9a3cfe71aa939`，typed-empty auction、Timeview 与 Formal 挂载均正常。
+- Broker 撮合改为 FIFO 即时释放已成交/拒绝单，保留更早仍挂单的冻结；Probe 增加未提交原因和三类安全策略拒单聚合；worker 恢复 `SIGCHLD` 默认处理；三类执行器固定 `PYTHONHASHSEED=0`。
+- `ctx.state_dir` 改为 substep 首次访问才复制，纯 Broker block 不再建暂存树；Prompt、合同和模板明确 tick 入口账户快照及批量本地预算。
+- 全量 787 tests、真实 Docker E2E 2 tests 通过；重建镜像 `af95fb629d7b`，内置 driver/source hash 均为 `cc2fe3e61e31`。分钟预取等待仍约 0.001 秒，不增加加载并行度、不复用 Formal 容器、不引入读优化湖。

@@ -26,6 +26,8 @@ Shows the recommended cadence for a heavier strategy under the 24h tick model:
   09:25-09:30 no-submission gap, so it waits until continuous trading. If a strategy intentionally uses blind
   09:15 auction orders, adapt that guard deliberately and ensure sizing is valid
   without a current price.
+  Account views stay fixed for one tick, so ``manage`` reads cash once, keeps a local
+  remaining budget, and leaves a fee/slippage buffer across the batch.
 
 Each plan entry carries a status (``pending`` / ``filled`` / ``cancelled``); only
 unfinished entries are acted on, reconciled against ``ctx.broker`` truth, mirroring
@@ -79,6 +81,8 @@ def manage(ctx) -> None:
         return
     plan = json.loads(path.read_text(encoding="utf-8"))
     changed = False
+    cash_budget = float(ctx.broker.stock["available_cash"]) * 0.95
+    remaining_budget = cash_budget
     for code, entry in plan.items():
         if entry.get("status") != "pending":
             continue
@@ -88,12 +92,15 @@ def manage(ctx) -> None:
             continue
         if "09:25" < ctx.cur_time < "09:30":
             continue  # an observed auction result is research-only in this gap
-        if ctx.broker.pending(code) or ctx.price(code) is None:
+        price = ctx.price(code)
+        if ctx.broker.pending(code) or price is None:
             continue  # an order is already in flight, or no price to size/submit yet
         cash_fraction = float(entry.get("cash_fraction") or 0.0)
-        amount = int((float(ctx.broker.stock["available_cash"]) * cash_fraction) / float(ctx.price(code)) // 100 * 100)
+        target_budget = min(remaining_budget, cash_budget * cash_fraction)
+        amount = int(target_budget / float(price) // 100 * 100)
         if amount <= 0:
             continue
         ctx.broker.buy(code, amount=amount, reason="plan_entry")
+        remaining_budget -= amount * float(price)
     if changed:
         path.write_text(json.dumps(plan), encoding="utf-8")

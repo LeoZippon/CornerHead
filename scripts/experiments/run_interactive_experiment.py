@@ -33,7 +33,13 @@ def _terminate(signum, frame):  # noqa: ANN001 - signal handler signature
     raise SystemExit(128 + signum)
 
 
+def _restore_child_reaping() -> None:
+    """Undo the console parent's SIGCHLD=SIG_IGN inheritance for this worker."""
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+
+
 def main() -> int:
+    _restore_child_reaping()
     repo_root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(

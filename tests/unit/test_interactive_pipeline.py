@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -56,6 +59,18 @@ TRADING_DAYS = _weekday_trading_days("2020-01-01", "2023-12-31")
 
 
 class WorkerEntrypointTest(unittest.TestCase):
+    def test_worker_restores_child_exit_status_after_console_sigchld_ignore(self) -> None:
+        from scripts.experiments import run_interactive_experiment
+
+        previous = signal.getsignal(signal.SIGCHLD)
+        try:
+            signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+            run_interactive_experiment._restore_child_reaping()
+            completed = subprocess.run([sys.executable, "-c", "raise SystemExit(7)"])
+            self.assertEqual(completed.returncode, 7)
+        finally:
+            signal.signal(signal.SIGCHLD, previous)
+
     def test_rejects_an_existing_live_worker_before_runtime_setup(self) -> None:
         from autotrade.pipelines import interactive
 

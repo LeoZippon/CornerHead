@@ -59,6 +59,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 ## 运行环境和实验参数
 - 写正式代码前先读取 `/mnt/artifacts/run_manifest.json`、`/mnt/artifacts/runtime_env.json` 和 `/mnt/artifacts/data_summary.json`。前者是 Fold 周期、数据窗口、Broker profile、修改约束、deadline、snapshot hash 和父产物 hash 的事实源；后两者分别是 Python 包/CLI/网络事实源与可见数据轻量索引。
 - 不要假设未列出的包可用，不要在普通 Fold 内安装新包；若依赖不确定，先用 shell 做只读 import/version probe。普通 Fold 默认无外网；元学习是否允许 shell 联网和安装实验依赖，以该 run 的 runtime_env/manifest 为准。
+- 正式策略解释器固定 hash seed，使未排序容器跨进程可复现；涉及选股优先级仍显式 `sorted(...)`，不要依赖集合迭代顺序。
 - 对 `events.parquet`、`text_index.parquet`、`intraday_1min.parquet` 等大表，先用 Parquet metadata 判断结构和规模；需要抽样或聚合时，再用 DuckDB、pyarrow 或 pandas 按列/日期过滤读取；不要在未知规模时直接 `pd.read_parquet()` 全量读取。
 - Prompt 只描述稳定协议，不承载当前数据事实。当前行数、关键列、日期覆盖和完整 schema 以本 run 动态生成的 `data_summary.json`、`run_manifest.json`、snapshot `manifest.json` 和 parquet metadata 为准；未来数据变动后由 Pipeline 重新生成。
 - Prompt 中的示例是协议说明，不替代 run manifest；实际策略应按当前 run manifest 的参数和可见 snapshot 编写。
@@ -86,12 +87,14 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - 成交延迟：在某根 bar 决策的单默认于其后第 `execution_lag_bars`（默认 2）根 bar 起进入撮合，杜绝 bar 内前视（如 09:35 决策、09:37 起成交）。临近收盘、其后无可成交 bar 的决策无法成交。
 - 竞价：`09:15` 信息 tick 无价格，盲下单成交于 09:30 开盘竞价；`09:25` 仍不暴露竞价结果，盲下单成交于首根连续 bar（按 taker 滑点），且不能再撤销此前开盘竞价单。`stk_auction` 结果只在实际落地后可见；09:30前的结果 tick 仅供研究、不可报单或撤单，策略应等09:30真实 bar。`14:57` 下单成交于 15:00 收盘竞价并进入不可撤阶段，**只对照单一竞价价**：限价可成交则按竞价价清算，劣于竞价价不成交。真正开/收盘集合竞价成交不计滑点。
 - 订单类型：市价单按进入 bar 的 open + 滑点成交；该分钟该票无成交时继续挂单、在当日下一个有成交的 bar 成交（当日收盘仍未成交自动撤销）。限价单（FIX_PRICE）挂单，若 open 已优于限价则按 open 成交，否则须 bar **严格击穿**限价（买单 low 低于限价 / 卖单 high 高于限价）才按限价成交——仅触及视为排队未成交；对只有日线数据的股票（按日线合成 bar 撮合）限价单不做区间击穿、只按合成 bar 参考价成交。限价单默认当日有效，直到成交、策略主动撤销或日终清扫。需要“N 分钟后撤单”时，用 `pending()` 的 `age_minutes` 加 `cancel()` 自行管理。
+- 同一 bar 内 Broker 按 FIFO 撮合：已成交/拒绝的前序单立即释放占用，只有更早仍挂单的订单继续冻结。
 - Broker 约束：策略只表达意图。每次实验同时运行普通+信用两个独立账户（现金、持仓、T+1 各自独立、互不担保），Broker 强制各账户现金与保证金可用余额、T+1 可卖余额、手数、涨跌停、停牌、融资融券标的与授信额度、融券限价规则、维保比例强平（只清信用账户）、账户间划转提取线和回放末日强制清仓。最大持仓数、单票权重和集中度默认由你控制。
+- `ctx.account`、`ctx.positions`、`ctx.broker.stock/credit` 是 tick 入口快照；同 tick 新 action 只进入 action 队列（已提交的轻量单也进入 `pending()`），不回写账户视图。批量下单从入口快照读取一次总预算，在本地逐笔递减并为费用/滑点留缓冲，不要在循环中反复读取静态 `available_cash` 当作剩余预算。
 - 子步骤预算：所有会访问 `ctx.state_dir`、调用 `ctx.broker`、调用 `ctx.nl()`、读写策略状态或做实质筛选/推理的策略步骤，都必须放进 `ctx.substep(name, budget_minutes=B)`；`B>0`、tick 内 name 唯一、低报会 fail-fast。`ctx.broker` 原语和 `ctx.state_dir` 在子步骤外会被拒绝；宿主还会用 `main(ctx)` 总耗时减去 substep 耗时，拒绝实质未包裹计算。`B<1` 的轻量块在回测中视为本决策分钟内完成（仍统计/限时并带 `ready_at` 元数据）；`B>=1` 的 broker action 只有在生成 tick、`ready_at` 和释放 tick 都处于交易所接受申报窗口内才提交，否则记录未提交/未成交，不会自动排到下一交易时段。未 ready 的跨分钟 broker 动作还不是委托，不会出现在 `pending()`；`pending()` 只展示已提交但未成交/可撤的在途单。
 - 回测成本：`backtest` 独立计时，不计入 Fold 推理 deadline，但单 Fold 次数受 `max_backtests_per_fold` 限制；单 tick 与单交易日真实墙钟硬上限由 run manifest 给出。小 `replay_window` 只能估计无 NL 退化路径的成本；NL 策略的行为和耗时必须用完整 Valid 验证并留足余量。
 - 回测归因：验证回测的返回附带 `benchmark` 诊断块（同窗沪深300收益、超额、β、市值风格倾斜；完整版含 PB/换手倾斜与申万行业净权重，在结果目录 `style_analysis.json`）。用它解读收益来源——绝对收益要对照基准看，超额为负的"正收益"不是证据，β 高说明在赌方向而非选股。这些是**描述性归因，不是优化目标**：不要为追求特定 β 或风格倾斜数值而改策略。
 - 跨周期生命周期：计划必须携带调仓周期键，每个新周期重新生成，并显式对比 Broker 真相源（持仓与在途单）执行卖出与再平衡；区间末宿主强制平仓只是安全网——回测结果中 `host_exit_liquidation_count` > 0 表示这些持仓从未被策略自己退出，买入后放任持有衡量的不是可持续策略。
-- 跨 tick 状态：`ctx.state_dir` 只存你的规则、计划和轻量状态，不是持仓/委托账本；Broker 才是真相源。`ctx.state_dir` 只能在 `ctx.substep` 内访问，单个暂存文件不超过64 MiB，块内读到进入该块前的可见状态，写入按 `ready_at` 延迟合并；每次回测重置，需继承的参数在回测前写入 `models/`。
+- 跨 tick 状态：`ctx.state_dir` 只存你的规则、计划和轻量状态，不是持仓/委托账本；Broker 才是真相源。它只能在 `ctx.substep` 内访问，首次访问才复制可见状态（纯 Broker block 不创建副本），单个暂存文件不超过64 MiB；访问后的旧值读取与 `ready_at` 延迟合并合同不变。每次回测重置，需继承的参数在回测前写入 `models/`。
 - NL 与做空：`ctx.nl(ts_code, prompt=...)` 用于单股文本分析，`ctx.nl(prompt=...)` 用于事件/主题/行业/宏观文本检索；文本按数据节点 PIT 滚动且受配额限制，证据必须降权使用。nl() 失败时返回 `status="error"` 且带 `feedback`（失败原因与退化建议：配额耗尽/未配置代理不要重试，超时/偶发失败可在后续 tick 重试一次）；策略必须按 status 分支降级，不得因 NL 失败崩溃。默认做空券源由成交当日 `margin_secs` 校验，当日集合缺失时按数据缺口拒单（`margin_secs_data_missing`），不可融券会拒单。
 
 ## 数据可见性（逐 tick 时序视图）
@@ -127,7 +130,7 @@ FOLD_ACTION_SECTION = """\
 | `read` | root?, path, offset?, limit? | 按行号读取文件（可分页）；读要编辑的代码优先用它而非 shell `cat`/`head`，`cat`/`head` 仍可用于管道；不访问测试或隐藏路径 |
 | `explore` | task, max_rounds? | 委托只读数据探查 Sub Agent（更便宜模型）调查一个具体问题并返回简洁摘要，把大量 shell/grep 探查移出主上下文 |
 | `modification_check` | （无） | 主动检查正式产物改动是否在约束内；`backtest` 执行前也会自动复核 |
-| `backtest` | replay_window? | 验证回测；Environment 逐 tick 回放当前 `output/main.py` 的 `main(ctx)`；可选 `replay_window=N` 回放前 N 个策略交易日并另加 1 个退出日，做运行成本/生命周期试探（`ctx.nl()` 返回 `withheld_probe`，只返回匿名 substep 成本、tick 与订单生命周期统计，不产生收益指标和成交明细；标记非完整验证、不可冻结、不满足 `finish_fold`），默认整段回放 |
+| `backtest` | replay_window? | 验证回测；Environment 逐 tick 回放当前 `output/main.py` 的 `main(ctx)`；可选 `replay_window=N` 回放前 N 个策略交易日并另加 1 个退出日，做运行成本/生命周期试探（`ctx.nl()` 返回 `withheld_probe`；Probe 仅给匿名成本/生命周期、未提交 action 原因和粗粒度策略拒单类别，不给市场/资格拒单、收益或成交；完整 Valid 保留完整审计；Probe 非完整验证、不可冻结、不满足 `finish_fold`），默认整段回放 |
 | `ask_user` | question | 暂停执行，把一个方向性问题连同简要现状总结（发现、可选方案、你的建议）提交给研究者，等待其答复后继续；等待不消耗推理预算。仅用于关键分叉点（如探针成本超预期需取舍、指令之间冲突、验证结果与指令方向矛盾），可自行判断的小事不要提问。无人值守运行会立即返回 `unattended`，此时自主决策、不要重复提问 |
 | `finish_fold` | （无） | 结束本 Fold；调用前先按“提交合同”自检；成功后 `output/` 和 `models/` 只读锁定，Sandbox 内 Agent 后台进程会被清理 |
 
@@ -150,11 +153,11 @@ FOLD_ACTION_SECTION = """\
 | `ctx.broker.cancel` | order_id, reason? | 撤销 `pending()` 返回的未成交委托（提交延迟队列或 Broker 当日订单簿；order_id 跨账户唯一） |
 | `ctx.broker.pending` | ts_code? | 有参返回该票已提交但未成交/可撤的在途单；无参返回全部在途单。记录含 `order_id`、`account`、`op_type`、`submitted_at`、`age_minutes`、`status`，可能含 `pending_stage` |
 | `ctx.broker.position` | ts_code, account? | 已成交持仓（不含在途），是持仓真相源；缺省跨账户净额（多空对冲净 0），给 `account=` 看单账户 |
-| `ctx.broker.stock` | （无） | 普通账户视图 dict 属性（不加括号；如 `ctx.broker.stock["available_cash"]`）；`cash` 是已成交真相，`available_cash` 扣已提交未成交买单冻结 |
-| `ctx.broker.credit` | （无） | 信用账户视图 dict 属性（不加括号）；字段含现金、维保比例、保证金可用余额、负债、利息、额度和利率；可用现金/保证金扣融券冻结所得和已提交未成交订单占用 |
+| `ctx.broker.stock` | （无） | tick 入口的普通账户视图 dict 属性（不加括号；如 `ctx.broker.stock["available_cash"]`）；`cash` 是已成交真相，`available_cash` 扣已提交未成交买单冻结 |
+| `ctx.broker.credit` | （无） | tick 入口的信用账户视图 dict 属性（不加括号）；字段含现金、维保比例、保证金可用余额、负债、利息、额度和利率；可用现金/保证金扣融券冻结所得和已提交未成交订单占用 |
 | `ctx.broker.debt_contracts` | ts_code? | 未了结融资/融券负债合约明细（未还金额/量、开仓日、年利率、已计利息） |
 
-每次实验同时运行两个独立账户（普通 + 信用），现金、持仓与 T+1 各自独立、互不担保：普通账户 long-only；融资/融券只在信用账户。同一票允许普通账户做多 + 信用账户融券做空（对冲）。`amount` 是股数，必须是正整数；沪深主板/创业板 100 股整数倍，科创板 200 股起、之后 1 股递增，北交所 100 股起、之后 1 股递增。Broker 不做向下取整、超可卖量截断或单票 cap 自动压量，超约束直接拒单。仓位 sizing 由策略显式读取现金/价格/可卖量后自行计算，Broker 不接受 `weight` 下单参数。`limit=P` 为限价单，缺省为市价单；非正 `limit` 拒单。只在显式可报单/交易分钟 tick 提交新订单；普通 off-session tick 不提交交易所订单，`transfer` 只用于每日 09:14 前的盘前资金划转申请。`ctx.broker` 下单/撤单/划转原语必须在 `ctx.substep` 内调用：`0 < B < 1` 的轻量块按当前决策分钟提交并统计耗时；`B>=1` 若跨出交易所接受申报窗口会记录未提交/未成交，不会自动排到下一交易时段。
+每次实验同时运行两个独立账户（普通 + 信用），现金、持仓与 T+1 各自独立、互不担保：普通账户 long-only；融资/融券只在信用账户。同一票允许普通账户做多 + 信用账户融券做空（对冲）。`amount` 是股数，必须是正整数；沪深主板/创业板 100 股整数倍，科创板 200 股起、之后 1 股递增，北交所 100 股起、之后 1 股递增。Broker 不做向下取整、超可卖量截断或单票 cap 自动压量，超约束直接拒单。仓位 sizing 由策略显式读取现金/价格/可卖量后自行计算；批量 action 应本地维护剩余预算并预留费用/滑点，Broker 不接受 `weight` 下单参数。`limit=P` 为限价单，缺省为市价单；非正 `limit` 拒单。只在显式可报单/交易分钟 tick 提交新订单；普通 off-session tick 不提交交易所订单，`transfer` 只用于每日 09:14 前的盘前资金划转申请。`ctx.broker` 下单/撤单/划转原语必须在 `ctx.substep` 内调用：`0 < B < 1` 的轻量块按当前决策分钟提交并统计耗时；`B>=1` 若跨出交易所接受申报窗口会记录未提交/未成交，不会自动排到下一交易时段。
 
 信用账户经济学（与交易所实施细则一致）：融资/融券利息按自然日 /360 计入合约、还款/还券时以现金支付（先息后本、最老合约优先）；融资买入股份卖出时必须用 `sell_repay` 先还融资负债；维保比例 = (信用账户现金+证券市值)/(融资负债+融券市值+利息)——**只计信用账户资产，普通账户不作担保**——低于平仓线（见 facts `maintenance_closeout_ratio`）强制平掉信用账户持仓（普通账户不受影响）；融券卖出所得现金被冻结、只能用于买券还券、不可划转；新的融资/融券操作受保证金可用余额（信用现金+担保品市值×折算率−占用−浮亏）约束。两账户初始资金见 facts `stock_initial_cash` / `credit_initial_cash`，可用盘前 `transfer` 重新配置（信用划出受提取线约束）。
 
