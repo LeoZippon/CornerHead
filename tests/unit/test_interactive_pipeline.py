@@ -230,6 +230,44 @@ class InteractiveRunnerTest(unittest.TestCase):
         self.assertEqual(status["state"], "completed")
         self.assertEqual(status["completed_sessions"], 4)
 
+    def test_fold_data_prefetch_finishes_before_fold_execution(self) -> None:
+        pipeline = FakePipeline(self.config)
+        prefetched: set[str] = set()
+        prefetch_active = threading.Event()
+        original_run_fold = pipeline.run_fold
+
+        def prefetch_fold_data(fold):
+            pipeline.calls.append(("prefetch", fold.fold_id))
+            prefetch_active.set()
+            time.sleep(0.02)
+            prefetched.add(fold.fold_id)
+            prefetch_active.clear()
+
+        def checked_run_fold(fold, **kwargs):
+            self.assertIn(fold.fold_id, prefetched)
+            self.assertFalse(prefetch_active.is_set())
+            return original_run_fold(fold, **kwargs)
+
+        pipeline.prefetch_fold_data = prefetch_fold_data
+        pipeline.run_fold = checked_run_fold
+        self._control(mode="auto")
+
+        self._runner(pipeline).run(TRADING_DAYS)
+
+        self.assertEqual(
+            [
+                (call[0], call[2] if call[0] == "fold" else call[1])
+                for call in pipeline.calls
+                if call[0] in {"prefetch", "fold"}
+            ],
+            [
+                ("prefetch", "fold_2022Q1"),
+                ("fold", "fold_2022Q1"),
+                ("prefetch", "fold_2022Q2"),
+                ("fold", "fold_2022Q2"),
+            ],
+        )
+
     def test_skip_to_heldout_after_first_frozen_fold(self) -> None:
         pipeline = FakePipeline(self.config)
         # Set from the start: ignored while nothing froze (meta + fold 1 run),

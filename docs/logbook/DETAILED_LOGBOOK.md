@@ -17341,3 +17341,23 @@ Implementation:
 
 Validation:
 - Documentation-only change; `git diff --check` passed.
+
+
+## 2026-07-13 Snapshot and replay build performance
+
+Task: implement the approved optimization order without adding a read-optimized lake or prestarting Fold containers.
+
+Implementation:
+- Replaced per-row Python auction maps with factorization of repeated code/time values and numpy expansion. Scalar rules and output columns are unchanged.
+- Replay minute partitions are now read, corrected, screened, and appended one day at a time to one Parquet file. Each chunk becomes bounded row groups; no full-range `concat` remains in the replay build path.
+- Snapshot and Replay domains use a dependency-aware pool capped at two workers. `daily -> intraday` remains ordered and only one minute task exists.
+- The interactive worker warms the next pending Fold's four immutable cache entries during its approval gate. It creates no Sandbox/container and joins before `run_fold`, preventing overlap with formal backtests.
+
+Evidence:
+- Real `trade_date=20220104` (1,108,600 rows): auction correction 1.028 s before, 0.401 s after; corrected row count stayed 2,568.
+- Real January 2022 minutes (21,122,927 rows / 19 files): 12.557 s build + 20.248 s write, 32.917 s wall, 459.5 MiB output, 2.50 GiB process high-water RSS.
+- A two-day 2,217,441-row comparison passed `assert_frame_equal` between the retained legacy reader and streamed output.
+- Snapshot builder tests and focused prefetch tests passed before the final full-suite run.
+
+Decision:
+- Keep `SNAPSHOT_DOMAIN_WORKERS=2` on the shared host. Do not add a second data lake, cross-Fold container startup, or backtest-loop changes in this batch.

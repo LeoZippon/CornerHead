@@ -9,7 +9,9 @@ import tempfile
 import time
 import unittest
 from dataclasses import MISSING, fields
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from autotrade.environment.broker import BrokerProfile
@@ -116,6 +118,70 @@ class AcceptanceRulesTest(unittest.TestCase):
 
 
 class CachingSnapshotProviderGenerationTest(unittest.TestCase):
+    def test_prefetch_fold_populates_cache_without_run_output(self):
+        from autotrade.pipelines.config import CachingSnapshotProvider
+
+        class FakeProvider:
+            config = None
+
+            def __init__(self, raw_dir: Path) -> None:
+                self.raw_dir = raw_dir
+                self.decision_builds = 0
+                self.replay_builds = 0
+
+            def decision_snapshot(self, decision_time, view):
+                self.decision_builds += 1
+                Path(view).mkdir(parents=True)
+                (Path(view) / "daily.parquet").write_bytes(str(decision_time).encode())
+                manifest = {"kind": "decision_input", "decision_time": decision_time.isoformat()}
+                (Path(view) / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                return manifest
+
+            def replay_slot(self, start, end, view, *, label):
+                self.replay_builds += 1
+                Path(view).mkdir(parents=True)
+                (Path(view) / "daily.parquet").write_bytes(f"{start}:{end}".encode())
+                manifest = {"kind": "replay_slot", "label": label}
+                (Path(view) / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                return manifest
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "raw"
+            raw.mkdir()
+            provider = FakeProvider(raw)
+            caching = CachingSnapshotProvider(provider, root / "cache")
+            fold = SimpleNamespace(
+                valid_decision_time=datetime(2022, 1, 1, 9, 25),
+                test_decision_time=datetime(2022, 4, 1, 9, 25),
+                validation_start="20220101",
+                validation_end="20220331",
+                test_start="20220401",
+                test_end="20220630",
+            )
+
+            manifests = caching.prefetch_fold(fold)
+
+            self.assertEqual(set(manifests), {
+                "valid_decision_input", "test_decision_input", "valid_replay", "test_replay"
+            })
+            self.assertEqual((provider.decision_builds, provider.replay_builds), (2, 2))
+            self.assertFalse((root / "run").exists())
+            entries = [path for path in (root / "cache").iterdir() if not path.name.startswith(".")]
+            self.assertEqual(len(entries), 4)
+
+            caching.decision_snapshot(fold.valid_decision_time, root / "run" / "valid_view")
+            caching.decision_snapshot(fold.test_decision_time, root / "run" / "test_view")
+            caching.replay_slot(
+                fold.validation_start, fold.validation_end, root / "run" / "valid", label="valid"
+            )
+            caching.replay_slot(fold.test_start, fold.test_end, root / "run" / "test", label="test")
+            self.assertEqual((provider.decision_builds, provider.replay_builds), (2, 2))
+            self.assertEqual(
+                json.loads((root / "run" / "valid" / "manifest.json").read_text(encoding="utf-8"))["label"],
+                "valid",
+            )
+
     def test_cache_key_includes_raw_generation(self):
         import json
 

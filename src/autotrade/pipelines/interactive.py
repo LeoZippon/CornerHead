@@ -28,6 +28,7 @@ import json
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -279,18 +280,33 @@ class InteractiveExperimentRunner:
                         break
                     if restored is None:
                         self._require_no_orphan_artifact(epoch_id, fold.fold_id)
-                    directive = self._gate(key, phase="fold", epoch_id=epoch_id, fold_id=fold.fold_id)
-                    control = read_control(self.control_path)
-                    # User-side step rollback: a control-plane override replaces the
-                    # inherited frozen chain with a validated step-tree node snapshot.
-                    override_node = control.parent_overrides.get(key)
-                    session_parent = self._parent_from_step_node(override_node) if override_node else parent
-                    self.status.set(
-                        state="running_session", phase="fold", session_key=key,
-                        epoch_id=epoch_id, fold_id=fold.fold_id, run_id=None, trace_path=None,
-                        session_started_at=utc_now_iso(), fold_deadline_at=None,
-                        parent_override=override_node,
+                    prefetch_method = getattr(self.pipeline, "prefetch_fold_data", None)
+                    prefetch_pool = (
+                        ThreadPoolExecutor(max_workers=1, thread_name_prefix="fold-data-prefetch")
+                        if callable(prefetch_method)
+                        else None
                     )
+                    prefetch = prefetch_pool.submit(prefetch_method, fold) if prefetch_pool is not None else None
+                    try:
+                        directive = self._gate(key, phase="fold", epoch_id=epoch_id, fold_id=fold.fold_id)
+                        control = read_control(self.control_path)
+                        # User-side step rollback: a control-plane override replaces the
+                        # inherited frozen chain with a validated step-tree node snapshot.
+                        override_node = control.parent_overrides.get(key)
+                        session_parent = self._parent_from_step_node(override_node) if override_node else parent
+                        self.status.set(
+                            state="running_session", phase="fold", session_key=key,
+                            epoch_id=epoch_id, fold_id=fold.fold_id, run_id=None, trace_path=None,
+                            session_started_at=utc_now_iso(), fold_deadline_at=None,
+                            parent_override=override_node,
+                        )
+                        if prefetch is not None:
+                            # Join before run_fold: no prefetch can overlap an
+                            # Agent-triggered formal backtest.
+                            prefetch.result()
+                    finally:
+                        if prefetch_pool is not None:
+                            prefetch_pool.shutdown(wait=True, cancel_futures=True)
                     outcome = self.pipeline.run_fold(
                         fold,
                         epoch_id=epoch_id,

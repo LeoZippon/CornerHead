@@ -100,11 +100,38 @@ class CachingSnapshotProvider:
         self._replace_output_manifest(Path(out_dir), manifest)
         return manifest
 
+    def prefetch_fold(self, fold: FoldSpec) -> dict[str, dict[str, object]]:
+        """Populate one Fold's four cache entries without creating a sandbox."""
+        return {
+            "valid_decision_input": self._cached(
+                ("decision", fold.valid_decision_time.isoformat()),
+                lambda view: self._provider.decision_snapshot(fold.valid_decision_time, view),
+                None,
+            ),
+            "test_decision_input": self._cached(
+                ("decision", fold.test_decision_time.isoformat()),
+                lambda view: self._provider.decision_snapshot(fold.test_decision_time, view),
+                None,
+            ),
+            "valid_replay": self._cached(
+                ("replay", fold.validation_start, fold.validation_end),
+                lambda view: self._provider.replay_slot(
+                    fold.validation_start, fold.validation_end, view, label=""
+                ),
+                None,
+            ),
+            "test_replay": self._cached(
+                ("replay", fold.test_start, fold.test_end),
+                lambda view: self._provider.replay_slot(fold.test_start, fold.test_end, view, label=""),
+                None,
+            ),
+        }
+
     def _cached(
         self,
         parts: tuple[str, ...],
         build: Callable[[Path], dict[str, object]],
-        out_dir: Path,
+        out_dir: Path | None,
     ) -> dict[str, object]:
         # Raw-lake generation in the key: a cron mutation between folds must
         # rebuild, never resurface a view of the previous lake.
@@ -139,7 +166,8 @@ class CachingSnapshotProvider:
                     finally:
                         if staging.exists():
                             shutil.rmtree(staging, ignore_errors=True)
-        link_copytree(entry / "view", out_dir)
+        if out_dir is not None:
+            link_copytree(entry / "view", out_dir)
         return json.loads(manifest_path.read_text(encoding="utf-8"))
 
     @staticmethod

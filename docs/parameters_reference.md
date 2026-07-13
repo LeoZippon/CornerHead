@@ -68,6 +68,7 @@
 | `text_body_chars` | 4000 | 每条文本载荷进入快照前的字符上限 |
 | `replay_include_events` / `replay_include_text` / `replay_include_minutes` | True / True / True | 回放槽是否包含事件、文本和分钟域 |
 | `replay_include_macro` / `replay_include_fundamentals` | True / True | 回放槽是否包含宏观和财务域 |
+| `SNAPSHOT_DOMAIN_WORKERS`（常量） | 2 | 单次 Snapshot/Replay 构建的独立数据域并行上限；分钟域本身不拆成并发任务 |
 
 ## 2. 实验编排与验收（ExperimentConfig / AcceptanceRules / ModificationConstraints）
 

@@ -278,6 +278,10 @@ class ExperimentPipeline:
 
     # ---- fold ----
 
+    def prefetch_fold_data(self, fold: FoldSpec) -> dict[str, dict[str, object]]:
+        """Warm only immutable data-cache entries; no sandbox or container."""
+        return self.snapshots.prefetch_fold(fold)
+
     def run_fold(
         self,
         fold: FoldSpec,
