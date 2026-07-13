@@ -17325,6 +17325,8 @@ Resource evidence and decision:
 Validation:
 - Two focused regressions passed, including the real existing null-schema cache.
 - `tests.unit.test_snapshot_builder` plus `tests.unit.test_tools_flow`: 124 tests passed in 32.793 seconds.
+- Full `unittest` suite: 726 tests passed in 117.637 seconds.
+- Post-run resources remained safe: 434 GiB system RAM available; all eight L20 GPUs remained at 0 MiB and 0% utilization.
 - `git diff --check` passed. No cache/data rewrite, download, provider call, experiment restart, or external mutation was performed. The already-running worker loaded the old module and must be restarted before retrying its Fold.
 
 
