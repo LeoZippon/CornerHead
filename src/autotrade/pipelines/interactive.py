@@ -482,7 +482,7 @@ class InteractiveExperimentRunner:
                 step_summary={
                     name: summary.get(name)
                     for name in ("result_name", "total_return", "sharpe", "max_drawdown",
-                                 "complete_validation", "probe_note")
+                                 "complete_validation", "probe_note", "diagnostic_warnings")
                 },
             )
             try:

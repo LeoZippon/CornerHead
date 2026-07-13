@@ -857,6 +857,8 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertNotIn("test_result", epoch2_ledger)
             self.assertNotIn("test_period", epoch2_ledger)
             self.assertNotIn("test_decision_time", epoch2_ledger)
+            self.assertNotIn("agent_trace_ref", epoch2_ledger)
+            self.assertNotIn(str(tmp), epoch2_ledger)
             # Item 3: epoch 2's memory concatenates epoch 1's meta-learning log.
             self.assertIn("meta-marker-epoch_001", captured["epoch_002"]["memory"])
             self.assertNotIn("meta-marker-epoch_002", captured["epoch_002"]["memory"])
@@ -1360,6 +1362,8 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual(mocked_run.call_args_list[0].args[0][0:2], ["docker", "build"])
             stored = json.loads((tmp / "artifacts" / "run_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(stored["sandbox_image_update"]["status"], "ok")
+            self.assertNotIn("host_request_ref", stored["sandbox_image_update"])
+            self.assertNotIn("dockerfile_ref", stored["sandbox_image_update"])
 
     def test_active_sandbox_image_reloads_from_ledger_on_fresh_pipeline(self):
         # A successful rebuild updates the active image only in-memory; a fresh

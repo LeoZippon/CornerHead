@@ -12,11 +12,16 @@ This module imports only the Python standard library (no ``autotrade``, ``pandas
 ``broker_core`` import), so it runs unchanged in the dependency-light sandbox image.
 """
 
-import builtins, contextlib, filecmp, importlib.util, json, math, os, re, shutil, sys, time, types, uuid
+import builtins, contextlib, filecmp, importlib.util, json, math, os, re, resource, shutil, sys, time, types, uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
 _PROTOCOL_STDOUT = sys.stdout
+
+
+def _peak_rss_bytes():
+    """Peak RSS of this one-shot formal driver (Linux ru_maxrss is KiB)."""
+    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
 
 _ACTION_ACCOUNT_OP = {
     "buy": ("stock", 23),
@@ -1059,6 +1064,9 @@ def _serve():
                     "substeps": broker._substeps,
                     "staged": broker._staged,
                     "main_wall_s": main_wall_s,
+                    # Informational only: lets the Agent spot accidental broad
+                    # reads without the Environment rejecting its strategy.
+                    "agent_peak_rss_bytes": _peak_rss_bytes(),
                 }
         except Exception as exc:
             response = {"request_id": request_id, "status": "error", "error": _sanitize_error("%s: %s" % (type(exc).__name__, exc))}

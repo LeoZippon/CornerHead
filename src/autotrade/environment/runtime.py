@@ -105,8 +105,13 @@ class SandboxPaths:
 
     @property
     def snapshot(self) -> Path:
-        """Current formal decision-input view bound before backtest_tool runs."""
+        """Development-visible decision-input mirror exposed as /mnt/snapshot."""
         return self.root / "snapshot"
+
+    @property
+    def formal_snapshot(self) -> Path:
+        """Host-only selector for the decision input mounted by formal replay."""
+        return self.root / "runtime" / "formal_snapshot"
 
     @property
     def snapshot_views(self) -> Path:
@@ -367,7 +372,6 @@ def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
             "nl_max_calls_per_backtest",
             "sandbox_spec",
             "sandbox_runtime",
-            "sandbox_image_update",
             "taste_prompt",
             "development_inputs",
             "taste_output",
@@ -379,6 +383,10 @@ def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
         )
         if key in record
     }
+    if isinstance(record.get("sandbox_image_update"), dict):
+        public["sandbox_image_update"] = _agent_visible_sandbox_image_update(
+            record["sandbox_image_update"]
+        )
     if "fold_id" in record:
         public["fold_id"] = _agent_visible_ref(record.get("fold_id"), prefix="fold_ref")
     # Artifact ids embed the raw fold label (strategy_<epoch>_fold_<period>), so they
@@ -406,6 +414,28 @@ def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
             if isinstance(item, dict) and item.get("mode") == "valid"
         ]
     return public
+
+
+def _agent_visible_sandbox_image_update(record: dict[str, object]) -> dict[str, object]:
+    """Keep rebuild outcome facts while withholding host build coordinates."""
+    return {
+        key: record[key]
+        for key in (
+            "status",
+            "reason",
+            "request_ref",
+            "base_image",
+            "image",
+            "request_hash",
+            "started_at",
+            "finished_at",
+            "timeout_seconds",
+            "returncode",
+            "image_id",
+            "image_repo_digests",
+        )
+        if key in record
+    }
 
 
 def _agent_visible_fold_record(record: dict[str, object]) -> dict[str, object]:
@@ -452,6 +482,7 @@ def _agent_visible_backtest_summary(record: dict[str, object]) -> dict[str, obje
             "max_drawdown",
             "margin_secs_reject_count",
             "order_count",
+            "host_exit_liquidation_count",
             "model_artifact_files",
             "model_artifact_bytes",
             "artifact_hash",
@@ -464,9 +495,14 @@ def _agent_visible_backtest_summary(record: dict[str, object]) -> dict[str, obje
             "replayed_trade_days",
             "substep_runtime",
             "phase_seconds",
+            "agent_peak_rss_bytes",
+            "diagnostic_warnings",
+            "strategy_advisories",
             "total_ticks",
             "intraday_ticks",
             "offsession_ticks",
+            "decision_calls",
+            "strategy_action_count",
             "state_staged_writes",
             "state_unmerged_writes",
             "error",

@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from dataclasses import MISSING, dataclass, field, fields
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Mapping
@@ -36,6 +37,7 @@ STATUS_NAME = "status.json"
 SCHEDULE_NAME = "schedule.json"
 ANALYSIS_DIR_NAME = "analysis"
 HELDOUT_SESSION_KEY = "heldout"
+_LIVE_RUN_STATES = {"running_session", "waiting_step_user", "waiting_user_reply"}
 
 # auto: run continuously; manual: approve each SESSION before it starts;
 # step: manual PLUS every fold session holds at each validated step
@@ -428,9 +430,14 @@ class StatusReporter:
         with self._lock:
             previous = self._data.get("state")
             self._data.update(fields)
-            self._write_locked()
             state = self._data.get("state")
             changed = "state" in fields and state != previous
+            if changed and state in _LIVE_RUN_STATES:
+                # A session can reach ask_user/Step wait before the first
+                # heartbeat. Discover its run synchronously so Trace does not
+                # remain stuck in "preparing" for the whole researcher wait.
+                self._refresh_live_run_locked()
+            self._write_locked()
             snapshot = dict(self._data) if changed else None
         if changed and self.on_state_change is not None:
             threading.Thread(
@@ -457,16 +464,21 @@ class StatusReporter:
     def _heartbeat_loop(self) -> None:
         while not self._stop.wait(self.interval_seconds):
             with self._lock:
-                if self._data.get("state") == "running_session":
+                if self._data.get("state") in _LIVE_RUN_STATES:
                     self._refresh_live_run_locked()
                 self._write_locked()
 
     def _refresh_live_run_locked(self) -> None:
         """Surface the live run dir, its trace path, and the session deadline
         so the console can show a preparation indicator and a countdown."""
-        live = self._latest_run_dir()
+        live = self._latest_run_dir(not_before=self._session_started_epoch())
         if live is None:
             return
+        if live.name != self._data.get("run_id"):
+            # These three fields describe one run and must move together.  In
+            # particular, never retain the previous Meta/Fold deadline after a
+            # newer run directory appears.
+            self._data["fold_deadline_at"] = None
         self._data["run_id"] = live.name
         self._data["trace_path"] = str(live / "artifacts" / "agent_trace.jsonl")
         if not self._data.get("fold_deadline_at"):
@@ -479,14 +491,45 @@ class StatusReporter:
             except (OSError, json.JSONDecodeError, ValueError):
                 pass  # manifest not written yet or mid-write; retry next beat
 
-    def _latest_run_dir(self) -> Path | None:
+    def _session_started_epoch(self) -> float | None:
+        raw = self._data.get("session_started_at")
+        if not raw:
+            return None
         try:
-            candidates = [entry for entry in self.work_root.glob("run_*") if entry.is_dir()]
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            return None
+
+    def _latest_run_dir(self, *, not_before: float | None = None) -> Path | None:
+        try:
+            candidates = []
+            for entry in self.work_root.glob("run_*"):
+                if not entry.is_dir():
+                    continue
+                modified = entry.stat().st_mtime
+                created = self._run_created_epoch(entry)
+                # A real run manifest carries created_at.  The small fallback
+                # tolerance only covers coarse/cache-delayed filesystem mtimes
+                # while that manifest is still being published.
+                started = created if created is not None else modified + 1.0
+                if not_before is None or started >= not_before:
+                    candidates.append((modified, entry))
         except OSError:
             return None
         if not candidates:
             return None
-        return max(candidates, key=lambda entry: entry.stat().st_mtime)
+        return max(candidates, key=lambda item: item[0])[1]
+
+    @staticmethod
+    def _run_created_epoch(run_dir: Path) -> float | None:
+        try:
+            payload = json.loads((run_dir / "artifacts" / "run_manifest.json").read_text(encoding="utf-8"))
+            raw = payload.get("created_at")
+            if not raw:
+                return None
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return None
 
 
 def read_status(path: Path) -> dict[str, object]:

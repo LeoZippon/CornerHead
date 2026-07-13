@@ -252,6 +252,8 @@ class SnapshotBuilderTest(unittest.TestCase):
             schema = pq.ParquetFile(path).schema_arrow
             field_types = {field.name: str(field.type) for field in schema}
             self.assertEqual(meta["rows"], 0)
+            self.assertNotIn("coverage_start", meta)
+            self.assertNotIn("coverage_end", meta)
             self.assertEqual(field_types["ts_code"], "string")
             self.assertEqual(field_types["trade_date"], "string")
             self.assertEqual(field_types["available_at"], "string")

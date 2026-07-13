@@ -50,12 +50,19 @@ from .base import (
     SessionInterrupt,
     ToolContext,
     ToolError,
+    agent_visible_tool_result,
 )
 from .modification_check import ModificationCheckTool
 
 _FINAL_EVAL_WALL_CAP_MULTIPLIER = 3.0
+_AGENT_MEMORY_ADVISORY_BYTES = 2 * 1024**3
 
 MODES = ("valid", "frozen_eval")
+
+
+def agent_visible_backtest_result(summary: dict[str, object]) -> dict[str, object]:
+    """Remove host-only filesystem coordinates from Agent-visible channels."""
+    return agent_visible_tool_result(summary)
 
 
 class BacktestTool:
@@ -124,6 +131,10 @@ class BacktestTool:
         self._backtest_started_monotonic = None
         self._public_nl_tmp = None
         self._data_load = {}
+        if mode == "frozen_eval":
+            seal_factory = getattr(self.ctx.executor, "formal_seal_factory", None)
+            if callable(seal_factory):
+                seal_factory()
         guard_factory = getattr(self.ctx.executor, "formal_guard_factory", None)
         guard = guard_factory() if callable(guard_factory) else contextlib.nullcontext()
         # Docker formal runs freeze the development container for the complete
@@ -141,11 +152,11 @@ class BacktestTool:
                 # A pre-flight rejection happens before backtest_start, so no
                 # bracket is open. Post-start failures must terminate the audit;
                 # Probe details remain host-only regardless of exception class.
+                public_error = self._public_failure_error(str(exc))
                 if self._backtest_started:
-                    public_error = self._public_failure_error(str(exc))
                     self._record_failure(mode, public_error, status="error")
-                    if public_error != str(exc):
-                        raise ToolError(public_error) from exc
+                if public_error != str(exc):
+                    raise ToolError(public_error) from exc
                 raise
             except SessionInterrupt as exc:
                 # Researcher stop/ask control flow is not a strategy failure and
@@ -184,6 +195,7 @@ class BacktestTool:
             decision_time = str(self.ctx.manifest.require("valid_decision_time"))
             replay_minutes = _read_replay_minutes(self.ctx.paths.valid)
             replay_granularity = "minute" if replay_minutes is not None else "daily"
+            snapshot_dir = self._resolved_snapshot()
             with _formal_artifacts_readonly(self.ctx.paths, restore_writable=not self.ctx.write_locked):
                 with _formal_replay_execution(self.ctx) as (executor, runtime_dir, _rpc_agent):
                     with MainPolicyRunner(
@@ -193,6 +205,11 @@ class BacktestTool:
                         decision_time=decision_time,
                         replay_granularity=replay_granularity,
                         runtime_dir=runtime_dir,
+                        snapshot_path=(
+                            snapshot_dir
+                            if getattr(executor, "formal_isolation", False)
+                            else self.ctx.paths.snapshot
+                        ),
                     ) as policy:
                         policy.validate_main()
         summary = {
@@ -267,23 +284,24 @@ class BacktestTool:
             raise ToolError(f"result directory already exists: {result_dir}")
         started_at = utc_now_iso()
         total_trade_days = int(replay_daily["trade_date"].nunique())
-        # Open the audit bracket before the synchronous replay; without a start event a
-        # long backtest that is later killed leaves no trace of having run.
-        self.ctx.trace.emit(
-            "backtest_start",
-            {
-                "tool": self.name, "mode": mode, "result_name": result_dir.name,
-                "complete_validation": complete_validation, "replay_window": replay_window,
-                "replay_granularity": replay_granularity, "total_trade_days": total_trade_days,
-                "artifact_hash": artifact.artifact_hash, "started_at": started_at,
-            },
-            step_id=self.ctx.current_step_id,
-        )
+        # Open the Agent-visible Valid bracket before synchronous replay so a
+        # long run is observable. Frozen evaluation stays on host-only surfaces.
+        if mode == "valid":
+            self.ctx.trace.emit(
+                "backtest_start",
+                {
+                    "tool": self.name, "mode": mode, "result_name": result_dir.name,
+                    "complete_validation": complete_validation, "replay_window": replay_window,
+                    "replay_granularity": replay_granularity, "total_trade_days": total_trade_days,
+                    "artifact_hash": artifact.artifact_hash, "started_at": started_at,
+                },
+                step_id=self.ctx.current_step_id,
+            )
         self._backtest_started = True  # bracket open: any later failure must emit a terminal event
         self._backtest_started_monotonic = time.monotonic()
 
         def _on_progress(date: str, idx: int, total: int, elapsed: float, orders: int) -> None:
-            if probe:
+            if probe or mode != "valid":
                 return  # do not stream progressive future-window/order feedback
             self.ctx.trace.emit(
                 "backtest_progress",
@@ -368,6 +386,11 @@ class BacktestTool:
                         responses_path=responses_host,
                         decision_max_sim_minutes=_optional_float(manifest.get("decision_max_sim_minutes")),
                         runtime_dir=runtime_dir,
+                        snapshot_path=(
+                            snapshot_dir
+                            if getattr(formal_executor, "formal_isolation", False)
+                            else self.ctx.paths.snapshot
+                        ),
                     ) as policy:
                         policy.validate_main()
                         replay = run_main_ctx_replay(
@@ -499,6 +522,11 @@ class BacktestTool:
             # had to liquidate at region end because the strategy never exited.
             "host_exit_liquidation_count": stats["host_exit_liquidation_count"],
             "modification_delta_summary": _modification_delta_summary(modification_check),
+            "strategy_advisories": (
+                list(modification_check.get("advisories") or [])
+                if isinstance(modification_check, dict)
+                else []
+            ),
             "probe_note": (
                 "replay_window 前 N 交易日探针：只返回运行成本与订单生命周期统计，"
                 "收益指标与成交明细不生成（对未来窗口的 P&L 属于前视信息）"
@@ -514,6 +542,7 @@ class BacktestTool:
                 else stats.get("substep_runtime")
             ),
             "phase_seconds": stats.get("phase_seconds"),
+            "agent_peak_rss_bytes": stats.get("agent_peak_rss_bytes"),
             "data_load": data_load,
             # Measured before manifest/trace publication and optional StepTree
             # snapshot; the name makes that boundary explicit.
@@ -524,8 +553,13 @@ class BacktestTool:
             "total_ticks": stats.get("total_ticks"),
             "intraday_ticks": stats.get("intraday_ticks"),
             "offsession_ticks": stats.get("offsession_ticks"),
+            "decision_calls": stats.get("decision_calls"),
+            "strategy_action_count": stats.get("strategy_action_count"),
             "state_staged_writes": len(staging_audit),
             "state_unmerged_writes": unmerged,
+            # Advisory only: strategy defects remain Agent-owned and never
+            # affect validation completeness, acceptance or freeze eligibility.
+            "diagnostic_warnings": _diagnostic_warnings(stats),
         }
         if nl_tool_dir is not None:
             summary.update(
@@ -553,7 +587,10 @@ class BacktestTool:
                 "host_orders_path": str(orders_path) if orders_path else None,
             })
         self.ctx.manifest.append_backtest_summary(summary)
-        self.ctx.trace.emit("backtest", summary, step_id=self.ctx.current_step_id)
+        if mode == "valid":
+            self.ctx.trace.emit(
+                "backtest", agent_visible_backtest_result(summary), step_id=self.ctx.current_step_id
+            )
         if mode == "valid" and complete_validation and self.ctx.manifest.get("step_tree_enabled"):
             StepTree(self.ctx.paths.steps).record_step(
                 self.ctx.paths.agent_output,
@@ -635,9 +672,9 @@ class BacktestTool:
         return refreshed
 
     def _resolved_snapshot(self) -> Path:
-        link = self.ctx.paths.snapshot
+        link = self.ctx.paths.formal_snapshot
         if not link.exists():
-            raise ToolError("/mnt/snapshot is not bound to a decision-input view")
+            raise ToolError("formal /mnt/snapshot is not bound to a decision-input view")
         return link.resolve()
 
     def _verify_snapshot_binding(self, mode: str, snapshot_dir: Path) -> None:
@@ -677,7 +714,8 @@ class BacktestTool:
         if self._data_load:
             summary["data_load"] = dict(self._data_load)
         self.ctx.manifest.append_backtest_summary(summary)
-        self.ctx.trace.emit("backtest", summary, step_id=self.ctx.current_step_id)
+        if mode == "valid":
+            self.ctx.trace.emit("backtest", summary, step_id=self.ctx.current_step_id)
         manifest = self.ctx.manifest
         if mode == "valid" and manifest.get("step_tree_enabled") and manifest.get("record_failed_attempts"):
             try:
@@ -702,7 +740,7 @@ class BacktestTool:
 
     def _public_failure_error(self, detail: str) -> str:
         if not (self._probe_active and self._backtest_started):
-            return detail
+            return detail.replace(str(self.ctx.paths.root), "/mnt")
         self._record_probe_failure_detail(detail)
         return (
             "probe failed inside the isolated replay; raw strategy/runtime error text is host-only. "
@@ -753,6 +791,26 @@ def _probe_substep_runtime(value: object) -> dict[str, dict[str, float]]:
             ),
         }
     }
+
+
+def _diagnostic_warnings(stats: dict[str, object]) -> list[str]:
+    """Return non-blocking strategy feedback without exposing private state."""
+    warnings: list[str] = []
+    if int(stats.get("order_count") or 0) == 0:
+        decisions = int(stats.get("decision_calls") or 0)
+        actions = int(stats.get("strategy_action_count") or 0)
+        warnings.append(
+            f"Backtest called main(ctx) {decisions} times, received {actions} broker actions, and completed "
+            "with zero orders. This is not rejected; inspect empty/date-stale plans and exceptions caught "
+            "by strategy code before accepting the result."
+        )
+    peak = int(stats.get("agent_peak_rss_bytes") or 0)
+    if peak >= _AGENT_MEMORY_ADVISORY_BYTES:
+        warnings.append(
+            f"Agent process peak RSS was {peak / 1024**3:.1f} GiB. This is informational only; "
+            "if unexpected, use Parquet column/filter projection and cache by asof_version."
+        )
+    return warnings
 
 
 def _read_replay_daily(

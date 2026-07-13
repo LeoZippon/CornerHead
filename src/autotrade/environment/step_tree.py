@@ -76,7 +76,9 @@ class StepTree:
             target = node_dir / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
-            copied_attachments[str(rel)] = str(target)
+            # tree.json is Agent-readable; store a node-relative reference,
+            # never the host's absolute workspace path.
+            copied_attachments[str(rel)] = str(Path(node_id) / rel)
         self.data["nodes"].append(
             {
                 "node_id": node_id,

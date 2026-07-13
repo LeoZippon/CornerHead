@@ -8,13 +8,14 @@ code paths as production without Docker or LLM calls.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pandas as pd
 
@@ -26,7 +27,7 @@ from autotrade.pipelines.fold_analysis import (
     guarded_record_view,
     read_strategy_files,
 )
-from autotrade.environment.runtime import write_json_atomic
+from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 from autotrade.pipelines.hitl_state import (
     CONTROL_NAME,
     HELDOUT_SESSION_KEY,
@@ -333,19 +334,26 @@ class InteractiveRunnerTest(unittest.TestCase):
         self.assertEqual(hook(1, {"total_return": 0.01}), "")
         # Gate on: holds until step_go reaches the step, then hands the directive.
         self._control(mode="auto", step_gate={key: True})
+        observed_status: dict[str, object] = {}
 
         def release() -> None:
             time.sleep(0.15)
+            observed_status.update(read_status(self.hitl_dir / STATUS_NAME))
             self._control(mode="auto", step_gate={key: True}, step_go={key: 2},
                           step_directives={f"{key}#2": "收紧持仓集中度"})
 
         thread = threading.Thread(target=release)
         thread.start()
         try:
-            directive = hook(2, {"total_return": 0.02, "sharpe": 1.0})
+            directive = hook(2, {
+                "total_return": 0.02,
+                "sharpe": 1.0,
+                "diagnostic_warnings": ["zero orders"],
+            })
         finally:
             thread.join()
         self.assertEqual(directive, "收紧持仓集中度")
+        self.assertEqual(observed_status["step_summary"]["diagnostic_warnings"], ["zero orders"])
         status = read_status(self.hitl_dir / STATUS_NAME)
         self.assertEqual(status["state"], "running_session")
         # Stop request raises out of the gate.
@@ -636,6 +644,55 @@ class InteractiveRunnerTest(unittest.TestCase):
         self.assertEqual(data["run_id"], "run_live")
         self.assertEqual(data["fold_deadline_at"], "2026-07-07T12:00:00+00:00")
         self.assertTrue(str(data["trace_path"]).endswith("agent_trace.jsonl"))
+
+    def test_status_reporter_does_not_attach_previous_session_run(self) -> None:
+        work_root = Path(self.config.work_root)
+        old_artifacts = work_root / "run_meta" / "artifacts"
+        old_artifacts.mkdir(parents=True)
+        (old_artifacts / "run_manifest.json").write_text(
+            json.dumps({
+                "created_at": "2026-07-07T10:00:00+00:00",
+                "fold_deadline_at": "2026-07-07T11:00:00+00:00",
+            }),
+            encoding="utf-8",
+        )
+        os.utime(work_root / "run_meta", (1, 1))
+        status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=work_root, interval_seconds=60.0)
+        status.set(state="running_session", session_started_at=utc_now_iso())
+        with status._lock:
+            status._refresh_live_run_locked()
+        self.assertIsNone(status._data["run_id"])
+        self.assertIsNone(status._data["fold_deadline_at"])
+
+        new_artifacts = work_root / "run_fold" / "artifacts"
+        new_artifacts.mkdir(parents=True)
+        (new_artifacts / "run_manifest.json").write_text(
+            json.dumps({
+                "created_at": utc_now_iso(),
+                "fold_deadline_at": "2026-07-07T12:00:00+00:00",
+            }),
+            encoding="utf-8",
+        )
+        with status._lock:
+            status._refresh_live_run_locked()
+        self.assertEqual(status._data["run_id"], "run_fold")
+        self.assertEqual(status._data["fold_deadline_at"], "2026-07-07T12:00:00+00:00")
+
+    def test_status_reporter_discovers_run_while_waiting_for_researcher(self) -> None:
+        work_root = Path(self.config.work_root)
+        status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=work_root, interval_seconds=60.0)
+        status.set(state="waiting_user_reply", session_started_at=utc_now_iso())
+        run_artifacts = work_root / "run_fast_question" / "artifacts"
+        run_artifacts.mkdir(parents=True)
+        (run_artifacts / "run_manifest.json").write_text(
+            json.dumps({"created_at": utc_now_iso()}), encoding="utf-8"
+        )
+        status._stop = SimpleNamespace(wait=Mock(side_effect=[False, True]))
+
+        status._heartbeat_loop()
+
+        self.assertEqual(status._data["run_id"], "run_fast_question")
+        self.assertTrue(str(status._data["trace_path"]).endswith("agent_trace.jsonl"))
 
     def test_post_fold_hook_failure_is_advisory(self) -> None:
         pipeline = FakePipeline(self.config, meta_enabled=False)

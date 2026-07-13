@@ -114,6 +114,7 @@ class SandboxSpecTest(unittest.TestCase):
             self.assertIn(f"{paths.artifacts}:/mnt/artifacts:ro", command)
             self.assertIn(f"{paths.agent}:/mnt/agent:rw", command)
             self.assertIn(f"{paths.current_snapshot}:/mnt/snapshot:ro", command)
+            self.assertNotIn(f"{paths.test}:/mnt/snapshots/test:ro", command)
             self.assertNotIn("/mnt/runtime/snapshot_views", command)
 
     def test_formal_container_uses_only_allowlisted_mounts(self):
@@ -122,6 +123,10 @@ class SandboxSpecTest(unittest.TestCase):
             paths = sandbox.prepare_layout()
             docker = DockerSandbox(sandbox, SandboxSpec(gpu=None))
             docker.image_id = "sha256:fixed-image"
+            hidden_view = paths.snapshot_views / "test_decision_input"
+            hidden_view.mkdir()
+            (hidden_view / "manifest.json").write_text('{"slot":"test"}', encoding="utf-8")
+            sandbox.bind_formal_snapshot_view(hidden_view)
 
             class Completed:
                 returncode = 0
@@ -141,6 +146,7 @@ class SandboxSpecTest(unittest.TestCase):
             self.assertIn("--network=none", command)
             self.assertIn(f"{paths.agent_output}:/mnt/agent/output:ro", command)
             self.assertIn(f"{paths.model_artifacts}:/mnt/agent/models:ro", command)
+            self.assertIn(f"{hidden_view.resolve()}:/mnt/snapshot:ro", command)
             self.assertIn(f"{runtime.resolve() / 'state'}:/mnt/runtime/state:ro", command)
             self.assertIn(f"{runtime.resolve() / 'state_staging'}:/mnt/runtime/state_staging:rw", command)
             self.assertNotIn(str(paths.workspace), rendered)
@@ -196,6 +202,51 @@ class SandboxSpecTest(unittest.TestCase):
             self.assertNotIsInstance(raised.exception, Exception)
             self.assertIsInstance(raised.exception.__cause__, ValueError)
             self.assertIn("failed to unpause development container", str(raised.exception))
+
+    def test_final_formal_guard_keeps_development_container_paused_until_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            docker = DockerSandbox(sandbox, SandboxSpec(gpu=None))
+            docker.container = "development-container"
+
+            class Completed:
+                returncode = 0
+                stderr = ""
+
+            docker.retain_pause_until_stop()
+            with patch("subprocess.run", return_value=Completed()) as run:
+                with docker.formal_guard():
+                    pass
+                with docker.formal_guard():
+                    pass
+                docker.stop()
+
+            self.assertEqual(
+                [call.args[0] for call in run.call_args_list],
+                [
+                    ["docker", "pause", "development-container"],
+                    ["docker", "rm", "-f", "development-container"],
+                ],
+            )
+
+    def test_stop_fails_closed_when_final_paused_container_cannot_be_destroyed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            docker = DockerSandbox(sandbox, SandboxSpec(gpu=None))
+            docker.container = "development-container"
+            docker._formal_pause_active = True
+            docker._retain_formal_pause = True
+
+            class Completed:
+                returncode = 1
+                stderr = "daemon busy"
+
+            with patch("subprocess.run", return_value=Completed()):
+                with self.assertRaises(SandboxLifecycleFatal):
+                    docker.stop()
+
+            self.assertTrue(docker._formal_pause_active)
+            self.assertTrue(docker._retain_formal_pause)
 
     def test_formal_guard_recovers_an_ambiguous_pause_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -523,12 +574,53 @@ class FilesystemPermissionTest(unittest.TestCase):
 
             sandbox.bind_snapshot_view(valid_view)
             self.assertTrue(paths.snapshot.is_symlink())
+            self.assertTrue(paths.formal_snapshot.is_symlink())
             self.assertEqual((paths.snapshot / "manifest.json").read_text(encoding="utf-8"), '{"slot":"valid"}')
+            self.assertEqual(
+                (paths.formal_snapshot / "manifest.json").read_text(encoding="utf-8"), '{"slot":"valid"}'
+            )
             self.assertEqual((paths.current_snapshot / "manifest.json").read_text(encoding="utf-8"), '{"slot":"valid"}')
 
             sandbox.bind_snapshot_view(test_view)
             self.assertEqual((paths.snapshot / "manifest.json").read_text(encoding="utf-8"), '{"slot":"test"}')
             self.assertEqual((paths.current_snapshot / "manifest.json").read_text(encoding="utf-8"), '{"slot":"test"}')
+
+    def test_formal_snapshot_binding_does_not_replace_development_mirror(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            paths = sandbox.prepare_layout()
+            valid_view = paths.snapshot_views / "valid_decision_input"
+            test_view = paths.snapshot_views / "test_decision_input"
+            valid_view.mkdir()
+            test_view.mkdir()
+            (valid_view / "manifest.json").write_text('{"slot":"valid"}', encoding="utf-8")
+            (test_view / "manifest.json").write_text('{"slot":"test"}', encoding="utf-8")
+            sandbox.bind_snapshot_view(valid_view)
+
+            sandbox.bind_formal_snapshot_view(test_view)
+
+            self.assertEqual((paths.snapshot / "manifest.json").read_text(encoding="utf-8"), '{"slot":"valid"}')
+            self.assertEqual(
+                (paths.formal_snapshot / "manifest.json").read_text(encoding="utf-8"), '{"slot":"test"}'
+            )
+            self.assertEqual((paths.current_snapshot / "manifest.json").read_text(encoding="utf-8"), '{"slot":"valid"}')
+
+    def test_formal_snapshot_binding_rejects_missing_and_escaping_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            paths = sandbox.prepare_layout()
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+
+            with self.assertRaisesRegex(ValueError, "existing directory"):
+                sandbox.bind_formal_snapshot_view(paths.snapshot_views / "missing")
+            with self.assertRaisesRegex(ValueError, "outside the sandbox snapshot roots"):
+                sandbox.bind_formal_snapshot_view(outside)
+
+            escaping = paths.snapshot_views / "escaping"
+            escaping.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "outside the sandbox snapshot roots"):
+                sandbox.bind_formal_snapshot_view(escaping)
 
 
 class MetaLearningSessionTest(unittest.TestCase):
@@ -1158,14 +1250,23 @@ class DockerSandboxE2ETest(unittest.TestCase):
                 self.assertNotEqual(hidden_views.exit_code, 0)
                 blocked_artifacts = executor.run(["/bin/sh", "-c", "touch /mnt/artifacts/steps/agent_write"], timeout_seconds=30)
                 self.assertNotEqual(blocked_artifacts.exit_code, 0)
-                blocked = executor.run(["/bin/sh", "-c", "ls /mnt/snapshots/test"], timeout_seconds=30)
-                self.assertNotEqual(blocked.exit_code, 0)  # 0700 test slot is unreadable for agent
+                blocked = executor.run(["/bin/sh", "-c", "test ! -e /mnt/snapshots/test"], timeout_seconds=30)
+                self.assertEqual(blocked.exit_code, 0)  # hidden replay is absent, not permission-dependent
 
                 (paths.workspace / "formal_secret").write_text("secret", encoding="utf-8")
                 (paths.artifacts / "formal_secret").write_text("secret", encoding="utf-8")
                 (paths.valid / "formal_secret").write_text("secret", encoding="utf-8")
+                hidden_view = paths.snapshot_views / "test_decision_input"
+                hidden_view.mkdir()
+                (hidden_view / "manifest.json").write_text('{"slot":"test"}', encoding="utf-8")
+                sandbox.bind_formal_snapshot_view(hidden_view)
                 runtime = Path(tmp) / "formal_one"
                 with docker.formal_executor(runtime) as formal:
+                    hidden = formal.run(
+                        ["/bin/sh", "-c", "cat /mnt/snapshot/manifest.json"], timeout_seconds=30
+                    )
+                    self.assertEqual(hidden.exit_code, 0, hidden.stderr)
+                    self.assertIn('"test"', hidden.stdout)
                     isolated = formal.run(
                         [
                             "/bin/sh",
@@ -1191,6 +1292,11 @@ class DockerSandboxE2ETest(unittest.TestCase):
                         timeout_seconds=30,
                     )
                     self.assertNotEqual(blocked_state.exit_code, 0)
+                still_valid = executor.run(
+                    ["/bin/sh", "-c", "cat /mnt/snapshot/manifest.json"], timeout_seconds=30
+                )
+                self.assertEqual(still_valid.exit_code, 0, still_valid.stderr)
+                self.assertIn('"valid"', still_valid.stdout)
                 self.assertEqual((runtime / "state_staging" / "ok").read_text(encoding="utf-8").strip(), "ok")
 
                 with docker.formal_executor(Path(tmp) / "formal_two") as formal:

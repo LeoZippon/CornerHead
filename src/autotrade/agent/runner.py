@@ -35,7 +35,14 @@ from autotrade.environment.tools import (
     ToolError,
 )
 from autotrade.environment.tools.artifact_io import ArtifactIOTool
-from autotrade.environment.tools.base import ActionField, ActionSpec, SessionInterrupt, ToolSchemaError
+from autotrade.environment.tools.backtest import agent_visible_backtest_result
+from autotrade.environment.tools.base import (
+    ActionField,
+    ActionSpec,
+    SessionInterrupt,
+    ToolSchemaError,
+    agent_visible_tool_result,
+)
 from autotrade.environment.tools.web_search import META_SEARCH_PERSPECTIVES, build_web_search_spec
 from autotrade.environment.web_fetch import WebFetchError
 from autotrade.environment.web_search import WebSearchError, WebSearchProvider
@@ -457,7 +464,7 @@ class AgentSessionRunner:
             max_output_chars=int(args["max_output_chars"]),
             timeout_seconds=int(args["timeout_seconds"]),
         )
-        return {"observation": "shell", **result.to_record()}
+        return {"observation": "shell", **agent_visible_tool_result(result.to_record())}
 
     def _do_write_file(self, args: dict[str, object]) -> dict[str, object]:
         return {"observation": "write_file", **self.artifact_io.write_file(**args)}
@@ -466,13 +473,13 @@ class AgentSessionRunner:
         return {"observation": "edit_file", **self.artifact_io.edit_file(**args)}
 
     def _do_grep(self, args: dict[str, object]) -> dict[str, object]:
-        return {"observation": "grep", **self.search.grep(**args)}
+        return {"observation": "grep", **agent_visible_tool_result(self.search.grep(**args))}
 
     def _do_glob(self, args: dict[str, object]) -> dict[str, object]:
-        return {"observation": "glob", **self.search.glob(**args)}
+        return {"observation": "glob", **agent_visible_tool_result(self.search.glob(**args))}
 
     def _do_read(self, args: dict[str, object]) -> dict[str, object]:
-        return {"observation": "read", **self.search.read(**args)}
+        return {"observation": "read", **agent_visible_tool_result(self.search.read(**args))}
 
     def _do_modification_check(self, args: dict[str, object]) -> dict[str, object]:
         return {"observation": "modification_check", **self.modification_check.run()}
@@ -498,8 +505,16 @@ class AgentSessionRunner:
             result = self.backtest.run(mode="valid", replay_window=(args or {}).get("replay_window"))
         finally:
             # Exclude this independently-timed backtest from the reasoning deadline.
-            self._excluded_backtest_seconds += time.monotonic() - started
-        observation = {"observation": "backtest", **result}
+            excluded_seconds = time.monotonic() - started
+            self._excluded_backtest_seconds += excluded_seconds
+            # The UI needs the same whole-tool exclusion as the runner (data
+            # load + replay + publication), not merely replay_wall_seconds.
+            self.ctx.trace.emit(
+                "budget_exclusion",
+                {"reason": "backtest", "seconds": round(excluded_seconds, 3)},
+                step_id=self.ctx.current_step_id,
+            )
+        researcher_directive = ""
         # Step-level HITL: after a formal (non-probe) validation the researcher
         # may hold the session at this step and inject guidance. The wait is
         # credited back to the deadline like backtest wall-time; the directive
@@ -521,9 +536,12 @@ class AgentSessionRunner:
                     step_id=self.ctx.current_step_id,
                 )
             if directive and str(directive).strip():
-                observation["researcher_step_directive"] = (
-                    "研究者 Step 级指令（用户注入的待检验假设，不放宽任何硬约束）：" + str(directive).strip()
-                )
+                researcher_directive = str(directive).strip()
+        observation = {"observation": "backtest", **agent_visible_backtest_result(result)}
+        if researcher_directive:
+            observation["researcher_step_directive"] = (
+                "研究者 Step 级指令（用户注入的待检验假设，不放宽任何硬约束）：" + researcher_directive
+            )
         return observation
 
     def _do_finish_fold(self, args: dict[str, object]) -> dict[str, object]:
@@ -589,7 +607,7 @@ class AgentSessionRunner:
             max_chars=int(args["max_chars"]),
             use_proxy=bool(args["use_proxy"]),
         )
-        return {"observation": "web_fetch", **result}
+        return {"observation": "web_fetch", **agent_visible_tool_result(result)}
 
     def _do_explore(self, args: dict[str, object]) -> dict[str, object]:
         engine = ExploreSubAgentEngine(

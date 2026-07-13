@@ -14,7 +14,7 @@ import subprocess
 import time
 from pathlib import Path, PurePosixPath
 
-from .base import ActionField, ActionSpec, ToolContext, ToolError
+from .base import ActionField, ActionSpec, ToolContext, ToolError, agent_visible_tool_result
 
 DEFAULT_GREP_LIMIT = 250
 DEFAULT_GLOB_LIMIT = 100
@@ -306,7 +306,7 @@ class StructuredSearchTool:
                 **paging,
                 **budget,
             }
-        self.ctx.trace.emit("grep", record, step_id=self.ctx.current_step_id)
+        self.ctx.trace.emit("grep", agent_visible_tool_result(record), step_id=self.ctx.current_step_id)
         return record
 
     def glob(
@@ -358,7 +358,7 @@ class StructuredSearchTool:
             **paging,
             **budget,
         }
-        self.ctx.trace.emit("glob", record, step_id=self.ctx.current_step_id)
+        self.ctx.trace.emit("glob", agent_visible_tool_result(record), step_id=self.ctx.current_step_id)
         return record
 
     def read(
@@ -393,7 +393,7 @@ class StructuredSearchTool:
             **paging,
             **budget,
         }
-        self.ctx.trace.emit("read", record, step_id=self.ctx.current_step_id)
+        self.ctx.trace.emit("read", agent_visible_tool_result(record), step_id=self.ctx.current_step_id)
         return record
 
     def _run_rg(

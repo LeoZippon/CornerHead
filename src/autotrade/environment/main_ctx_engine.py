@@ -155,6 +155,7 @@ class _TickResult:
     substeps: list[dict[str, object]]
     staged: list[dict[str, object]]
     main_wall_s: float | None = None
+    agent_peak_rss_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -192,6 +193,7 @@ class MainPolicyRunner:
         responses_path: Path | None = None,
         decision_max_sim_minutes: float | None = None,
         runtime_dir: Path | None = None,
+        snapshot_path: Path | None = None,
     ) -> None:
         self.executor = executor
         self.paths = paths
@@ -202,6 +204,7 @@ class MainPolicyRunner:
         self.nl_service = nl_service
         self.requests_path = requests_path
         self.responses_path = responses_path
+        self.snapshot_path = Path(snapshot_path) if snapshot_path is not None else self.paths.snapshot
         self.formal_isolation = bool(getattr(executor, "formal_isolation", False))
         if runtime_dir is None:
             self.state_dir = self.paths.workspace / ".state"
@@ -229,7 +232,7 @@ class MainPolicyRunner:
         try:
             main_py = self.paths.agent_output / "main.py"
             env = {
-                "AT_SNAPSHOT_DIR": self.executor.map_path(self.paths.snapshot),
+                "AT_SNAPSHOT_DIR": self.executor.map_path(self.snapshot_path),
                 "AT_AGENT_OUTPUT_DIR": self.executor.map_path(self.paths.agent_output),
                 "AT_MODEL_DIR": self.executor.map_path(self.paths.model_artifacts),
                 "AT_STATE_DIR": self.executor.map_path(self.state_dir),
@@ -313,11 +316,17 @@ class MainPolicyRunner:
             main_wall_s = float(main_wall_raw) if main_wall_raw is not None else None
         except (TypeError, ValueError):
             main_wall_s = None
+        peak_rss_raw = response.get("agent_peak_rss_bytes")
+        try:
+            agent_peak_rss_bytes = int(peak_rss_raw) if peak_rss_raw is not None else None
+        except (TypeError, ValueError):
+            agent_peak_rss_bytes = None
         return _TickResult(
             actions=[dict(action) for action in actions if isinstance(action, dict)],
             substeps=[dict(s) for s in substeps if isinstance(s, dict)],
             staged=[dict(s) for s in staged if isinstance(s, dict)],
             main_wall_s=main_wall_s,
+            agent_peak_rss_bytes=agent_peak_rss_bytes,
         )
 
     def close(self) -> None:
@@ -561,10 +570,11 @@ def run_main_ctx_replay(
     # main(ctx) step, the Timeview rebuilds, the state-staging merges, and the Broker
     # matching. The NL-service share of step wall is split out from strategy compute.
     phase_wall = {
-        "strategy_step": 0.0, "timeview_init": timeview_init_seconds,
+        "strategy_step": 0.0, "agent_main": 0.0, "timeview_init": timeview_init_seconds,
         "timeview_roll": 0.0, "state_merge": 0.0, "broker_match": 0.0,
     }
-    tick_counts = {"total": 0, "intraday": 0, "offsession": 0}
+    agent_peak_rss_bytes = 0
+    tick_counts = {"total": 0, "intraday": 0, "offsession": 0, "decisions": 0, "actions": 0}
     delayed_actions: list[_DelayedAction] = []
     delayed_seq = 0
     total_days = len(market.trade_dates)
@@ -659,6 +669,7 @@ def run_main_ctx_replay(
                     # transfers, and delayed-action release above all still ran.
                     if not _is_decision_tick(tick, intraday_decision_minutes):
                         continue
+                    tick_counts["decisions"] += 1
                     state = _market_state(
                         broker,
                         trade_date=trade_date,
@@ -675,10 +686,15 @@ def run_main_ctx_replay(
                     # the day's compute and fail-fast when it exceeds the per-day budget
                     # (scales with replay length, unlike a fixed total cap).
                     _tick_t0 = time.monotonic()
-                    actions, substeps, staged, main_wall_s = _normalize_tick(main_policy.step(state))
+                    actions, substeps, staged, main_wall_s, tick_peak_rss = _normalize_tick(main_policy.step(state))
+                    tick_counts["actions"] += len(actions)
                     _tick_wall = time.monotonic() - _tick_t0
                     day_compute_wall += _tick_wall
                     phase_wall["strategy_step"] += _tick_wall
+                    strategy_wall = float(main_wall_s if main_wall_s is not None else _tick_wall)
+                    phase_wall["agent_main"] += strategy_wall
+                    if tick_peak_rss is not None:
+                        agent_peak_rss_bytes = max(agent_peak_rss_bytes, int(tick_peak_rss))
                     if stager is not None and staged:
                         try:
                             stager.register(staged, when=when)
@@ -712,7 +728,6 @@ def run_main_ctx_replay(
                         agg["total_real_wall_s"] += real_wall
                         agg["max_real_wall_s"] = max(agg["max_real_wall_s"], real_wall)
                         agg["budget_minutes"] = budget_min
-                    strategy_wall = float(main_wall_s if main_wall_s is not None else _tick_wall)
                     # Only top-level substeps count toward coverage: a nested substep's
                     # wall-time is already inside its parent's real_wall_s, so summing all
                     # of them would over-count and let genuine unwrapped compute hide.
@@ -807,6 +822,7 @@ def run_main_ctx_replay(
             ready_at=delayed.ready_at.isoformat(),
         )
 
+    replay_wall_seconds = time.monotonic() - replay_start
     return ReplayResult(
         equity_curve=pd.Series(equity_by_date).sort_index(),
         broker=broker,
@@ -814,15 +830,20 @@ def run_main_ctx_replay(
         exit_date=exit_date,
         granularity=granularity,
         substep_runtime=substep_runtime or None,
-        replay_wall_seconds=time.monotonic() - replay_start,
+        replay_wall_seconds=replay_wall_seconds,
         replayed_trade_days=total_days,
         total_ticks=tick_counts["total"],
         intraday_ticks=tick_counts["intraday"],
         offsession_ticks=tick_counts["offsession"],
+        decision_calls=tick_counts["decisions"],
+        strategy_action_count=tick_counts["actions"],
         state_staging_audit=(stager.audit() if stager is not None else None),
         phase_seconds=_phase_seconds(
-            phase_wall, getattr(getattr(main_policy, "nl_service", None), "nl_wall_seconds", 0.0)
+            phase_wall,
+            getattr(getattr(main_policy, "nl_service", None), "nl_wall_seconds", 0.0),
+            replay_wall_seconds,
         ),
+        agent_peak_rss_bytes=agent_peak_rss_bytes or None,
     )
 
 
@@ -1030,28 +1051,45 @@ def _auction_result_ticks(
     return ticks, wake_keys
 
 
-def _phase_seconds(phase_wall: dict[str, float], nl_wall: float) -> dict[str, float]:
+def _phase_seconds(phase_wall: dict[str, float], nl_wall: float, replay_wall: float) -> dict[str, float]:
     """Per-phase replay wall-time. The NL-service share of the agent step is split
     out of strategy compute so the four host phases plus the LLM service sum to the
     replay's active work."""
     nl = float(nl_wall or 0.0)
-    return {
-        "strategy_compute": round(max(0.0, phase_wall["strategy_step"] - nl), 3),
+    main_wall = max(0.0, phase_wall["agent_main"])
+    result = {
+        "strategy_compute": round(max(0.0, main_wall - nl), 3),
+        # State serialization, JSONL transport, driver ctx construction and
+        # response decoding around main(ctx); measured separately from Agent code.
+        "strategy_ipc": round(max(0.0, phase_wall["strategy_step"] - main_wall), 3),
         "nl_service": round(nl, 3),
         "timeview_init": round(phase_wall["timeview_init"], 3),
         "timeview_roll": round(phase_wall["timeview_roll"], 3),
         "state_merge": round(phase_wall["state_merge"], 3),
         "broker_match": round(phase_wall["broker_match"], 3),
     }
+    accounted = sum(result.values())
+    # Remaining host loop: day slicing/planning, state assembly, broker book-
+    # keeping and result construction. This closes the previous opaque timing gap.
+    result["host_replay_overhead"] = round(max(0.0, replay_wall - accounted), 3)
+    return result
 
 
-def _normalize_tick(result: object) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]], float | None]:
+def _normalize_tick(
+    result: object,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]], float | None, int | None]:
     """A ``MainPolicyRunner`` step returns a ``_TickResult``; test fakes return a
     plain action list (no sub-steps or staged writes = current next-bar behavior)."""
     if isinstance(result, _TickResult):
-        return result.actions, result.substeps, result.staged, result.main_wall_s
+        return (
+            result.actions,
+            result.substeps,
+            result.staged,
+            result.main_wall_s,
+            result.agent_peak_rss_bytes,
+        )
     actions = [dict(a) for a in (result or []) if isinstance(a, dict)]
-    return actions, [], [], None
+    return actions, [], [], None, None
 
 
 def _release_delayed_actions(

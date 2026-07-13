@@ -5,7 +5,7 @@ from __future__ import annotations
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.web_fetch import WebFetchError, WebFetchService
 
-from .base import ActionField, ActionSpec, ToolContext
+from .base import ActionField, ActionSpec, ToolContext, agent_visible_tool_result
 
 DEFAULT_MAX_CHARS = 12_000
 MAX_RESULT_CHARS = 30_000
@@ -99,7 +99,9 @@ class AgentWebFetchTool:
             }
         )
         payload = sanitize_for_log(payload)
-        trace_payload = {key: value for key, value in payload.items() if key != "content"}
+        trace_payload = agent_visible_tool_result(
+            {key: value for key, value in payload.items() if key != "content"}
+        )
         self.ctx.trace.emit("web_fetch", trace_payload, step_id=self.ctx.current_step_id)
         return payload
 

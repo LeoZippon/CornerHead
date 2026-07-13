@@ -160,12 +160,14 @@ class DockerExecutor:
         python: str = "python3",
         formal_factory: Callable[[Path], ContextManager["FormalDockerExecutor"]] | None = None,
         formal_guard_factory: Callable[[], ContextManager[None]] | None = None,
+        formal_seal_factory: Callable[[], None] | None = None,
     ) -> None:
         self.container = container
         self.host_paths = host_paths
         self.python = python
         self.formal_factory = formal_factory
         self.formal_guard_factory = formal_guard_factory
+        self.formal_seal_factory = formal_seal_factory
 
     def runtime_path(self, host_path: Path | str) -> str:
         """Container path of the trusted runtime module (the main_ctx driver) baked
@@ -322,6 +324,7 @@ class FormalDockerExecutor(DockerExecutor):
         self.python = python
         self.formal_factory = None
         self.formal_guard_factory = None
+        self.formal_seal_factory = None
         self._mappings = tuple((Path(host).resolve(), str(target)) for host, target in mappings)
 
     def map_path(self, host_path: Path | str) -> str:

@@ -177,9 +177,24 @@ class WebFetchRunnerTest(unittest.TestCase):
             )
             with patch("autotrade.environment.tools.web_fetch.WebFetchService.fetch", return_value=result):
                 payload = tool.run(url="https://example.com/secret", max_chars=1000)
+                runner = AgentSessionRunner(
+                    ctx,
+                    ScriptedLLM([]),
+                    AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5)),
+                    fold_info={},
+                    acceptance_rules={},
+                    mode="meta_learning",
+                )
+                observation = runner._do_web_fetch(
+                    {"url": "https://example.com/secret", "max_chars": 1000, "use_proxy": False}
+                )
             saved = Path(str(payload["host_markdown_path"])).read_text(encoding="utf-8")
             self.assertIn("hf_[redacted]", saved)
             self.assertNotIn("hf_" + "a" * 30, saved)
+            self.assertNotIn("host_markdown_path", observation)
+            events = [event for event in ctx.trace.read_events() if event["event_type"] == "web_fetch"]
+            self.assertTrue(events)
+            self.assertTrue(all("host_markdown_path" not in event for event in events))
 
     def test_fold_tool_schema_does_not_expose_web_fetch(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -162,6 +162,18 @@ class StepTreeTest(unittest.TestCase):
                     artifact_hash=artifact_hash(artifact), metrics={},
                     complete_validation=True, attachments={"output/x.json": payload},
                 )
+            node_id = tree.record_step(
+                artifact,
+                fold_id="fold_2022Q1",
+                result_name="valid_001",
+                artifact_hash=artifact_hash(artifact),
+                metrics={},
+                complete_validation=True,
+                attachments={"detail.json": payload},
+            )
+            stored = tree.get_node(node_id)["attachments"]["detail.json"]
+            self.assertFalse(Path(stored).is_absolute())
+            self.assertEqual(stored, f"{node_id}/detail.json")
 
     def test_failed_attempt_error_is_redacted_on_disk(self):
         with tempfile.TemporaryDirectory() as tmp:

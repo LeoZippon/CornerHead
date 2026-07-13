@@ -431,8 +431,10 @@ class ToolFlowTest(unittest.TestCase):
             # A pre-flight rejection (here: duplicate result dir) is an ordinary tool
             # error, not a backtest outcome — it must not emit an 'aborted' terminal
             # event (which would also lack a matching backtest_start bracket).
-            with self.assertRaisesRegex(ToolError, "already exists"):
+            with self.assertRaisesRegex(ToolError, "already exists") as raised:
                 BacktestTool(ctx).run(mode="valid", result_name="valid_dup")
+            self.assertNotIn(str(ctx.paths.root), str(raised.exception))
+            self.assertIn("/mnt/artifacts/results/valid_dup", str(raised.exception))
             events = ctx.trace.read_events()
             aborted = [e for e in events if e["event_type"] == "backtest" and e.get("status") == "aborted"]
             self.assertEqual(aborted, [])
@@ -442,11 +444,14 @@ class ToolFlowTest(unittest.TestCase):
             _, ctx = build_sandbox(Path(tmp))
             # A ToolError raised AFTER backtest_start (here: the post-replay modification
             # refresh) must still emit a terminal backtest event, not leave an open bracket.
+            host_error = f"refresh rejected at {ctx.paths.root}/private"
             with patch.object(
-                BacktestTool, "_refresh_modification_check_after_replay", side_effect=ToolError("refresh rejected")
+                BacktestTool, "_refresh_modification_check_after_replay", side_effect=ToolError(host_error)
             ):
-                with self.assertRaisesRegex(ToolError, "refresh rejected"):
+                with self.assertRaisesRegex(ToolError, "refresh rejected") as raised:
                     BacktestTool(ctx).run(mode="valid")
+            self.assertNotIn(str(ctx.paths.root), str(raised.exception))
+            self.assertIn("/mnt/private", str(raised.exception))
             events = ctx.trace.read_events()
             self.assertTrue(any(e["event_type"] == "backtest_start" for e in events))
             terminals = [e for e in events if e["event_type"] == "backtest"]
@@ -468,6 +473,49 @@ class ToolFlowTest(unittest.TestCase):
             self.assertEqual(orders.loc[0, "action"], "buy")
             self.assertEqual(orders.loc[0, "status"], "filled")
             self.assertEqual(orders.loc[0, "ts_code"], "000001.SZ")
+            backtest_event = [event for event in ctx.trace.read_events() if event["event_type"] == "backtest"][-1]
+            self.assertNotIn("host_result_path", backtest_event)
+            self.assertNotIn("host_orders_path", backtest_event)
+            self.assertIn("host_exit_liquidation_count", backtest_event)
+            self.assertIn("host_replay_overhead", backtest_event["phase_seconds"])
+
+    def test_zero_order_backtest_returns_soft_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text("def main(ctx):\n    pass\n", encoding="utf-8")
+
+            summary = BacktestTool(ctx).run(mode="valid")
+
+            self.assertEqual(summary["status"], "ok")
+            self.assertTrue(summary["complete_validation"])
+            self.assertEqual(summary["order_count"], 0)
+            self.assertGreater(summary["decision_calls"], 0)
+            self.assertEqual(summary["strategy_action_count"], 0)
+            self.assertIsInstance(summary["agent_peak_rss_bytes"], int)
+            self.assertTrue(any("zero orders" in warning for warning in summary["diagnostic_warnings"]))
+            # Diagnostics explain but never become an Environment-side fence.
+            self.assertTrue(ModificationCheckTool(ctx).run()["allowed_to_backtest"])
+
+    def test_modification_check_advises_without_blocking_strategy_choices(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(
+                """import pandas as pd
+
+def main(ctx):
+    try:
+        rows = pd.read_parquet(ctx.snapshot_dir / \"events.parquet\")
+    except Exception:
+        rows = []
+""",
+                encoding="utf-8",
+            )
+
+            check = ModificationCheckTool(ctx).run()
+
+            self.assertTrue(check["allowed_to_backtest"])
+            kinds = {item["kind"] for item in check["advisories"]}
+            self.assertEqual(kinds, {"unprojected_parquet_read", "suppressed_broad_exception"})
 
     def test_strategy_stdout_does_not_corrupt_rpc(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -778,8 +826,17 @@ class ToolFlowTest(unittest.TestCase):
             ctx.write_locked = True
             ctx.manifest.update(frozen_strategy_artifact_hash=artifact_hash(ctx.paths.agent_output))
             sandbox.bind_snapshot_view(ctx.paths.snapshot_views / "test_decision_input")
+            sealed: list[bool] = []
+            ctx.executor.formal_seal_factory = lambda: sealed.append(True)
+            public_trace_count = len(ctx.trace.read_events())
             summary = BacktestTool(ctx).run(mode="frozen_eval", result_name="test_000")
+            self.assertEqual(sealed, [True])
             self.assertEqual(summary["result_name"], "test_000")
+            self.assertEqual(len(ctx.trace.read_events()), public_trace_count)
+            host_manifest = json.loads(ctx.manifest.host_path.read_text(encoding="utf-8"))
+            frozen = [item for item in host_manifest["backtest_summaries"] if item["mode"] == "frozen_eval"]
+            self.assertEqual(len(frozen), 1)
+            self.assertEqual(frozen[0]["result_name"], "test_000")
 
     def test_wall_caps_are_tight_for_validation_and_generous_for_final_eval(self):
         # H2: the tight per-decision/per-day wall caps bound only agent-iteration
@@ -1289,6 +1346,24 @@ class ShellToolTest(unittest.TestCase):
             self.assertTrue(result.stdout_path)
             self.assertTrue(Path(str(result.host_stdout_path)).exists())
             self.assertEqual(len(result.stdout), 20_000)
+            shell_event = [event for event in ctx.trace.read_events() if event["event_type"] == "shell"][-1]
+            self.assertNotIn("host_stdout_path", shell_event)
+
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([]),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5)),
+                fold_info={},
+                acceptance_rules={},
+            )
+            observation = runner._do_shell(
+                {
+                    "command": "python3 -c \"print('y' * 21050)\"",
+                    "max_output_chars": 20_000,
+                    "timeout_seconds": 120,
+                }
+            )
+            self.assertNotIn("host_stdout_path", observation)
 
             large = SandboxShellTool(ctx).run("python3 -c \"print('x' * 250000)\"")
             self.assertEqual(large.exit_code, 0)
@@ -1387,6 +1462,48 @@ class ShellToolTest(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("rg"), "ripgrep is required for structured grep tests")
 class StructuredSearchToolTest(unittest.TestCase):
+    def test_truncated_search_hides_host_storage_coordinates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp), with_strategy=False)
+            (ctx.paths.workspace / "large.txt").write_text(
+                "".join(f"needle-{index}-{'x' * 80}\n" for index in range(1000)),
+                encoding="utf-8",
+            )
+            tool = StructuredSearchTool(ctx)
+            raw = tool.grep(
+                pattern="needle",
+                root="workspace",
+                path="large.txt",
+                output_mode="content",
+                head_limit=1000,
+            )
+            self.assertTrue(raw["truncated_by_chars"])
+            self.assertIn("host_grep_content_path", raw)
+
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([]),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5)),
+                fold_info={},
+                acceptance_rules={},
+            )
+            observation = runner._do_grep(
+                {
+                    "pattern": "needle",
+                    "root": "workspace",
+                    "path": "large.txt",
+                    "glob": None,
+                    "output_mode": "content",
+                    "head_limit": 1000,
+                    "offset": 0,
+                    "timeout_seconds": 60,
+                }
+            )
+            self.assertNotIn("host_grep_content_path", observation)
+            events = [event for event in ctx.trace.read_events() if event["event_type"] == "grep"]
+            self.assertTrue(events)
+            self.assertNotIn("host_grep_content_path", json.dumps(events))
+
     def test_grep_and_glob_are_structured_and_read_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp), with_strategy=False)
@@ -1875,8 +1992,15 @@ def main(ctx):
             _, ctx = build_sandbox(Path(tmp))
             explore_proxy = ScriptedLLM(
                 [
-                    tool_call_response(tool_call("glob", pattern="**/*.py", root="output")),
-                    "摘要：output 下找到 main.py。",
+                    tool_call_response(
+                        tool_call(
+                            "shell",
+                            command="python3 -c \"print('x' * 100)\"",
+                            max_output_chars=10,
+                            timeout_seconds=60,
+                        )
+                    ),
+                    "摘要：已核对 shell 输出。",
                 ]
             )
             runner = AgentSessionRunner(
@@ -1892,6 +2016,7 @@ def main(ctx):
             self.assertEqual(result["tool_calls"], 1)
             self.assertEqual(result["rounds"], 2)
             self.assertIn("摘要", result["digest"])
+            self.assertNotIn("host_stdout_path", json.dumps(explore_proxy.calls, ensure_ascii=False))
             llm_events = [e for e in ctx.trace.read_events() if e["event_type"] == "explore_llm_call"]
             self.assertGreaterEqual(len(llm_events), 2)
 

@@ -847,15 +847,19 @@ class SnapshotBuilder:
             auction["available_at_rule"] = [availability[str(day)][1] for day in auction["trade_date"]]
             auction = auction[list(self._AUCTION_COLUMNS)]
             auction = auction.sort_values(["trade_date", "session", "ts_code"]).reset_index(drop=True)
-        return auction, {
+        metadata: dict[str, object] = {
             "rows": int(len(auction)),
             "datasets": ["stk_auction"],
             "units": "vol=股, amount=元",
-            "coverage_start": "20250116",
             "clearing_price_fields": {"open": "price", "close": "15:00 bar close"},
             "precoverage_fallback": "labelled 09:30 minute proxy; Shenzhen vol/amount use configured correction",
             "price_quality": price_quality,
         }
+        if not auction.empty:
+            visible_dates = sorted(auction["trade_date"].astype(str).unique())
+            metadata["coverage_start"] = visible_dates[0]
+            metadata["coverage_end"] = visible_dates[-1]
+        return auction, metadata
 
     def _auction_partition_availability(self, trade_date: str) -> tuple[str, str]:
         path = self.raw_dir / "stk_auction" / f"trade_date={trade_date}.parquet"

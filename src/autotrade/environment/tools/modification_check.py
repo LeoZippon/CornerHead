@@ -8,6 +8,9 @@ to agent_trace.jsonl and the run manifest's latest-check summary.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 from autotrade.environment.artifacts import (
     ArtifactError,
     ModificationConstraints,
@@ -31,7 +34,8 @@ class ModificationCheckTool:
         tool_name=name,
         description=(
             "Validate current output/ and models/ artifacts against modification constraints, "
-            "parent hashes, size/line limits, and format rules before backtest or finish_fold."
+            "parent hashes, size/line limits, and format rules before backtest or finish_fold. "
+            "Also returns non-blocking performance/error-handling advisories; advisories never reject code."
         ),
         read_only=False,
         destructive=False,
@@ -117,7 +121,56 @@ class ModificationCheckTool:
             "delta": delta.to_record() if delta is not None else None,
             "model_delta": model_delta.to_record() if model_delta is not None else None,
             "reasons": reasons,
+            # Static hints only. They neither change ``allowed`` nor become an
+            # acceptance input; the Agent remains free to keep the code.
+            "advisories": _strategy_advisories(work_root),
         }
         manifest.record_modification_check(summary)
         self.ctx.trace.emit("tool", {**summary}, step_id=self.ctx.current_step_id, phase=phase)
         return summary
+
+
+def _strategy_advisories(root: Path) -> list[dict[str, object]]:
+    advisories: list[dict[str, object]] = []
+    for path in sorted(Path(root).rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (OSError, UnicodeError, SyntaxError):
+            continue
+        relative = path.relative_to(root).as_posix()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "read_parquet":
+                columns = next((keyword.value for keyword in node.keywords if keyword.arg == "columns"), None)
+                projected = columns is not None and not (
+                    isinstance(columns, ast.Constant) and columns.value is None
+                )
+                if not projected:
+                    advisories.append(
+                        {
+                            "kind": "unprojected_parquet_read",
+                            "path": relative,
+                            "line": node.lineno,
+                            "message": "read_parquet has no columns projection; this may load an entire wide domain",
+                        }
+                    )
+            elif isinstance(node, ast.ExceptHandler) and _is_broad_exception(node.type):
+                if not any(isinstance(child, ast.Raise) for statement in node.body for child in ast.walk(statement)):
+                    advisories.append(
+                        {
+                            "kind": "suppressed_broad_exception",
+                            "path": relative,
+                            "line": node.lineno,
+                            "message": "broad exception is not re-raised; preserve enough signal to diagnose empty fallbacks",
+                        }
+                    )
+    return advisories
+
+
+def _is_broad_exception(node: ast.expr | None) -> bool:
+    if node is None:
+        return True
+    if isinstance(node, ast.Name):
+        return node.id in {"Exception", "BaseException"}
+    if isinstance(node, ast.Attribute):
+        return node.attr in {"Exception", "BaseException"}
+    return False

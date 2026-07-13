@@ -1,3 +1,26 @@
+## 2026-07-13 Experiment observability, strategy diagnostics, and hidden-evaluation isolation
+
+Task: fix the seven selected Environment/UI defects without turning strategy-quality problems into hard acceptance fences, audit `lap-test9`, and decide whether Docker/replay optimization should continue now.
+
+Evidence:
+- `lap-test9` run `run_88cab9682eac` used raw generation `c0ce23156b36434bbbcaaac3d2919e22` in committed state for both decision inputs and both replay slots. Snapshot builds were 257.397/271.232 s; replay builds were 148.429/170.981 s.
+- Valid auction was a typed zero-row Parquet (string/double schema). Test auction had 257,528 rows across 47 days, no duplicate `(trade_date, ts_code, session)` keys, no missing keys, no non-finite/negative values, and all non-trading rows were exactly zero volume/amount with null price. Nonzero rows matched `amount / vol` to price within 0.005.
+- Full Valid replay completed 61 days in 1169.415 s with 18,452 decisions and zero orders. The strategy passed a string to a Path-based loader and broad handlers suppressed the resulting failure; host run status had no Environment error, while two failed probes remained auditable.
+- Docker create/start measured about 0.065 s versus the 1169 s replay. The separate formal container is retained for isolation; pre-starting/reusing it is not justified by the measured share.
+
+Implementation:
+- Bound HITL status fields to a current-session run, forced detail refresh on state/session/run changes, made trace stats atomic, credited full backtest and researcher waits, corrected UI labels/progress, restored remount auto-scroll, and treated dead `waiting_user_reply` as interrupted.
+- Added non-blocking AST/runtime diagnostics and phase/RSS/action telemetry. No diagnostic changes backtest permission, validation completeness, acceptance, or freeze eligibility.
+- Removed hidden Test replay from the development container, separated the formal decision selector, projected host paths out of Agent-visible channels, suppressed frozen evaluation trace, and kept the development container paused from final hidden evaluation through destruction.
+
+Decision:
+- Do not add a read-optimized lake, next-Fold container pre-start, Docker reuse, parallel tick replay, or new Agent scheduling entities now. Re-run the same experiment on this code and use the new phase/RSS telemetry; only optimize minute column projection/day pipeline if the measured host or memory share remains material.
+
+Validation and deployment:
+- Affected-module suite: 394 tests passed in 113.094 s. Full suite: 743 tests passed in 120.523 s. `node --check`, prompt export, and `git diff --check` passed.
+- Host after validation: 414 GiB RAM available; load average 16.55 on 192 logical CPUs. No new sustained GPU workload was created.
+- Rebuilt `autotrade-sandbox:latest` in 74.9 s; dependency layers were cached and rootless layer unpacking took about 61 s. New image ID is `sha256:cd2d08fc4b743dd277503aa34558400cc61858a1730e35caacc6b39227a06370`; an in-container smoke check confirmed the updated runtime driver. The still-running old experiment remains pinned to its old image ID and was not mutated.
+
 ## 2026-05-19 TuShare data requirement and permission probe
 
 Task: identify required TuShare datasets/interfaces before bulk download for MacroQuant.

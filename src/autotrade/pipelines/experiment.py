@@ -194,6 +194,7 @@ class ExperimentPipeline:
             sandbox.paths,
             formal_factory=docker.formal_executor,
             formal_guard_factory=docker.formal_guard,
+            formal_seal_factory=docker.retain_pause_until_stop,
         )
 
     @staticmethod
@@ -202,6 +203,16 @@ class ExperimentPipeline:
             sandbox.bind_snapshot_view(sandbox.paths.snapshot_views / view_name)
         else:
             docker.bind_snapshot_view(view_name)
+
+    @staticmethod
+    def _bind_formal_view(sandbox: LocalSandbox, docker: DockerSandbox | None, view_name: str) -> None:
+        view = sandbox.paths.snapshot_views / view_name
+        if docker is None:
+            sandbox.bind_snapshot_view(view)
+        else:
+            # Do not copy hidden Test/Held-out input into the directory mounted
+            # by the development Agent container.
+            sandbox.bind_formal_snapshot_view(view)
 
     @staticmethod
     def _start_container(docker: DockerSandbox | None, manifest: RunManifest) -> None:
@@ -1011,7 +1022,7 @@ class ExperimentPipeline:
                     phase=PHASE_FROZEN,
                     write_locked=True,
                 )
-                self._bind_view(sandbox, docker, "test_decision_input")
+                self._bind_formal_view(sandbox, docker, "test_decision_input")
                 summary = BacktestTool(ctx).run(mode="frozen_eval", result_name=f"heldout_{index:03d}")
             finally:
                 if docker is not None:
@@ -1188,7 +1199,7 @@ class ExperimentPipeline:
             frozen_strategy_artifact_hash=frozen.artifact_hash,
             frozen_model_artifact_hash=frozen.model_artifact_hash,
         )
-        self._bind_view(sandbox, docker, "test_decision_input")
+        self._bind_formal_view(sandbox, docker, "test_decision_input")
         summary = BacktestTool(ctx).run(mode="frozen_eval", result_name=result_name)
         if artifact_hash(ctx.paths.agent_output) != frozen.artifact_hash:
             raise RuntimeError("frozen test run modified the strategy artifact")
@@ -1377,6 +1388,7 @@ def _compact_fold_history(record: dict[str, object]) -> dict[str, object]:
                         "sharpe",
                         "max_drawdown",
                         "order_count",
+                        "host_exit_liquidation_count",
                         "error",
                     )
                     if key in summary
@@ -1421,7 +1433,6 @@ def _agent_visible_ledger_record(record: dict[str, object]) -> dict[str, object]
         "modification_check",
         "taste_chars",
         "agent_session_summary",
-        "agent_trace_ref",
         "meta_learning_directive",
         "web_search_engines",
         "input_window",

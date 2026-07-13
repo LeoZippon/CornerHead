@@ -1274,9 +1274,15 @@ def main(ctx):
         # Per-phase wall-time is reported for the 24h replay's cost breakdown (W9).
         self.assertEqual(
             set(result.phase_seconds),
-            {"strategy_compute", "nl_service", "timeview_init", "timeview_roll", "state_merge", "broker_match"},
+            {
+                "strategy_compute", "strategy_ipc", "nl_service", "timeview_init", "timeview_roll",
+                "state_merge", "broker_match", "host_replay_overhead",
+            },
         )
         self.assertGreaterEqual(result.phase_seconds["strategy_compute"], 0.0)
+        self.assertGreaterEqual(result.phase_seconds["strategy_ipc"], 0.0)
+        self.assertGreaterEqual(result.phase_seconds["host_replay_overhead"], 0.0)
+        self.assertIsInstance(result.agent_peak_rss_bytes, int)
 
     def test_on_progress_heartbeat_fires_for_long_replay(self) -> None:
         # The throttled heartbeat fires by the day-count threshold (>=30 days) so a

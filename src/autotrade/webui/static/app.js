@@ -514,14 +514,15 @@ function statTilesRow(tiles) {
 window.addEventListener("hashchange", route);
 window.addEventListener("DOMContentLoaded", route);
 
-function route() {
+function route(forceRefresh = false) {
+  const force = forceRefresh === true; // hashchange passes an Event, not a force flag.
   const hash = location.hash || "#/";
   const expMatch = hash.match(/^#\/exp\/([^/]+)(?:\/(.*))?$/);
   const expId = expMatch ? decodeURIComponent(expMatch[1]) : null;
   const key = expMatch && expMatch[2] ? sessionKeyFromUrl(expMatch[2]) : null;
   // Session switch within an already-rendered experiment swaps only the right
   // panel: no page rebuild, no scroll jump, live stream and timers untouched.
-  if (expMatch && key && detailView && detailView.experimentId === expId
+  if (!force && expMatch && key && detailView && detailView.experimentId === expId
       && document.body.contains(detailView.listHost)) {
     selectSession(key);
     return;
@@ -1017,6 +1018,14 @@ async function renderDetailPage(experimentId, selectedKey) {
   }
   const status = detail.status || {};
   const sessions = detail.sessions || [];
+  if (livePanel && livePanel.expId === experimentId) {
+    const liveState = detail.worker_alive
+      && ["running_session", "waiting_step_user", "waiting_user_reply"].includes(detail.state);
+    const currentRunId = String(status.run_id || "");
+    if (!liveState || livePanel.key !== status.session_key || livePanel.runId !== currentRunId) {
+      destroyLivePanel();
+    }
+  }
   if (!selectedKey) {
     selectedKey = status.session_key
       || (sessions.find((session) => !session.record && !session.records) || sessions[sessions.length - 1] || {}).key;
@@ -1102,9 +1111,11 @@ async function renderDetailPage(experimentId, selectedKey) {
     try {
       const fresh = await api(`/api/experiments/${encodeURIComponent(experimentId)}/status`);
       const freshState = fresh.state;
+      const raw = fresh.raw_status || {};
       const badge = document.querySelector(".page-head .badge");
-      if (badge && !badge.className.includes(`state-${freshState}`)) route(); // full refresh on state change
-      else if (fresh.raw_status && fresh.raw_status.session_key && fresh.raw_status.session_key !== (status.session_key || null)) route();
+      if (badge && !badge.className.includes(`state-${freshState}`)) route(true); // fetch fresh detail on state change
+      else if (raw.session_key && raw.session_key !== (status.session_key || null)) route(true);
+      else if (String(raw.run_id || "") !== String(status.run_id || "")) route(true);
     } catch { /* transient */ }
   }, 4000);
 }
@@ -1567,9 +1578,18 @@ function statsChipsRow(stats) {
   const row = el("div", { class: "stats-chips" });
   for (const [key, label] of STAT_CHIPS) {
     if (!counts[key]) continue;
-    let text = `${label} ${counts[key]}`;
-    if (key === "backtest" && stats.backtest_wall_seconds) text += `（Σ ${fmtDuration(stats.backtest_wall_seconds)}）`;
-    row.append(el("span", { class: "stat-chip" }, text));
+    row.append(el("span", { class: "stat-chip" }, `${label} ${counts[key]}`));
+  }
+  if (stats.backtest_wall_seconds) {
+    row.append(el("span", { class: "stat-chip" }, `⏸ 预算暂停/回补 Σ ${fmtDuration(stats.backtest_wall_seconds)}`));
+  }
+  if (stats.in_backtest) {
+    const progress = stats.backtest_progress || {};
+    const done = Number(progress.day_index) || 0;
+    const total = Number(progress.total_days) || 0;
+    row.append(el("span", { class: "stat-chip" }, total && done
+      ? `⏳ 回测已完成 ${done}/${total} 日（${Number(progress.percent || 0).toFixed(1)}%）`
+      : "⏳ 回测初始化 / 首个交易日处理中"));
   }
   if (stats.llm_prompt_tokens || stats.llm_completion_tokens) {
     row.append(
@@ -1639,6 +1659,7 @@ function stepGatePanel(detail, session) {
   );
   if (status.state === "waiting_step_user" && status.session_key === session.key) {
     const summary = status.step_summary || {};
+    const diagnostics = summary.diagnostic_warnings || [];
     const textarea = el("textarea", { class: "directive",
       placeholder: "可选：本 Step 结果的针对性指令（作为待检验假设注入下一轮对话）……" });
     panel.append(
@@ -1648,6 +1669,7 @@ function stepGatePanel(detail, session) {
         { label: "最大回撤", value: fmtPct(summary.max_drawdown) },
         { label: "完整验证", value: summary.complete_validation ? "是" : "否" },
       ])),
+      ...diagnostics.map((message) => el("div", { class: "hint warn" }, String(message))),
       textarea,
       el("div", { class: "control-bar" },
         el("button", {
@@ -1666,14 +1688,21 @@ function stepGatePanel(detail, session) {
 function liveTracePanel(detail, session) {
   // Reuse the streaming panel across page rebuilds and session navigation so
   // the SSE stream, scroll position, and accumulated events survive.
+  const status = detail.status || {};
+  const runId = String(status.run_id || "");
   if (livePanel && livePanel.expId === detail.experiment_id && livePanel.key === session.key
+      && livePanel.runId === runId
       && !livePanel.closed && (!livePanel.source || livePanel.source.readyState !== EventSource.CLOSED)) {
-    livePanel.refresh(detail);
-    return livePanel.node;
+    const reused = livePanel;
+    reused.refresh(detail);
+    // The reused node is attached to its new parent only after this function
+    // returns.  Scroll on the next frame so mode/Step switches still land on
+    // the newest event when auto-scroll is enabled.
+    requestAnimationFrame(() => { if (livePanel === reused) reused.scrollToBottom(); });
+    return reused.node;
   }
   destroyLivePanel();
   const panel = el("div", { class: "panel section-gap" }, el("h4", {}, `实时 Agent Trace — ${session.key}`));
-  const status = detail.status || {};
   const tools = el("div", { class: "trace-tools" });
   const box = el("div", { class: "trace-box" });
   let autoScroll = true;
@@ -1683,7 +1712,7 @@ function liveTracePanel(detail, session) {
   }), " 自动滚动");
   const countdown = el("span", {
     class: "badge state-running_session", style: "display:none",
-    title: "推理截止倒计时 = 名义 deadline + 已回补的回测墙钟；回测执行中独立计时",
+    title: "Agent 会话预算 = 名义 deadline + 已回补的回测墙钟；等待研究者时暂停",
   });
   tools.append(el("span", { class: "badge state-running_session" }, "streaming"), countdown, scrollToggle);
   const statsHost = el("div", {});
@@ -1692,7 +1721,6 @@ function liveTracePanel(detail, session) {
   panel.append(tools, statsHost, prep, box);
   let sawEvent = false;
   let source = null;
-  const runId = String(status.run_id || "");
   const runQuery = runId ? `run_id=${encodeURIComponent(runId)}&` : "";
   const appendEvents = (events) => {
     if (!events.length) return;
@@ -1721,26 +1749,45 @@ function liveTracePanel(detail, session) {
   };
   let deadlineMs = status.fold_deadline_at ? Date.parse(status.fold_deadline_at) : null;
   let startedMs = status.session_started_at ? Date.parse(status.session_started_at) : Date.now();
+  let sessionState = detail.state;
   let creditSeconds = 0;
   let inBacktest = false;
   let activeBacktestStartedMs = null;
+  let backtestProgress = null;
+  let agentSessionEnded = false;
   let statsSignature = "";
   const tick = () => {
     if (!sawEvent) {
       const elapsed = (Date.now() - startedMs) / 1000;
       prepText.textContent = `沙箱与数据快照准备中（已 ${fmtDuration(elapsed)}）… 首个 Agent 事件到达后开始流式显示`;
     }
-    if (deadlineMs) {
+    if (sessionState === "waiting_step_user") {
+      countdown.style.display = "";
+      countdown.textContent = "等待 Step 批准（Agent 会话计时暂停）";
+    } else if (sessionState === "waiting_user_reply") {
+      countdown.style.display = "";
+      countdown.textContent = "等待研究者答复（Agent 会话计时暂停）";
+    } else if (agentSessionEnded && sessionState === "running_session") {
+      countdown.style.display = "";
+      countdown.textContent = "Agent 推理已结束；Environment 正在验收、评估或落盘（不消耗 Agent 预算）";
+    } else if (deadlineMs && sessionState === "running_session") {
       countdown.style.display = "";
       if (inBacktest) {
         const activeSeconds = activeBacktestStartedMs ? Math.max(0, (Date.now() - activeBacktestStartedMs) / 1000) : 0;
-        countdown.textContent = `回测执行中（本次 ${fmtDuration(activeSeconds)}，结束后回补；此前已回补 ${fmtDuration(creditSeconds)}）`;
+        const done = Number((backtestProgress || {}).day_index) || 0;
+        const total = Number((backtestProgress || {}).total_days) || 0;
+        const progressText = total && done
+          ? `已完成 ${done}/${total} 日，${Number((backtestProgress || {}).percent || 0).toFixed(1)}%`
+          : "初始化 / 首个交易日处理中";
+        countdown.textContent = `回测执行中（${progressText}；本次 ${fmtDuration(activeSeconds)}，结束后回补）`;
       } else {
         const remain = (deadlineMs + creditSeconds * 1000 - Date.now()) / 1000;
         countdown.textContent = remain >= 0
-          ? `推理剩余 ${fmtDuration(remain)}（含回补 ${fmtDuration(creditSeconds)}）`
+          ? `Agent 活跃会话预算剩余 ${fmtDuration(remain)}（含暂停回补 ${fmtDuration(creditSeconds)}）`
           : `收尾中 +${fmtDuration(-remain)}`;
       }
+    } else {
+      countdown.style.display = "none";
     }
   };
   const pollStats = async () => {
@@ -1749,8 +1796,11 @@ function liveTracePanel(detail, session) {
       creditSeconds = Number(stats.backtest_wall_seconds) || 0;
       inBacktest = Boolean(stats.in_backtest);
       activeBacktestStartedMs = stats.active_backtest_started_at ? Date.parse(stats.active_backtest_started_at) : null;
+      backtestProgress = stats.backtest_progress || null;
+      agentSessionEnded = Number((stats.counts || {}).session_end || 0) > 0;
       const signature = JSON.stringify([stats.counts, stats.backtest_wall_seconds,
-        stats.llm_prompt_tokens, stats.llm_completion_tokens, stats.llm_total_tokens]);
+        stats.llm_prompt_tokens, stats.llm_completion_tokens, stats.llm_total_tokens,
+        stats.in_backtest, stats.backtest_progress]);
       if (signature !== statsSignature) {
         statsSignature = signature;
         statsHost.replaceChildren(statsChipsRow(stats));
@@ -1759,8 +1809,13 @@ function liveTracePanel(detail, session) {
     try {
       const fresh = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/status`);
       const raw = fresh.raw_status || {};
-      if (raw.fold_deadline_at) deadlineMs = Date.parse(raw.fold_deadline_at);
-      if (raw.session_started_at) startedMs = Date.parse(raw.session_started_at);
+      // This panel is pinned to one run.  A newer run is rebuilt by the outer
+      // detail poll; never borrow its state/deadline during that short window.
+      if (String(raw.run_id || "") === runId) {
+        sessionState = fresh.state;
+        deadlineMs = raw.fold_deadline_at ? Date.parse(raw.fold_deadline_at) : null;
+        if (raw.session_started_at) startedMs = Date.parse(raw.session_started_at);
+      }
     } catch { /* transient */ }
   };
   tick();
@@ -1768,13 +1823,16 @@ function liveTracePanel(detail, session) {
   livePanel = {
     expId: detail.experiment_id,
     key: session.key,
+    runId,
     node: panel,
     source: null,
     closed: false,
     timers,
+    scrollToBottom: () => { if (autoScroll) box.scrollTop = box.scrollHeight; },
     refresh: (freshDetail) => {
       const rawStatus = freshDetail.status || {};
-      if (rawStatus.fold_deadline_at) deadlineMs = Date.parse(rawStatus.fold_deadline_at);
+      sessionState = freshDetail.state;
+      deadlineMs = rawStatus.fold_deadline_at ? Date.parse(rawStatus.fold_deadline_at) : null;
     },
   };
   (async () => {
@@ -1858,7 +1916,8 @@ function lazyDetails(summaryText, build) {
 const TOOL_BRIEF_KEYS = [
   "action", "tool", "cmd", "command", "pattern", "path", "query", "engine", "perspective",
   "mode", "result_name", "replay_window", "exit_code", "duration_seconds", "replay_wall_seconds",
-  "reason", "error_type", "name",
+  "reason", "error_type", "name", "trade_date", "day_index", "total_days", "percent",
+  "elapsed_seconds", "orders_so_far",
 ];
 
 function traceEventNode(event) {
@@ -1925,7 +1984,7 @@ function rerunPanel(detail, session) {
                   body: JSON.stringify({ action: "rerun_fold", session_key: session.key }),
                 });
                 toast("重跑已启动，等待批准");
-                route();
+                route(true);
               } catch (error) { toast(error.message, true); }
             },
           }, "确认重跑"),
@@ -1969,7 +2028,7 @@ function rollbackPanel(detail, session) {
                   body: JSON.stringify({ action: "rollback_fold", session_key: session.key }),
                 });
                 toast("已回滚并重启 worker");
-                route();
+                route(true);
               } catch (error) { toast(error.message, true); }
             },
           }, "确认回滚"),
@@ -2262,7 +2321,7 @@ function openStepParentOverrideModal(detail, payload, node) {
           await send("rerun_fold", select.value, null);
           toast("已设置起点并启动重跑（等待批准）");
           closeModal();
-          route();
+          route(true);
         } catch (error) { toast(error.message, true); }
       },
     }, "设置并重跑"),

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 from autotrade.environment.llm.proxy import LLMProxy, LLMProxyError, ProviderResponse, assistant_tool_turn
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
-from autotrade.environment.tools.base import ToolError, ToolSchemaError
+from autotrade.environment.tools.base import ToolError, ToolSchemaError, agent_visible_tool_result
 
 EXPLORE_SYSTEM_PROMPT = """\
 # 角色
@@ -240,11 +240,21 @@ class ExploreSubAgentEngine:
                 max_output_chars=int(args["max_output_chars"]),
                 timeout_seconds=self._bounded_tool_timeout(int(args["timeout_seconds"])),
             )
-            return {"observation": "shell", **result.to_record()}
+            return {"observation": "shell", **agent_visible_tool_result(result.to_record())}
         if name == "grep":
-            return {"observation": "grep", **self.search.grep(**args, timeout_seconds=self._search_timeout())}
+            return {
+                "observation": "grep",
+                **agent_visible_tool_result(
+                    self.search.grep(**args, timeout_seconds=self._search_timeout())
+                ),
+            }
         if name == "glob":
-            return {"observation": "glob", **self.search.glob(**args, deadline_monotonic=self._search_deadline())}
+            return {
+                "observation": "glob",
+                **agent_visible_tool_result(
+                    self.search.glob(**args, deadline_monotonic=self._search_deadline())
+                ),
+            }
         return {"observation": "error", "error": f"unsupported explore tool: {name!r}"}
 
     def _dispatch_calls(

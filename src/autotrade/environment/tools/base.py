@@ -61,6 +61,31 @@ class ToolError(RuntimeError):
         }
 
 
+def agent_visible_tool_result(record: dict[str, object]) -> dict[str, object]:
+    """Recursively remove trusted host coordinates before Agent publication."""
+
+    def is_host_coordinate(key: object) -> bool:
+        name = str(key)
+        return name.startswith("host_") and name.endswith(
+            ("_path", "_paths", "_dir", "_dirs", "_ref", "_refs", "_root", "_roots")
+        )
+
+    def project(value: object) -> object:
+        if isinstance(value, dict):
+            return {
+                key: project(item)
+                for key, item in value.items()
+                if not is_host_coordinate(key)
+            }
+        if isinstance(value, list):
+            return [project(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(project(item) for item in value)
+        return value
+
+    return project(record)  # type: ignore[return-value]
+
+
 class ToolSchemaError(ToolError):
     """Action payload failed the Runner-side tool schema."""
 

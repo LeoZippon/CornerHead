@@ -53,6 +53,8 @@ Agent 遵循以下使用原则：
 
 一个 Fold 内可以有多个 Step。Step 是同一 Agent 会话中一次有记录的候选验证迭代；两次 Step 之间可以穿插任意数量的只读探查、修改和调试工具调用。进入下一 Step 不会重启 Agent，也不会创建新的对话上下文。
 
+修改检查和回测会返回非阻断 advisory：未投影的 Parquet 读取、未重新抛出的宽异常、formal Agent 峰值内存，以及多次 `main(ctx)` 后零 action/零订单。它们只帮助 Agent 定位策略问题，不替代 Agent 决策，也不改变 `allowed_to_backtest`、完整验证或冻结资格。
+
 **初始 Step 建议**
 
 1. 读取研究输入窗口、父产物、数据 manifest 和可见文本样本。

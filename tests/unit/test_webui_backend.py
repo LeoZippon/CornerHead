@@ -11,6 +11,7 @@ import json
 import os
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -22,7 +23,7 @@ from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.hitl_state import PARAM_DEFAULTS, ControlState, write_control
 from autotrade.webui.manager import ExperimentManager, ManagerError
 from autotrade.webui.server import create_app
-from autotrade.webui.traces import read_trace_page, read_trace_tail
+from autotrade.webui.traces import read_trace_page, read_trace_tail, trace_stats
 
 
 def _write_ledger(experiment_dir: Path, records: list[dict[str, object]]) -> None:
@@ -258,6 +259,22 @@ class WebuiBackendTest(unittest.TestCase):
         legacy = by_id["exp_legacy"]
         self.assertEqual(legacy["kind"], "legacy")
         self.assertEqual(legacy["state"], "legacy")
+
+    def test_dead_question_wait_degrades_to_interrupted(self) -> None:
+        write_json_atomic(
+            self.experiments_root / "exp_hitl" / "hitl" / "status.json",
+            {
+                "pid": 999_999_999,
+                "state": "waiting_user_reply",
+                "session_key": "epoch_001/fold_2022Q2",
+            },
+        )
+
+        status = self.client.get("/api/experiments/exp_hitl/status").json()
+
+        self.assertEqual(status["state"], "interrupted")
+        self.assertFalse(status["worker_alive"])
+        self.assertEqual(status["raw_status"]["state"], "waiting_user_reply")
 
     def test_experiment_detail_merges_schedule_and_records(self) -> None:
         detail = self.client.get("/api/experiments/exp_hitl").json()
@@ -938,6 +955,63 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertTrue(stats["in_backtest"])  # 2 starts, 1 terminal event
         self.assertIsNotNone(stats["active_backtest_started_at"])
         self.assertEqual(stats["total_events"], 6)
+
+    def test_trace_stats_surfaces_live_progress_and_reply_wait_credit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.jsonl"
+            events = [
+                {"event_type": "backtest_start", "ts": "2026-07-06T00:00:00+00:00", "total_trade_days": 61},
+                {"event_type": "backtest_progress", "day_index": 30, "total_days": 61,
+                 "percent": 49.2, "trade_date": "20241112", "elapsed_seconds": 400.0,
+                 "orders_so_far": 2},
+                {"event_type": "ask_user", "waited_seconds": 12.5},
+            ]
+            path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+
+            running = trace_stats(path)
+            self.assertTrue(running["in_backtest"])
+            self.assertEqual(running["backtest_progress"]["day_index"], 30)
+            self.assertAlmostEqual(running["backtest_wall_seconds"], 12.5)
+
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"event_type": "backtest", "replay_wall_seconds": 500.0}) + "\n")
+            legacy_terminal = trace_stats(path)
+            self.assertFalse(legacy_terminal["in_backtest"])
+            self.assertAlmostEqual(legacy_terminal["backtest_wall_seconds"], 512.5)
+
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"event_type": "budget_exclusion", "reason": "backtest", "seconds": 520.0}) + "\n")
+            finished = trace_stats(path)
+            self.assertFalse(finished["in_backtest"])
+            self.assertIsNone(finished["backtest_progress"])
+            self.assertAlmostEqual(finished["backtest_wall_seconds"], 532.5)
+            self.assertAlmostEqual(trace_stats(path)["backtest_wall_seconds"], 532.5)
+
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"event_type": "backtest_start", "ts": "2026-07-06T01:00:00+00:00"}) + "\n")
+                handle.write(json.dumps({"event_type": "backtest", "status": "error", "replay_wall_seconds": 20.0}) + "\n")
+            self.assertAlmostEqual(trace_stats(path)["backtest_wall_seconds"], 552.5)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"event_type": "budget_exclusion", "reason": "backtest", "seconds": 25.0}) + "\n")
+            failed = trace_stats(path)
+            self.assertFalse(failed["in_backtest"])
+            self.assertAlmostEqual(failed["backtest_wall_seconds"], 557.5)
+
+    def test_trace_stats_cache_is_atomic_across_concurrent_pollers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.jsonl"
+            events = [
+                {"event_type": "backtest_start", "ts": "2026-07-06T00:00:00+00:00"},
+                {"event_type": "backtest", "replay_wall_seconds": 500.0},
+                {"event_type": "budget_exclusion", "reason": "backtest", "seconds": 520.0},
+            ]
+            path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(lambda _: trace_stats(path), range(32)))
+
+            self.assertTrue(all(result["backtest_wall_seconds"] == 520.0 for result in results))
+            self.assertTrue(all(result["counts"]["budget_exclusion"] == 1 for result in results))
 
     def test_trace_download_serves_raw_jsonl(self) -> None:
         response = self.client.get("/api/experiments/exp_hitl/trace/download", params={"run_id": "run_001"})

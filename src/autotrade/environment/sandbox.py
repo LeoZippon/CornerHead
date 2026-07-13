@@ -210,12 +210,33 @@ class LocalSandbox:
     def bind_snapshot_view(self, view_dir: Path) -> None:
         """Refresh the current decision-input mirror and bind /mnt/snapshot to it."""
         _replace_dir_contents(view_dir, self.paths.current_snapshot)
-        link = self.paths.snapshot
+        self._bind_snapshot_selector(self.paths.snapshot, self.paths.current_snapshot)
+        self.bind_formal_snapshot_view(self.paths.current_snapshot)
+
+    def bind_formal_snapshot_view(self, view_dir: Path) -> None:
+        """Point host/formal replay at a view without changing the dev mount.
+
+        Frozen Test/Held-out views use this path: the development container
+        keeps its last Agent-visible PIT mirror while the one-shot formal
+        container mounts the referenced hidden view directly.
+        """
+        source = Path(view_dir)
+        if not source.exists() or not source.is_dir():
+            raise ValueError(f"formal snapshot view must be an existing directory: {source}")
+        source = source.resolve()
+        allowed_roots = (self.paths.snapshot_views.resolve(), self.paths.current_snapshot.resolve())
+        if not any(source == root or source.is_relative_to(root) for root in allowed_roots):
+            raise ValueError(f"formal snapshot view is outside the sandbox snapshot roots: {source}")
+        self._bind_snapshot_selector(self.paths.formal_snapshot, source)
+
+    @staticmethod
+    def _bind_snapshot_selector(link: Path, source: Path) -> None:
+        """Replace one host-only snapshot selector symlink."""
         if link.is_symlink() or link.exists():
             if link.is_dir() and not link.is_symlink():
-                raise ValueError(f"/mnt/snapshot must be a symlink, found directory: {link}")
+                raise ValueError(f"snapshot selector must be a symlink, found directory: {link}")
             link.unlink()
-        os.symlink(self.paths.current_snapshot.resolve(), link)
+        os.symlink(Path(source).resolve(), link)
 
     def install_replay_slot(self, slot: str, source_dir: Path) -> Path:
         """Install replay/exploration data; hardlinked when possible.
@@ -611,9 +632,9 @@ def resolve_image_identity(image: str) -> tuple[str, list[str]]:
 class DockerSandbox:
     """Container lifecycle for one Fold run (docs/environment_design.md §2.1).
 
-    The container runs detached with the documented isolation flags; Agent
-    commands execute inside via ``docker exec --user agent`` and the frozen
-    test phase reuses the same container after writes are locked.
+    The development container runs detached with the documented isolation
+    flags; Agent commands use ``docker exec --user agent`` while formal replay
+    runs in a separate ephemeral container.
     """
 
     def __init__(self, local: LocalSandbox, spec: SandboxSpec, labels: dict[str, str] | None = None) -> None:
@@ -628,6 +649,8 @@ class DockerSandbox:
         self.active_env_aliases: list[dict[str, str]] = []
         self.image_id = ""
         self.image_repo_digests: list[str] = []
+        self._retain_formal_pause = False
+        self._formal_pause_active = False
 
     def start(self) -> str:
         paths = self.local.paths
@@ -669,8 +692,6 @@ class DockerSandbox:
             f"{paths.train}:/mnt/snapshots/train:ro",
             "-v",
             f"{paths.valid}:/mnt/snapshots/valid:ro",
-            "-v",
-            f"{paths.test}:/mnt/snapshots/test:ro",
             "-v",
             f"{paths.current_snapshot}:/mnt/snapshot:ro",
             "-v",
@@ -745,6 +766,11 @@ class DockerSandbox:
         it paused through result publication closes that TOCTOU without copying
         potentially large model artifacts for every Probe.
         """
+        if self._formal_pause_active:
+            # A final hidden evaluation deliberately keeps this namespace
+            # paused until stop(). Later formal calls share that same seal.
+            yield
+            return
         try:
             paused = subprocess.run(
                 ["docker", "pause", self.container],
@@ -760,12 +786,15 @@ class DockerSandbox:
         except (OSError, subprocess.SubprocessError) as exc:
             pause_error = RuntimeError(f"failed to pause development container: {type(exc).__name__}: {exc}")
         if pause_error is not None:
+            self._retain_formal_pause = False
+            self._formal_pause_active = False
             resume_error = self._ensure_development_container_unpaused()
             if resume_error is not None:
                 raise SandboxLifecycleFatal(
                     f"development container pause state is unsafe: {resume_error}"
                 ) from pause_error
             raise pause_error
+        self._formal_pause_active = True
         body_error: BaseException | None = None
         try:
             yield
@@ -773,12 +802,18 @@ class DockerSandbox:
             body_error = exc
             raise
         finally:
-            resume_error = self._ensure_development_container_unpaused()
-            if resume_error is not None:
-                fatal = SandboxLifecycleFatal(str(resume_error))
-                if body_error is not None:
-                    raise fatal from body_error
-                raise fatal
+            if not self._retain_formal_pause:
+                resume_error = self._ensure_development_container_unpaused()
+                if resume_error is not None:
+                    fatal = SandboxLifecycleFatal(str(resume_error))
+                    if body_error is not None:
+                        raise fatal from body_error
+                    raise fatal
+                self._formal_pause_active = False
+
+    def retain_pause_until_stop(self) -> None:
+        """Keep the development namespace sealed after final hidden replay."""
+        self._retain_formal_pause = True
 
     def _ensure_development_container_unpaused(self) -> RuntimeError | None:
         """Retry unpause and verify state before declaring the session unsafe."""
@@ -824,6 +859,9 @@ class DockerSandbox:
         from autotrade.environment.executor import FormalDockerExecutor
 
         paths = self.local.paths
+        if not paths.formal_snapshot.exists():
+            raise RuntimeError("formal snapshot is not bound")
+        snapshot_source = paths.formal_snapshot.resolve()
         runtime_root = Path(runtime_root).resolve()
         state = runtime_root / "state"
         staging = runtime_root / "state_staging"
@@ -849,7 +887,7 @@ class DockerSandbox:
             "/tmp:rw,nosuid,nodev,size=4g",
             *_CACHE_REDIRECT_ENV_ARGS,
             "-v",
-            f"{paths.current_snapshot}:/mnt/snapshot:ro",
+            f"{snapshot_source}:/mnt/snapshot:ro",
             "-v",
             f"{paths.agent_output}:/mnt/agent/output:ro",
             "-v",
@@ -870,7 +908,7 @@ class DockerSandbox:
         if completed.returncode != 0:
             raise RuntimeError(f"failed to start formal replay container: {completed.stderr.strip()}")
         mappings = (
-            (paths.current_snapshot, "/mnt/snapshot"),
+            (snapshot_source, "/mnt/snapshot"),
             (paths.agent_output, "/mnt/agent/output"),
             (paths.model_artifacts, "/mnt/agent/models"),
             (state, "/mnt/runtime/state"),
@@ -884,4 +922,25 @@ class DockerSandbox:
             subprocess.run(["docker", "rm", "-f", container], capture_output=True, text=True, timeout=60)
 
     def stop(self) -> None:
-        subprocess.run(["docker", "rm", "-f", self.container], capture_output=True, text=True, timeout=60)
+        strict_cleanup = self._formal_pause_active or self._retain_formal_pause
+        try:
+            removed = subprocess.run(
+                ["docker", "rm", "-f", self.container],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            if strict_cleanup:
+                raise SandboxLifecycleFatal(
+                    f"failed to destroy sealed development container: {type(exc).__name__}: {exc}"
+                ) from exc
+            raise
+        if removed.returncode != 0 and strict_cleanup:
+            raise SandboxLifecycleFatal(
+                f"failed to destroy sealed development container: {removed.stderr.strip()}"
+            )
+        if removed.returncode != 0:
+            return  # best-effort cleanup of a container that may never have started
+        self._formal_pause_active = False
+        self._retain_formal_pause = False

@@ -45,7 +45,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 | `/mnt/snapshot/` | 只读 | 当前正式决策输入视图 | `main.py`、`candidate.py` 和 helper 可读取 |
 | `/mnt/snapshots/train/` | 只读 | 训练/历史窗口快照 | 仅用于 Agent 探查；正式策略代码不得硬编码引用 |
 | `/mnt/snapshots/valid/` | 只读 | 当前验证回放区间 | 仅用于 Agent 探查；正式策略代码不得硬编码引用 |
-| `/mnt/snapshots/test/` | 不可读 | 测试回放区间 | 禁止读取 |
+| `/mnt/snapshots/test/` | 不存在（不挂载） | 测试回放区间 | 仅宿主 Environment 在冻结评估时读取 |
 | `/mnt/artifacts/run_manifest.json` | 只读 | 当前 run 配置、deadline、snapshot、约束和父产物信息 | 可用于确认边界和验收条件 |
 | `/mnt/artifacts/runtime_env.json` | 只读 | Sandbox Python 包、CLI 工具、网络/安装策略和资源摘要 | 写代码前确认可用包和可执行命令；不确定时用 shell 做只读 probe |
 | `/mnt/artifacts/data_summary.json` | 只读 | Agent 可见 snapshot/replay 的轻量数据索引，含文件规模、行数、关键列、日期覆盖和大表访问提示 | 做数据探查前先读，避免盲目全量读取大表 |
@@ -66,7 +66,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 ## 环境硬约束（由 Environment 强制执行，违反会直接被拒绝）
 - 正式代码只接受 `output/` 下的受控文本/代码目录；根目录 `README.md` 只读。模型参数只接受 `models/` 下的受控参数/权重目录。可以创建有清晰用途的子目录，但不要创建缓存、日志、数据 dump、notebook 或密钥。
 - 正式回测会在执行前自动复核最近一次 `modification_check` 与当前 `output`/`models` hash；若检查缺失或过期，`backtest` 会自动补跑。你仍应在修改后主动调用 `modification_check`，便于提前看到格式或约束问题。
-- `/mnt/snapshots/test` 不可读；不能直接调用外部 LLM/网络；`/mnt/artifacts` 对 Shell/检索只读。
+- `/mnt/snapshots/test` 不挂载到开发容器；不能直接调用外部 LLM/网络；`/mnt/artifacts` 对 Shell/检索只读。
 - 正式策略代码只能读取 `/mnt/snapshot`（由环境绑定）、`/mnt/agent/output` 自身和 `/mnt/agent/models`，不得硬编码引用 train/valid/test 阶段目录、`/mnt/artifacts` 或回测结果目录。
 - Shell 命令自身失败会以 `exit_code`、`stderr`、`stdout_path` / `stderr_path` 返回；Tool 层拒绝才会返回 `error_type`、`reason` 和 `retry_hint`。不要用 `2>/dev/null` 隐藏错误，stderr 是审计输入。
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -121,9 +122,16 @@ def read_trace_tail(
 # of the last COMPLETE line already folded into the aggregates.
 _STATS_CACHE: dict[str, dict[str, object]] = {}
 _STATS_CACHE_MAX = 32
+_STATS_CACHE_LOCK = threading.Lock()
 
 
 def trace_stats(path: Path) -> dict[str, object]:
+    """Return one atomic incremental aggregate for a trace path."""
+    with _STATS_CACHE_LOCK:
+        return _trace_stats_locked(path)
+
+
+def _trace_stats_locked(path: Path) -> dict[str, object]:
     """Aggregate per-event-type counts and headline totals from one trace file.
 
     Powers the live operations dashboard: LLM/tool call counts, cumulative
@@ -138,7 +146,8 @@ def trace_stats(path: Path) -> dict[str, object]:
     if cached is None or size < int(cached["offset"]):  # rewritten/truncated: rescan
         cached = {"offset": 0, "counts": {}, "backtest_wall": 0.0, "llm_tokens": 0,
                   "prompt_tokens": 0, "completion_tokens": 0, "last_ts": None,
-                  "active_backtest_started_at": None}
+                  "active_backtest_started_at": None, "active_backtest_progress": None,
+                  "pending_backtest_credit": 0.0}
     counts: dict[str, int] = dict(cached["counts"])
     backtest_wall = float(cached["backtest_wall"])
     llm_tokens = int(cached["llm_tokens"])
@@ -146,6 +155,8 @@ def trace_stats(path: Path) -> dict[str, object]:
     completion_tokens = int(cached["completion_tokens"])
     last_ts: str | None = cached["last_ts"]
     active_backtest_started_at: str | None = cached.get("active_backtest_started_at")
+    active_backtest_progress = cached.get("active_backtest_progress")
+    pending_backtest_credit = float(cached.get("pending_backtest_credit") or 0.0)
     offset = int(cached["offset"])
     with path.open("rb") as handle:
         handle.seek(offset)
@@ -165,16 +176,60 @@ def trace_stats(path: Path) -> dict[str, object]:
         counts[kind] = counts.get(kind, 0) + 1
         last_ts = str(event.get("ts") or last_ts or "")
         if kind == "backtest_start":
+            pending_backtest_credit = 0.0
             active_backtest_started_at = str(event.get("ts") or event.get("started_at") or "") or None
+            active_backtest_progress = {
+                "status": "initializing",
+                "mode": event.get("mode"),
+                "result_name": event.get("result_name"),
+                "day_index": 0,
+                "total_days": event.get("total_trade_days"),
+                "percent": 0.0,
+                "trade_date": None,
+                "elapsed_seconds": 0.0,
+                "orders_so_far": 0,
+            }
+        elif kind == "backtest_progress":
+            previous = active_backtest_progress if isinstance(active_backtest_progress, dict) else {}
+            active_backtest_progress = {
+                **previous,
+                "status": "running",
+                **{
+                    field: event.get(field)
+                    for field in (
+                        "mode", "result_name", "day_index", "total_days", "percent",
+                        "trade_date", "elapsed_seconds", "orders_so_far",
+                    )
+                    if field in event
+                },
+            }
         elif kind == "backtest":
             try:
-                backtest_wall += float(event.get("replay_wall_seconds") or 0.0)
+                pending_backtest_credit = float(event.get("replay_wall_seconds") or 0.0)
+                backtest_wall += pending_backtest_credit  # legacy fallback until exact exclusion arrives
+            except (TypeError, ValueError):
+                pending_backtest_credit = 0.0
+            active_backtest_started_at = None
+            active_backtest_progress = None
+        elif kind == "budget_exclusion":
+            try:
+                seconds = float(event.get("seconds") or 0.0)
+                if event.get("reason") == "backtest" and pending_backtest_credit:
+                    backtest_wall -= pending_backtest_credit
+                    pending_backtest_credit = 0.0
+                backtest_wall += seconds
             except (TypeError, ValueError):
                 pass
-            active_backtest_started_at = None
         elif kind == "step_gate":
             # Step-gate holds are deadline-credited like backtest wall-time;
             # counting them keeps the console countdown truthful during holds.
+            try:
+                backtest_wall += float(event.get("waited_seconds") or 0.0)
+            except (TypeError, ValueError):
+                pass
+        elif kind == "ask_user":
+            # Researcher reply waits are excluded from the same active-session
+            # budget; count the completed hold exactly like a Step gate.
             try:
                 backtest_wall += float(event.get("waited_seconds") or 0.0)
             except (TypeError, ValueError):
@@ -190,10 +245,18 @@ def trace_stats(path: Path) -> dict[str, object]:
                     pass
     if len(_STATS_CACHE) >= _STATS_CACHE_MAX and key not in _STATS_CACHE:
         _STATS_CACHE.pop(next(iter(_STATS_CACHE)))
-    _STATS_CACHE[key] = {"offset": offset + tail, "counts": dict(counts), "backtest_wall": backtest_wall,
-                         "llm_tokens": llm_tokens, "prompt_tokens": prompt_tokens,
-                         "completion_tokens": completion_tokens, "last_ts": last_ts}
-    _STATS_CACHE[key]["active_backtest_started_at"] = active_backtest_started_at
+    _STATS_CACHE[key] = {
+        "offset": offset + tail,
+        "counts": dict(counts),
+        "backtest_wall": backtest_wall,
+        "llm_tokens": llm_tokens,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "last_ts": last_ts,
+        "active_backtest_started_at": active_backtest_started_at,
+        "active_backtest_progress": active_backtest_progress,
+        "pending_backtest_credit": pending_backtest_credit,
+    }
     return {
         "counts": counts,
         "total_events": sum(counts.values()),
@@ -203,6 +266,7 @@ def trace_stats(path: Path) -> dict[str, object]:
         "llm_completion_tokens": completion_tokens,
         "in_backtest": active_backtest_started_at is not None,
         "active_backtest_started_at": active_backtest_started_at,
+        "backtest_progress": active_backtest_progress,
         "last_event_ts": last_ts,
         "trace_bytes": size,
     }

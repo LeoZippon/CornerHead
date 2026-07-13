@@ -1,3 +1,9 @@
+2026-07-13 Experiment observability and hidden-evaluation audit
+
+- 修复 HITL run/deadline 串线、轮询刷新、活跃预算文案/回补、Trace 重挂滚底与长回测首日进度；死亡的 ask_user 等待会转为 interrupted。
+- 策略宽表读取、吞异常、峰值内存和零订单只返回 advisory，不新增验收硬门槛；隐藏 Test 从开发容器移除且最终评估时暂停至容器销毁。
+- lap-test9 数据 generation/PIT/schema 正常；完整 Valid 61 日 1169.4 秒、0 订单源于策略 Path 类型错误被宽异常吞掉。受影响模块 394 tests、全量 743 tests 均通过；基础镜像已刷新并验证新 runtime driver。
+
 2026-07-13 Snapshot/Replay 构建性能优化（fix/auction-pit-performance）
 
 - 竞价分钟修正改为唯一值字典编码后批量展开；真实 111 万行修正由 1.03 秒降至 0.40 秒。

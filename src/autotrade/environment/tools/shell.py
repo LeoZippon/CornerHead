@@ -15,7 +15,14 @@ from dataclasses import dataclass
 
 from autotrade.environment.runtime import utc_now_iso
 
-from .base import ActionField, ActionSpec, PHASE_TRAIN_VALID, ToolContext, ToolError
+from .base import (
+    ActionField,
+    ActionSpec,
+    PHASE_TRAIN_VALID,
+    ToolContext,
+    ToolError,
+    agent_visible_tool_result,
+)
 
 OUTPUT_LIMIT_CHARS = 20_000
 OUTPUT_CAPTURE_LIMIT_CHARS = 200_000
@@ -223,7 +230,7 @@ class SandboxShellTool:
         timed_out = exit_code == 124 or "timeout after" in result.stderr.lower()
         call_id = self.ctx.trace.emit(
             "shell",
-            {
+            agent_visible_tool_result({
                 "tool": self.name,
                 "tool_spec": self.spec.to_record(),
                 "command": command,
@@ -241,7 +248,7 @@ class SandboxShellTool:
                 **stdout_ref,
                 **stderr_ref,
                 "started_at": started,
-            },
+            }),
             step_id=self.ctx.current_step_id,
         )
         return ShellResult(
