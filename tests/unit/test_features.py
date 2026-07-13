@@ -15,7 +15,12 @@ from autotrade.environment.features import (
     audit_fundamental_events,
     month_aligned_replace_window,
 )
-from autotrade.environment.features.auction import apply_open_auction_correction, market_bucket
+from autotrade.environment.features.auction import (
+    AuctionCorrectionConfig,
+    apply_open_auction_correction,
+    is_open_auction_time,
+    market_bucket,
+)
 
 
 class AuctionCorrectionTest(unittest.TestCase):
@@ -46,6 +51,54 @@ class AuctionCorrectionTest(unittest.TestCase):
         self.assertAlmostEqual(out.loc[3, "vol_pit"], 1000.0)
         self.assertEqual(out.loc[0, "auction_correction_rule"], "minute_0930_to_live_stk_auction_by_market_bucket")
         self.assertEqual(out.loc[2, "auction_correction_rule"], "none")
+
+    def test_vectorized_auction_correction_matches_scalar_contract(self):
+        frame = pd.DataFrame(
+            {
+                "ts_code": [" 000001.sz ", "300001.SZ", "600000.SH", "688001.SH", "430001.BJ", None, 0],
+                "trade_time": [
+                    " 2026-05-29 09:30:00 ",
+                    "2026-05-29 09:31:00",
+                    "09:30",
+                    None,
+                    "2026-05-29 09:30:59",
+                    "2026-05-29 09:30:00",
+                    930,
+                ],
+                "vol": ["100", "bad", 300, None, 500, 600, 700],
+                "amount": [200, 400, "600", 800, None, 1200, 1400],
+            },
+            index=[9, 7, 5, 3, 1, -1, -3],
+        )
+        original = frame.copy(deep=True)
+        config = AuctionCorrectionConfig(
+            volume_factors={"sz_main_00": 0.5, "sh_main_60": 0.25, "other": 0.9},
+            amount_factors={"sz_main_00": 0.75, "bj": 0.1, "other": 0.8},
+        )
+
+        out = apply_open_auction_correction(frame, config)
+
+        expected_buckets = frame["ts_code"].map(market_bucket)
+        expected_open = frame["trade_time"].map(is_open_auction_time)
+        expected_vol_factors = pd.Series(
+            [config.volume_factors.get(bucket, 1.0) if opened else 1.0 for bucket, opened in zip(expected_buckets, expected_open)],
+            index=frame.index,
+        )
+        expected_amount_factors = pd.Series(
+            [config.amount_factors.get(bucket, 1.0) if opened else 1.0 for bucket, opened in zip(expected_buckets, expected_open)],
+            index=frame.index,
+        )
+        pd.testing.assert_frame_equal(frame, original)
+        pd.testing.assert_series_equal(out["auction_market_bucket"], expected_buckets, check_names=False)
+        pd.testing.assert_series_equal(out["auction_open_bar"], expected_open.astype(bool), check_names=False)
+        pd.testing.assert_series_equal(out["auction_vol_correction_factor"], expected_vol_factors, check_names=False)
+        pd.testing.assert_series_equal(out["auction_amount_correction_factor"], expected_amount_factors, check_names=False)
+        pd.testing.assert_series_equal(
+            out["vol_pit"], pd.to_numeric(frame["vol"], errors="coerce") * expected_vol_factors, check_names=False
+        )
+        pd.testing.assert_series_equal(
+            out["amount_pit"], pd.to_numeric(frame["amount"], errors="coerce") * expected_amount_factors, check_names=False
+        )
 
 
 
