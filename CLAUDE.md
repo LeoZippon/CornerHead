@@ -85,6 +85,12 @@ For experiment, training, inference, evaluation, or data-processing jobs:
 3. Recheck memory usage after the job starts and after it finishes.
 4. Write the detailed traceability record to `@docs/logbook/DETAILED_LOGBOOK.md`, write the concise result to `@LOGBOOK.md`, and keep `logs/` out of commits.
 
+## Development Principles
+
+- Correctness and completeness come first. Once PIT, security, business, and edge-case contracts are satisfied, use the smallest clear architecture and implementation; add no entity, abstraction, compatibility path, or duplicate logic without a demonstrated need.
+- Preserve reality before optimizing speed. Model real data visibility, timing, execution, isolation, and resource constraints as faithfully as practical, then optimize measured Environment hot paths without weakening those contracts.
+- Reduce Agent interaction and decision burden while preserving freedom. Put mechanical efficiency, safety, and audit enforcement behind small stable Environment interfaces, and leave the Agent maximum strategy freedom inside explicit PIT and safety boundaries.
+
 ## Operational Guardrails
 
 - Avoid over-engineering.

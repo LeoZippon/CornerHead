@@ -17326,3 +17326,16 @@ Validation:
 - Two focused regressions passed, including the real existing null-schema cache.
 - `tests.unit.test_snapshot_builder` plus `tests.unit.test_tools_flow`: 124 tests passed in 32.793 seconds.
 - `git diff --check` passed. No cache/data rewrite, download, provider call, experiment restart, or external mutation was performed. The already-running worker loaded the old module and must be restarted before retrying its Fold.
+
+
+## 2026-07-13 Project development principles
+
+Task: make the project's development priorities explicit without expanding the documentation surface.
+
+Implementation:
+- Added one three-item `Development Principles` section to the canonical `CLAUDE.md`; `AGENTS.md` remains a pointer and does not duplicate it.
+- The priorities are: correctness/completeness before simplicity; realistic contracts before measured performance optimization; and minimal Environment interaction/decision burden while preserving maximum Agent freedom inside explicit PIT and safety boundaries.
+- The text explicitly discourages unproved entities, abstractions, compatibility paths, and duplicate logic.
+
+Validation:
+- Documentation-only change; `git diff --check` passed.

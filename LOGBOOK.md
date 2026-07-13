@@ -1,3 +1,7 @@
+2026-07-13 项目开发原则精简落文档（fix/auction-pit-performance）
+
+- `CLAUDE.md` 新增三条唯一原则：正确完备后保持最简；现实合同优先后优化实测热路径；由环境承担机械复杂度并在 PIT/安全边界内给 Agent 最大自由度。
+
 2026-07-13 空竞价 schema 回测修复与共享机资源审计（fix/auction-pit-performance）
 
 - `lzp-test8` 首个 Fold 证明：0 行 `auction.parquet` 被写为 Arrow `null` 列，带字符串日期过滤时在策略执行前报 `null vs string`；空策略和父基线同样失败。
