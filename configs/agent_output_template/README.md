@@ -151,7 +151,7 @@ therefore do not appear in `pending()` before submission.
 
 | ctx surface | Environment contract |
 |---|---|
-| `ctx.cur_datetime` | Authoritative sim timestamp in Asia/Shanghai ISO format; drives Timeview, substep `ready_at`, delayed submission, and matching |
+| `ctx.cur_datetime` | Authoritative Asia/Shanghai ISO-8601 string, for example `"2025-01-02T09:25:00+08:00"`; use it directly, or parse it with `datetime.fromisoformat()` when an object is needed |
 | `ctx.cur_date` | Current trade date derived from `cur_datetime`, `YYYYMMDD`; use for daily logic, cache keys, and state filenames |
 | `ctx.cur_time` | Current intraday minute derived from `cur_datetime`, `HH:MM`; use for scheduled actions such as 09:25 and 14:57 |
 | `ctx.account` | Read-only dual-account snapshot: `stock`, `credit`, `total_assets`, `risk_limits` |

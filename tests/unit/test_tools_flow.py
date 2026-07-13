@@ -215,6 +215,18 @@ def main(ctx):
     _ = ctx.state_dir
 '''
 
+PROBE_CUR_DATETIME_ISOFORMAT_MAIN = '''
+def main(ctx):
+    with ctx.substep("bad_cur_datetime", budget_minutes=0.5):
+        ctx.cur_datetime.isoformat()
+'''
+
+PROBE_OTHER_STRING_ISOFORMAT_MAIN = '''
+def main(ctx):
+    with ctx.substep("unrelated_string", budget_minutes=0.5):
+        "plain string".isoformat()
+'''
+
 PROBE_UNIVERSE_PATH_MAIN = '''
 from pathlib import Path
 
@@ -1389,6 +1401,11 @@ def main(ctx):
                 "inside ctx.substep",
             ),
             (
+                PROBE_CUR_DATETIME_ISOFORMAT_MAIN,
+                "cur_datetime_string_contract",
+                "already an ISO-8601 string",
+            ),
+            (
                 PROBE_UNIVERSE_PATH_MAIN,
                 "universe_path_mismatch",
                 "universe.parquet",
@@ -1449,6 +1466,20 @@ def main(ctx):
             self.assertNotIn(marker, public)
             evidence = ctx.paths.root / "runtime" / "host_evidence"
             self.assertTrue(any(marker in path.read_text(encoding="utf-8") for path in evidence.rglob("*.*")))
+
+    def test_probe_clock_classifier_does_not_cover_unrelated_strings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(
+                PROBE_OTHER_STRING_ISOFORMAT_MAIN,
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ToolError, "raw strategy/runtime error text is host-only") as raised:
+                BacktestTool(ctx).run(mode="valid", replay_window=2)
+
+            self.assertEqual(raised.exception.error_type, "probe_runtime_error")
+            self.assertIsNone(raised.exception.reason)
 
     def test_probe_evidence_write_failure_keeps_public_error_fixed(self):
         marker = "PROBE_EVIDENCE_WRITE_FAILURE_PRIVATE_MARKER"

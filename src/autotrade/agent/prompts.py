@@ -163,7 +163,7 @@ FOLD_ACTION_SECTION = """\
 
 公司行为（除权日盘前自动处理，见 facts `corporate_actions`）：多头持仓在除权日贷记现金红利（税前 × (1−`dividend_tax_rate`)）并按送转比例增股（成本连续，红股上市日晚于除权日时先锁定）；融券空头按税前全额补偿现金红利、应还股数按送转比例调增。持有跨除权日不再被记为纯亏损；配股未建模。
 
-`ctx` 其他字段：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`、`ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`、`ctx.substep(name, budget_minutes=B)`、`ctx.asof_dir`、`ctx.asof_version`、`ctx.snapshot_dir`、`ctx.model_dir`、`ctx.state_dir`、`ctx.nl(ts_code?, prompt=...)`。
+`ctx` 其他字段：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO-8601 **字符串**，如 `"2025-01-02T09:25:00+08:00"`；直接使用，不调用 `.isoformat()`，需要对象时用 `datetime.fromisoformat(...)`）、`ctx.account`、`ctx.positions`、`ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`、`ctx.substep(name, budget_minutes=B)`、`ctx.asof_dir`、`ctx.asof_version`、`ctx.snapshot_dir`、`ctx.model_dir`、`ctx.state_dir`、`ctx.nl(ts_code?, prompt=...)`。
 `ctx.asof_dir` 中常规数据域是目录（如 `daily`），冻结股票池是单文件 `universe.parquet`。
 
 轻量委托管理例子（每个 tick 可运行，用小预算子步骤统一统计耗时和撤单提交时点）：

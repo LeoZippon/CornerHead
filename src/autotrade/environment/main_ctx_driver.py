@@ -50,6 +50,24 @@ def _public_strategy_error(exc, *, main_path, request, snapshot_dir):
                         "use ctx.broker.stock['available_cash'] without parentheses."
                     ),
                 }
+    if isinstance(exc, AttributeError) and message == "'str' object has no attribute 'isoformat'":
+        strategy_root = Path(main_path).parent
+        for frame in traceback.extract_tb(exc.__traceback__):
+            try:
+                in_strategy = _is_under(_normalize_path(frame.filename), _normalize_path(strategy_root))
+            except (OSError, TypeError):
+                in_strategy = False
+            if in_strategy and re.search(
+                r"\bctx\s*\.\s*cur_datetime\s*\.\s*isoformat\s*\(", frame.line or ""
+            ):
+                return {
+                    "public_error_type": "strategy_contract_error",
+                    "public_reason": "cur_datetime_string_contract",
+                    "public_retry_hint": (
+                        "ctx.cur_datetime is already an ISO-8601 string; use it directly, "
+                        "or call datetime.fromisoformat(ctx.cur_datetime) when a datetime object is required."
+                    ),
+                }
     state = request.get("state") or {}
     rolling_asof_dir = state.get("asof_dir") if isinstance(state, dict) else None
     asof_dir = rolling_asof_dir or snapshot_dir
