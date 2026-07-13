@@ -165,6 +165,43 @@ CONFIG = SnapshotConfig(
 
 
 class SnapshotBuilderTest(unittest.TestCase):
+    def test_replay_minutes_stream_daily_partitions_into_one_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            minute_dir = raw / "stk_mins_1min_by_date"
+            rows = []
+            for trade_date, code in (("20211008", "000001.SZ"), ("20211011", "600000.SH")):
+                row = {
+                    "ts_code": code,
+                    "trade_time": f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]} 09:30:00",
+                    "open": 10.0,
+                    "high": 10.1,
+                    "low": 9.9,
+                    "close": 10.0,
+                    "vol": 1000.0,
+                    "amount": 10000.0,
+                    "trade_date": trade_date,
+                    "available_at": f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}T09:30:00+08:00",
+                    "available_at_rule": "bar_close",
+                }
+                rows.append(row)
+                write(minute_dir / f"trade_date={trade_date}.parquet", pd.DataFrame([row]))
+            output = Path(tmp) / "intraday_1min.parquet"
+
+            meta, profile = SnapshotBuilder(raw, Path(tmp) / "missing_events")._write_minutes_range(
+                "20211008", "20211011", output, None
+            )
+
+            actual = pd.read_parquet(output)
+            self.assertEqual(actual["trade_date"].tolist(), ["20211008", "20211011"])
+            self.assertEqual(actual["auction_market_bucket"].tolist(), ["sz_main_00", "sh_main_60"])
+            self.assertAlmostEqual(actual.loc[0, "vol_pit"], 760.0)
+            self.assertAlmostEqual(actual.loc[1, "vol_pit"], 1000.0)
+            self.assertEqual(pq.ParquetFile(output).metadata.num_row_groups, 2)
+            self.assertEqual(meta, {"rows": 2, "datasets": ["stk_mins_1min_by_date"], "files": 2})
+            self.assertEqual(profile["rows"], 2)
+            self.assertEqual(profile["date_ranges"]["trade_date"], {"min": "20211008", "max": "20211011"})
+
     def test_empty_auction_builder_writes_canonical_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"

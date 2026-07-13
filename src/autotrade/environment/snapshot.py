@@ -626,12 +626,11 @@ class SnapshotBuilder:
             )
             domains["text"] = text_meta
         if config.replay_include_minutes:
-            started = time.perf_counter()
-            minutes, minutes_meta = self._read_minutes_range(start_key, end_key)
-            minutes = self._apply_screen(minutes, screened)
-            minutes_meta = {**minutes_meta, "rows": int(len(minutes))}
-            profiles["intraday_1min.parquet"] = _write_with_profile(
-                output_dir / "intraday_1min.parquet", minutes, build_seconds=time.perf_counter() - started
+            minutes_meta, profiles["intraday_1min.parquet"] = self._write_minutes_range(
+                start_key,
+                end_key,
+                output_dir / "intraday_1min.parquet",
+                screened,
             )
             domains["intraday_1min"] = minutes_meta
 
@@ -890,13 +889,10 @@ class SnapshotBuilder:
         return out[list(self._CORPORATE_ACTION_COLUMNS)], meta
 
     def _read_minutes_range(self, start_key: str, end_key: str) -> tuple[pd.DataFrame, dict[str, object]]:
-        dataset_dir = self.raw_dir / "stk_mins_1min_by_date"
-        if not dataset_dir.exists():
-            raise FileNotFoundError(f"missing intraday by-date dataset: {dataset_dir}")
+        paths = self._minute_partition_paths(start_key, end_key)
         frames = [
             pd.read_parquet(path)
-            for path in sorted(dataset_dir.glob("trade_date=*.parquet"))
-            if start_key <= path.stem.split("=", 1)[1] <= end_key
+            for path in paths
         ]
         minutes = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         if not minutes.empty:
@@ -905,6 +901,106 @@ class SnapshotBuilder:
             # correction; available_at is kept here as the row-level Timeview gate.
             minutes = apply_open_auction_correction(minutes)
         return minutes, {"rows": int(len(minutes)), "datasets": ["stk_mins_1min_by_date"], "files": len(frames)}
+
+    def _minute_partition_paths(self, start_key: str, end_key: str) -> list[Path]:
+        dataset_dir = self.raw_dir / "stk_mins_1min_by_date"
+        if not dataset_dir.exists():
+            raise FileNotFoundError(f"missing intraday by-date dataset: {dataset_dir}")
+        return [
+            path
+            for path in sorted(dataset_dir.glob("trade_date=*.parquet"))
+            if start_key <= path.stem.split("=", 1)[1] <= end_key
+        ]
+
+    def _write_minutes_range(
+        self,
+        start_key: str,
+        end_key: str,
+        output_path: Path,
+        screened: frozenset[str] | None,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        """Transform and append one daily minute partition at a time.
+
+        The prior replay path retained every daily frame and a second full
+        concatenated frame before writing.  Daily Parquet row groups preserve
+        the same single-file consumer contract while bounding working memory to
+        one source partition plus Arrow's write buffers.
+        """
+        paths = self._minute_partition_paths(start_key, end_key)
+        tmp = output_path.with_suffix(output_path.suffix + ".tmp")
+        tmp.unlink(missing_ok=True)
+        writer: pq.ParquetWriter | None = None
+        schema: pa.Schema | None = None
+        empty_template: pd.DataFrame | None = None
+        rows = 0
+        columns: list[str] = []
+        build_seconds = 0.0
+        write_seconds = 0.0
+
+        try:
+            for source_path in paths:
+                started = time.perf_counter()
+                frame = pd.read_parquet(source_path)
+                if not frame.empty:
+                    frame = apply_open_auction_correction(frame)
+                frame = self._apply_screen(frame, screened)
+                build_seconds += time.perf_counter() - started
+                if empty_template is None or len(frame.columns) > len(empty_template.columns):
+                    empty_template = frame.iloc[0:0]
+                if frame.empty:
+                    continue
+
+                started = time.perf_counter()
+                table = pa.Table.from_pandas(frame, preserve_index=False)
+                if writer is None:
+                    schema = table.schema
+                    columns = list(frame.columns)
+                    writer = pq.ParquetWriter(tmp, schema, compression="snappy")
+                elif not table.schema.equals(schema, check_metadata=False):
+                    try:
+                        table = table.cast(schema, safe=True)
+                    except (pa.ArrowInvalid, pa.ArrowNotImplementedError, ValueError) as exc:
+                        raise ValueError(
+                            f"minute partition schema drift at {source_path}: "
+                            f"expected={schema} actual={table.schema}"
+                        ) from exc
+                else:
+                    table = table.replace_schema_metadata(schema.metadata)
+                writer.write_table(table)
+                write_seconds += time.perf_counter() - started
+                rows += len(frame)
+
+            if writer is None:
+                empty = empty_template if empty_template is not None else pd.DataFrame()
+                profile = _write_with_profile(output_path, empty, build_seconds=build_seconds)
+                return (
+                    {"rows": 0, "datasets": ["stk_mins_1min_by_date"], "files": len(paths)},
+                    profile,
+                )
+
+            started = time.perf_counter()
+            writer.close()
+            writer = None
+            tmp.replace(output_path)
+            write_seconds += time.perf_counter() - started
+            profile = _parquet_file_profile(
+                output_path,
+                rows=rows,
+                columns=columns,
+                build_seconds=build_seconds,
+                write_seconds=write_seconds,
+            )
+            return (
+                {"rows": rows, "datasets": ["stk_mins_1min_by_date"], "files": len(paths)},
+                profile,
+            )
+        finally:
+            if writer is not None:
+                try:
+                    writer.close()
+                except Exception:  # noqa: BLE001 - preserve the original build error
+                    pass
+            tmp.unlink(missing_ok=True)
 
     # ---- domain builders ----
 
@@ -1510,6 +1606,36 @@ def _frame_profile(
             profile["dataset_counts"] = {str(key): int(value) for key, value in counts.items()}
         elif "dataset" in frame.columns:
             profile["dataset_counts"] = "skipped_large_frame"
+    return profile
+
+
+def _parquet_file_profile(
+    path: Path,
+    *,
+    rows: int,
+    columns: list[str],
+    build_seconds: float,
+    write_seconds: float,
+) -> dict[str, object]:
+    """Profile a streamed Parquet file from footer statistics only."""
+    profile: dict[str, object] = {
+        "file": path.name,
+        "rows": int(rows),
+        "size_bytes": int(path.stat().st_size),
+        "column_count": len(columns),
+        "columns": [str(column) for column in columns],
+        "build_seconds": round(float(build_seconds), 3),
+        "write_seconds": round(float(write_seconds), 3),
+    }
+    if rows:
+        footer_profile = _parquet_footer_profile(path)
+        if footer_profile is None:
+            raise ValueError(f"streamed Parquet footer lacks required profile statistics: {path}")
+        date_ranges, key_nulls = footer_profile
+        if date_ranges:
+            profile["date_ranges"] = date_ranges
+        if key_nulls:
+            profile["key_nulls"] = key_nulls
     return profile
 
 
