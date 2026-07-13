@@ -17357,7 +17357,8 @@ Evidence:
 - Real `trade_date=20220104` (1,108,600 rows): auction correction 1.028 s before, 0.401 s after; corrected row count stayed 2,568.
 - Real January 2022 minutes (21,122,927 rows / 19 files): 12.557 s build + 20.248 s write, 32.917 s wall, 459.5 MiB output, 2.50 GiB process high-water RSS.
 - A two-day 2,217,441-row comparison passed `assert_frame_equal` between the retained legacy reader and streamed output.
-- Snapshot builder tests and focused prefetch tests passed before the final full-suite run.
+- `PYTHONDONTWRITEBYTECODE=1 ... python -m unittest discover -s tests -t .`: 731 tests passed in 118.892 seconds.
+- Host resources were unchanged after validation: 433 GiB available RAM and all eight GPUs at 0 MiB / 0% utilization.
 
 Decision:
 - Keep `SNAPSHOT_DOMAIN_WORKERS=2` on the shared host. Do not add a second data lake, cross-Fold container startup, or backtest-loop changes in this batch.
