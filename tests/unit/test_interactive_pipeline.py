@@ -162,8 +162,10 @@ class FakePipeline:
 
     # -- pipeline surface ---------------------------------------------------
     def run_meta_learning(self, *, epoch_id, parent, previous_taste="", visible_fold=None, directive_override=None,
-                          system_prompt_override="", user_question_hook=None):
+                          system_prompt_override="", user_question_hook=None, agent_ready_hook=None):
         self.calls.append(("meta", epoch_id, previous_taste, directive_override, system_prompt_override))
+        if agent_ready_hook is not None:
+            agent_ready_hook()
         taste = f"taste-{epoch_id}"
         meta_dir = Path(self.config.experiment_dir) / "meta_learning" / epoch_id
         meta_dir.mkdir(parents=True, exist_ok=True)
@@ -331,6 +333,117 @@ class InteractiveRunnerTest(unittest.TestCase):
                 ("fold", "fold_2022Q2"),
             ],
         )
+
+    def test_auto_first_fold_prefetch_overlaps_meta_agent(self) -> None:
+        pipeline = FakePipeline(self.config)
+        meta_active = threading.Event()
+        prefetch_started = threading.Event()
+        allow_prefetch_finish = threading.Event()
+        original_meta = pipeline.run_meta_learning
+
+        def slow_meta(**kwargs):
+            hook = kwargs.pop("agent_ready_hook")
+            meta_active.set()
+            hook()
+            self.assertTrue(prefetch_started.wait(timeout=1.0))
+            allow_prefetch_finish.set()
+            result = original_meta(agent_ready_hook=None, **kwargs)
+            meta_active.clear()
+            return result
+
+        def prefetch_fold_data(fold):
+            pipeline.calls.append(("prefetch", fold.fold_id))
+            if fold.fold_id == "fold_2022Q1":
+                self.assertTrue(meta_active.is_set())
+                prefetch_started.set()
+                self.assertTrue(allow_prefetch_finish.wait(timeout=1.0))
+
+        pipeline.run_meta_learning = slow_meta
+        pipeline.prefetch_fold_data = prefetch_fold_data
+        self._control(mode="auto")
+
+        self._runner(pipeline).run(TRADING_DAYS)
+
+        self.assertTrue(prefetch_started.is_set())
+        self.assertEqual(
+            [call for call in pipeline.calls if call[0] == "prefetch"][0],
+            ("prefetch", "fold_2022Q1"),
+        )
+
+    def test_meta_prefetch_selects_an_earlier_rerun(self) -> None:
+        from autotrade.pipelines.folds import build_fold_schedule
+
+        pipeline = FakePipeline(self.config)
+        first_fold = build_fold_schedule("2022Q1", "2022Q2", TRADING_DAYS)[0]
+        pipeline.run_fold(first_fold, epoch_id="epoch_001", parent=None)
+        pipeline.calls.clear()
+        pipeline.prefetch_fold_data = lambda fold: pipeline.calls.append(("prefetch", fold.fold_id))
+        self._control(
+            mode="auto",
+            rerun_sessions={fold_session_key("epoch_001", "fold_2022Q1"): "rerun-new"},
+        )
+
+        self._runner(pipeline).run(TRADING_DAYS)
+
+        self.assertEqual(
+            [call for call in pipeline.calls if call[0] == "prefetch"][0],
+            ("prefetch", "fold_2022Q1"),
+        )
+
+    def test_dynamic_skip_waits_for_meta_prefetch_before_heldout(self) -> None:
+        seed = self.root / "seed_for_skip"
+        seed.mkdir()
+        (seed / "main.py").write_text("def main(ctx):\n    return None\n", encoding="utf-8")
+        write_json_atomic(self.hitl_dir / "params.json", {
+            "experiment_id": self.config.experiment_id,
+            "_inherited_artifact": {
+                "artifact_id": "strategy_seed_for_skip",
+                "path": str(seed),
+                "artifact_hash": artifact_hash(seed),
+                "model_path": None,
+                "model_artifact_hash": model_artifact_hash(seed / ".missing_models"),
+            },
+        })
+        pipeline = FakePipeline(self.config)
+        prefetch_started = threading.Event()
+        release_prefetch = threading.Event()
+        original_meta = pipeline.run_meta_learning
+
+        def meta_then_skip(**kwargs):
+            hook = kwargs.pop("agent_ready_hook")
+            hook()
+            self.assertTrue(prefetch_started.wait(timeout=1.0))
+            self._control(mode="auto", skip_to_heldout=True)
+            return original_meta(agent_ready_hook=None, **kwargs)
+
+        def blocked_prefetch(fold):
+            pipeline.calls.append(("prefetch", fold.fold_id))
+            prefetch_started.set()
+            self.assertTrue(release_prefetch.wait(timeout=2.0))
+            raise RuntimeError("unused skipped-fold prefetch")
+
+        pipeline.run_meta_learning = meta_then_skip
+        pipeline.prefetch_fold_data = blocked_prefetch
+        self._control(mode="auto")
+        errors: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                self._runner(pipeline).run(TRADING_DAYS)
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        self.assertTrue(prefetch_started.wait(timeout=1.0))
+        time.sleep(0.05)
+        self.assertFalse(any(call[0] == "heldout" for call in pipeline.calls))
+        release_prefetch.set()
+        thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(any(call[0] == "heldout" for call in pipeline.calls))
 
     def test_skip_to_heldout_after_first_frozen_fold(self) -> None:
         pipeline = FakePipeline(self.config)

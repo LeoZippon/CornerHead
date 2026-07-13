@@ -448,7 +448,7 @@ experiments/<experiment_id>/
 - 缓存键另含显式格式版本；快照/PIT 磁盘合同变化时递增版本，无关代码提交不清空大缓存。
 - 同一内容键由跨进程 `flock` 合并为一次构建，加锁后复查命中并原子发布；发布异常直接报错。
 - 数据文件以硬链接挂入运行目录；本地 manifest 以新 inode 替换，不会改写缓存或其他运行的硬链接。
-- 交互式 worker 在下一 Fold 的人工门控期间只预取四个数据缓存项；不创建 Sandbox 或容器，并在进入 Fold 前等待完成，所以不与正式回测并行。
+- 交互式 worker 只预取将进入的 Fold 的四个宿主数据缓存项：`auto` 首 Fold 在 Meta Agent 就绪后与其推理重叠，其他 Fold 与门控重叠；不创建 Sandbox 或容器，并在进入 Fold 前等待完成，所以不与正式回测并行。
 - 每个 Fold/Meta/Held-out 的生产输入在启动 Agent 前校验 pinned generation 唯一；混代或部分缺失世代戳直接失败，本地合成输入可以全部无戳。
 
 **主账本**

@@ -1512,3 +1512,12 @@
 - Broker 撮合改为 FIFO 即时释放已成交/拒绝单，保留更早仍挂单的冻结；Probe 增加未提交原因和三类安全策略拒单聚合；worker 恢复 `SIGCHLD` 默认处理；三类执行器固定 `PYTHONHASHSEED=0`。
 - `ctx.state_dir` 改为 substep 首次访问才复制，纯 Broker block 不再建暂存树；Prompt、合同和模板明确 tick 入口账户快照及批量本地预算。
 - 全量 787 tests、真实 Docker E2E 2 tests 通过；重建镜像 `af95fb629d7b`，内置 driver/source hash 均为 `cc2fe3e61e31`。分钟预取等待仍约 0.001 秒，不增加加载并行度、不复用 Formal 容器、不引入读优化湖。
+
+2026-07-14 lzp-test14 诊断与首 Fold 预取
+
+- `lzp-test14` 固定 generation `941d89e6afaf4cfdbfa295e139fb4a64`；Meta 总耗时 703.1 秒，Q1 数据串行准备约 461 秒。Q1 的 30 次回测额度全部用于 3 日 Probe，10 次零订单成功、20 次策略失败，未运行完整 Valid；确认不可恢复后优雅终止，所有产物保留。
+- 数据、typed-empty auction、PIT、Docker、IPC 和 worker 均正常。15 次同类失败来自把字符串 `ctx.cur_datetime` 再调用 `.isoformat()`，3 次来自 Agent 的 Pandas 索引不对齐；分钟读取约 1.93 秒、归一化约 4.89 秒、预取等待近零，故不提高加载并行度。
+- Probe 仅为直接 `ctx.cur_datetime.isoformat()` 增加固定安全合同提示，并同步 Prompt、模板和 Environment 文档；未知异常仍为 host-only。02:30 事件/资金审计统一按最晚发布的次晨两融边界使用 D-2，09:20 的 D-1 审计不变。
+- `auto` 首 Fold 的现有四项宿主缓存改在 Meta Agent 就绪后预取；不创建/预启动容器，不挂载隐藏数据，进入 Fold 或 Held-out 前等待。rerun、动态 skip 和未使用预取失败均有回归。
+- 真实调度/SSE 日历 Case Study 覆盖周二、周三、周六、周日：02:30 与 09:20 边界互补且周日重复审计可跳过；281,115 个 raw、754 个 PIT 文件及 release/pin/质量 hash 一致。当前 event-flow 的 2 个 error 是旧调度留下的当日两融误报，待下一次 cron 重写。
+- 全量 794 tests、真实 Docker E2E 2 tests 通过；镜像 `sha256:6af1d9b40c27` 的 driver/source hash 均为 `bbbd8160a31b`。结束时 452 GiB 可用内存、8 张 L20 空闲、load 约 3/192 核。

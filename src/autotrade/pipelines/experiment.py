@@ -579,6 +579,7 @@ class ExperimentPipeline:
         directive_override: str | None = None,
         system_prompt_override: str = "",
         user_question_hook=None,
+        agent_ready_hook=None,
     ) -> tuple[FrozenArtifact | None, str]:
         if self.meta_learner is None:
             raise RuntimeError("no meta learner configured")
@@ -593,6 +594,7 @@ class ExperimentPipeline:
                 directive_override=directive_override,
                 system_prompt_override=system_prompt_override,
                 user_question_hook=user_question_hook,
+                agent_ready_hook=agent_ready_hook,
             )
         except Exception as exc:
             self._record_attempt_failure(
@@ -611,6 +613,7 @@ class ExperimentPipeline:
         directive_override: str | None = None,
         system_prompt_override: str = "",
         user_question_hook=None,
+        agent_ready_hook=None,
     ) -> tuple[FrozenArtifact | None, str]:
         run_started = time.monotonic()
         sandbox, docker = self._start_sandbox(run_id, kind="meta_learning")
@@ -764,6 +767,8 @@ class ExperimentPipeline:
                 ctx.extra["user_question_hook"] = user_question_hook
             if managed_proxy.env:
                 ctx.extra["web_fetch_proxy_env"] = dict(managed_proxy.env)
+            if agent_ready_hook is not None:
+                agent_ready_hook()
 
             session_summary = self.meta_learner(ctx)
             if session_summary is None:

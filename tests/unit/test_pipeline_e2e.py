@@ -1214,6 +1214,38 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual(taste, "hook checked")
             self.assertEqual(calls, [(2, "是否继续？")])
 
+    def test_meta_learning_agent_ready_hook_runs_before_learner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+            events: list[str] = []
+
+            def ready_hook() -> None:
+                events.append("ready")
+
+            def inspect_meta_learner(ctx: ToolContext) -> None:
+                self.assertEqual(events, ["ready"])
+                self.assertTrue(ctx.paths.run_manifest.exists())
+                events.append("learner")
+                (ctx.paths.workspace / "taste.md").write_text("hook checked", encoding="utf-8")
+
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, fold, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+                meta_learner=inspect_meta_learner,
+            )
+
+            _, taste = pipeline.run_meta_learning(
+                epoch_id="epoch_001",
+                parent=None,
+                agent_ready_hook=ready_hook,
+            )
+
+            self.assertEqual(taste, "hook checked")
+            self.assertEqual(events, ["ready", "learner"])
+
     def test_meta_learning_workspace_includes_sandbox_environment_example_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

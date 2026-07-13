@@ -17522,6 +17522,36 @@ Decision:
 - Do not delete experiments, runtime artifacts or old images during the experiment series; deletion candidates remain in ignored `check.md` for one final user decision.
 
 
+## 2026-07-14 lzp-test14 failure case and targeted latency fixes
+
+Task: supervise a clean 1-Meta/2-Fold auto experiment, audit the immutable research-release framework, and implement only the environment or performance fixes justified by measured evidence.
+
+Observed experiment:
+- `lzp-test14` started from code `94b80cb` and Sandbox image `af95fb629d7b`, pinned generation `941d89e6afaf4cfdbfa295e139fb4a64`, and retained the same raw path set as the previous release. Recent PIT replacements did not mutate the previous generation; 2024 Decision/Replay payload hashes matched across releases.
+- Meta Decision and Replay materialization took 267.513 s and 152.969 s; Meta completed in 703.1 s. Q1 hidden Decision and Replay preparation then took 283.999 s and 177.181 s, about 461 s on the serial critical path.
+- Q1 issued 30 three-day Probes and no full validation: 10 succeeded with zero actions/orders/trades and 20 failed. Host evidence classified one state-dir misuse, one universe-path misuse, 15 direct `ctx.cur_datetime.isoformat()` AttributeErrors and three Agent-authored Pandas unalignable-index errors. The fixed path/state hints worked immediately; the generic clock error caused repeated blind diagnosis and exhausted the backtest budget.
+- The run was therefore irrecoverable and was terminated gracefully at 2026-07-14 06:25 CST (`escalated=false`). Only Meta entered the ledger; Q1/Q2/Held-out did not. The worker, Agent and Formal containers exited, while experiment, Trace, cache and image artifacts were kept.
+- No Arrow, Parquet, Timeview, PIT, mixed-generation, Docker, IPC, worker, OOM or API error occurred. Empty Q4 auction loaded with its explicit schema; Q1 test auction contained 257,528 rows. Successful Probe minute reads averaged about 1.93 s, normalization 4.89 s, and prefetch wait was negligible. Host peak was about 49 GiB with over 400 GiB available.
+
+Implementation:
+- Add one allowlisted `cur_datetime_string_contract` classification. It requires the exact AttributeError text, a traceback frame under the strategy root and a direct `ctx.cur_datetime.isoformat()` source expression, then returns only a fixed hint. Other string `.isoformat()` failures remain generic and host-only. Prompt, generated prompt audit, template and Environment docs now state that the value is already an ISO-8601 string.
+- Change only `cn_nightly_full_audit`: its whole event/flow status uses `event_flow_end_extra_offset_days=1` on top of the generic D-1 end. This follows the latest-publishing next-morning margin boundary; the 09:20 D-1 audit remains responsible for the prior trading day. Real-schedule weekday/weekend cases and the parameter reference are covered.
+- Reuse the existing single-thread Fold cache prefetcher. In auto mode, the first actually pending Fold (including reruns) is submitted only after the Meta container and ToolContext are ready. Meta mounts and manifests remain unchanged; no Snapshot cache path is Agent-visible. The future is joined before a real Fold or Held-out, dynamic skip consumes an unused failure, and later Folds retain gate-time prefetch.
+- No new configuration, cache format, storage layer, Docker, Sandbox, UI state or strategy fence was added. Formal Docker remains one-shot: observed create/start is about 53 ms and bind mounts do not copy data.
+
+Validation and resources:
+- Targeted suites: interactive prefetch 41 tests; refresh/Probe/interactive combined 167 tests; replay/tool/prompt group 186 tests; schedule/data group 99 tests. Two independent read-only reviews found no remaining concurrency, leakage or date-boundary blocker.
+- A read-only Case Study used the real schedule loader, command builder, SSE calendar and release validators for Tuesday, Wednesday, Saturday and Sunday. The 02:30 D-2 command boundary and 09:20 prior-trading-day boundary were complementary; a repeated Sunday audit had the same command/config hash and skipped after Saturday success. The active marker, global release and `lzp-test14` pin all resolved to generation `941d89e6afaf4cfdbfa295e139fb4a64`; 281,115 raw paths, 754 PIT files and all seven quality hashes were consistent, with no mixed generation or temporary/special file. The existing event-flow status still contains two missing-margin errors written by the old schedule and must not be called repaired until the next cron audit rewrites it.
+- Full `PYTHONDONTWRITEBYTECODE=1 ~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests -p 'test_*.py'`: 794 tests passed in 94.569 s. Real Docker E2E: 2 tests passed in 6.809 s. Prompt export is current and `git diff --check` passed.
+- Rebuilt `autotrade-sandbox:latest` as `sha256:6af1d9b40c27b6ccde09f9a0029098d44cb16fbf7ab81278f02b62fc1cbb5231`; image/source `main_ctx_driver.py` SHA-256 both equal `bbbd8160a31ba59d4a89d21494b47f45196a13df0436d7c795b0ec4219bc4e79`.
+- Final resource check: 452 GiB available of 503 GiB, swap essentially unused, all eight L20 GPUs at 0 MiB/0%, load 3.01/4.15/4.68 on 192 logical CPUs.
+
+Decision:
+- Start another clean 1-Meta/2-Fold auto run after commits and console restart. The expected high-value change is overlapping roughly 278 s of Meta Agent work with the 461 s first-Fold hidden-data build; measure rather than assume the gain under host load.
+- Keep current minute streaming, one-shot Formal Docker and release storage. Do not add loader threads, a read-optimized lake, cross-regular-Fold prefetch, container pre-start or a generic traceback/line-number channel.
+- Preserve every experiment, runtime artifact, cache and old image until the user reviews the consolidated deletion list in ignored `check.md`.
+
+
 ## 2026-07-14 Research-release data/update decoupling
 
 Task: let experiments start and continue during raw/PIT/audit updates without changing cron timing or reading a mixed generation.

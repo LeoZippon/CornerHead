@@ -193,6 +193,19 @@ class InteractiveExperimentRunner:
     # ---- main loop ----
 
     def run(self, trading_days: list[str]) -> dict[str, object]:
+        prefetch_method = getattr(self.pipeline, "prefetch_fold_data", None)
+        prefetch_pool = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="fold-data-prefetch")
+            if callable(prefetch_method)
+            else None
+        )
+        try:
+            return self._run(trading_days, prefetch_pool=prefetch_pool)
+        finally:
+            if prefetch_pool is not None:
+                prefetch_pool.shutdown(wait=True, cancel_futures=True)
+
+    def _run(self, trading_days: list[str], *, prefetch_pool) -> dict[str, object]:
         folds = build_fold_schedule(
             self.config.first_test_period,
             self.config.last_test_period,
@@ -214,6 +227,8 @@ class InteractiveExperimentRunner:
         )
         fold_records = self._latest_records("fold")
         meta_records = self._latest_records("meta_learning")
+        prefetch_method = getattr(self.pipeline, "prefetch_fold_data", None)
+        early_prefetches = {}
         heldout_done = {
             str(record.get("fold_id", "")).removeprefix("heldout_")
             for record in self.pipeline.ledger.read("heldout")
@@ -247,6 +262,36 @@ class InteractiveExperimentRunner:
                 else:
                     directive = self._gate(key, phase="meta_learning", epoch_id=epoch_id)
                     control = read_control(self.control_path)
+                    agent_ready_hook = None
+                    if prefetch_pool is not None:
+
+                        def agent_ready_hook() -> None:
+                            # Auto mode has no researcher gate to overlap. Start
+                            # only after the Meta container and ToolContext are
+                            # ready, so its visible snapshot remains unchanged.
+                            live_control = read_control(self.control_path)
+                            if live_control.mode != "auto" or live_control.request is not None:
+                                return
+
+                            def needs_run(fold) -> bool:
+                                record = fold_records.get((epoch_id, fold.fold_id))
+                                rerun_id = live_control.rerun_sessions.get(
+                                    fold_session_key(epoch_id, fold.fold_id)
+                                )
+                                return record is None or (
+                                    rerun_id is not None
+                                    and str(record.get("rerun_id") or "") != rerun_id
+                                )
+
+                            fold = next((candidate for candidate in folds if needs_run(candidate)), None)
+                            if fold is None:
+                                return
+                            job_key = (epoch_id, fold.fold_id)
+                            if job_key not in early_prefetches:
+                                early_prefetches[job_key] = prefetch_pool.submit(
+                                    prefetch_method, fold
+                                )
+
                     self.status.set(
                         state="running_session", phase="meta_learning", session_key=key,
                         epoch_id=epoch_id, fold_id=None, run_id=None, trace_path=None,
@@ -260,6 +305,7 @@ class InteractiveExperimentRunner:
                         directive_override=directive if directive.strip() else None,
                         system_prompt_override=control.prompt_overrides.get(key, ""),
                         user_question_hook=self._user_question_hook(key),
+                        agent_ready_hook=agent_ready_hook,
                     )
                 completed += 1
                 self.status.set(completed_sessions=completed)
@@ -280,33 +326,27 @@ class InteractiveExperimentRunner:
                         break
                     if restored is None:
                         self._require_no_orphan_artifact(epoch_id, fold.fold_id)
-                    prefetch_method = getattr(self.pipeline, "prefetch_fold_data", None)
-                    prefetch_pool = (
-                        ThreadPoolExecutor(max_workers=1, thread_name_prefix="fold-data-prefetch")
-                        if callable(prefetch_method)
-                        else None
+                    prefetch = early_prefetches.pop(
+                        (epoch_id, fold.fold_id), None
                     )
-                    prefetch = prefetch_pool.submit(prefetch_method, fold) if prefetch_pool is not None else None
-                    try:
-                        directive = self._gate(key, phase="fold", epoch_id=epoch_id, fold_id=fold.fold_id)
-                        control = read_control(self.control_path)
-                        # User-side step rollback: a control-plane override replaces the
-                        # inherited frozen chain with a validated step-tree node snapshot.
-                        override_node = control.parent_overrides.get(key)
-                        session_parent = self._parent_from_step_node(override_node) if override_node else parent
-                        self.status.set(
-                            state="running_session", phase="fold", session_key=key,
-                            epoch_id=epoch_id, fold_id=fold.fold_id, run_id=None, trace_path=None,
-                            session_started_at=utc_now_iso(), fold_deadline_at=None,
-                            parent_override=override_node,
-                        )
-                        if prefetch is not None:
-                            # Join before run_fold: no prefetch can overlap an
-                            # Agent-triggered formal backtest.
-                            prefetch.result()
-                    finally:
-                        if prefetch_pool is not None:
-                            prefetch_pool.shutdown(wait=True, cancel_futures=True)
+                    if prefetch is None and prefetch_pool is not None:
+                        prefetch = prefetch_pool.submit(prefetch_method, fold)
+                    directive = self._gate(key, phase="fold", epoch_id=epoch_id, fold_id=fold.fold_id)
+                    control = read_control(self.control_path)
+                    # User-side step rollback: a control-plane override replaces the
+                    # inherited frozen chain with a validated step-tree node snapshot.
+                    override_node = control.parent_overrides.get(key)
+                    session_parent = self._parent_from_step_node(override_node) if override_node else parent
+                    self.status.set(
+                        state="running_session", phase="fold", session_key=key,
+                        epoch_id=epoch_id, fold_id=fold.fold_id, run_id=None, trace_path=None,
+                        session_started_at=utc_now_iso(), fold_deadline_at=None,
+                        parent_override=override_node,
+                    )
+                    if prefetch is not None:
+                        # Join before run_fold: no prefetch can overlap an
+                        # Agent-triggered formal backtest.
+                        prefetch.result()
                     outcome = self.pipeline.run_fold(
                         fold,
                         epoch_id=epoch_id,
@@ -327,6 +367,12 @@ class InteractiveExperimentRunner:
                     self._run_post_fold_hook(epoch_id, fold.fold_id, outcome)
                 completed += 1
                 self.status.set(completed_sessions=completed)
+        # A dynamic skip may leave Meta-started data work unused. Do not let it
+        # compete with the held-out replay. Its failure is irrelevant after the
+        # Fold was skipped; a prefetch for a Fold we enter still fails fast above.
+        for prefetch in early_prefetches.values():
+            _ = prefetch.exception()
+        early_prefetches.clear()
         if parent is None:
             raise RuntimeError("experiment produced no frozen strategy artifact")
         heldout_runs = 0
