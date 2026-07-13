@@ -1,6 +1,8 @@
 import hashlib
 import json
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -165,6 +167,41 @@ CONFIG = SnapshotConfig(
 
 
 class SnapshotBuilderTest(unittest.TestCase):
+    def test_domain_scheduler_bounds_concurrency_and_respects_dependencies(self):
+        lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+        finished: set[str] = set()
+
+        def task(name: str, required: str | None = None):
+            def build(completed):
+                nonlocal active, maximum_active
+                if required is not None:
+                    self.assertIn(required, completed)
+                    self.assertIn(required, finished)
+                with lock:
+                    active += 1
+                    maximum_active = max(maximum_active, active)
+                time.sleep(0.02)
+                with lock:
+                    active -= 1
+                    finished.add(name)
+                return {"name": name}, {}
+
+            return build
+
+        results = snapshot_module._run_domain_tasks(
+            [
+                ("daily", (), task("daily")),
+                ("intraday", ("daily",), task("intraday", "daily")),
+                ("events", (), task("events")),
+                ("text", (), task("text")),
+            ]
+        )
+
+        self.assertEqual(set(results), {"daily", "intraday", "events", "text"})
+        self.assertEqual(maximum_active, snapshot_module.SNAPSHOT_DOMAIN_WORKERS)
+
     def test_replay_minutes_stream_daily_partitions_into_one_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"

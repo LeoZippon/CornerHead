@@ -22,6 +22,8 @@ import hashlib
 import json
 import os
 import time
+from collections.abc import Callable, Mapping
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -44,6 +46,14 @@ from autotrade.environment.features.auction import apply_open_auction_correction
 from autotrade.environment.features.fundamental_events import FUNDAMENTAL_EVENT_DATASETS, read_fundamental_events
 from autotrade.environment.features.units import normalize_daily_units
 from autotrade.environment.runtime import new_id, utc_now_iso
+
+SNAPSHOT_DOMAIN_WORKERS = 2
+DomainBuildResult = tuple[dict[str, object], dict[str, object]]
+DomainBuildTask = tuple[
+    str,
+    tuple[str, ...],
+    Callable[[Mapping[str, DomainBuildResult]], DomainBuildResult],
+]
 
 @dataclass(frozen=True)
 class SnapshotConfig:
@@ -326,91 +336,130 @@ class SnapshotBuilder:
         # per-stock domain below (None = screening off, zero overhead).
         screened = self._screened_codes(decision_time, config)
 
-        started = time.perf_counter()
-        daily, daily_meta = self._build_daily(decision_time, daily_window_start)
-        daily = self._apply_screen(daily, screened)
-        daily_meta = {**daily_meta, "rows": int(len(daily))}
-        profiles["daily.parquet"] = _write_with_profile(
-            output_dir / "daily.parquet", daily, build_seconds=time.perf_counter() - started
-        )
-        domains["daily"] = daily_meta
+        def build_daily(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
+            started = time.perf_counter()
+            daily, meta = self._build_daily(decision_time, daily_window_start)
+            daily = self._apply_screen(daily, screened)
+            meta = {**meta, "rows": int(len(daily))}
+            profile = _write_with_profile(
+                output_dir / "daily.parquet", daily, build_seconds=time.perf_counter() - started
+            )
+            return meta, profile
 
-        started = time.perf_counter()
-        auction, auction_meta = self._build_auction(
-            daily_window_start.strftime("%Y%m%d"), decision_time.strftime("%Y%m%d")
-        )
-        auction = self._apply_screen(auction, screened)
-        if not auction.empty:
-            available_at = to_cn_timestamps(auction["available_at"])
-            auction = auction[available_at <= decision_time].reset_index(drop=True)
-            auction_meta = {**auction_meta, "rows": int(len(auction))}
-        profiles["auction.parquet"] = _write_with_profile(
-            output_dir / "auction.parquet", auction, build_seconds=time.perf_counter() - started
-        )
-        domains["auction"] = auction_meta
+        def build_intraday(completed: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
+            started = time.perf_counter()
+            if config.include_intraday:
+                daily_meta = completed["daily"][0]
+                intraday, meta = self._build_intraday(decision_time, daily_meta["trade_dates"], config)
+                intraday = self._apply_screen(intraday, screened)
+                meta = {**meta, "rows": int(len(intraday))}
+            else:
+                intraday, meta = pd.DataFrame(), {"rows": 0, "datasets": [], "skipped": True}
+            profile = _write_with_profile(
+                output_dir / "intraday_1min.parquet", intraday, build_seconds=time.perf_counter() - started
+            )
+            return meta, profile
 
-        started = time.perf_counter()
-        if config.include_intraday:
-            intraday, intraday_meta = self._build_intraday(decision_time, daily_meta["trade_dates"], config)
-            intraday = self._apply_screen(intraday, screened)
-            intraday_meta = {**intraday_meta, "rows": int(len(intraday))}
-        else:
-            intraday, intraday_meta = pd.DataFrame(), {"rows": 0, "datasets": [], "skipped": True}
-        profiles["intraday_1min.parquet"] = _write_with_profile(
-            output_dir / "intraday_1min.parquet", intraday, build_seconds=time.perf_counter() - started
-        )
-        domains["intraday_1min"] = intraday_meta
+        def build_auction(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
+            started = time.perf_counter()
+            auction, meta = self._build_auction(
+                daily_window_start.strftime("%Y%m%d"), decision_time.strftime("%Y%m%d")
+            )
+            auction = self._apply_screen(auction, screened)
+            if not auction.empty:
+                available_at = to_cn_timestamps(auction["available_at"])
+                auction = auction[available_at <= decision_time].reset_index(drop=True)
+                meta = {**meta, "rows": int(len(auction))}
+            profile = _write_with_profile(
+                output_dir / "auction.parquet", auction, build_seconds=time.perf_counter() - started
+            )
+            return meta, profile
 
-        started = time.perf_counter()
-        if config.fundamental_datasets:
-            self._assert_fundamental_event_status_ok()
-        fundamentals = read_fundamental_events(
-            self.fundamental_events_root,
-            decision_time.isoformat(),
-            datasets=config.fundamental_datasets,
-            min_available_at=fundamentals_window_start.isoformat(),
-            require_partitions=bool(config.fundamental_datasets),
-        )
-        fundamentals = self._apply_screen(fundamentals, screened)
-        profiles["fundamentals.parquet"] = _write_with_profile(
-            output_dir / "fundamentals.parquet", fundamentals, build_seconds=time.perf_counter() - started
-        )
-        domains["fundamentals"] = {
-            "rows": int(len(fundamentals)),
-            "datasets": list(config.fundamental_datasets),
-            "units": "source",
-        }
+        def build_fundamentals(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
+            started = time.perf_counter()
+            if config.fundamental_datasets:
+                self._assert_fundamental_event_status_ok()
+            fundamentals = read_fundamental_events(
+                self.fundamental_events_root,
+                decision_time.isoformat(),
+                datasets=config.fundamental_datasets,
+                min_available_at=fundamentals_window_start.isoformat(),
+                require_partitions=bool(config.fundamental_datasets),
+            )
+            fundamentals = self._apply_screen(fundamentals, screened)
+            profile = _write_with_profile(
+                output_dir / "fundamentals.parquet",
+                fundamentals,
+                build_seconds=time.perf_counter() - started,
+            )
+            return {
+                "rows": int(len(fundamentals)),
+                "datasets": list(config.fundamental_datasets),
+                "units": "source",
+            }, profile
 
-        started = time.perf_counter()
-        events, events_meta = self._build_available_at_domain(config.events_datasets, decision_time, events_window_start)
-        events = self._apply_screen(events, screened)
-        events_meta = {**events_meta, "rows": int(len(events))}
-        profiles["events.parquet"] = _write_with_profile(
-            output_dir / "events.parquet", events, build_seconds=time.perf_counter() - started
-        )
-        domains["events"] = events_meta
+        def build_events(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
+            started = time.perf_counter()
+            events, meta = self._build_available_at_domain(
+                config.events_datasets, decision_time, events_window_start
+            )
+            events = self._apply_screen(events, screened)
+            meta = {**meta, "rows": int(len(events))}
+            profile = _write_with_profile(
+                output_dir / "events.parquet", events, build_seconds=time.perf_counter() - started
+            )
+            return meta, profile
 
-        started = time.perf_counter()
-        macro, macro_meta = self._build_available_at_domain(config.macro_datasets, decision_time, macro_window_start)
-        profiles["macro.parquet"] = _write_with_profile(
-            output_dir / "macro.parquet", macro, build_seconds=time.perf_counter() - started
-        )
-        domains["macro"] = macro_meta
+        def build_macro(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
+            started = time.perf_counter()
+            macro, meta = self._build_available_at_domain(
+                config.macro_datasets, decision_time, macro_window_start
+            )
+            profile = _write_with_profile(
+                output_dir / "macro.parquet", macro, build_seconds=time.perf_counter() - started
+            )
+            return meta, profile
 
-        started = time.perf_counter()
-        text_index, text_meta = self._build_text(config, decision_time, text_window_start, output_dir)
-        profiles["text_index.parquet"] = _write_with_profile(
-            output_dir / "text_index.parquet", text_index, build_seconds=time.perf_counter() - started
-        )
-        domains["text"] = text_meta
+        def build_text(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
+            started = time.perf_counter()
+            text_index, meta = self._build_text(config, decision_time, text_window_start, output_dir)
+            profile = _write_with_profile(
+                output_dir / "text_index.parquet", text_index, build_seconds=time.perf_counter() - started
+            )
+            return meta, profile
 
-        started = time.perf_counter()
-        universe = self._build_universe(decision_time, config)
-        universe = self._apply_screen(universe, screened)
-        profiles["universe.parquet"] = _write_with_profile(
-            output_dir / "universe.parquet", universe, build_seconds=time.perf_counter() - started
+        def build_universe(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
+            started = time.perf_counter()
+            universe = self._build_universe(decision_time, config)
+            universe = self._apply_screen(universe, screened)
+            profile = _write_with_profile(
+                output_dir / "universe.parquet", universe, build_seconds=time.perf_counter() - started
+            )
+            return {"rows": int(len(universe))}, profile
+
+        task_results = _run_domain_tasks(
+            [
+                ("daily", (), build_daily),
+                ("intraday", ("daily",), build_intraday),
+                ("auction", (), build_auction),
+                ("fundamentals", (), build_fundamentals),
+                ("events", (), build_events),
+                ("macro", (), build_macro),
+                ("text", (), build_text),
+                ("universe", (), build_universe),
+            ]
         )
-        domains["universe"] = {"rows": int(len(universe))}
+        for task_name, domain_name, file_name in (
+            ("daily", "daily", "daily.parquet"),
+            ("auction", "auction", "auction.parquet"),
+            ("intraday", "intraday_1min", "intraday_1min.parquet"),
+            ("fundamentals", "fundamentals", "fundamentals.parquet"),
+            ("events", "events", "events.parquet"),
+            ("macro", "macro", "macro.parquet"),
+            ("text", "text", "text_index.parquet"),
+            ("universe", "universe", "universe.parquet"),
+        ):
+            domains[domain_name], profiles[file_name] = task_results[task_name]
         domains["universe_screen"] = {
             "active": screened is not None,
             "codes": len(screened) if screened is not None else None,
@@ -570,26 +619,26 @@ class SnapshotBuilder:
             period_start.to_pydatetime() - timedelta(seconds=1), config
         ) if config.screening_active() else None
 
-        started = time.perf_counter()
-        daily = self._daily_join(start_key, end_key)
-        daily = self._apply_screen(daily, screened)
-        daily, conversions = normalize_daily_units(daily)
-        daily = _stamp_daily_available_at(daily, self.contracts["daily"])
-        profiles["daily.parquet"] = _write_with_profile(
-            output_dir / "daily.parquet", daily, build_seconds=time.perf_counter() - started
-        )
-        domains["daily"] = {"rows": int(len(daily)), "unit_conversions": conversions}
-
-        if config.replay_include_macro:
+        def build_daily(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
-            macro, macro_meta = self._build_available_at_domain(
-                config.macro_datasets, period_end, period_start
+            daily = self._daily_join(start_key, end_key)
+            daily = self._apply_screen(daily, screened)
+            daily, conversions = normalize_daily_units(daily)
+            daily = _stamp_daily_available_at(daily, self.contracts["daily"])
+            profile = _write_with_profile(
+                output_dir / "daily.parquet", daily, build_seconds=time.perf_counter() - started
             )
-            profiles["macro.parquet"] = _write_with_profile(
+            return {"rows": int(len(daily)), "unit_conversions": conversions}, profile
+
+        def build_macro(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
+            started = time.perf_counter()
+            macro, meta = self._build_available_at_domain(config.macro_datasets, period_end, period_start)
+            profile = _write_with_profile(
                 output_dir / "macro.parquet", macro, build_seconds=time.perf_counter() - started
             )
-            domains["macro"] = macro_meta
-        if config.replay_include_fundamentals and config.fundamental_datasets:
+            return meta, profile
+
+        def build_fundamentals(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
             # Not the formal PIT decision boundary: take fundamentals published
             # inside the period without requiring partitions or the audit status,
@@ -602,53 +651,89 @@ class SnapshotBuilder:
                 require_partitions=False,
             )
             fundamentals = self._apply_screen(fundamentals, screened)
-            profiles["fundamentals.parquet"] = _write_with_profile(
+            profile = _write_with_profile(
                 output_dir / "fundamentals.parquet", fundamentals, build_seconds=time.perf_counter() - started
             )
-            domains["fundamentals"] = {"rows": int(len(fundamentals)), "datasets": list(config.fundamental_datasets)}
+            return {"rows": int(len(fundamentals)), "datasets": list(config.fundamental_datasets)}, profile
 
-        if config.replay_include_events:
+        def build_events(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
-            events, events_meta = self._build_available_at_domain(
+            events, meta = self._build_available_at_domain(
                 config.events_datasets, period_end, period_start
             )
             events = self._apply_screen(events, screened)
-            events_meta = {**events_meta, "rows": int(len(events))}
-            profiles["events.parquet"] = _write_with_profile(
+            meta = {**meta, "rows": int(len(events))}
+            profile = _write_with_profile(
                 output_dir / "events.parquet", events, build_seconds=time.perf_counter() - started
             )
-            domains["events"] = events_meta
-        if config.replay_include_text:
+            return meta, profile
+
+        def build_text(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
-            text_index, text_meta = self._build_text(config, period_end, period_start, output_dir)
-            profiles["text_index.parquet"] = _write_with_profile(
+            text_index, meta = self._build_text(config, period_end, period_start, output_dir)
+            profile = _write_with_profile(
                 output_dir / "text_index.parquet", text_index, build_seconds=time.perf_counter() - started
             )
-            domains["text"] = text_meta
-        if config.replay_include_minutes:
-            minutes_meta, profiles["intraday_1min.parquet"] = self._write_minutes_range(
+            return meta, profile
+
+        def build_minutes(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
+            meta, profile = self._write_minutes_range(
                 start_key,
                 end_key,
                 output_dir / "intraday_1min.parquet",
                 screened,
             )
-            domains["intraday_1min"] = minutes_meta
+            return meta, profile
 
-        started = time.perf_counter()
-        actions, actions_meta = self._build_corporate_actions(start_key, end_key, period_end)
-        profiles["corporate_actions.parquet"] = _write_with_profile(
-            output_dir / "corporate_actions.parquet", actions, build_seconds=time.perf_counter() - started
-        )
-        domains["corporate_actions"] = actions_meta
+        def build_actions(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
+            started = time.perf_counter()
+            actions, meta = self._build_corporate_actions(start_key, end_key, period_end)
+            profile = _write_with_profile(
+                output_dir / "corporate_actions.parquet", actions, build_seconds=time.perf_counter() - started
+            )
+            return meta, profile
 
-        started = time.perf_counter()
-        auction, auction_meta = self._build_auction(start_key, end_key)
-        auction = self._apply_screen(auction, screened)
-        auction_meta = {**auction_meta, "rows": int(len(auction))}
-        profiles["auction.parquet"] = _write_with_profile(
-            output_dir / "auction.parquet", auction, build_seconds=time.perf_counter() - started
+        def build_auction(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
+            started = time.perf_counter()
+            auction, meta = self._build_auction(start_key, end_key)
+            auction = self._apply_screen(auction, screened)
+            meta = {**meta, "rows": int(len(auction))}
+            profile = _write_with_profile(
+                output_dir / "auction.parquet", auction, build_seconds=time.perf_counter() - started
+            )
+            return meta, profile
+
+        tasks: list[DomainBuildTask] = []
+        if config.replay_include_minutes:
+            tasks.append(("minutes", (), build_minutes))
+        if config.replay_include_events:
+            tasks.append(("events", (), build_events))
+        if config.replay_include_text:
+            tasks.append(("text", (), build_text))
+        tasks.append(("daily", (), build_daily))
+        if config.replay_include_fundamentals and config.fundamental_datasets:
+            tasks.append(("fundamentals", (), build_fundamentals))
+        if config.replay_include_macro:
+            tasks.append(("macro", (), build_macro))
+        tasks.extend(
+            [
+                ("actions", (), build_actions),
+                ("auction", (), build_auction),
+            ]
         )
-        domains["auction"] = auction_meta
+        task_results = _run_domain_tasks(tasks)
+        for task_name, domain_name, file_name in (
+            ("daily", "daily", "daily.parquet"),
+            ("macro", "macro", "macro.parquet"),
+            ("fundamentals", "fundamentals", "fundamentals.parquet"),
+            ("events", "events", "events.parquet"),
+            ("text", "text", "text_index.parquet"),
+            ("minutes", "intraday_1min", "intraday_1min.parquet"),
+            ("actions", "corporate_actions", "corporate_actions.parquet"),
+            ("auction", "auction", "auction.parquet"),
+        ):
+            if task_name in task_results:
+                domains[domain_name], profiles[file_name] = task_results[task_name]
         domains["universe_screen"] = {
             "active": screened is not None,
             "codes": len(screened) if screened is not None else None,
@@ -1471,6 +1556,47 @@ def _filter_trade_dates(frame: pd.DataFrame, visible_dates: list[str]) -> pd.Dat
     visible = set(visible_dates)
     out = frame[frame["trade_date"].astype(str).isin(visible)].copy()
     return out
+
+
+def _run_domain_tasks(tasks: list[DomainBuildTask]) -> dict[str, DomainBuildResult]:
+    """Run independent snapshot domains with a small dependency-aware pool."""
+    if len({name for name, _, _ in tasks}) != len(tasks):
+        raise ValueError("snapshot domain task names must be unique")
+    remaining = list(tasks)
+    results: dict[str, DomainBuildResult] = {}
+    running: dict[Future[DomainBuildResult], str] = {}
+    executor = ThreadPoolExecutor(max_workers=SNAPSHOT_DOMAIN_WORKERS, thread_name_prefix="snapshot-domain")
+    try:
+        while remaining or running:
+            while len(running) < SNAPSHOT_DOMAIN_WORKERS:
+                ready_index = next(
+                    (
+                        index
+                        for index, (_, dependencies, _) in enumerate(remaining)
+                        if all(dependency in results for dependency in dependencies)
+                    ),
+                    None,
+                )
+                if ready_index is None:
+                    break
+                name, _, build = remaining.pop(ready_index)
+                running[executor.submit(build, dict(results))] = name
+
+            if not running:
+                unresolved = {name: dependencies for name, dependencies, _ in remaining}
+                raise ValueError(f"snapshot domain dependencies cannot be resolved: {unresolved}")
+
+            completed, _ = wait(running, return_when=FIRST_COMPLETED)
+            for future in completed:
+                name = running.pop(future)
+                results[name] = future.result()
+    except Exception:
+        for future in running:
+            future.cancel()
+        raise
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+    return results
 
 
 def _window_start(decision_time: datetime, months: int) -> pd.Timestamp:
