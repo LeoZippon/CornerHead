@@ -185,6 +185,18 @@ class WebuiBackendTest(unittest.TestCase):
         return experiment_dir
 
     # ---- schema & listing ------------------------------------------------------
+    def test_frontend_assets_use_clean_urls_and_revalidate(self) -> None:
+        index = self.client.get("/")
+        self.assertEqual(index.status_code, 200)
+        self.assertIn('src="/static/app.js"', index.text)
+        self.assertNotIn("app.js?v=", index.text)
+        self.assertEqual(index.headers["cache-control"], "no-store, max-age=0")
+        script = self.client.get("/static/app.js")
+        self.assertEqual(script.status_code, 200)
+        self.assertEqual(script.headers["cache-control"], "no-store, max-age=0")
+        self.assertIn("性能参考：本次回测策略进程峰值内存约", script.text)
+        self.assertIn('kvRow("总耗时", foldDurationNode(detail, session))', script.text)
+
     def test_parameter_schema_defaults_track_worker_defaults(self) -> None:
         schema = self.client.get("/api/parameter-schema").json()
         fields = {field["key"]: field for group in schema["groups"] for field in group["fields"]}
@@ -531,6 +543,69 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
         unknown = self.client.get("/api/experiments/exp_hitl/steps/nope/source.zip")
         self.assertEqual(unknown.status_code, 404)
+
+    def test_current_step_zip_reads_live_validated_snapshot_only_at_gate(self) -> None:
+        from autotrade.environment.identity import agent_visible_ref
+        from autotrade.environment.step_tree import StepTree
+
+        run_id = "run_live"
+        steps_root = self.repo_root / ".runtime" / "sandboxes" / "exp_hitl" / run_id / "artifacts" / "steps"
+        strategy_dir = (
+            self.experiments_root / "exp_hitl" / "strategy_artifacts"
+            / "epoch_001" / "strategy_epoch_001_fold_2022Q1"
+        )
+        detail = self.repo_root / "live_detail.json"
+        detail.write_text("{}", encoding="utf-8")
+        node_id = StepTree(steps_root).record_step(
+            strategy_dir,
+            epoch_id="epoch_001",
+            fold_id=agent_visible_ref("fold_2022Q2", prefix="fold_ref"),
+            result_name="valid_003",
+            artifact_hash=artifact_hash(strategy_dir),
+            metrics={"total_return": 0.01},
+            complete_validation=True,
+            model_artifact_hash=model_artifact_hash(strategy_dir / ".missing_models"),
+            attachments={"detailed_return.json": detail},
+        )
+        status_path = self.experiments_root / "exp_hitl" / "hitl" / "status.json"
+        write_json_atomic(
+            status_path,
+            {"state": "waiting_step_user", "run_id": run_id, "epoch_id": "epoch_001",
+             "fold_id": "fold_2022Q2", "session_key": "epoch_001/fold_2022Q2", "awaiting_step": 2},
+        )
+
+        response = self.client.get("/api/experiments/exp_hitl/current-step/source.zip")
+        self.assertEqual(response.status_code, 200, response.text)
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            names = set(archive.namelist())
+        self.assertIn("output/main.py", names)
+        self.assertNotIn("detailed_return.json", names)
+
+        current = self.client.get("/api/experiments/exp_hitl/current-step").json()
+        self.assertEqual(current, {"available": True, "node_id": node_id})
+        with patch("autotrade.webui.analysis.AnalysisService.regenerate_step") as regenerate:
+            started = self.client.post("/api/experiments/exp_hitl/current-step/analysis")
+        self.assertEqual(started.status_code, 200, started.text)
+        regenerate.assert_called_once()
+        analysis_dir = self.experiments_root / "exp_hitl" / "hitl" / "analysis"
+        analysis_dir.mkdir(exist_ok=True)
+        (analysis_dir / f"step__{node_id}.md").write_text("## 策略逻辑\nok\n", encoding="utf-8")
+        (analysis_dir / f"step__{node_id}.json").write_text(
+            json.dumps({"status": "ok", "analysis_kind": "step"}), encoding="utf-8"
+        )
+        analysis = self.client.get("/api/experiments/exp_hitl/current-step/analysis").json()
+        self.assertTrue(analysis["available"])
+        self.assertIn("策略逻辑", analysis["content"])
+
+        # Agent questions can download the latest completed Step too.
+        write_json_atomic(status_path, {"state": "waiting_user_reply", "run_id": run_id})
+        question_download = self.client.get("/api/experiments/exp_hitl/current-step/source.zip")
+        self.assertEqual(question_download.status_code, 200)
+
+        write_json_atomic(status_path, {"state": "running_session", "run_id": run_id})
+        refused = self.client.get("/api/experiments/exp_hitl/current-step/source.zip")
+        self.assertEqual(refused.status_code, 404)
+        self.assertFalse(self.client.get("/api/experiments/exp_hitl/current-step").json()["available"])
 
     def _make_node_legacy(self, experiment_id: str, node_id: str) -> None:
         """Rewrite a node dir into the pre-2026-07-10 flat layout (files at root)."""

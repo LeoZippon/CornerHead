@@ -25,11 +25,13 @@ class ReplayResult:
     exit_date: str
     granularity: str = "minute"
     # Cost feedback: per-sub-step wall-time aggregates, total replay wall-clock, and
-    # the number of trade days replayed (so the Agent can extrapolate a full run from
-    # a small replay_window test pass).
+    # the number of strategy and liquidation days replayed (so the Agent can
+    # extrapolate a full run from a small replay_window test pass without counting
+    # the no-decision exit day as strategy compute).
     substep_runtime: dict[str, dict[str, float]] | None = None
     replay_wall_seconds: float | None = None
     replayed_trade_days: int | None = None
+    replayed_exit_days: int | None = None
     # 24h tick-grid breakdown: total main(ctx) ticks and how many were intraday
     # (matchable session/auction bars) vs off-session (research/state only), so the
     # Agent can see the extra cost the off-session grid adds.
@@ -178,6 +180,7 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "replay_granularity": result.granularity,
         "replay_wall_seconds": result.replay_wall_seconds,
         "replayed_trade_days": result.replayed_trade_days,
+        "replayed_exit_days": result.replayed_exit_days,
         "substep_runtime": result.substep_runtime or {},
         "phase_seconds": result.phase_seconds or {},
         "agent_peak_rss_bytes": result.agent_peak_rss_bytes,

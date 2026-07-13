@@ -736,7 +736,7 @@ def run_interactive_worker(experiment_dir: Path, *, repo_root: Path, poll_second
         status=status,
     )
     try:
-        result = runner.run(load_sse_trading_days(options.raw_dir))
+        result = runner.run(load_sse_trading_days(pipeline.raw_dir))
         return {"status": "completed", **result}
     except ExperimentStopped as exc:
         status.set(state="stopped", error=None, phase=None)

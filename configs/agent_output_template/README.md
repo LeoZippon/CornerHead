@@ -128,7 +128,7 @@ then 1-share increments, and size is never inferred from `weight`.
 | `cancel(order_id, reason=None)` | Cancel an order returned by `pending()` |
 | `pending(ts_code=None)` | Submitted, unfilled, cancellable orders; no argument returns all |
 | `position(ts_code, account=None)` | Filled position only; default nets across accounts |
-| `stock` / `credit` / `account` / `positions` | Account and position snapshots; `cash`/`quantity` are filled truth, while available cash/bail/sellable shares reserve submitted pending orders |
+| `stock` / `credit` / `account` / `positions` | Account and position snapshots; `stock`/`credit` are dict properties (no parentheses); `cash`/`quantity` are filled truth, while available cash/bail/sellable shares reserve submitted pending orders |
 | `debt_contracts(ts_code=None)` | Open financing/short debt contracts and accrued interest |
 
 Common mistakes: broker actions outside `ctx.substep` are rejected; `short`
@@ -151,7 +151,7 @@ therefore do not appear in `pending()` before submission.
 | `ctx.broker` | Broker queries, order/cancel verbs, and margin primitives; order/cancel calls must be inside `ctx.substep`; see the broker quick reference above |
 | `ctx.substep(name, budget_minutes=B)` | Strategy-step budget context; declares compute time, state `ready_at`, and broker action submit timing |
 | `ctx.nl(ts_code?, prompt="...")` | Point-in-time NL Sub Agent for single-stock or event/theme/sector/macro text analysis; must run inside `ctx.substep` and follows sim-clock text visibility |
-| `ctx.asof_dir` | Per-tick rolling, refresh-node-gated PIT view: `daily`, `events`, `macro`, `fundamentals`, `intraday_1min`, `text_index`, and `text_library` |
+| `ctx.asof_dir` | Per-tick PIT view: dataset directories such as `daily`, plus the single file `universe.parquet` and `text_library` |
 | `ctx.asof_version` | Changes only when Timeview actually rolls; cache as-of reads by this value |
 | `ctx.snapshot_dir` | Frozen research baseline snapshot; does not roll during replay |
 | `ctx.state_dir` | Managed cross-tick state directory; only available inside `ctx.substep`, with writes staged until `ready_at` |

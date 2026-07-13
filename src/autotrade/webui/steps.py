@@ -110,10 +110,24 @@ def step_tree_view(experiment_dir: Path) -> dict[str, object]:
 
 def node_export_dir(experiment_dir: Path, node_id: str) -> Path:
     """Validated node directory for the source.zip download (never a raw path join)."""
-    tree = StepTree(experiment_dir / "steps")
+    return node_export_dir_from_root(experiment_dir / "steps", node_id)
+
+
+def node_export_dir_from_root(steps_root: Path, node_id: str) -> Path:
+    """Validated export directory for either a collected or live step tree."""
+    tree = StepTree(steps_root)
     node = tree.get_node(node_id)  # raises ValueError for unknown ids
     if node.get("status") == "failed" or not node.get("complete_validation"):
         raise ValueError(f"step node {node_id} is a failed attempt without a snapshot")
     if node_layout(tree.root, str(node["node_id"])) is None:
         raise ValueError(f"step node snapshot is missing on disk: {node_id}")
     return tree.root / str(node["node_id"])
+
+
+def current_node_export_dir(steps_root: Path) -> tuple[str, Path]:
+    """Return the current validated Step snapshot from a live tree."""
+    tree = StepTree(steps_root)
+    node_id = tree.current_node_id
+    if not node_id:
+        raise ValueError("live fold has no current validated step snapshot")
+    return node_id, node_export_dir_from_root(tree.root, node_id)

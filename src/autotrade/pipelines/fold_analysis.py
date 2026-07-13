@@ -42,6 +42,7 @@ _RECORD_FIELDS = (
     "accept_reasons",
     "accept_warnings",
     "selected_step_id",
+    "step_id",
     "steps",
     "validation_result",
     "fold_directive",
@@ -64,6 +65,18 @@ FOLD_ANALYSIS_SYSTEM_PROMPT = """\
 不要包含具体日历日期或特定月份行情经验。
 - 全文控制在 1500 字以内：结论先行、逐节精炼，宁可少而准。
 - 所有结论必须能从给定材料推出；材料不足时明确说不确定，不要脑补。\
+"""
+
+STEP_ANALYSIS_SYSTEM_PROMPT = """\
+你是一名资深量化策略审阅人，负责帮助研究者审阅自主 Agent 刚完成一次正式验证回测的当前策略。
+你只掌握当前 Step 的策略代码与验证期证据；测试期/Held-out 结果不可见，也不得猜测。
+
+输出要求：
+- 用简体中文和精炼 Markdown，依次给出 `策略逻辑`、`代码与接口使用`、`验证表现与风险`、
+  `下一 Step 可检验假设` 四个 `##` 小节。
+- 最后一节给出 2-4 条适合研究者自然语言反馈给 Agent 的具体假设；不要直接宣称应采用哪一条。
+- 重点指出代码逻辑、数据使用、交易频率、未清仓或异常行为，不为策略缺陷要求 Environment 增加硬围栏。
+- 全文控制在 1200 字以内，所有判断必须能从材料推出；证据不足时明确说明不确定。\
 """
 
 
@@ -160,6 +173,9 @@ def analyze_fold(
     out_dir: Path,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    output_identity: tuple[str, str] | None = None,
+    system_prompt: str = FOLD_ANALYSIS_SYSTEM_PROMPT,
+    analysis_kind: str = "fold",
 ) -> Path:
     """Run the analysis template against one completed fold and persist it.
 
@@ -169,7 +185,8 @@ def analyze_fold(
     """
     epoch_id = str(ledger_record.get("epoch_id") or "epoch_unknown")
     fold_id = str(ledger_record.get("fold_id") or "fold_unknown")
-    md_path, meta_path = analysis_paths(Path(out_dir), epoch_id, fold_id)
+    output_epoch_id, output_fold_id = output_identity or (epoch_id, fold_id)
+    md_path, meta_path = analysis_paths(Path(out_dir), output_epoch_id, output_fold_id)
     md_path.parent.mkdir(parents=True, exist_ok=True)
     strategy_files = read_strategy_files(Path(strategy_dir))
     model_files = (
@@ -178,6 +195,7 @@ def analyze_fold(
         else []
     )
     messages = build_fold_analysis_messages(ledger_record, strategy_files, model_files=model_files)
+    messages[0]["content"] = system_prompt
     meta: dict[str, object] = {
         "schema_version": ANALYSIS_SCHEMA_VERSION,
         "epoch_id": epoch_id,
@@ -186,6 +204,7 @@ def analyze_fold(
         "model": getattr(proxy, "model", "unknown"),
         "created_at": utc_now_iso(),
         "guarded_view": "validation_only",
+        "analysis_kind": analysis_kind,
     }
     base_tokens = int(max_tokens) if max_tokens else DEFAULT_MAX_TOKENS
     try:
@@ -216,3 +235,29 @@ def analyze_fold(
     meta.update(status="ok", usage=dict(response.usage or {}), analysis_path=str(md_path))
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return md_path
+
+
+def analyze_step(
+    proxy,
+    *,
+    step_record: Mapping[str, object],
+    strategy_dir: Path,
+    model_dir: Path | None,
+    out_dir: Path,
+    node_id: str,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+) -> Path:
+    """Analyze one immutable validation Step snapshot for researcher guidance."""
+    return analyze_fold(
+        proxy,
+        ledger_record=step_record,
+        strategy_dir=strategy_dir,
+        model_dir=model_dir,
+        out_dir=out_dir,
+        timeout_seconds=timeout_seconds,
+        max_tokens=max_tokens,
+        output_identity=("step", node_id),
+        system_prompt=STEP_ANALYSIS_SYSTEM_PROMPT,
+        analysis_kind="step",
+    )

@@ -969,6 +969,22 @@ class FillRealismTest(unittest.TestCase):
     def bar_group(open_, high, low, close, code="000001.SZ"):
         return pd.DataFrame([{"ts_code": code, "open": open_, "high": high, "low": low, "close": close}])
 
+    def test_tick_bar_lookup_filters_codes_and_keeps_last_duplicate(self):
+        from autotrade.environment.broker import _bars_for_codes
+
+        rows = pd.DataFrame(
+            [
+                {"ts_code": 1, "open": 10.0, "close": 10.1},
+                {"ts_code": "ignored", "open": 20.0, "close": 20.1},
+                {"ts_code": "1", "open": 11.0, "close": 11.1},
+            ]
+        )
+        lookup = _bars_for_codes(rows, {"1", "missing"})
+
+        self.assertEqual(set(lookup), {"1"})
+        self.assertEqual(float(lookup["1"]["open"]), 11.0)
+        self.assertEqual(float(lookup["1"]["close"]), 11.1)
+
     def test_limit_buy_needs_strict_trade_through(self):
         broker = self.make_broker()
         broker.passorder(optype.STOCK_BUY, 1101, "", "000001.SZ", prtype.FIX, 9.8, 1000)

@@ -347,6 +347,48 @@ class SnapshotDomainFilterTest(unittest.TestCase):
             build_snapshot_config(SimpleNamespace(**{**PARAM_DEFAULTS, "macro_datasets": ["nope"]}))
 
 
+class ProductionPipelineWiringTest(unittest.TestCase):
+    def test_build_pipeline_uses_the_experiment_research_release(self):
+        from autotrade.pipelines.assembly import build_pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = make_config(root)
+            source_raw = root / "data" / "raw"
+            source_events = root / "data" / "pit" / "fundamental_events"
+            source_status = root / "results" / "data_quality" / "fundamental_events_status.json"
+            pinned_raw = root / "release" / "raw"
+            pinned_events = root / "release" / "fundamental_events"
+            pinned_status = root / "release" / "data_quality" / "fundamental_events_status.json"
+            args = SimpleNamespace(
+                raw_dir=source_raw,
+                fundamental_events_root=source_events,
+                fundamental_events_status=source_status,
+            )
+            release = SimpleNamespace(
+                raw_dir=pinned_raw,
+                fundamental_events_root=pinned_events,
+                fundamental_events_status=pinned_status,
+            )
+            proxies = SimpleNamespace(proxy=None, nl_proxy=None)
+
+            with mock.patch(
+                "autotrade.pipelines.assembly.pin_research_release", return_value=release
+            ) as pin:
+                pipeline = build_pipeline(config, args, lambda *_args: None, None, proxies)
+
+            pin.assert_called_once_with(
+                experiment_dir=config.experiment_dir,
+                raw_dir=source_raw.resolve(),
+                fundamental_events_root=source_events.resolve(),
+                fundamental_events_status=source_status.resolve(),
+            )
+            self.assertEqual(pipeline.raw_dir, pinned_raw)
+            self.assertEqual(pipeline.snapshots._provider.raw_dir, pinned_raw)
+            self.assertEqual(pipeline.snapshots._provider.builder.fundamental_events_root, pinned_events)
+            self.assertEqual(pipeline.snapshots._provider.builder.fundamental_events_status, pinned_status)
+
+
 class ExperimentConfigValidationTest(unittest.TestCase):
     def test_budget_knobs_must_be_positive_finite(self):
         with tempfile.TemporaryDirectory() as tmp:

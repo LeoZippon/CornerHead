@@ -17387,6 +17387,22 @@ Decision:
 - Keep `SNAPSHOT_DOMAIN_WORKERS=2` on the shared host. Do not add a second data lake, cross-Fold container startup, or backtest-loop changes in this batch.
 
 
+## 2026-07-13 Raw data recent-week archive
+
+Task: inspect `data/raw`, select its most recent seven calendar days of date-partitioned data, and create a ZIP archive.
+
+Selection and artifact:
+- The raw store uses dataset directories with Parquet files and paired `.meta.json` files, partitioned mainly by `trade_date`, `date`, `ann_date`, and `period`, with some nested dimension partitions.
+- The maximum recognized eight-digit partition date was `20260713`; the inclusive seven-day window was therefore `20260707` through `20260713`.
+- Selected 576 files across 47 datasets, totaling 120,665,196 bytes before compression.
+- Created `data/exports/raw_last_7_days_20260707_20260713.zip`, 98,480,953 bytes compressed.
+
+Validation and resources:
+- `7z t` reported `Everything is Ok`; archive listing contains exactly 576 files.
+- SHA-256: `a9e3d7ffe1c57fc4e9f9204a61b236514fa014b9c929c61c1da2f67ded8253c2`.
+- Before processing, 421 GiB RAM was available; after processing, 421 GiB remained available. GPU use was irrelevant and remained effectively idle.
+
+
 ## 2026-07-13 Minute replay daily loading and one-day prefetch
 
 Task: implement the approved minute normalization and bounded replay-loading optimizations without changing PIT, Broker, or Agent-visible data semantics.
@@ -17429,3 +17445,69 @@ Live observation:
 - The largest observed Snapshot event temporary stage put worker RSS near 26.7 GiB. During the minute Replay stream, RSS declined from about 14.2 GiB at 886 MiB output to about 9.6 GiB at 1.45 GiB output.
 - The worker entered `epoch_001/meta_learning`; heartbeat remained current and the trace contained no failed/timed-out tool or LLM events at the checkpoint.
 - Host load was roughly 9--12 on 192 logical CPUs with at least 427 GiB available RAM. CPU, memory, and prefetch wait are not limiting this startup, so no higher data-load parallelism is justified.
+
+
+## 2026-07-13 Safe structured Probe failures
+
+Task: keep Probe failure details non-public while returning enough stable contract feedback for the Agent to repair its own strategy.
+
+Implementation:
+- The sandbox driver classifies only allowlisted failures at their source: called `stock`/`credit` account views, `state_dir` outside a substep, the known extensionless universe path, and strategy import failure.
+- The replay engine transports those fixed fields through `BacktestError`; decision timeout has its own fixed runtime code. `BacktestTool` reuses the existing `ToolError` fields and preserves the prior host-path redaction and host-only raw evidence behavior.
+- Unknown Probe errors remain generic. No traceback, strategy-controlled text, P&L, fill detail, future data, new API, data alias, or Environment fence is exposed.
+- Added only short template/Prompt notes that account views are dict properties and `universe.parquet` is a file; regenerated `configs/prompts/PROMPTS.md` from code.
+
+Validation:
+- Four real two-day Probe fixtures returned the expected safe reason and retry hint; unknown-error, NL exfiltration, evidence-write-failure, full-backtest redaction, and interrupt behavior regressions passed.
+- `tests.unit.test_tools_flow`: 99 passed in 32.540 seconds.
+- `tests.unit.test_main_ctx_replay`: 63 passed in 12.586 seconds.
+- Target files passed `py_compile`; `git diff --check` passed. Ruff is not installed in the configured `quant` environment.
+
+
+## 2026-07-13 Probe day contract and replay hot paths
+
+Task: fix the two pending Environment contracts from `lzp-test11` and implement only the measured, semantics-preserving replay optimizations.
+
+Implementation:
+- `replay_window=N` now selects N strategy decision days plus one separate liquidation day. `ReplayResult`, the tool summary, Agent-visible projection, Prompt, and Environment documentation report `replayed_trade_days` and `replayed_exit_days` separately.
+- The sandbox driver recognizes only allowlisted Timeview paths with an erroneous `.parquet` suffix, including DuckDB-style message-only IO exceptions. Probe returns fixed `asof_path_mismatch` metadata; raw exception text stays in host evidence.
+- `SimBroker.match_bar` scans/string-normalizes the full Tick code column once for the union of working-order and held-position codes. The same last-row-wins lookup is reused for pre-match open marks, order matching, and post-match close marks.
+- Numeric OHLCVA columns use a vectorized float64/NaN-mask encoder; object and complex columns retain the scalar fallback. Main request and response JSON use compact separators without changing decoded objects.
+- Timeview refresh order was deliberately unchanged: its no-boundary call is already O(1), while Broker, state merges and delayed actions must advance before the decision gate.
+
+Evidence:
+- Synthetic 5,353-code, 15-relevant-code benchmark over 300 iterations: Broker lookup 2.4716 s -> 0.2775 s (8.91x).
+- Six numeric columns over the same frame: scalar conversion 1.8852 s -> 0.2839 s (6.64x).
+- Compact JSON reduced the synthetic payload from 574,647 to 537,166 bytes (6.52%); the recorded real request sample reduced about 11.6%.
+- Timeview no-boundary conversion was independently measured at about 4.9 microseconds/call; a five-minute grid would save only about 0.06 s, so no refresh-contract change was made.
+
+Validation:
+- `~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_broker_engine`: 108 passed.
+- `~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_main_ctx_replay`: 64 passed.
+- `~/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_tools_flow`: 100 passed.
+- `PYTHONDONTWRITEBYTECODE=1 ~/miniconda3/envs/quant/bin/python -m unittest discover -s tests -t .`: 756 passed in 122.019 seconds.
+- Numeric nullable/NaN/infinity/object/complex parity, duplicate-code last-row behavior, Probe redaction, and N+1 date selection have direct regressions. `git diff --check` passed.
+
+Decision:
+- Re-run the same experiment configuration before claiming end-to-end wall-time improvement. Keep one-day minute prefetch, one-shot formal Docker, and per-Tick Timeview visibility; do not add loader threads, a read-optimized lake, cross-Fold prefetch, or container reuse.
+
+
+## 2026-07-14 Research-release data/update decoupling
+
+Task: let experiments start and continue during raw/PIT/audit updates without changing cron timing or reading a mixed generation.
+
+Implementation:
+- A production experiment publishes `data/research_releases/<generation_id>/` on demand: raw Parquet/sidecars and PIT Parquet are hardlinks, small files and seven quality reports are copies, and `rt_min_live` is excluded. `experiments/<id>/research_release/` stores the immutable pin and copied quality evidence.
+- The updater shared lock is nonblocking. A committed generation is published once; a busy updater or non-committed marker immediately selects the latest compatible release. Creation, fallback and resume validate explicit schema-v2 committed state and the resolved raw/PIT/quality source contract.
+- Raw and PIT mutating jobs already share one lock and both advance generation; audit-only jobs do not. Board-trading quality now reuses its existing report as a Snapshot warning, not a hard gate.
+- The full-suite investigation also moved process-wide `open`/`os`/`Path` guard installation out of driver module import and into standalone `_serve()`, preventing test-host pollution without weakening the formal replay process.
+
+Case Study and cost:
+- Generation `4346853b403a4eaeadb9a3cfe71aa939`: 140,557 raw Parquet + 140,557 sidecars and 754 PIT files had identical path sets and inodes between live and release; marker/copy inodes differed, seven quality hashes matched, no symlink/tmp/`rt_min_live` entered the release.
+- Daily (5,524 rows), minute (1,331,284), auction (5,521), stock list (5,530), financial raw/PIT and the 4,016-day trading calendar passed schema/row/hash/date checks. Two experiments and resume stayed on the same pin.
+- Cold publish took 9.830 s and added 24,428,544 bytes plus 232 inodes. Reuse took about 0.0056 s and resume 0.0018 s. During the real 02:30 exclusive audit lock, a new pin returned the prior release in about 0.0055 s with baseline quality evidence.
+- Deleting one unreferenced 28万-entry bootstrap tree took about four minutes; synchronous GC is therefore deliberately absent. No cron/Docker change, data lake, container pre-start or compatibility branch was added.
+
+Validation/resources:
+- Targeted release/Snapshot/pipeline suite: 95 passed. Full suite: 771 passed in 109.761 s. Three experiment CLI helps, `node --check` and `git diff --check` passed.
+- During validation the host retained about 424 GiB available RAM; load was low on 192 logical CPUs. Seven L20 GPUs were idle and GPU 7 had an unrelated 26.98 GiB allocation.

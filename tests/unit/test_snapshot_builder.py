@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -147,6 +148,7 @@ def write_domain_statuses(quality_dir: Path, **overrides: str) -> None:
         ("daily", "base_research_status.json"),
         ("intraday_1min", "intraday_minutes_status.json"),
         ("events", "event_flow_status.json"),
+        ("board_trading", "board_trading_status.json"),
         ("macro", "macro_context_status.json"),
         ("text", "text_evidence_status.json"),
     ):
@@ -1102,6 +1104,23 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertIn("audit status is error", warnings["macro"])
             self.assertIn("status file missing", warnings["events"])
             self.assertNotIn("text", warnings)
+
+    def test_board_trading_audit_is_an_independent_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "raw"
+            build_raw(raw)
+            events_root = root / "fund_events"
+            build_fundamental_events(events_root)
+            status_path = root / "fundamental_events_status.json"
+            write_fundamental_status(status_path)
+            write_domain_statuses(root, board_trading="error")
+
+            warnings = SnapshotBuilder(raw, events_root, status_path)._domain_status_gates(
+                replace(CONFIG, events_datasets=("kpl_list",))
+            )
+
+            self.assertIn("audit status is error", warnings["board_trading"])
 
     def test_fundamental_event_audit_error_blocks_decision_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:

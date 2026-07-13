@@ -13,7 +13,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from fastapi import Body, FastAPI, Header, HTTPException, Query
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
@@ -37,6 +37,17 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     analysis_service = AnalysisService(repo_root)
     app = FastAPI(title="CornerHead Console", docs_url=None, redoc_url=None)
     trading_days_cache: dict[str, list[str] | None] = {}
+
+    @app.middleware("http")
+    async def revalidate_frontend_assets(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            # Keep clean, unversioned asset URLs and never retain stale UI
+            # code in a browser or reverse-proxy cache.
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
 
     def _trading_days() -> list[str]:
         # Loaded once per process (registry.clamped_trading_days does the
@@ -159,6 +170,31 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         }
 
     # ---- folds -------------------------------------------------------------------
+    def _strategy_zip_response(
+        strategy_dir: Path, model_dir: Path | None, filename: str
+    ) -> FileResponse:
+        handle = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        handle.close()
+        zip_path = Path(handle.name)
+        try:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for file in sorted(strategy_dir.rglob("*")):
+                    if file.is_file():
+                        archive.write(file, Path("output") / file.relative_to(strategy_dir))
+                if model_dir is not None and model_dir.is_dir():
+                    for file in sorted(model_dir.rglob("*")):
+                        if file.is_file():
+                            archive.write(file, Path("models") / file.relative_to(model_dir))
+        except Exception:
+            zip_path.unlink(missing_ok=True)
+            raise
+        return FileResponse(
+            zip_path,
+            media_type="application/zip",
+            filename=filename,
+            background=BackgroundTask(zip_path.unlink, missing_ok=True),
+        )
+
     @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}")
     def get_fold(experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
         _experiment_dir(experiment_id)
@@ -181,29 +217,9 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             raise HTTPException(status_code=404, detail="fold has no frozen strategy artifact on disk")
         record = detail["record"]
         model_dir = record.get("frozen_model_artifact_path")
-        handle = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
-        handle.close()
-        zip_path = Path(handle.name)
-        try:
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-                root = Path(str(strategy_dir))
-                for file in sorted(root.rglob("*")):
-                    if file.is_file():
-                        archive.write(file, Path("output") / file.relative_to(root))
-                if model_dir and Path(str(model_dir)).is_dir():
-                    model_root = Path(str(model_dir))
-                    for file in sorted(model_root.rglob("*")):
-                        if file.is_file():
-                            archive.write(file, Path("models") / file.relative_to(model_root))
-        except Exception:
-            zip_path.unlink(missing_ok=True)  # archive failed: never orphan the temp file
-            raise
         filename = f"{experiment_id}__{epoch_id}__{fold_id}.zip"
-        return FileResponse(
-            zip_path,
-            media_type="application/zip",
-            filename=filename,
-            background=BackgroundTask(zip_path.unlink, missing_ok=True),
+        return _strategy_zip_response(
+            Path(str(strategy_dir)), Path(str(model_dir)) if model_dir else None, filename
         )
 
     # ---- step tree ---------------------------------------------------------------
@@ -218,6 +234,9 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             node_dir = steps.node_export_dir(experiment_dir, node_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return _step_zip_response(node_dir, f"{experiment_id}__{node_id}.zip")
+
+    def _step_zip_response(node_dir: Path, filename: str) -> FileResponse:
         handle = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
         handle.close()
         zip_path = Path(handle.name)
@@ -232,9 +251,75 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         return FileResponse(
             zip_path,
             media_type="application/zip",
-            filename=f"{experiment_id}__{node_id}.zip",
+            filename=filename,
             background=BackgroundTask(zip_path.unlink, missing_ok=True),
         )
+
+    def _current_step_snapshot(experiment_id: str) -> tuple[Path, dict[str, object], str, Path]:
+        experiment_dir = _experiment_dir(experiment_id)
+        status = read_status(experiment_dir / HITL_DIR_NAME / STATUS_NAME)
+        if status.get("state") not in {"waiting_step_user", "waiting_user_reply"}:
+            raise ValueError("experiment is not waiting for researcher input")
+        run_id = str(status.get("run_id") or "")
+        if not run_id or "/" in run_id or run_id.startswith("."):
+            raise ValueError("live Step run is unavailable")
+        # The console manager owns this per-experiment work root; constructing
+        # the path here avoids trusting a mutable absolute path from status.json.
+        steps_root = repo_root / ".runtime" / "sandboxes" / experiment_id / run_id / "artifacts" / "steps"
+        node_id, node_dir = steps.current_node_export_dir(steps_root)
+        return experiment_dir, status, node_id, node_dir
+
+    @app.get("/api/experiments/{experiment_id}/current-step")
+    def get_current_step(experiment_id: str) -> dict[str, object]:
+        try:
+            _experiment_dir, _status, node_id, _node_dir = _current_step_snapshot(experiment_id)
+        except ValueError as exc:
+            return {"available": False, "reason": str(exc)}
+        return {"available": True, "node_id": node_id}
+
+    @app.get("/api/experiments/{experiment_id}/current-step/source.zip")
+    def get_current_step_zip(experiment_id: str) -> FileResponse:
+        try:
+            _experiment_dir, _status, node_id, node_dir = _current_step_snapshot(experiment_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        model_dir = node_dir / "models"
+        return _strategy_zip_response(
+            node_dir / "output",
+            model_dir if model_dir.is_dir() else None,
+            f"{experiment_id}__{node_id}.zip",
+        )
+
+    @app.get("/api/experiments/{experiment_id}/current-step/analysis")
+    def get_current_step_analysis(experiment_id: str) -> dict[str, object]:
+        try:
+            experiment_dir, _status, node_id, _node_dir = _current_step_snapshot(experiment_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        md_path, meta_path = analysis_paths(
+            experiment_dir / HITL_DIR_NAME / ANALYSIS_DIR_NAME, "step", node_id
+        )
+        return {
+            "available": md_path.exists(),
+            "pending": analysis_service.pending(experiment_id, "step", node_id),
+            "content": md_path.read_text(encoding="utf-8") if md_path.exists() else None,
+            "meta": read_json(meta_path) if meta_path.exists() else None,
+        }
+
+    @app.post("/api/experiments/{experiment_id}/current-step/analysis")
+    def post_current_step_analysis(experiment_id: str) -> dict[str, object]:
+        try:
+            experiment_dir, status, node_id, node_dir = _current_step_snapshot(experiment_id)
+            analysis_service.regenerate_step(
+                experiment_dir=experiment_dir,
+                experiment_id=experiment_id,
+                node_id=node_id,
+                node_dir=node_dir,
+                status=status,
+            )
+        except (ManagerError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"status": "started"}
 
     # ---- equity series ---------------------------------------------------------------
     @app.get("/api/experiments/{experiment_id}/equity")

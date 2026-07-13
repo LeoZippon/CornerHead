@@ -23,6 +23,7 @@ from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
 from autotrade.pipelines import ExperimentConfig, ExperimentLedger, FoldOutcome, FrozenArtifact
 from autotrade.pipelines.fold_analysis import (
     analyze_fold,
+    analyze_step,
     build_fold_analysis_messages,
     guarded_record_view,
     read_strategy_files,
@@ -72,6 +73,53 @@ class WorkerEntrypointTest(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "already has a live worker"):
                     interactive.run_interactive_worker(experiment_dir, repo_root=root)
+
+    def test_loads_the_trading_calendar_from_the_pinned_release(self) -> None:
+        from autotrade.pipelines import assembly, folds, interactive
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            experiment_dir = root / "experiments" / "exp"
+            hitl_dir = experiment_dir / "hitl"
+            hitl_dir.mkdir(parents=True)
+            (hitl_dir / "params.json").write_text('{"experiment_id": "exp"}', encoding="utf-8")
+            source_raw = root / "data" / "raw"
+            pinned_raw = experiment_dir / "research_release" / "raw"
+            options = SimpleNamespace(
+                experiments_root=root / "experiments",
+                experiment_id="exp",
+                raw_dir=source_raw,
+                initial_control_mode="auto",
+                analysis_enabled=False,
+            )
+            config = SimpleNamespace(
+                experiment_id="exp",
+                work_root=root / "work",
+            )
+            pipeline = SimpleNamespace(raw_dir=pinned_raw)
+            status = Mock()
+            runner = Mock()
+            runner.run.return_value = {"heldout_runs": 0}
+            trading_days = ["20220104", "20220105"]
+
+            with (
+                patch.object(interactive, "resolve_options", return_value=options),
+                patch.object(interactive, "read_status", return_value={}),
+                patch.object(interactive, "build_config_from_options", return_value=config),
+                patch.object(assembly, "build_proxies", return_value=SimpleNamespace()),
+                patch.object(assembly, "build_web_search_providers", return_value={}),
+                patch.object(assembly, "build_session_builders", return_value=(Mock(), None)),
+                patch.object(assembly, "build_pipeline", return_value=pipeline),
+                patch.object(folds, "load_sse_trading_days", return_value=trading_days) as load_days,
+                patch.object(interactive, "StatusReporter", return_value=status),
+                patch.object(interactive, "InteractiveExperimentRunner", return_value=runner),
+            ):
+                result = interactive.run_interactive_worker(experiment_dir, repo_root=root)
+
+            load_days.assert_called_once_with(pinned_raw)
+            runner.run.assert_called_once_with(trading_days)
+            self.assertEqual(result["status"], "completed")
+            status.stop.assert_called_once()
 
 
 class FakePipeline:
@@ -944,6 +992,37 @@ class FoldAnalysisTest(unittest.TestCase):
             meta = json.loads((out_dir / "epoch_001__fold_2022Q1.json").read_text(encoding="utf-8"))
             self.assertEqual(meta["status"], "ok")
             self.assertTrue(meta["retried_after_length_stop"])
+
+    def test_analyze_step_uses_step_prompt_and_separate_sidecar(self) -> None:
+        class FakeProxy:
+            provider = "fake"
+            model = "fake-model"
+
+            def complete(self, messages, *, json_mode, timeout_seconds, max_tokens=None):
+                self.assert_step_prompt = "下一 Step 可检验假设" in messages[0]["content"]
+                from types import SimpleNamespace
+                return SimpleNamespace(content="## 下一 Step 可检验假设\n降低换手。", usage={})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            strategy = Path(tmp) / "strategy"
+            strategy.mkdir()
+            (strategy / "main.py").write_text("pass\n", encoding="utf-8")
+            out_dir = Path(tmp) / "analysis"
+            proxy = FakeProxy()
+            node_id = "epoch_001__fold_ref_x__run_x__valid_003"
+            md_path = analyze_step(
+                proxy,
+                step_record={"epoch_id": "epoch_001", "fold_id": "fold_2022Q1",
+                             "step_id": "step_002", "validation_result": {"total_return": -0.01}},
+                strategy_dir=strategy,
+                model_dir=None,
+                out_dir=out_dir,
+                node_id=node_id,
+            )
+            self.assertTrue(proxy.assert_step_prompt)
+            self.assertEqual(md_path.name, f"step__{node_id}.md")
+            meta = json.loads((out_dir / f"step__{node_id}.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["analysis_kind"], "step")
 
     def test_read_strategy_files_orders_main_first_and_skips_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

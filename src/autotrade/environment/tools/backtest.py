@@ -125,9 +125,10 @@ class BacktestTool:
                 "replay_window",
                 "integer",
                 required=False,
-                min_value=2,
+                min_value=1,
                 description=(
-                    "Optional: replay only the first N trade days of the region for a fast debug check "
+                    "Optional: replay the first N strategy trade days plus one separate liquidation day "
+                    "for a fast debug check "
                     "(non-accept-eligible). Use it to measure runtime (replay_wall_seconds / "
                     "replayed_trade_days) and extrapolate the full run's cost before launching it. The "
                     "default full run is the only result eligible for acceptance/freeze."
@@ -181,43 +182,64 @@ class BacktestTool:
             try:
                 return self._execute(mode=mode, result_name=result_name, replay_window=replay_window)
             except (BacktestError, ArtifactError) as exc:
-                detail = str(exc)
-                public_error = self._public_failure_error(detail)
-                self._record_failure(mode, public_error)
-                raise ToolError(public_error) from exc
+                public_error = self._public_failure(str(exc), source=exc)
+                self._record_failure(
+                    mode, str(public_error), error_record=public_error.to_record()
+                )
+                raise public_error from exc
             except ToolError as exc:
                 # A pre-flight rejection happens before backtest_start, so no
                 # bracket is open. Post-start failures must terminate the audit;
                 # Probe details remain host-only regardless of exception class.
-                public_error = self._public_failure_error(str(exc))
+                public_error = self._public_failure(str(exc), source=exc)
                 if self._backtest_started:
-                    self._record_failure(mode, public_error, status="error")
-                if public_error != str(exc):
-                    raise ToolError(public_error) from exc
+                    self._record_failure(
+                        mode,
+                        str(public_error),
+                        status="error",
+                        error_record=public_error.to_record(),
+                    )
+                if public_error is not exc:
+                    raise public_error from exc
                 raise
             except SessionInterrupt as exc:
                 # Researcher stop/ask control flow is not a strategy failure and
                 # must reach the session loop unchanged. If the replay bracket is
                 # already open, still close its host audit record first.
                 if self._backtest_started:
-                    public_error = self._public_failure_error(
-                        f"{type(exc).__name__}: {exc}"
+                    public_error = self._public_failure(
+                        f"{type(exc).__name__}: {exc}", source=exc
                     )
-                    self._record_failure(mode, public_error, status="aborted")
+                    self._record_failure(
+                        mode,
+                        str(public_error),
+                        status="aborted",
+                        error_record=public_error.to_record(),
+                    )
                 raise
             except Exception as exc:  # noqa: BLE001 - strategy/runtime failures are normalized
                 detail = f"{type(exc).__name__}: {exc}"
-                public_error = self._public_failure_error(detail)
+                public_error = self._public_failure(detail, source=exc)
                 if self._backtest_started:
-                    self._record_failure(mode, public_error, status="aborted")
-                raise ToolError(public_error) from exc
+                    self._record_failure(
+                        mode,
+                        str(public_error),
+                        status="aborted",
+                        error_record=public_error.to_record(),
+                    )
+                raise public_error from exc
             except BaseException as exc:  # noqa: BLE001 - preserve stop/interrupt semantics
                 # KeyboardInterrupt/SystemExit must propagate, but their
                 # potentially strategy-derived text is never written publicly.
                 detail = f"{type(exc).__name__}: {exc}"
-                public_error = self._public_failure_error(detail)
+                public_error = self._public_failure(detail, source=exc)
                 if self._backtest_started:
-                    self._record_failure(mode, public_error, status="aborted")
+                    self._record_failure(
+                        mode,
+                        str(public_error),
+                        status="aborted",
+                        error_record=public_error.to_record(),
+                    )
                 raise
             finally:
                 if self._public_nl_tmp is not None and self._public_nl_tmp.exists():
@@ -274,8 +296,8 @@ class BacktestTool:
         self._verify_snapshot_binding(mode, snapshot_dir)
         decision_time = str(manifest.require("valid_decision_time" if mode == "valid" else "test_decision_time"))
         replay_dir = self.ctx.paths.valid if mode == "valid" else self.ctx.paths.test
-        # A short debug window replays only the first N trade days; such a run is
-        # never accept-eligible (complete_validation=False).
+        # A short debug window replays the first N strategy days plus one distinct
+        # liquidation day; such a run is never accept-eligible.
         complete_validation = replay_window is None
         probe = not complete_validation
         data_load: dict[str, object] = {}
@@ -284,10 +306,17 @@ class BacktestTool:
         minute_source: ParquetMinuteReplaySource | None = None
         if replay_window is not None:
             load_t0 = time.monotonic()
+            requested_strategy_days = max(1, int(replay_window))
             keep = _first_replay_trade_dates(
                 replay_dir / "daily.parquet",
-                max(2, int(replay_window)),
+                requested_strategy_days + 1,
             )
+            if len(keep) < requested_strategy_days + 1:
+                raise ToolError(
+                    f"replay_window={requested_strategy_days} requires "
+                    f"{requested_strategy_days + 1} trade dates including liquidation; "
+                    f"the replay region has only {len(keep)}"
+                )
             data_load["catalog_seconds"] = round(time.monotonic() - load_t0, 6)
             load_t0 = time.monotonic()
             replay_daily = _read_replay_daily(replay_dir, trade_dates=keep)
@@ -335,6 +364,8 @@ class BacktestTool:
             raise ToolError(f"result directory already exists: {result_dir}")
         started_at = utc_now_iso()
         total_trade_days = int(replay_daily["trade_date"].nunique())
+        strategy_trade_days = max(0, total_trade_days - 1)
+        exit_trade_days = 1 if total_trade_days else 0
         # Open the Agent-visible Valid bracket before synchronous replay so a
         # long run is observable. Frozen evaluation stays on host-only surfaces.
         if mode == "valid":
@@ -344,6 +375,7 @@ class BacktestTool:
                     "tool": self.name, "mode": mode, "result_name": result_dir.name,
                     "complete_validation": complete_validation, "replay_window": replay_window,
                     "replay_granularity": replay_granularity, "total_trade_days": total_trade_days,
+                    "strategy_trade_days": strategy_trade_days, "exit_trade_days": exit_trade_days,
                     "artifact_hash": artifact.artifact_hash, "started_at": started_at,
                 },
                 step_id=self.ctx.current_step_id,
@@ -588,7 +620,8 @@ class BacktestTool:
                 else []
             ),
             "probe_note": (
-                "replay_window 前 N 交易日探针：只返回运行成本与订单生命周期统计，"
+                "replay_window 前 N 个策略交易日 + 1 个独立退出日探针："
+                "只返回运行成本与订单生命周期统计，"
                 "收益指标与成交明细不生成（对未来窗口的 P&L 属于前视信息）"
                 if probe else None
             ),
@@ -596,6 +629,7 @@ class BacktestTool:
             "finished_at": utc_now_iso(),
             "replay_wall_seconds": stats.get("replay_wall_seconds"),
             "replayed_trade_days": stats.get("replayed_trade_days"),
+            "replayed_exit_days": stats.get("replayed_exit_days"),
             "substep_runtime": (
                 _probe_substep_runtime(stats.get("substep_runtime"))
                 if probe
@@ -760,7 +794,14 @@ class BacktestTool:
             result_name = f"{prefix}_{len(existing):03d}"
         return results_root / result_name
 
-    def _record_failure(self, mode: str, error: str, *, status: str = "error") -> None:
+    def _record_failure(
+        self,
+        mode: str,
+        error: str,
+        *,
+        status: str = "error",
+        error_record: dict[str, object] | None = None,
+    ) -> None:
         summary = {
             "tool": self.name,
             "mode": mode,
@@ -772,6 +813,14 @@ class BacktestTool:
                 if self._backtest_started_monotonic is not None else None
             ),
         }
+        if error_record:
+            summary.update(
+                {
+                    key: error_record[key]
+                    for key in ("error_type", "reason", "retry_hint")
+                    if error_record.get(key) not in (None, "")
+                }
+            )
         if self._data_load:
             summary["data_load"] = dict(self._data_load)
         self.ctx.manifest.append_backtest_summary(summary)
@@ -799,13 +848,26 @@ class BacktestTool:
             # Evidence durability must never reopen the public error channel.
             pass
 
-    def _public_failure_error(self, detail: str) -> str:
+    def _public_failure(self, detail: str, *, source: BaseException) -> ToolError:
         if not (self._probe_active and self._backtest_started):
-            return detail.replace(str(self.ctx.paths.root), "/mnt")
+            sanitized = detail.replace(str(self.ctx.paths.root), "/mnt")
+            if isinstance(source, ToolError) and sanitized == detail:
+                return source
+            return ToolError(
+                sanitized,
+                error_type=getattr(source, "error_type", None) or "tool_error",
+                reason=getattr(source, "reason", None),
+                retry_hint=getattr(source, "retry_hint", None),
+            )
         self._record_probe_failure_detail(detail)
-        return (
-            "probe failed inside the isolated replay; raw strategy/runtime error text is host-only. "
-            "Use the returned failure state to fix control flow, then rerun a small probe."
+        return ToolError(
+            "probe failed inside the isolated replay; raw strategy/runtime error text is host-only.",
+            error_type=getattr(source, "error_type", None) or "probe_runtime_error",
+            reason=getattr(source, "reason", None),
+            retry_hint=(
+                getattr(source, "retry_hint", None)
+                or "Reduce the strategy to the smallest failing control flow, then rerun a small probe."
+            ),
         )
 
 
@@ -868,8 +930,7 @@ def _diagnostic_warnings(stats: dict[str, object]) -> list[str]:
     peak = int(stats.get("agent_peak_rss_bytes") or 0)
     if peak >= _AGENT_MEMORY_ADVISORY_BYTES:
         warnings.append(
-            f"Agent process peak RSS was {peak / 1024**3:.1f} GiB. This is informational only; "
-            "if unexpected, use Parquet column/filter projection and cache by asof_version."
+            f"性能参考：本次回测策略进程峰值内存约 {peak / 1024**3:.1f} GiB，不影响验证结果。"
         )
     return warnings
 

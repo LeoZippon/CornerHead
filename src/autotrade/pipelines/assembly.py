@@ -30,6 +30,7 @@ from autotrade.environment.managed_proxy import (
     META_XRAY_CONFIG_PATH_ENV,
     ManagedProxySpec,
 )
+from autotrade.environment.research_release import pin_research_release
 from autotrade.environment.sandbox import SandboxSpec
 from autotrade.environment.snapshot import SnapshotConfig
 from autotrade.environment.tools import ToolContext
@@ -59,13 +60,19 @@ def build_pipeline(
     proxies: "ProxyBundle",
 ) -> ExperimentPipeline:
     """Provider + pipeline wiring shared verbatim by every entrypoint."""
+    release = pin_research_release(
+        experiment_dir=config.experiment_dir,
+        raw_dir=args.raw_dir.resolve(),
+        fundamental_events_root=args.fundamental_events_root.resolve(),
+        fundamental_events_status=args.fundamental_events_status.resolve(),
+    )
     return ExperimentPipeline(
         config,
         RawSnapshotProvider(
-            args.raw_dir.resolve(),
-            args.fundamental_events_root.resolve(),
+            release.raw_dir,
+            release.fundamental_events_root,
             config=config.snapshot_config,
-            fundamental_events_status=args.fundamental_events_status.resolve(),
+            fundamental_events_status=release.fundamental_events_status,
         ),
         agent_factory,
         proxy=proxies.proxy,

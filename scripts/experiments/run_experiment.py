@@ -174,7 +174,7 @@ def main() -> int:
     )
 
     pipeline = build_pipeline(config, args, agent_factory, meta_learner, proxies)
-    result = pipeline.run(load_sse_trading_days(args.raw_dir))
+    result = pipeline.run(load_sse_trading_days(pipeline.raw_dir))
     print(json.dumps({"status": "ok", **result}, ensure_ascii=False, sort_keys=True))
     return 0
 

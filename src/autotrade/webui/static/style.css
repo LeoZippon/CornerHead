@@ -216,7 +216,7 @@ h4.subsection-title, .panel h4.subsection-title {
 .dot.waiting { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
 .dot.pending { background: var(--chip-bg); }
 .session-item .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-item .ret { font-variant-numeric: tabular-nums; font-size: 0.875rem; }
+.session-item .ret { font-variant-numeric: tabular-nums; font-size: 0.875rem; white-space: nowrap; }
 .epoch-head { margin: 0.7rem 4px 4px; font-size: 0.845rem; color: var(--muted); font-weight: 600; }
 .session-item.phase-head {
   width: 100%; min-height: 2.35rem; box-sizing: border-box;

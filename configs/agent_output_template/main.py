@@ -8,7 +8,7 @@ placeholder screen in ``_screen`` with your own signal.
 
 Key ``ctx`` surface (advanced helpers in ``candidate.py`` / ``trading.py`` + ``README.md``):
   ``ctx.account`` / ``ctx.positions``                 dual-account snapshots / per-symbol holdings (rows carry ``account``)
-  ``ctx.broker.stock`` / ``ctx.broker.credit``         per-account cash/available_cash views
+  ``ctx.broker.stock`` / ``ctx.broker.credit``         per-account dict properties (do not call them)
   ``ctx.price(code)`` / ``ctx.bar(code)``              this tick's price/bar (None pre-auction)
   ``ctx.broker.buy/sell(...)``                         stock account (long-only cash)
   ``ctx.broker.credit_buy/credit_sell/fin_buy/short/cover/sell_repay/direct_repay``  credit account (两融)
@@ -21,8 +21,9 @@ Key ``ctx`` surface (advanced helpers in ``candidate.py`` / ``trading.py`` + ``R
   ``ctx.substep(name, budget_minutes=B)``              required wrapper for broker/state actions; B<1 submits this tick, B>=1 after ready_at
   ``ctx.nl(code?, prompt=...)``                        optional PIT text analysis
 
-``ctx.asof_dir`` holds one directory per data domain (``daily``, ``events``, ``macro``,
-``fundamentals``, ``intraday_1min``, ``text_index``) plus ``text_library`` body shards.
+``ctx.asof_dir`` holds directories for ``daily``, ``events``, ``macro``,
+``fundamentals``, ``intraday_1min`` and ``text_index``, plus the ``universe.parquet``
+file and ``text_library`` body shards.
 Read parquet domains with ``pd.read_parquet(ctx.asof_dir / "daily")``.
 The view rolls forward as each dataset's real refresh job completes, so during a
 trading session it is frozen and ``ctx.asof_version`` is stable — cache a read by

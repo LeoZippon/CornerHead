@@ -50,6 +50,23 @@ from autotrade.environment.timeview import Timeview
 class BacktestError(RuntimeError):
     """A formal backtest step failed; the error is explicit, never silent."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_type: str | None = None,
+        reason: str | None = None,
+        retry_hint: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+        self.reason = reason
+        self.retry_hint = retry_hint
+
+
+def _optional_text(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
 
 def _serve_nl_requests(
     requests_path: Path,
@@ -375,7 +392,9 @@ class MainPolicyRunner:
                 encoded_state = encoded.get("state")
                 if isinstance(encoded_state, dict):
                     encoded_state["bars"] = bars
-            proc.stdin.write(json.dumps(encoded, ensure_ascii=False, default=str) + "\n")
+            proc.stdin.write(
+                json.dumps(encoded, ensure_ascii=False, default=str, separators=(",", ":")) + "\n"
+            )
             proc.stdin.flush()
         except BrokenPipeError as exc:
             raise BacktestError(f"main policy runner exited early: {self._drain_stderr()}") from exc
@@ -408,11 +427,21 @@ class MainPolicyRunner:
             if str(response.get("request_id", "")) != request_id:
                 continue
             if response.get("status") != "ok":
-                raise BacktestError(str(sanitize_for_log(str(response.get("error", "main(ctx) failed")))))
+                raise BacktestError(
+                    str(sanitize_for_log(str(response.get("error", "main(ctx) failed")))),
+                    error_type=_optional_text(response.get("public_error_type")),
+                    reason=_optional_text(response.get("public_reason")),
+                    retry_hint=_optional_text(response.get("public_retry_hint")),
+                )
             return response
         proc.kill()
         self.executor.kill_marker(self._run_marker)
-        raise BacktestError(f"main(ctx) decision exceeded its {self.timeout_seconds:.0f}s wall-clock cap")
+        raise BacktestError(
+            f"main(ctx) decision exceeded its {self.timeout_seconds:.0f}s wall-clock cap",
+            error_type="strategy_runtime_error",
+            reason="strategy_decision_timeout",
+            retry_hint="Cache data by asof_version and reduce repeated work inside each decision tick.",
+        )
 
     def _pump_nl(self) -> int:
         if self.nl_service is None or self.requests_path is None or self.responses_path is None:
@@ -855,7 +884,8 @@ def run_main_ctx_replay(
         granularity=granularity,
         substep_runtime=substep_runtime or None,
         replay_wall_seconds=replay_wall_seconds,
-        replayed_trade_days=total_days,
+        replayed_trade_days=len(replay_days),
+        replayed_exit_days=1,
         total_ticks=tick_counts["total"],
         intraday_ticks=tick_counts["intraday"],
         offsession_ticks=tick_counts["offsession"],
@@ -1879,7 +1909,7 @@ def _market_state(
         bars = {"ts_code": [str(code) for code in minute_group["ts_code"].tolist()]}
         for column in ("open", "high", "low", "close", "vol", "amount"):
             if column in minute_group.columns:
-                bars[column] = [_float_or_none(value) for value in minute_group[column].tolist()]
+                bars[column] = _columnar_float_values(minute_group[column])
             else:
                 bars[column] = [None] * len(bars["ts_code"])
     return {
@@ -1909,6 +1939,19 @@ def _market_state(
         "asof_version": asof_version,
         "pending": pending or {},
     }
+
+
+def _columnar_float_values(values: pd.Series) -> list[float | None]:
+    """Encode one bar column with a numeric fast path and legacy fallbacks."""
+    if (
+        pd.api.types.is_numeric_dtype(values.dtype)
+        and not pd.api.types.is_complex_dtype(values.dtype)
+    ):
+        numeric = values.to_numpy(dtype="float64", na_value=float("nan"), copy=False)
+        encoded = numeric.astype(object)
+        encoded[pd.isna(numeric)] = None
+        return encoded.tolist()
+    return [_float_or_none(value) for value in values.tolist()]
 
 
 def _float_or_none(value: object) -> float | None:

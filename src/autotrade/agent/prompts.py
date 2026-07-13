@@ -127,7 +127,7 @@ FOLD_ACTION_SECTION = """\
 | `read` | root?, path, offset?, limit? | 按行号读取文件（可分页）；读要编辑的代码优先用它而非 shell `cat`/`head`，`cat`/`head` 仍可用于管道；不访问测试或隐藏路径 |
 | `explore` | task, max_rounds? | 委托只读数据探查 Sub Agent（更便宜模型）调查一个具体问题并返回简洁摘要，把大量 shell/grep 探查移出主上下文 |
 | `modification_check` | （无） | 主动检查正式产物改动是否在约束内；`backtest` 执行前也会自动复核 |
-| `backtest` | replay_window? | 验证回测；Environment 逐 tick 回放当前 `output/main.py` 的 `main(ctx)`；可选 `replay_window` 只回放前 N 个交易日做运行成本/生命周期试探（`ctx.nl()` 返回 `withheld_probe`，只返回匿名 substep 成本、tick 与订单生命周期统计，不产生收益指标和成交明细；标记非完整验证、不可冻结、不满足 `finish_fold`），默认整段回放 |
+| `backtest` | replay_window? | 验证回测；Environment 逐 tick 回放当前 `output/main.py` 的 `main(ctx)`；可选 `replay_window=N` 回放前 N 个策略交易日并另加 1 个退出日，做运行成本/生命周期试探（`ctx.nl()` 返回 `withheld_probe`，只返回匿名 substep 成本、tick 与订单生命周期统计，不产生收益指标和成交明细；标记非完整验证、不可冻结、不满足 `finish_fold`），默认整段回放 |
 | `ask_user` | question | 暂停执行，把一个方向性问题连同简要现状总结（发现、可选方案、你的建议）提交给研究者，等待其答复后继续；等待不消耗推理预算。仅用于关键分叉点（如探针成本超预期需取舍、指令之间冲突、验证结果与指令方向矛盾），可自行判断的小事不要提问。无人值守运行会立即返回 `unattended`，此时自主决策、不要重复提问 |
 | `finish_fold` | （无） | 结束本 Fold；调用前先按“提交合同”自检；成功后 `output/` 和 `models/` 只读锁定，Sandbox 内 Agent 后台进程会被清理 |
 
@@ -150,8 +150,8 @@ FOLD_ACTION_SECTION = """\
 | `ctx.broker.cancel` | order_id, reason? | 撤销 `pending()` 返回的未成交委托（提交延迟队列或 Broker 当日订单簿；order_id 跨账户唯一） |
 | `ctx.broker.pending` | ts_code? | 有参返回该票已提交但未成交/可撤的在途单；无参返回全部在途单。记录含 `order_id`、`account`、`op_type`、`submitted_at`、`age_minutes`、`status`，可能含 `pending_stage` |
 | `ctx.broker.position` | ts_code, account? | 已成交持仓（不含在途），是持仓真相源；缺省跨账户净额（多空对冲净 0），给 `account=` 看单账户 |
-| `ctx.broker.stock` | （无） | 普通账户视图 dict（`cash`/`available_cash`/`total_assets`/`market_value`）；`cash` 是已成交真相，`available_cash` 扣已提交未成交买单冻结 |
-| `ctx.broker.credit` | （无） | 信用账户视图 dict（`cash`/`available_cash`、维保比例、保证金可用余额、融资/融券负债、已计未付利息、额度、利率）；可用现金/保证金扣融券冻结所得和已提交未成交订单占用 |
+| `ctx.broker.stock` | （无） | 普通账户视图 dict 属性（不加括号；如 `ctx.broker.stock["available_cash"]`）；`cash` 是已成交真相，`available_cash` 扣已提交未成交买单冻结 |
+| `ctx.broker.credit` | （无） | 信用账户视图 dict 属性（不加括号）；字段含现金、维保比例、保证金可用余额、负债、利息、额度和利率；可用现金/保证金扣融券冻结所得和已提交未成交订单占用 |
 | `ctx.broker.debt_contracts` | ts_code? | 未了结融资/融券负债合约明细（未还金额/量、开仓日、年利率、已计利息） |
 
 每次实验同时运行两个独立账户（普通 + 信用），现金、持仓与 T+1 各自独立、互不担保：普通账户 long-only；融资/融券只在信用账户。同一票允许普通账户做多 + 信用账户融券做空（对冲）。`amount` 是股数，必须是正整数；沪深主板/创业板 100 股整数倍，科创板 200 股起、之后 1 股递增，北交所 100 股起、之后 1 股递增。Broker 不做向下取整、超可卖量截断或单票 cap 自动压量，超约束直接拒单。仓位 sizing 由策略显式读取现金/价格/可卖量后自行计算，Broker 不接受 `weight` 下单参数。`limit=P` 为限价单，缺省为市价单；非正 `limit` 拒单。只在显式可报单/交易分钟 tick 提交新订单；普通 off-session tick 不提交交易所订单，`transfer` 只用于每日 09:14 前的盘前资金划转申请。`ctx.broker` 下单/撤单/划转原语必须在 `ctx.substep` 内调用：`0 < B < 1` 的轻量块按当前决策分钟提交并统计耗时；`B>=1` 若跨出交易所接受申报窗口会记录未提交/未成交，不会自动排到下一交易时段。
@@ -161,6 +161,7 @@ FOLD_ACTION_SECTION = """\
 公司行为（除权日盘前自动处理，见 facts `corporate_actions`）：多头持仓在除权日贷记现金红利（税前 × (1−`dividend_tax_rate`)）并按送转比例增股（成本连续，红股上市日晚于除权日时先锁定）；融券空头按税前全额补偿现金红利、应还股数按送转比例调增。持有跨除权日不再被记为纯亏损；配股未建模。
 
 `ctx` 其他字段：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO，+08:00）、`ctx.account`、`ctx.positions`、`ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`、`ctx.substep(name, budget_minutes=B)`、`ctx.asof_dir`、`ctx.asof_version`、`ctx.snapshot_dir`、`ctx.model_dir`、`ctx.state_dir`、`ctx.nl(ts_code?, prompt=...)`。
+`ctx.asof_dir` 中常规数据域是目录（如 `daily`），冻结股票池是单文件 `universe.parquet`。
 
 轻量委托管理例子（每个 tick 可运行，用小预算子步骤统一统计耗时和撤单提交时点）：
 

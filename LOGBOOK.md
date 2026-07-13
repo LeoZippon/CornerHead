@@ -1,3 +1,11 @@
+2026-07-14 数据更新与实验输入解耦（fix/auction-pit-performance）
+
+- 新实验按需把 committed raw/PIT 发布为共享 hardlink research release，并保存实验 pin；更新锁忙时立即复用上一完整版本，所有 Fold、恢复和交易日历保持同一 generation。
+- 真实 281,114 个 raw Parquet/sidecar、754 个 PIT 文件全量路径/inode 对照通过；7 个质量状态独立复制并校验 hash，打板状态作为 warning 接入 Snapshot。
+- 首发 9.83 秒、增加约 23.3 MiB/232 inode；复用约 0.0056 秒。02:30 审计占锁时新 pin 约 0.0055 秒完成，不等待、不读半更新数据。
+- Full suite 同时捕获并修复 driver 导入时改写宿主 `os`/`Path` 的副作用；路径守卫现仅在独立回放进程启动时安装。定向 95 tests、全量 771 tests、CLI/前端语法和 `git diff --check` 通过。
+- 不改 cron/Docker，不增加数据湖、Fold 预启动或同步 GC。
+
 2026-07-13 Experiment observability and hidden-evaluation audit
 
 - 修复 HITL run/deadline 串线、轮询刷新、活跃预算文案/回补、Trace 重挂滚底与长回测首日进度；死亡的 ask_user 等待会转为 interrupted。
@@ -1470,6 +1478,11 @@
 - Snapshot/Timeview 使用分区首次实际落地时间；旧历史保守记09:29，内容修订推进可见时间。09:25改为盲 tick，删除从未来09:30/09:31分钟条反推开盘价；盘前结果 tick 仅研究唤醒，Broker 隐藏清算真值仍可执行09:15委托。
 - 同步 Prompt、模板和 living docs；相关 data/environment/tool 回归共374项通过，`git diff --check` 通过。生产 crontab 留待本提交后安装并复核。
 
+2026-07-13 Raw data recent-week archive
+
+- 按 `data/raw` 最新日期分区 `20260713` 取最近 7 个自然日（`20260707`–`20260713`），打包 47 个数据集的 576 个 Parquet/元数据文件。
+- 产物 `data/exports/raw_last_7_days_20260707_20260713.zip` 为 98,480,953 bytes；7-Zip 完整性测试通过，SHA-256 为 `a9e3d7ffe1c57fc4e9f9204a61b236514fa014b9c929c61c1da2f67ded8253c2`。
+
 2026-07-13 分钟回放逐日加载与单日前瞻
 
 - 分钟时间解析改为唯一值字典展开；正式回放按交易日读取，只前瞻下一日，Timeview 放行后释放分片；不新增数据湖、容器或跨 Fold 预取。
@@ -1481,3 +1494,14 @@
 - 新实验 `initial_control_mode` 默认值由 `manual` 改为 `step`；运行时控制文件缺失/损坏时的安全回退不变。
 - 重启 WebUI 后在线参数接口已返回 `step`；WebUI/HITL 相关 74 tests 通过。
 - `lzp-test10` 决策快照约 260.9 秒、Replay 缓存约 150.7 秒，均与上一轮相近；无错误，资源余量充足，不提高并行度。
+
+2026-07-13 Probe 安全错误反馈
+
+- Probe 保持隐藏原始策略异常，但现在为账户视图误调用、substep 外访问状态、错误 universe 路径、策略导入失败和决策超时返回稳定错误码与安全修复提示；未知异常仍返回通用提示。
+- 未新增 API、兼容路径或硬围栏；仅补充两条接口备注。工具流 99 tests、主回放 63 tests 通过，`py_compile` 与 `git diff --check` 通过。
+
+2026-07-13 Probe 日期合同与回放热路径优化
+
+- `replay_window=N` 现为 N 个策略日另加 1 个退出日，并分别报告 `replayed_trade_days` / `replayed_exit_days`；错误的 Timeview `.parquet` 路径返回安全 `asof_path_mismatch` 提示。
+- Broker 每 Tick 只建立一次相关代码行情索引；行情数值列改为保持旧异常语义的向量化编码；主 RPC 使用紧凑 JSON。微基准分别约快 8.9 倍、6.6 倍，合成载荷缩小 6.5%。
+- Timeview 不改：普通无边界调用约 4.9 微秒，条件刷新收益不足且会扩大合同风险。相关模块 272 tests、全量 756 tests 通过，`git diff --check` 通过。

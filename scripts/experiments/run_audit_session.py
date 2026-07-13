@@ -139,7 +139,7 @@ def main() -> int:
     )
 
     pipeline = build_pipeline(config, args, agent_factory, meta_learner, proxies)
-    trading_days = load_sse_trading_days(args.raw_dir)
+    trading_days = load_sse_trading_days(pipeline.raw_dir)
     folds = build_fold_schedule(
         config.first_test_period,
         config.last_test_period,

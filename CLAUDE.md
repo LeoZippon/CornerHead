@@ -87,9 +87,9 @@ For experiment, training, inference, evaluation, or data-processing jobs:
 
 ## Development Principles
 
-- Correctness and completeness come first. Once PIT, security, business, and edge-case contracts are satisfied, use the smallest clear architecture and implementation; add no entity, abstraction, compatibility path, or duplicate logic without a demonstrated need.
-- Preserve reality before optimizing speed. Model real data visibility, timing, execution, isolation, and resource constraints as faithfully as practical, then optimize measured Environment hot paths without weakening those contracts.
-- Reduce Agent interaction and decision burden while preserving freedom. Put mechanical efficiency, safety, and audit enforcement behind small stable Environment interfaces, and leave the Agent maximum strategy freedom inside explicit PIT and safety boundaries.
+- Maintain a minimalist code architecture and implementation while ensuring logical correctness and completeness.
+- Achieve optimal performance while keeping the environment as close to real-world conditions as possible.
+- Maximize the Agent’s autonomy while lowering the complexity of interactions between the Agent and the environment.
 
 ## Operational Guardrails
 
@@ -98,6 +98,7 @@ For experiment, training, inference, evaluation, or data-processing jobs:
 - Treat resource checks and logging as mandatory steps, not optional cleanup.
 - Keep the repository organized, clean and tidy.
 - Prefer fail-fast behavior in core pipelines. Missing data files, cache splits, scaler/meta artifacts, or model weights should raise explicit errors instead of silently falling back.
+- Route every production live raw/PIT source mutation through the updater's exclusive lock and temp-plus-replace; never modify a hardlinked source file in place.
 - When starting a sub-agent, always choose the best performing ones.
 - Do not add compatibility or fallback branches unless they are required by a real supported workflow and their trigger conditions are explicit.
 - Dare to break thinking inertia and rethink when necessary.

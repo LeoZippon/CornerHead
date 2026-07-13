@@ -187,6 +187,50 @@ def main(ctx):
     raise RuntimeError("decision failed Authorization: Bearer secret-token-abc")
 '''
 
+PROBE_ACCOUNT_VIEW_CALL_MAIN = '''
+def main(ctx):
+    with ctx.substep("bad_account_view", budget_minutes=0.5):
+        ctx.broker.stock()
+'''
+
+PROBE_STATE_OUTSIDE_SUBSTEP_MAIN = '''
+def main(ctx):
+    _ = ctx.state_dir
+'''
+
+PROBE_UNIVERSE_PATH_MAIN = '''
+from pathlib import Path
+
+import pandas as pd
+
+
+def main(ctx):
+    with ctx.substep("bad_universe_path", budget_minutes=0.5):
+        pd.read_parquet(Path(str(ctx.asof_dir)) / "universe")
+'''
+
+PROBE_ASOF_DATASET_PATH_MAIN = '''
+from pathlib import Path
+
+
+class IOException(Exception):
+    pass
+
+
+def main(ctx):
+    with ctx.substep("bad_asof_dataset_path", budget_minutes=0.5):
+        wrong = Path(str(ctx.asof_dir)) / "events.parquet"
+        raise IOException('IO Error: No files found that match the pattern "' + str(wrong) + '"')
+'''
+
+PROBE_IMPORT_ERROR_MAIN = '''
+raise RuntimeError("import fixture failure")
+
+
+def main(ctx):
+    return None
+'''
+
 POLICY_SECRET_ERROR_MAIN = '''
 def leak_secret(ctx):
     raise RuntimeError("provider failed Authorization: Bearer secret-token-abc")
@@ -495,6 +539,15 @@ class ToolFlowTest(unittest.TestCase):
             self.assertTrue(any("zero orders" in warning for warning in summary["diagnostic_warnings"]))
             # Diagnostics explain but never become an Environment-side fence.
             self.assertTrue(ModificationCheckTool(ctx).run()["allowed_to_backtest"])
+
+    def test_memory_diagnostic_is_a_neutral_chinese_performance_note(self):
+        from autotrade.environment.tools.backtest import _diagnostic_warnings
+
+        warnings = _diagnostic_warnings(
+            {"order_count": 1, "agent_peak_rss_bytes": int(5.3 * 1024**3)}
+        )
+
+        self.assertEqual(warnings, ["性能参考：本次回测策略进程峰值内存约 5.3 GiB，不影响验证结果。"])
 
     def test_modification_check_advises_without_blocking_strategy_choices(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1104,6 +1157,9 @@ def main(ctx):
             for key in ("total_return", "sharpe", "max_drawdown", "benchmark", "orders_path"):
                 self.assertNotIn(key, summary)
             self.assertIn("replayed_trade_days", summary)
+            self.assertEqual(summary["replayed_trade_days"], 2)
+            self.assertEqual(summary["replayed_exit_days"], 1)
+            self.assertEqual(summary["data_load"]["daily_rows"], 3)
             self.assertTrue(summary["probe_note"])
             result_dir = Path(summary["host_result_path"])
             self.assertEqual(list(result_dir.iterdir()), [])
@@ -1237,6 +1293,53 @@ def main(ctx):
             evidence = ctx.paths.root / "runtime" / "host_evidence"
             self.assertFalse(any(marker in path.read_text(encoding="utf-8") for path in evidence.rglob("*.*")))
 
+    def test_probe_contract_errors_return_safe_repair_metadata(self):
+        cases = (
+            (
+                PROBE_ACCOUNT_VIEW_CALL_MAIN,
+                "account_view_not_callable",
+                "without parentheses",
+            ),
+            (
+                PROBE_STATE_OUTSIDE_SUBSTEP_MAIN,
+                "state_dir_outside_substep",
+                "inside ctx.substep",
+            ),
+            (
+                PROBE_UNIVERSE_PATH_MAIN,
+                "universe_path_mismatch",
+                "universe.parquet",
+            ),
+            (
+                PROBE_ASOF_DATASET_PATH_MAIN,
+                "asof_path_mismatch",
+                "without a .parquet suffix",
+            ),
+            (
+                PROBE_IMPORT_ERROR_MAIN,
+                "strategy_import_failed",
+                "module-level code",
+            ),
+        )
+        for strategy, reason, hint in cases:
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as tmp:
+                _, ctx = build_sandbox(Path(tmp))
+                (ctx.paths.agent_output / "main.py").write_text(strategy, encoding="utf-8")
+
+                with self.assertRaisesRegex(ToolError, "raw strategy/runtime error text is host-only") as raised:
+                    BacktestTool(ctx).run(mode="valid", replay_window=2)
+
+                error = raised.exception
+                self.assertEqual(error.error_type, "strategy_contract_error")
+                self.assertEqual(error.reason, reason)
+                self.assertIn(hint, error.retry_hint or "")
+                summary = ctx.manifest.get("backtest_summaries", [])[-1]
+                self.assertEqual(summary["error_type"], "strategy_contract_error")
+                self.assertEqual(summary["reason"], reason)
+                self.assertIn(hint, summary["retry_hint"])
+                evidence = ctx.paths.root / "runtime" / "host_evidence"
+                self.assertTrue(any(path.name == "error.txt" for path in evidence.rglob("error.txt")))
+
     def test_probe_unexpected_exception_detail_is_host_only(self):
         marker = "PROBE_UNEXPECTED_EXCEPTION_PRIVATE_MARKER"
         with tempfile.TemporaryDirectory() as tmp:
@@ -1252,6 +1355,9 @@ def main(ctx):
                     tool.run(mode="valid", replay_window=2)
 
             self.assertNotIn(marker, str(raised.exception))
+            self.assertEqual(raised.exception.error_type, "probe_runtime_error")
+            self.assertIsNone(raised.exception.reason)
+            self.assertIn("smallest failing control flow", raised.exception.retry_hint or "")
             public = json.dumps(
                 {"manifest": ctx.manifest.data, "trace": ctx.trace.read_events()},
                 ensure_ascii=False,

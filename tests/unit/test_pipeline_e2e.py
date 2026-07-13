@@ -799,6 +799,7 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual([r["epoch_id"] for r in meta_records], ["epoch_001", "epoch_002"])
             self.assertEqual(meta_records[1]["status"], "meta_regularized")
             for record in meta_records:
+                self.assertGreaterEqual(record["run_wall_seconds"], 0)
                 trace_ref = Path(str(record["agent_trace_ref"]))
                 self.assertTrue(trace_ref.exists())
                 self.assertFalse(

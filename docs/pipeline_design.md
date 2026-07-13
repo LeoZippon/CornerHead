@@ -418,6 +418,9 @@ experiments/<experiment_id>/
     <epoch_id>/
   artifacts/
     <run_id>/
+  research_release/
+    manifest.json
+    quality/
   snapshot_cache/
   reports/
   hitl/
@@ -431,20 +434,22 @@ experiments/<experiment_id>/
 | `strategy_artifacts/` | Pipeline | 冻结策略产物和对应模型参数产物 |
 | `meta_learning/` | Pipeline | 元学习 Taste；trace 由账本 `agent_trace_ref` 指向 canonical run 目录 |
 | `artifacts/<run_id>/` | Environment | Sandbox run manifest、trace、results、logs |
+| `research_release/` | Pipeline | 实验固定的数据 generation 与质量状态；恢复时原样复用 |
 | `snapshot_cache/` | Pipeline | 实验内决策快照/回放槽构建缓存（见下） |
 | `reports/` | reporting 脚本 | 实验图表和汇总 |
 | `hitl/` | 交互式 worker / Web 后端 | HITL 控制面文件与 Fold 分析（见第 5 章） |
 
 快照缓存按内容身份复用同一实验内字节相同的构建结果：
 
+- 新实验先固定一个 research release：live 可读时按需发布当前 committed generation，更新期立即使用最近完整版本；部署后的首个版本须在 committed 空窗 bootstrap，已有账本但缺少 pin 时拒绝混用数据恢复。
 - 相邻 Fold 可以共享相同决策锚点，多 Epoch 的同一视图也可复用。
 - 同区间回放数据跨 valid/test 标签复用；label 不进入内容键，只原子写入本次运行目录的独立 manifest。
-- 缓存键包含 committed raw 数据湖世代戳：落库后旧缓存自动失效重建；`updating` / `dirty` 状态拒绝命中或构建，不会把部分更新伪装成旧世代。
+- 缓存键包含实验固定的 committed generation；live 更新不会令同一实验跨 Fold 换代，也不会读取部分更新。
 - 缓存键另含显式格式版本；快照/PIT 磁盘合同变化时递增版本，无关代码提交不清空大缓存。
 - 同一内容键由跨进程 `flock` 合并为一次构建，加锁后复查命中并原子发布；发布异常直接报错。
 - 数据文件以硬链接挂入运行目录；本地 manifest 以新 inode 替换，不会改写缓存或其他运行的硬链接。
 - 交互式 worker 在下一 Fold 的人工门控期间只预取四个数据缓存项；不创建 Sandbox 或容器，并在进入 Fold 前等待完成，所以不与正式回测并行。
-- 每个 Fold/Meta/Held-out 的全部输入在启动 Agent 前校验 raw generation 唯一；混代或部分缺失世代戳直接失败。
+- 每个 Fold/Meta/Held-out 的生产输入在启动 Agent 前校验 pinned generation 唯一；混代或部分缺失世代戳直接失败，本地合成输入可以全部无戳。
 
 **主账本**
 

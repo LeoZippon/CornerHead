@@ -943,10 +943,17 @@ class SimBroker:
         matching, so the agent-visible account state reflects the completed bar.
         Interest accrual and the forced-close check keep their own end-of-day
         schedule in :meth:`mark_to_market`."""
-        self._mark_positions_to_bars(minute_group, at_open=True)
+        relevant_codes = {str(order.ts_code) for order in self._book}
+        relevant_codes.update(
+            str(pos.ts_code)
+            for state in self.accounts.values()
+            for pos in state.positions.values()
+        )
+        bars_by_code = _bars_for_codes(minute_group, relevant_codes)
+        self._mark_positions_to_bars(bars_by_code, at_open=True)
         survivors: list[WorkingOrder] = []
         for order in self._book:
-            bar = _bar_for_code(minute_group, order.ts_code)
+            bar = bars_by_code.get(str(order.ts_code))
             if bar is None:
                 # The code printed no bar this minute. A market order keeps working
                 # until the day's next bar with trades (an auction order that missed
@@ -1018,7 +1025,7 @@ class SimBroker:
                     order.is_auction = False
                 survivors.append(order)
         self._book = survivors
-        self._mark_positions_to_bars(minute_group, at_open=False)
+        self._mark_positions_to_bars(bars_by_code, at_open=False)
 
     def _auction_print(self, trade_date: object, order: "WorkingOrder") -> float | None:
         """The day's actual OPENING-auction price for this order, if it is
@@ -1032,13 +1039,13 @@ class SimBroker:
             return None
         return prints.get(order.ts_code)
 
-    def _mark_positions_to_bars(self, minute_group: pd.DataFrame, *, at_open: bool) -> None:
+    def _mark_positions_to_bars(self, bars_by_code: dict[str, pd.Series], *, at_open: bool) -> None:
         """Re-mark held positions to the current bar (open or close phase)."""
-        if minute_group.empty:
+        if not bars_by_code:
             return
         for state in self.accounts.values():
             for pos in state.positions.values():
-                bar = _bar_for_code(minute_group, pos.ts_code)
+                bar = bars_by_code.get(str(pos.ts_code))
                 if bar is None:
                     continue
                 price = _open_price(bar) if at_open else _close_price(bar)
@@ -2381,9 +2388,25 @@ def load_corporate_actions_by_date(
     return grouped
 
 
-def _bar_for_code(minute_group: pd.DataFrame, ts_code: str) -> pd.Series | None:
-    rows = minute_group[minute_group["ts_code"].astype(str) == str(ts_code)]
-    return None if rows.empty else rows.iloc[-1]
+def _bars_for_codes(minute_group: pd.DataFrame, ts_codes: set[str]) -> dict[str, pd.Series]:
+    """Build one per-tick lookup for only working-order and held-position codes.
+
+    Duplicate prints retain the legacy behavior: the last row for a code wins.
+    The full universe code column is normalized/scanned once, rather than once per
+    order and twice per position.
+    """
+    if minute_group.empty or not ts_codes:
+        return {}
+    normalized_codes = minute_group["ts_code"].astype(str)
+    selected_mask = normalized_codes.isin(ts_codes)
+    if not bool(selected_mask.any()):
+        return {}
+    selected_codes = normalized_codes.loc[selected_mask].tolist()
+    selected_rows = minute_group.loc[selected_mask]
+    bars: dict[str, pd.Series] = {}
+    for code, (_, row) in zip(selected_codes, selected_rows.iterrows()):
+        bars[code] = row
+    return bars
 
 
 def _date_gap(start_date: str, end_date: str) -> int:

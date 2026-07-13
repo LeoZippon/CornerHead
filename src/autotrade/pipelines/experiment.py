@@ -66,6 +66,8 @@ class ExperimentPipeline:
         meta_learner: MetaLearner | None = None,
     ) -> None:
         self.config = config
+        provider_raw_dir = getattr(snapshots, "raw_dir", None)
+        self._raw_dir = Path(provider_raw_dir) if provider_raw_dir is not None else None
         # Identical builds recur constantly (adjacent folds share the decision
         # snapshot anchor; multi-epoch reruns are snapshot-invariant) — cache
         # them per experiment and hardlink into each run's sandbox.
@@ -76,6 +78,12 @@ class ExperimentPipeline:
         self.meta_learner = meta_learner
         self.ledger = ExperimentLedger(config.ledger_path)
         self._active_sandbox_spec = self._restore_active_sandbox_image(config.sandbox_spec)
+
+    @property
+    def raw_dir(self) -> Path:
+        if self._raw_dir is None:
+            raise RuntimeError("snapshot provider does not expose its pinned raw_dir")
+        return self._raw_dir
 
     def _restore_active_sandbox_image(self, base_spec):
         """Resume durability: a successful meta-learning sandbox rebuild updates the
@@ -604,6 +612,7 @@ class ExperimentPipeline:
         system_prompt_override: str = "",
         user_question_hook=None,
     ) -> tuple[FrozenArtifact | None, str]:
+        run_started = time.monotonic()
         sandbox, docker = self._start_sandbox(run_id, kind="meta_learning")
         paths = sandbox.paths
         has_parent = parent is not None
@@ -822,6 +831,9 @@ class ExperimentPipeline:
                     "epoch_id": epoch_id,
                     "fold_id": fold_id,
                     "run_id": run_id,
+                    # Same boundary as a regular Fold: sandbox preparation,
+                    # visible snapshots, Agent work and finalization.
+                    "run_wall_seconds": round(time.monotonic() - run_started, 1),
                     "status": status,
                     "modification_check": {
                         k: check.get(k)

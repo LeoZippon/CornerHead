@@ -121,6 +121,23 @@ function fmtDuration(totalSeconds) {
   return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
 }
 
+function foldDurationNode(detail, session, prefix = "", className = "") {
+  const node = el("span", { class: className });
+  const fixedValue = (session.record || {}).run_wall_seconds;
+  const fixed = Number(fixedValue);
+  const isFixed = fixedValue !== null && fixedValue !== undefined && Number.isFinite(fixed) && fixed >= 0;
+  const status = detail.status || {};
+  const startedAt = status.session_key === session.key ? Date.parse(status.session_started_at || "") : NaN;
+  const isLive = !isFixed && detail.worker_alive && Number.isFinite(startedAt);
+  const update = () => {
+    const seconds = isFixed ? fixed : isLive ? (Date.now() - startedAt) / 1000 : null;
+    node.textContent = [prefix, seconds === null ? "" : fmtDuration(seconds)].filter(Boolean).join(" · ");
+  };
+  update();
+  if (isLive) liveTimers.push(setInterval(() => { if (node.isConnected) update(); }, 1000));
+  return node;
+}
+
 /* ---------------- utilities ---------------- */
 
 async function api(path, options = {}) {
@@ -1261,6 +1278,23 @@ function sessionListPanel(detail, selectedKey) {
     const isWaiting = isCurrent && detail.state === "waiting_user";
     const dotClass = isDone ? "done" : isWaiting ? "waiting" : isCurrent ? "running" : "pending";
     const validReturn = session.record && session.record.validation_result ? session.record.validation_result.total_return : null;
+    const stateText = isCurrent && status.state === "waiting_step_user"
+      ? `Step ${status.awaiting_step ?? "?"} 待批准`
+      : isCurrent && status.state === "waiting_user_reply"
+      ? "提问待答复"
+      : isWaiting ? "待批准" : isCurrent ? "运行中" : "";
+    const ret = session.kind === "fold" || session.kind === "meta_learning"
+      ? foldDurationNode(
+          detail,
+          session,
+          session.kind === "fold" && validReturn !== null && validReturn !== undefined
+            ? fmtPct(validReturn) : stateText,
+          session.kind === "fold" && validReturn !== null && validReturn !== undefined ? numClass(validReturn) : "",
+        )
+      : validReturn !== null && validReturn !== undefined
+      ? el("span", { class: numClass(validReturn) }, fmtPct(validReturn))
+      : el("span", {}, stateText);
+    ret.classList.add("ret");
     const item = el("div", {
       class: `session-item${session.kind === "heldout" ? " phase-head" : ""}${session.key === selectedKey ? " selected" : ""}`,
       "data-key": session.key,
@@ -1269,14 +1303,7 @@ function sessionListPanel(detail, selectedKey) {
       el("span", { class: `dot ${dotClass}` }),
       el("span", { class: "label" },
         session.kind === "fold" ? String(session.fold_id || "").replace("fold_", "Fold ") : KIND_LABELS[session.kind] || session.kind),
-      validReturn !== null && validReturn !== undefined
-        ? el("span", { class: `ret ${numClass(validReturn)}` }, fmtPct(validReturn))
-        : el("span", { class: "ret" },
-            isCurrent && status.state === "waiting_step_user"
-              ? `Step ${status.awaiting_step ?? "?"} 待批准`
-              : isCurrent && status.state === "waiting_user_reply"
-              ? "提问待答复"
-              : isWaiting ? "待批准" : isCurrent ? "运行中" : ""),
+      ret,
     );
     list.append(item);
   }
@@ -1316,7 +1343,7 @@ function sessionDetailPanel(detail, selectedKey) {
       panel.append(rollbackPanel(detail, session));
     }
   }
-  if (session.kind === "meta_learning" && done) panel.append(metaResultPanel(session));
+  if (session.kind === "meta_learning" && done) panel.append(metaResultPanel(detail, session));
   if (session.kind === "heldout" && done) panel.append(heldoutPanel(session));
   if (done && session.record && session.record.run_id) {
     const statsHost = el("div", {});
@@ -1605,6 +1632,32 @@ function statsChipsRow(stats) {
 /* ask_user tool: when the Agent pauses on a question (state=waiting_user_reply),
    show it and send the researcher's reply (empty reply = proceed, Agent decides).
    The wait is excluded from the Agent's reasoning budget. */
+function currentStrategyDownloadNode(detail) {
+  const host = el("span", {}, el("button", {
+    class: "btn", disabled: "", title: "正在确认是否已有正式验证 Step 快照",
+  }, "策略快照检查中…"));
+  api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/current-step`)
+    .then((payload) => {
+      host.innerHTML = "";
+      if (payload.available) {
+        host.append(el("a", {
+          class: "btn",
+          href: `/api/experiments/${encodeURIComponent(detail.experiment_id)}/current-step/source.zip`,
+          title: "下载最近一次正式验证 Step 保存的只读策略快照",
+        }, "下载当前策略"));
+      } else {
+        host.append(el("button", {
+          class: "btn", disabled: "", title: payload.reason || "尚无正式验证 Step 快照",
+        }, "暂无策略快照"));
+      }
+    })
+    .catch(() => {
+      host.innerHTML = "";
+      host.append(el("button", { class: "btn", disabled: "" }, "策略快照不可用"));
+    });
+  return host;
+}
+
 function askUserPanel(detail, session) {
   const status = detail.status || {};
   const question = status.awaiting_question || null;
@@ -1619,6 +1672,7 @@ function askUserPanel(detail, session) {
     el("div", { class: "ask-user-question" }, String(question.question || "")),
     textarea,
     el("div", { class: "control-bar" },
+      currentStrategyDownloadNode(detail),
       el("button", { class: "btn primary", onclick: () => send(textarea.value, "已答复，Agent 继续") }, "答复并继续"),
       el("button", { class: "btn", onclick: () => send("", "已放行（无指引）") }, "不给指引，继续"),
     ),
@@ -1659,8 +1713,14 @@ function stepGatePanel(detail, session) {
   );
   if (status.state === "waiting_step_user" && status.session_key === session.key) {
     const summary = status.step_summary || {};
-    const diagnostics = summary.diagnostic_warnings || [];
-    const textarea = el("textarea", { class: "directive",
+    const diagnostics = (summary.diagnostic_warnings || []).map((raw) => {
+      const message = String(raw);
+      const legacyMemory = message.match(/^Agent process peak RSS was ([0-9.]+ GiB)\./);
+      return legacyMemory
+        ? { message: `性能参考：本次回测策略进程峰值内存约 ${legacyMemory[1]}，不影响验证结果。`, warning: false }
+        : { message, warning: !message.startsWith("性能参考：") };
+    });
+    const textarea = el("textarea", { class: "directive section-gap",
       placeholder: "可选：本 Step 结果的针对性指令（作为待检验假设注入下一轮对话）……" });
     panel.append(
       el("div", { class: "section-gap" }, statTilesRow([
@@ -1668,10 +1728,17 @@ function stepGatePanel(detail, session) {
         { label: "Sharpe", value: summary.sharpe === null || summary.sharpe === undefined ? "—" : Number(summary.sharpe).toFixed(2) },
         { label: "最大回撤", value: fmtPct(summary.max_drawdown) },
         { label: "完整验证", value: summary.complete_validation ? "是" : "否" },
+        { label: "本 Fold 已耗时", value: foldDurationNode(detail, session) },
       ])),
-      ...diagnostics.map((message) => el("div", { class: "hint warn" }, String(message))),
+      ...diagnostics.map((item) => el("div", { class: item.warning ? "hint warn" : "hint" }, item.message)),
+      analysisNode(
+        `/api/experiments/${encodeURIComponent(detail.experiment_id)}/current-step/analysis`,
+        "当前 Step DeepSeek 分析（可选，仅验证期证据）",
+        { standalone: false },
+      ),
       textarea,
       el("div", { class: "control-bar" },
+        currentStrategyDownloadNode(detail),
         el("button", {
           class: "btn primary",
           onclick: () => send(
@@ -1696,9 +1763,11 @@ function liveTracePanel(detail, session) {
     const reused = livePanel;
     reused.refresh(detail);
     // The reused node is attached to its new parent only after this function
-    // returns.  Scroll on the next frame so mode/Step switches still land on
-    // the newest event when auto-scroll is enabled.
-    requestAnimationFrame(() => { if (livePanel === reused) reused.scrollToBottom(); });
+    // returns. Wait through the following layout frame before restoring the
+    // bottom position; one frame is too early on control-mode panel rebuilds.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (livePanel === reused) reused.scrollToBottom();
+    }));
     return reused.node;
   }
   destroyLivePanel();
@@ -1720,6 +1789,7 @@ function liveTracePanel(detail, session) {
   const prep = el("div", { class: "prep-indicator" }, el("span", { class: "spinner" }), prepText);
   panel.append(tools, statsHost, prep, box);
   let sawEvent = false;
+  let traceKnown = Boolean(status.trace_path);
   let source = null;
   const runQuery = runId ? `run_id=${encodeURIComponent(runId)}&` : "";
   const appendEvents = (events) => {
@@ -1758,8 +1828,12 @@ function liveTracePanel(detail, session) {
   let statsSignature = "";
   const tick = () => {
     if (!sawEvent) {
-      const elapsed = (Date.now() - startedMs) / 1000;
-      prepText.textContent = `沙箱与数据快照准备中（已 ${fmtDuration(elapsed)}）… 首个 Agent 事件到达后开始流式显示`;
+      if (traceKnown) {
+        prepText.textContent = "正在加载 Agent Trace…";
+      } else {
+        const elapsed = (Date.now() - startedMs) / 1000;
+        prepText.textContent = `沙箱与数据快照准备中（已 ${fmtDuration(elapsed)}）… 首个 Agent 事件到达后开始流式显示`;
+      }
     }
     if (sessionState === "waiting_step_user") {
       countdown.style.display = "";
@@ -1793,6 +1867,7 @@ function liveTracePanel(detail, session) {
   const pollStats = async () => {
     try {
       const stats = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stats?${runQuery}`);
+      traceKnown = true;
       creditSeconds = Number(stats.backtest_wall_seconds) || 0;
       inBacktest = Boolean(stats.in_backtest);
       activeBacktestStartedMs = stats.active_backtest_started_at ? Date.parse(stats.active_backtest_started_at) : null;
@@ -1815,6 +1890,7 @@ function liveTracePanel(detail, session) {
         sessionState = fresh.state;
         deadlineMs = raw.fold_deadline_at ? Date.parse(raw.fold_deadline_at) : null;
         if (raw.session_started_at) startedMs = Date.parse(raw.session_started_at);
+        if (raw.trace_path) traceKnown = true;
       }
     } catch { /* transient */ }
   };
@@ -1833,6 +1909,7 @@ function liveTracePanel(detail, session) {
       const rawStatus = freshDetail.status || {};
       sessionState = freshDetail.state;
       deadlineMs = rawStatus.fold_deadline_at ? Date.parse(rawStatus.fold_deadline_at) : null;
+      if (rawStatus.trace_path) traceKnown = true;
     },
   };
   (async () => {
@@ -2634,10 +2711,14 @@ function ordersNode(experimentId, epochId, foldId) {
 /* Standalone LLM strategy-review card (peer of the fold-result panel). */
 function analysisPanel(experimentId, epochId, foldId) {
   const base = `/api/experiments/${encodeURIComponent(experimentId)}/analysis/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}`;
-  const panel = el("div", { class: "panel section-gap" });
+  return analysisNode(base, "策略分析（LLM，仅验证期证据）");
+}
+
+function analysisNode(base, title, { standalone = true } = {}) {
+  const panel = el("div", { class: standalone ? "panel section-gap" : "section-gap" });
   const regenButton = el("button", { class: "btn small" }, "生成分析");
   const head = el("div", { class: "control-bar" },
-    el("h4", { class: "subsection-title" }, "策略分析（LLM，仅验证期证据）"),
+    el("h4", { class: "subsection-title" }, title),
     el("span", { class: "spacer" }),
     regenButton,
   );
@@ -2679,11 +2760,12 @@ function analysisPanel(experimentId, epochId, foldId) {
   return panel;
 }
 
-function metaResultPanel(session) {
+function metaResultPanel(detail, session) {
   const record = session.record || {};
   const panel = el("div", { class: "panel section-gap" }, el("h4", {}, `元学习结果 — ${session.epoch_id}`));
   panel.append(el("table", { class: "kv" },
     kvRow("状态", record.status || "—"),
+    kvRow("总耗时", foldDurationNode(detail, session)),
     record.meta_learning_directive ? kvRow("注入指令", record.meta_learning_directive) : null,
     record.sandbox_image_update ? kvRow("沙箱镜像", JSON.stringify(record.sandbox_image_update)) : null,
   ));

@@ -493,6 +493,7 @@ def _agent_visible_backtest_summary(record: dict[str, object]) -> dict[str, obje
             "finished_at",
             "replay_wall_seconds",
             "replayed_trade_days",
+            "replayed_exit_days",
             "substep_runtime",
             "phase_seconds",
             "agent_peak_rss_bytes",

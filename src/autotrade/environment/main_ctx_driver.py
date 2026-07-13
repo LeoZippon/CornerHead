@@ -12,11 +12,90 @@ This module imports only the Python standard library (no ``autotrade``, ``pandas
 ``broker_core`` import), so it runs unchanged in the dependency-light sandbox image.
 """
 
-import builtins, contextlib, filecmp, importlib.util, json, math, os, re, resource, shutil, sys, time, types, uuid
+import builtins, contextlib, filecmp, importlib.util, json, math, os, re, resource, shutil, sys, time, traceback, types, uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
 _PROTOCOL_STDOUT = sys.stdout
+
+
+def _public_strategy_error(exc, *, main_path, request, snapshot_dir):
+    """Return only allowlisted, non-sensitive repair metadata for Probe feedback."""
+    message = str(exc)
+    if message.startswith("main.py failed to import:"):
+        return {
+            "public_error_type": "strategy_contract_error",
+            "public_reason": "strategy_import_failed",
+            "public_retry_hint": "Check output imports and keep module-level code limited to imports and constants.",
+        }
+    if "ctx.state_dir is only available inside ctx.substep" in message:
+        return {
+            "public_error_type": "strategy_contract_error",
+            "public_reason": "state_dir_outside_substep",
+            "public_retry_hint": "Access ctx.state_dir only inside ctx.substep(name, budget_minutes=B).",
+        }
+    if isinstance(exc, TypeError) and "'dict' object is not callable" in message:
+        strategy_root = Path(main_path).parent
+        for frame in traceback.extract_tb(exc.__traceback__):
+            try:
+                in_strategy = _is_under(_normalize_path(frame.filename), _normalize_path(strategy_root))
+            except (OSError, TypeError):
+                in_strategy = False
+            if in_strategy and re.search(r"\.\s*broker\s*\.\s*(stock|credit)\s*\(", frame.line or ""):
+                return {
+                    "public_error_type": "strategy_contract_error",
+                    "public_reason": "account_view_not_callable",
+                    "public_retry_hint": (
+                        "ctx.broker.stock and ctx.broker.credit are dict properties; "
+                        "use ctx.broker.stock['available_cash'] without parentheses."
+                    ),
+                }
+    state = request.get("state") or {}
+    rolling_asof_dir = state.get("asof_dir") if isinstance(state, dict) else None
+    asof_dir = rolling_asof_dir or snapshot_dir
+    missing = _normalize_path(getattr(exc, "filename", None))
+
+    def matches_known_path(path):
+        normalized = _normalize_path(path)
+        return normalized is not None and (
+            missing == normalized
+            or re.search(
+                r"(?<![A-Za-z0-9_./-])" + re.escape(str(normalized)) + r"(?![A-Za-z0-9_./-])",
+                message,
+            ) is not None
+        )
+
+    wrong_universe = Path(str(asof_dir)) / "universe"
+    if matches_known_path(wrong_universe):
+        return {
+            "public_error_type": "strategy_contract_error",
+            "public_reason": "universe_path_mismatch",
+            "public_retry_hint": "Read the frozen universe from Path(ctx.asof_dir) / 'universe.parquet'.",
+        }
+    # Timeview domains are partitioned Parquet dataset directories. Pandas raises
+    # FileNotFoundError for a wrong suffix, while DuckDB raises IOException with
+    # the path only in its message; match only trusted, allowlisted paths and never
+    # return the raw exception text.
+    if rolling_asof_dir:
+        for domain in (
+            "daily",
+            "intraday_1min",
+            "auction",
+            "events",
+            "macro",
+            "fundamentals",
+            "text_index",
+        ):
+            if matches_known_path(Path(str(asof_dir)) / (domain + ".parquet")):
+                return {
+                    "public_error_type": "strategy_contract_error",
+                    "public_reason": "asof_path_mismatch",
+                    "public_retry_hint": (
+                        "Read rolling Timeview data from Path(ctx.asof_dir) / %r; "
+                        "it is a partitioned dataset directory without a .parquet suffix."
+                    ) % domain,
+                }
+    return {}
 
 
 def _peak_rss_bytes():
@@ -204,9 +283,6 @@ def _guarded_os_unlink(path, *args, **kwargs):
     return _os_unlink(path, *args, **kwargs)
 
 
-os.remove = _guarded_os_unlink
-
-
 _path_unlink = Path.unlink
 
 
@@ -327,26 +403,29 @@ def _guarded_os_scandir(path=None):
     return _os_scandir()
 
 
-builtins.open = _guarded_open
-Path.open = _guarded_path_open
-os.open = _guarded_os_open
-os.mkdir = _guarded_os_mkdir
-os.makedirs = _guarded_os_makedirs
-Path.mkdir = _guarded_path_mkdir
-os.unlink = _guarded_os_unlink
-Path.unlink = _guarded_path_unlink
-os.rmdir = _guarded_os_rmdir
-Path.rmdir = _guarded_path_rmdir
-os.rename = _guarded_os_rename
-os.replace = _guarded_os_replace
-Path.rename = _guarded_path_rename
-Path.replace = _guarded_path_replace
-os.symlink = _guarded_os_symlink
-Path.symlink_to = _guarded_path_symlink_to
-os.link = _guarded_os_link
-Path.hardlink_to = _guarded_path_hardlink_to
-os.listdir = _guarded_os_listdir
-os.scandir = _guarded_os_scandir
+def _install_path_guards():
+    """Install process-wide guards only in the standalone replay driver."""
+    builtins.open = _guarded_open
+    Path.open = _guarded_path_open
+    os.open = _guarded_os_open
+    os.mkdir = _guarded_os_mkdir
+    os.makedirs = _guarded_os_makedirs
+    Path.mkdir = _guarded_path_mkdir
+    os.unlink = _guarded_os_unlink
+    os.remove = _guarded_os_unlink
+    Path.unlink = _guarded_path_unlink
+    os.rmdir = _guarded_os_rmdir
+    Path.rmdir = _guarded_path_rmdir
+    os.rename = _guarded_os_rename
+    os.replace = _guarded_os_replace
+    Path.rename = _guarded_path_rename
+    Path.replace = _guarded_path_replace
+    os.symlink = _guarded_os_symlink
+    Path.symlink_to = _guarded_path_symlink_to
+    os.link = _guarded_os_link
+    Path.hardlink_to = _guarded_path_hardlink_to
+    os.listdir = _guarded_os_listdir
+    os.scandir = _guarded_os_scandir
 
 _SECRET_PATTERNS = (
     (re.compile(r"sk-[A-Za-z0-9_-]{8,}"), "sk-***"),
@@ -1009,6 +1088,7 @@ def _load_module(path, name):
 
 
 def _serve():
+    _install_path_guards()
     main_path = Path(sys.argv[1])
     snapshot_dir = os.environ.get("AT_SNAPSHOT_DIR", "/mnt/snapshot")
     model_dir = os.environ.get("AT_MODEL_DIR", "/mnt/agent/models")
@@ -1069,8 +1149,22 @@ def _serve():
                     "agent_peak_rss_bytes": _peak_rss_bytes(),
                 }
         except Exception as exc:
-            response = {"request_id": request_id, "status": "error", "error": _sanitize_error("%s: %s" % (type(exc).__name__, exc))}
-        print(json.dumps(response, ensure_ascii=False, default=str), file=_PROTOCOL_STDOUT, flush=True)
+            response = {
+                "request_id": request_id,
+                "status": "error",
+                "error": _sanitize_error("%s: %s" % (type(exc).__name__, exc)),
+                **_public_strategy_error(
+                    exc,
+                    main_path=main_path,
+                    request=request,
+                    snapshot_dir=snapshot_dir,
+                ),
+            }
+        print(
+            json.dumps(response, ensure_ascii=False, default=str, separators=(",", ":")),
+            file=_PROTOCOL_STDOUT,
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

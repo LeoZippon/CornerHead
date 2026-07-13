@@ -1299,7 +1299,9 @@ def main(ctx):
         self.assertEqual(result.substep_runtime["screen"]["count"], 1.0)
         self.assertGreaterEqual(result.substep_runtime["screen"]["budget_minutes"], 3.0)
         self.assertIsInstance(result.replay_wall_seconds, float)
-        self.assertEqual(result.replayed_trade_days, 2)  # _ohlc_replay has two trade dates
+        # _ohlc_replay has one strategy day plus one reserved liquidation day.
+        self.assertEqual(result.replayed_trade_days, 1)
+        self.assertEqual(result.replayed_exit_days, 1)
         # Per-phase wall-time is reported for the 24h replay's cost breakdown (W9).
         self.assertEqual(
             set(result.phase_seconds),
@@ -1378,12 +1380,15 @@ def main(ctx):
             decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
-            with self.assertRaisesRegex(BacktestError, "decision exceeded"):
+            with self.assertRaisesRegex(BacktestError, "decision exceeded") as raised:
                 run_main_ctx_replay(
                     _ohlc_replay(), BrokerProfile(),
                     shortable_codes=frozenset(), main_policy=policy,
                     replay_intraday_1min=_dense_minutes(),
                 )
+            self.assertEqual(raised.exception.error_type, "strategy_runtime_error")
+            self.assertEqual(raised.exception.reason, "strategy_decision_timeout")
+            self.assertIn("asof_version", raised.exception.retry_hint or "")
 
     def test_preopen_0915_tick_has_no_price_but_fills_at_open(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(PREOPEN_MAIN, encoding="utf-8")
@@ -1789,6 +1794,23 @@ class DecisionGridTest(unittest.TestCase):
         self.assertTrue(_is_decision_tick(tick("14:57", is_close_auction=True), 5))
         self.assertTrue(_is_decision_tick(tick("08:00", is_offsession=True), 5))
         self.assertTrue(_is_decision_tick(tick("15:06", is_afterhours=True), 5))
+
+
+class MarketStateEncodingTest(unittest.TestCase):
+    def test_numeric_fast_path_matches_scalar_contract(self) -> None:
+        from autotrade.environment.main_ctx_engine import _columnar_float_values, _float_or_none
+
+        cases = (
+            pd.Series([1.0, float("nan"), float("inf"), float("-inf")], dtype="float64"),
+            pd.Series([1, None, -3], dtype="Int64"),
+            pd.Series([True, False, None], dtype="boolean"),
+            pd.Series(["1.25", "", "bad", None], dtype="object"),
+            pd.Series([complex(1, 0), complex(1, 2)], dtype="complex128"),
+        )
+        for values in cases:
+            with self.subTest(dtype=str(values.dtype)):
+                expected = [_float_or_none(value) for value in values.tolist()]
+                self.assertEqual(_columnar_float_values(values), expected)
 
 
 class LazyBarsTest(unittest.TestCase):

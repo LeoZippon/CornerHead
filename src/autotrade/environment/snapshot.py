@@ -35,6 +35,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from autotrade.data_sources.tushare.common import (
+    BOARD_TRADING_DATASETS,
     STK_AUCTION_OBSERVED_AVAILABILITY_START,
     STK_AUCTION_PRICE_ABS_TOLERANCE,
 )
@@ -45,9 +46,11 @@ from autotrade.environment.data.pit import yyyymmdd
 from autotrade.environment.features.auction import apply_open_auction_correction
 from autotrade.environment.features.fundamental_events import FUNDAMENTAL_EVENT_DATASETS, read_fundamental_events
 from autotrade.environment.features.units import normalize_daily_units
+from autotrade.environment.research_release import DOMAIN_STATUS_FILES
 from autotrade.environment.runtime import new_id, utc_now_iso
 
 SNAPSHOT_DOMAIN_WORKERS = 2
+_BOARD_TRADING_DATASETS = frozenset(BOARD_TRADING_DATASETS)
 DomainBuildResult = tuple[dict[str, object], dict[str, object]]
 DomainBuildTask = tuple[
     str,
@@ -499,15 +502,16 @@ class SnapshotBuilder:
     # Enabled-domain data-quality gates over the audit status files. Execution-
     # critical domains (daily bars, intraday minutes; fundamentals has its own
     # stricter gate) hard-fail on a missing/unreadable/error status — bad
-    # execution data invalidates every fill. Research domains (events/macro/
-    # text) degrade to a manifest warning: their audits flag source-level
+    # execution data invalidates every fill. Research domains (events,
+    # board-trading, macro, text) degrade to a manifest warning: their audits flag source-level
     # sparsity and calibration artifacts that should not block an experiment.
     _DOMAIN_STATUS_FILES: tuple[tuple[str, str, bool], ...] = (
-        ("daily", "base_research_status.json", True),
-        ("intraday_1min", "intraday_minutes_status.json", True),
-        ("events", "event_flow_status.json", False),
-        ("macro", "macro_context_status.json", False),
-        ("text", "text_evidence_status.json", False),
+        ("daily", DOMAIN_STATUS_FILES["daily"], True),
+        ("intraday_1min", DOMAIN_STATUS_FILES["intraday_1min"], True),
+        ("events", DOMAIN_STATUS_FILES["events"], False),
+        ("board_trading", DOMAIN_STATUS_FILES["board_trading"], False),
+        ("macro", DOMAIN_STATUS_FILES["macro"], False),
+        ("text", DOMAIN_STATUS_FILES["text"], False),
     )
 
     def _domain_status_gates(self, config: SnapshotConfig) -> dict[str, str]:
@@ -518,6 +522,7 @@ class SnapshotBuilder:
             "daily": True,
             "intraday_1min": bool(config.include_intraday),
             "events": bool(config.events_datasets),
+            "board_trading": bool(_BOARD_TRADING_DATASETS.intersection(config.events_datasets)),
             "macro": bool(config.macro_datasets),
             "text": bool(config.text_datasets),
         }
