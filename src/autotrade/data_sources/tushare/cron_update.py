@@ -436,6 +436,42 @@ def stable_hash(value: object) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def job_config_hash(ctx: RunContext) -> str:
+    """Hash only schedule inputs that can affect this job.
+
+    Hashing the complete schedule made an edit to any unrelated job invalidate
+    every successful job/date record. Commands already have a separate hash;
+    this identity retains the shared settings read by this operation plus the
+    selected job's own configuration.
+    """
+    operation = str(ctx.job.get("operation", "update"))
+    shared_keys = {
+        "schema_version",
+        "timezone",
+        "repo_root",
+        "python",
+        "default_start_date",
+        "default_raw_dir",
+        "default_lock_wait_seconds",
+    }
+    if operation in {
+        "update",
+        "download_tier",
+        "download_event_flow",
+        "auction_capture",
+        "revision_sentinel",
+    }:
+        shared_keys.add("default_update_args")
+    if operation == "pit_event_pipeline":
+        shared_keys.add("default_pit_root")
+    if operation == "revision_sentinel":
+        shared_keys.add("revision_monitor")
+    return stable_hash({
+        "shared": {key: ctx.config.get(key) for key in sorted(shared_keys)},
+        "job": ctx.job,
+    })
+
+
 @dataclass
 class FileLock:
     """A held kernel flock; the file itself is never deleted (unlinking a
@@ -649,7 +685,7 @@ def main() -> int:
         "end_date": ctx.end_date,
         "commands": commands,
         "command_hash": stable_hash(commands),
-        "config_hash": stable_hash(ctx.config),
+        "config_hash": job_config_hash(ctx),
         "log_path": str(log_path),
         "timezone": ctx.timezone_name,
     }

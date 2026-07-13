@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autotrade.agent import AgentSessionConfig, AgentSessionRunner
-from autotrade.environment.executor import DockerExecutor, LocalExecutor, docker_available
+from autotrade.environment.executor import DockerExecutor, ExecutorError, LocalExecutor, docker_available
 from autotrade.environment.llm.proxy import ScriptedLLM, tool_call, tool_call_response
 from autotrade.environment.runtime import SandboxPaths
 from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, SandboxSpec
@@ -110,6 +110,60 @@ class SandboxSpecTest(unittest.TestCase):
             self.assertIn(f"{paths.agent}:/mnt/agent:rw", command)
             self.assertIn(f"{paths.current_snapshot}:/mnt/snapshot:ro", command)
             self.assertNotIn("/mnt/runtime/snapshot_views", command)
+
+    def test_formal_container_uses_only_allowlisted_mounts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            paths = sandbox.prepare_layout()
+            docker = DockerSandbox(sandbox, SandboxSpec(gpu=None))
+            docker.image_id = "sha256:fixed-image"
+
+            class Completed:
+                returncode = 0
+                stderr = ""
+                stdout = "container-id"
+
+            runtime = Path(tmp) / "formal"
+            with patch("subprocess.run", return_value=Completed()) as run:
+                with docker.formal_executor(runtime) as executor:
+                    self.assertEqual(executor.map_path(paths.agent_output / "main.py"), "/mnt/agent/output/main.py")
+                    with self.assertRaises(ExecutorError):
+                        executor.map_path(paths.workspace / "secret.txt")
+
+            command = run.call_args_list[0].args[0]
+            rendered = " ".join(command)
+            self.assertIn("--read-only", command)
+            self.assertIn("--network=none", command)
+            self.assertIn(f"{paths.agent_output}:/mnt/agent/output:ro", command)
+            self.assertIn(f"{paths.model_artifacts}:/mnt/agent/models:ro", command)
+            self.assertIn(f"{runtime.resolve() / 'state'}:/mnt/runtime/state:ro", command)
+            self.assertIn(f"{runtime.resolve() / 'state_staging'}:/mnt/runtime/state_staging:rw", command)
+            self.assertNotIn(str(paths.workspace), rendered)
+            self.assertNotIn(str(paths.artifacts), rendered)
+            self.assertNotIn(str(paths.valid), rendered)
+            self.assertNotIn(str(paths.test), rendered)
+
+    def test_formal_guard_pauses_and_always_unpauses_development_container(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            docker = DockerSandbox(sandbox, SandboxSpec(gpu=None))
+            docker.container = "development-container"
+
+            class Completed:
+                returncode = 0
+                stderr = ""
+
+            with patch("subprocess.run", return_value=Completed()) as run:
+                with docker.formal_guard():
+                    pass
+
+            self.assertEqual(
+                [call.args[0] for call in run.call_args_list],
+                [
+                    ["docker", "pause", "development-container"],
+                    ["docker", "unpause", "development-container"],
+                ],
+            )
 
     def test_docker_sandbox_redirects_tool_caches_out_of_workspace(self):
         # pip/HF/torch/CUDA caches must land in the ephemeral /tmp, never under
@@ -1052,6 +1106,46 @@ class DockerSandboxE2ETest(unittest.TestCase):
                 self.assertNotEqual(blocked_artifacts.exit_code, 0)
                 blocked = executor.run(["/bin/sh", "-c", "ls /mnt/snapshots/test"], timeout_seconds=30)
                 self.assertNotEqual(blocked.exit_code, 0)  # 0700 test slot is unreadable for agent
+
+                (paths.workspace / "formal_secret").write_text("secret", encoding="utf-8")
+                (paths.artifacts / "formal_secret").write_text("secret", encoding="utf-8")
+                (paths.valid / "formal_secret").write_text("secret", encoding="utf-8")
+                runtime = Path(tmp) / "formal_one"
+                with docker.formal_executor(runtime) as formal:
+                    isolated = formal.run(
+                        [
+                            "/bin/sh",
+                            "-c",
+                            "test ! -e /mnt/agent/workspace/formal_secret && "
+                            "test ! -e /mnt/artifacts/formal_secret && "
+                            "test ! -e /mnt/snapshots/valid/formal_secret && "
+                            "touch /tmp/formal_only && echo ok > /mnt/runtime/state_staging/ok",
+                        ],
+                        cwd=paths.agent_output,
+                        timeout_seconds=30,
+                    )
+                    self.assertEqual(isolated.exit_code, 0, isolated.stderr)
+                    blocked_output = formal.run(
+                        ["/bin/sh", "-c", "touch /mnt/agent/output/forbidden"],
+                        cwd=paths.agent_output,
+                        timeout_seconds=30,
+                    )
+                    self.assertNotEqual(blocked_output.exit_code, 0)
+                    blocked_state = formal.run(
+                        ["/bin/sh", "-c", "echo bad > /mnt/runtime/state/forbidden"],
+                        cwd=paths.agent_output,
+                        timeout_seconds=30,
+                    )
+                    self.assertNotEqual(blocked_state.exit_code, 0)
+                self.assertEqual((runtime / "state_staging" / "ok").read_text(encoding="utf-8").strip(), "ok")
+
+                with docker.formal_executor(Path(tmp) / "formal_two") as formal:
+                    clean_tmp = formal.run(
+                        ["/bin/sh", "-c", "test ! -e /tmp/formal_only"],
+                        cwd=paths.agent_output,
+                        timeout_seconds=30,
+                    )
+                    self.assertEqual(clean_tmp.exit_code, 0, clean_tmp.stderr)
             finally:
                 docker.stop()
 

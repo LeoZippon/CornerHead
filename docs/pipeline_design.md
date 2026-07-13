@@ -438,9 +438,12 @@ experiments/<experiment_id>/
 快照缓存按内容身份复用同一实验内字节相同的构建结果：
 
 - 相邻 Fold 可以共享相同决策锚点，多 Epoch 的同一视图也可复用。
-- 回放槽按阶段标签分别构建，不跨 valid/test 标签复用。
+- 同区间回放数据跨 valid/test 标签复用；label 不进入内容键，只原子写入本次运行目录的独立 manifest。
 - 缓存键包含 committed raw 数据湖世代戳：落库后旧缓存自动失效重建；`updating` / `dirty` 状态拒绝命中或构建，不会把部分更新伪装成旧世代。
-- 缓存只写一次，再以硬链接挂入运行目录；共享文件保持只读。
+- 缓存键另含显式格式版本；快照/PIT 磁盘合同变化时递增版本，无关代码提交不清空大缓存。
+- 同一内容键由跨进程 `flock` 合并为一次构建，加锁后复查命中并原子发布；发布异常直接报错。
+- 数据文件以硬链接挂入运行目录；本地 manifest 以新 inode 替换，不会改写缓存或其他运行的硬链接。
+- 每个 Fold/Meta/Held-out 的全部输入在启动 Agent 前校验 raw generation 唯一；混代或部分缺失世代戳直接失败。
 
 **主账本**
 
@@ -582,7 +585,7 @@ experiments/<experiment_id>/
 
 - **重跑**：只允许在 worker 停止时重跑最新 Fold。旧记录保留，新产物使用独立身份；完成后重新执行 held-out。
 - **回滚**：先备份账本并归档目标 Fold 之后的冻结产物，再从目标 Fold 恢复父产物链；同时修剪 Step 产物树——被丢弃 Fold 会话记录的节点（及其后代）连同快照移入同一归档目录（`tree.json` 一并备份），否则重跑的 Fold 会在树里看到未来区间上验证过的策略与指标。回滚后可继续运行或重跑该 Fold。
-- **逐 Step 门控**：对单个 Fold 会话开启后，每次正式验证回测完成即挂起（status `waiting_step_user` + 该 Step 指标摘要），研究者放行时可注入 Step 级指令（作为待检验假设写入该次回测的工具观察，不放宽硬约束）；等待时间回补 Fold 推理预算；门控可随时开关，stop 请求在门控处立即生效。控制动作 `set_step_gate` / `approve_step`（后者由服务端从 status.json 解析当前挂起的 step 序号）。探针（`replay_window`）与失败回测不触发门控。
+- **逐 Step 门控**：对单个 Fold 会话开启后，每次正式验证回测完成即挂起（status `waiting_step_user` + 该 Step 指标摘要），研究者放行时可注入 Step 级指令（作为待检验假设写入该次回测的工具观察，不放宽硬约束）；等待时间回补 Fold 推理预算；门控可随时开关，stop 请求在门控处立即生效。控制动作 `set_step_gate` / `approve_step`（后者由服务端从 status.json 解析当前挂起的 step 序号）。探针（`replay_window`）与失败回测不触发门控。`ask_user` 回复键含本次 worker attempt nonce，崩溃重试不会误消费旧问题的回复。
 - **Agent 主动提问（`ask_user` 工具）**：Agent 在关键分叉点可暂停并提交一个方向性问题 + 现状总结（status `waiting_user_reply` + 问题原文），研究者在详情页答复（`reply_question`，空答复=放行由 Agent 自行决策），答复作为研究者方向指引注入工具观察（不放宽硬约束）；等待时间回补推理预算，stop 请求在等待处立即生效。auto 模式或 CLI 无人值守运行立即返回 unattended，由 Agent 自主决策。控制字段 `user_replies["<session>#q<n>"]`；重跑/回滚会清除对应会话的历史答复。
 - **Step 级回滚（父产物覆盖）**：详情页 Step 产物树列出跨 Fold 的全部已验证节点（含各节点完整源代码与验证明细下载）；研究者可把任一已验证节点设为某个 Fold 会话的父产物起点（`parent_overrides`，替代默认冻结继承链）。未运行的 Fold 在下次启动时生效；已完成的 Fold 配合重跑使用。仅允许指向不晚于目标会话的节点（更晚 Fold 的节点携带未来区间验证结果，控制台直接拒绝）；节点快照按记录哈希校验后才会成为父产物，账本中该 Fold 的父产物 id 带 `stepnode_` 前缀可审计。设置持续有效，重设覆盖、留空清除；Fold 回滚会清除被丢弃会话的覆盖。
 - **提前收官**：至少有一个冻结 Fold 后，可跳过剩余 development，以最新冻结产物进入 held-out；人工控制模式仍需批准 held-out。

@@ -118,8 +118,11 @@ class RefreshNode:
 REFRESH_NODES: dict[str, RefreshNode] = {
     # Evening rolling-window update: A-share daily core, minute history, money flow,
     # block trade, holders/repurchase/float/top-list, macro, and bulk text. Launches
-    # 23:35 and finishes ~02:05 next day, so its data is visible only from D+1.
-    "cn_evening_full": RefreshNode("cn_evening_full", time(23, 35), 150),
+    # Real dispatches have exceeded the former 150-minute estimate (one reached
+    # 169 minutes). Historical replays have no per-run completion ledger, so use
+    # a conservative 210-minute fallback (03:05) rather than knowingly exposing
+    # rows before the observed job completed.
+    "cn_evening_full": RefreshNode("cn_evening_full", time(23, 35), 210),
     # Fundamental PIT event index build (financial filings become queryable).
     "cn_nightly_pit_event_build": RefreshNode("cn_nightly_pit_event_build", time(3, 35), 15),
     # Pre-open board-trading backfill (kpl_list etc.).
@@ -203,9 +206,37 @@ def visible_cutoff(node_names: tuple[str, ...], when: datetime) -> datetime | No
     return max(cutoffs) if cutoffs else None
 
 
+def next_visible_boundary(node_names: tuple[str, ...], when: datetime) -> datetime | None:
+    """Earliest future ``ready_at`` among ``node_names``.
+
+    Timeview uses this as a fast gate between refreshes. The prior day's evening
+    job can finish after midnight, so candidates include both the previous and
+    current local calendar day. Boundaries are strict: a node ready exactly at
+    ``when`` has already been processed and the next daily instance is returned.
+    """
+    if not node_names:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=CN_TZ)
+    local_when = when.astimezone(CN_TZ)
+    base_day = local_when.date()
+    candidates = [
+        ready_at
+        for name in node_names
+        for delta in (-1, 0, 1)
+        if (ready_at := REFRESH_NODES[name].ready_at(base_day + timedelta(days=delta))) > local_when
+    ]
+    return min(candidates) if candidates else None
+
+
 def domain_visible_cutoff(domain: str, when: datetime) -> datetime | None:
     """Timeview availability cutoff for a whole-domain file at ``when``."""
     return visible_cutoff(DOMAIN_REFRESH_NODES.get(domain, (EVENING_NODE,)), when)
+
+
+def domain_next_visible_boundary(domain: str, when: datetime) -> datetime | None:
+    """Next Timeview refresh boundary for a whole-domain file."""
+    return next_visible_boundary(DOMAIN_REFRESH_NODES.get(domain, (EVENING_NODE,)), when)
 
 
 def event_dataset_visible_cutoff(dataset: str, when: datetime) -> datetime | None:
@@ -213,6 +244,16 @@ def event_dataset_visible_cutoff(dataset: str, when: datetime) -> datetime | Non
     return visible_cutoff(EVENT_DATASET_REFRESH_NODES.get(dataset, (EVENING_NODE,)), when)
 
 
+def event_dataset_next_visible_boundary(dataset: str, when: datetime) -> datetime | None:
+    """Next Timeview refresh boundary for one events-domain dataset."""
+    return next_visible_boundary(EVENT_DATASET_REFRESH_NODES.get(dataset, (EVENING_NODE,)), when)
+
+
 def text_dataset_visible_cutoff(dataset: str, when: datetime) -> datetime | None:
     """Timeview availability cutoff for one text-domain dataset at ``when``."""
     return visible_cutoff(TEXT_DATASET_REFRESH_NODES.get(dataset, (EVENING_NODE,)), when)
+
+
+def text_dataset_next_visible_boundary(dataset: str, when: datetime) -> datetime | None:
+    """Next Timeview refresh boundary for one text-domain dataset."""
+    return next_visible_boundary(TEXT_DATASET_REFRESH_NODES.get(dataset, (EVENING_NODE,)), when)

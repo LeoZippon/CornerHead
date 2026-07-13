@@ -55,6 +55,7 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 27 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927 >> logs/tushare_cron_dispatch.log 2>&1
 31 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927 >> logs/tushare_cron_dispatch.log 2>&1
 
-# Final same-job recovery before the evening full refresh. It normally skips;
-# after a morning timeout it completes the exact generation transaction first.
-20 23 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927 >> logs/tushare_cron_dispatch.log 2>&1
+# Final strict source reconciliation before the evening full refresh. It always
+# re-queries the exact date even when the morning capture succeeded, so a late
+# source correction is published before the normal nightly generation.
+20 23 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927 --force-run >> logs/tushare_cron_dispatch.log 2>&1

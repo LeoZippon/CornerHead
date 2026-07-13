@@ -189,7 +189,12 @@ class ExperimentPipeline:
     def _executor_for(docker: DockerSandbox | None, sandbox: LocalSandbox):
         if docker is None:
             return None  # ToolContext defaults to LocalExecutor
-        return DockerExecutor(docker.container, sandbox.paths)
+        return DockerExecutor(
+            docker.container,
+            sandbox.paths,
+            formal_factory=docker.formal_executor,
+            formal_guard_factory=docker.formal_guard,
+        )
 
     @staticmethod
     def _bind_view(sandbox: LocalSandbox, docker: DockerSandbox | None, view_name: str) -> None:
@@ -334,6 +339,12 @@ class ExperimentPipeline:
             fold.validation_start, fold.validation_end, paths.valid, label="valid"
         )
         test_replay = self.snapshots.replay_slot(fold.test_start, fold.test_end, paths.test, label="test")
+        _assert_single_raw_generation(
+            valid_decision_input=valid_snapshot,
+            test_decision_input=test_snapshot,
+            valid_replay=valid_replay,
+            test_replay=test_replay,
+        )
         write_agent_data_summary(
             paths.data_summary,
             kind="fold",
@@ -600,6 +611,10 @@ class ExperimentPipeline:
                 visible_fold.validation_end,
                 paths.valid,
                 label="valid",
+            )
+            _assert_single_raw_generation(
+                valid_decision_input=visible_snapshot,
+                valid_replay=visible_replay,
             )
             sandbox.bind_snapshot_view(visible_view)
         write_agent_data_summary(
@@ -939,6 +954,10 @@ class ExperimentPipeline:
             replay = self.snapshots.replay_slot(
                 str(period["start"]), str(period["end"]), paths.test, label="heldout"
             )
+            _assert_single_raw_generation(
+                test_decision_input=snapshot,
+                test_replay=replay,
+            )
             fold_id = f"heldout_{period['label']}"
             manifest = RunManifest.create(
                 paths.run_manifest,
@@ -1265,6 +1284,37 @@ class ExperimentPipeline:
 
 def _snapshot_ref(manifest: dict[str, object]) -> dict[str, object]:
     return {"snapshot_id": manifest.get("snapshot_id"), "snapshot_hash": manifest.get("snapshot_hash")}
+
+
+def _assert_single_raw_generation(**inputs: dict[str, object]) -> None:
+    """Fail before Agent/container start when one run mixes raw-lake generations.
+
+    Legacy and synthetic views may omit a generation stamp, so only non-empty
+    generation IDs participate in the comparison.
+    """
+    generations: dict[str, str] = {}
+    unstamped: list[str] = []
+    for name, manifest in inputs.items():
+        raw_generation = manifest.get("raw_generation")
+        if not isinstance(raw_generation, dict):
+            unstamped.append(name)
+            continue
+        generation_id = str(raw_generation.get("generation_id") or "").strip()
+        if generation_id:
+            generations[name] = generation_id
+        else:
+            unstamped.append(name)
+    if generations and unstamped:
+        raise RuntimeError(
+            "run inputs mix generation-stamped and unstamped data; refusing to start "
+            f"Agent/container: stamped={sorted(generations)}, unstamped={sorted(unstamped)}"
+        )
+    if len(set(generations.values())) > 1:
+        details = ", ".join(f"{name}={generation_id}" for name, generation_id in generations.items())
+        raise RuntimeError(
+            "raw lake generation changed while building run inputs; "
+            f"refusing to start Agent/container: {details}"
+        )
 
 
 def _metrics(summary: dict[str, object] | None) -> dict[str, object] | None:

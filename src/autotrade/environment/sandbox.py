@@ -501,6 +501,29 @@ def _host_gateway_args(spec: SandboxSpec) -> list[str]:
     return ["--add-host", f"host.docker.internal:{target}"]
 
 
+def _docker_resource_args(
+    spec: SandboxSpec,
+    gpu_indices: Sequence[int],
+    *,
+    network: str | None = None,
+) -> list[str]:
+    args: list[str] = []
+    if gpu_indices:
+        devices = ",".join(str(index) for index in gpu_indices)
+        args.extend(["--gpus", f'"device={devices}"'])
+    args.extend(
+        [
+            f"--network={network or spec.network}",
+            f"--cpus={spec.cpus}",
+            f"--memory={spec.memory}",
+            f"--pids-limit={spec.pids_limit}",
+            "--ulimit",
+            "core=0:0",
+        ]
+    )
+    return args
+
+
 def link_copytree(source: str | Path, dest: str | Path) -> Path:
     """Replace ``dest`` with a hardlinked copy of ``source``."""
     source, dest = Path(source), Path(dest)
@@ -604,15 +627,11 @@ class DockerSandbox:
 
     def start(self) -> str:
         paths = self.local.paths
-        gpu_args: list[str] = []
         if self.spec.gpu is not None:
             from autotrade.environment.gpu import GpuUnavailableError
 
             try:
                 self.gpu_indices = self._resolve_gpu_indices()
-                if self.gpu_indices:
-                    devices = ",".join(str(index) for index in self.gpu_indices)
-                    gpu_args = ["--gpus", f'"device={devices}"']
             except GpuUnavailableError as exc:
                 message = str(exc)
                 if self.spec.gpu == "auto" and (
@@ -638,17 +657,7 @@ class DockerSandbox:
             "--name",
             self.container,
             *(arg for key, value in sorted(self.labels.items()) for arg in ("--label", f"{key}={value}")),
-            *gpu_args,
-            f"--network={self.spec.network}",
-            f"--cpus={self.spec.cpus}",
-            f"--memory={self.spec.memory}",
-            f"--pids-limit={self.spec.pids_limit}",
-            # Disable core dumps: a crashing GPU/training child (e.g. a torch
-            # std::system_error under pid pressure) would otherwise write a
-            # multi-GB, subuid-owned core into the agent workspace that the host
-            # collector cannot read.
-            "--ulimit",
-            "core=0:0",
+            *_docker_resource_args(self.spec, self.gpu_indices),
             *_host_gateway_args(self.spec),
             *_CACHE_REDIRECT_ENV_ARGS,
             *env_args,
@@ -721,6 +730,101 @@ class DockerSandbox:
     def bind_snapshot_view(self, view_name: str) -> None:
         """Refresh the host current snapshot mounted at container /mnt/snapshot."""
         self.local.bind_snapshot_view(self.local.paths.snapshot_views / view_name)
+
+    @contextmanager
+    def formal_guard(self):
+        """Freeze the development container for one complete formal tool call.
+
+        A read-only bind in the formal container does not stop a background
+        process in the development container from writing the same host inode.
+        Pausing the development namespace before artifact validation and keeping
+        it paused through result publication closes that TOCTOU without copying
+        potentially large model artifacts for every Probe.
+        """
+        paused = subprocess.run(
+            ["docker", "pause", self.container],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if paused.returncode != 0:
+            raise RuntimeError(f"failed to pause development container: {paused.stderr.strip()}")
+        try:
+            yield
+        finally:
+            resumed = subprocess.run(
+                ["docker", "unpause", self.container],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if resumed.returncode != 0 and sys.exc_info()[0] is None:
+                raise RuntimeError(f"failed to unpause development container: {resumed.stderr.strip()}")
+
+    @contextmanager
+    def formal_executor(self, runtime_root: Path):
+        """Start one throw-away strategy container with only formal mounts."""
+        from autotrade.environment.executor import FormalDockerExecutor
+
+        paths = self.local.paths
+        runtime_root = Path(runtime_root).resolve()
+        state = runtime_root / "state"
+        staging = runtime_root / "state_staging"
+        asof = runtime_root / "asof"
+        rpc_agent = runtime_root / "rpc_agent"
+        for path in (state, staging, asof, rpc_agent / ".runtime"):
+            path.mkdir(parents=True, exist_ok=True)
+            path.chmod(0o777)
+        container = new_id("mqformal")
+        command = [
+            "docker",
+            "run",
+            "--detach",
+            "--init",
+            "--name",
+            container,
+            *(arg for key, value in sorted(self.labels.items()) for arg in ("--label", f"{key}={value}")),
+            "--label",
+            "mq.role=formal-replay",
+            *_docker_resource_args(self.spec, self.gpu_indices, network="none"),
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,size=4g",
+            *_CACHE_REDIRECT_ENV_ARGS,
+            "-v",
+            f"{paths.current_snapshot}:/mnt/snapshot:ro",
+            "-v",
+            f"{paths.agent_output}:/mnt/agent/output:ro",
+            "-v",
+            f"{paths.model_artifacts}:/mnt/agent/models:ro",
+            "-v",
+            f"{state}:/mnt/runtime/state:ro",
+            "-v",
+            f"{staging}:/mnt/runtime/state_staging:rw",
+            "-v",
+            f"{asof}:/mnt/runtime/asof:ro",
+            "-v",
+            f"{rpc_agent}:/mnt/runtime/rpc_agent:rw",
+            self.image_id or self.spec.image,
+            "sleep",
+            "infinity",
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        if completed.returncode != 0:
+            raise RuntimeError(f"failed to start formal replay container: {completed.stderr.strip()}")
+        mappings = (
+            (paths.current_snapshot, "/mnt/snapshot"),
+            (paths.agent_output, "/mnt/agent/output"),
+            (paths.model_artifacts, "/mnt/agent/models"),
+            (state, "/mnt/runtime/state"),
+            (staging, "/mnt/runtime/state_staging"),
+            (asof, "/mnt/runtime/asof"),
+            (rpc_agent, "/mnt/runtime/rpc_agent"),
+        )
+        try:
+            yield FormalDockerExecutor(container, mappings)
+        finally:
+            subprocess.run(["docker", "rm", "-f", container], capture_output=True, text=True, timeout=60)
 
     def stop(self) -> None:
         subprocess.run(["docker", "rm", "-f", self.container], capture_output=True, text=True, timeout=60)

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
@@ -378,10 +379,36 @@ def _validate_auction_capture(frame_: pd.DataFrame, trade_date: str, *, min_rows
         price = pd.to_numeric(frame_["price"], errors="coerce")
         volume = pd.to_numeric(frame_["vol"], errors="coerce")
         amount = pd.to_numeric(frame_["amount"], errors="coerce")
-        traded = volume.fillna(0).gt(0) | amount.fillna(0).gt(0)
-        inconsistent = traded & (~price.gt(0) | ~volume.gt(0) | ~amount.gt(0))
+        finite_volume = pd.Series(np.isfinite(volume), index=frame_.index)
+        finite_amount = pd.Series(np.isfinite(amount), index=frame_.index)
+        invalid_volume = ~finite_volume | volume.lt(0)
+        invalid_amount = ~finite_amount | amount.lt(0)
+        if invalid_volume.any():
+            errors.append(f"invalid_vol_rows={int(invalid_volume.sum())}")
+        if invalid_amount.any():
+            errors.append(f"invalid_amount_rows={int(invalid_amount.sum())}")
+
+        valid_quantities = ~invalid_volume & ~invalid_amount
+        traded = valid_quantities & (volume.gt(0) | amount.gt(0))
+        inconsistent = traded & ~(volume.gt(0) & amount.gt(0))
         if inconsistent.any():
             errors.append(f"inconsistent_trade_rows={int(inconsistent.sum())}")
+
+        direct_price = pd.Series(np.isfinite(price), index=frame_.index) & price.gt(0)
+        recovered_price = amount.div(volume)
+        recoverable = (
+            volume.gt(0)
+            & amount.gt(0)
+            & pd.Series(np.isfinite(recovered_price), index=frame_.index)
+            & recovered_price.gt(0)
+        )
+        bad_trade_price = traded & ~(direct_price | recoverable)
+        if bad_trade_price.any():
+            errors.append(f"unrecoverable_trade_price_rows={int(bad_trade_price.sum())}")
+        no_trade = valid_quantities & volume.eq(0) & amount.eq(0)
+        hidden_no_trade_price = no_trade & direct_price
+        if hidden_no_trade_price.any():
+            errors.append(f"hidden_no_trade_price_rows={int(hidden_no_trade_price.sum())}")
     return errors
 
 

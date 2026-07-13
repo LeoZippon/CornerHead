@@ -1,3 +1,14 @@
+2026-07-13 数据刷新、世代一致性与正式容器基础边界（fix/auction-pit-performance）
+
+- 晚间通用任务不再写 `stk_auction`，23:20 走强制严格复核；竞价量价校验、cron 安装 marker/全文核验和 job-scoped config identity 补齐。
+- Fold/Meta/Held-out 输入启动前强制同一 raw generation；Snapshot cache 增加显式格式版本、label-neutral manifest 和跨进程 single-flight。
+- 增加一次性 formal 容器挂载白名单与开发容器 pause guard，visible state 只读；数据/刷新/cron/pipeline/Docker 定向回归通过。
+
+2026-07-13 Replay 缓存去重与跨进程 single-flight（fix/auction-pit-performance）
+
+- Replay 内容键不再包含 valid/test label；同区间只构建一次，label 以新 inode 原子覆盖到本次 out_dir manifest，不改写缓存或已硬链接的其他运行。
+- 同 cache key 以 `flock` 跨进程合并构建并在获锁后复查；原子 rename 异常不再被当成竞态吞掉。Pipeline/config 回归 60 tests OK，`git diff --check` 通过。
+
 2026-07-13 数据 generation 失败封锁与刷新合同修复（fix/auction-pit-performance）
 
 - `.raw_generation.json` 升级为兼容旧格式的 v2 状态机：mutating job 先标 updating，失败为 dirty，只有同 job/区间/命令可精确恢复；Snapshot/cache 对非 committed fail-closed。下载子进程继承 flock，runner 被杀后不再失锁继续写。

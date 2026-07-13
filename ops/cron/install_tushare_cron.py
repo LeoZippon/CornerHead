@@ -39,7 +39,25 @@ def build_managed_block() -> str:
     return f"{BEGIN}\n{body}\n{END}\n"
 
 
+def validate_managed_markers(text: str, *, source: str) -> None:
+    """Reject unmatched, duplicated, reversed, or nested managed markers."""
+    markers = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() in {BEGIN, END}
+    ]
+    if not markers:
+        return
+    if markers != [BEGIN, END]:
+        raise RuntimeError(
+            f"invalid managed cron markers in {source}: expected one paired "
+            f"{BEGIN!r}/{END!r}, found {markers!r}"
+        )
+
+
 def replace_managed_block(current: str, managed: str) -> str:
+    validate_managed_markers(current, source="current crontab")
+    validate_managed_markers(managed, source="generated block")
     kept: list[str] = []
     skipping = False
     for line in current.splitlines():
@@ -58,6 +76,14 @@ def replace_managed_block(current: str, managed: str) -> str:
     return result + managed
 
 
+def verify_installed_crontab(expected: str, installed: str) -> None:
+    validate_managed_markers(installed, source="installed crontab")
+    expected_text = expected.rstrip("\n") + "\n"
+    installed_text = installed.rstrip("\n") + "\n"
+    if installed_text != expected_text:
+        raise RuntimeError("post-install verification failed: installed crontab differs from requested content")
+
+
 def main() -> int:
     args = parse_args()
     if not TEMPLATE.exists():
@@ -74,8 +100,7 @@ def main() -> int:
         print(f"backed up current crontab to {backup}")
     subprocess.run(["crontab", "-"], input=updated, text=True, check=True)
     installed = subprocess.run(["crontab", "-l"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-    if BEGIN not in installed.stdout:
-        raise RuntimeError("post-install verification failed: managed block not found in crontab")
+    verify_installed_crontab(updated, installed.stdout)
     print("installed MacroQuant TuShare cron block")
     return 0
 

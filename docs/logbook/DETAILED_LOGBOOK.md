@@ -17240,3 +17240,40 @@ Validation:
 - `test_data_sources_tushare test_main_ctx_replay test_broker_engine test_snapshot_builder test_timeview test_refresh_nodes`: 288 OK.
 - `tests.unit.test_tools_flow`: 86 OK.
 - Schedule JSON, generated prompt, and `git diff --check` verified. Production cron installation intentionally follows the focused commit.
+
+
+## 2026-07-13 Replay-cache single-flight and label-local manifests
+
+Task: remove duplicate replay builds without adding a new cache service or changing snapshot payload semantics.
+
+Implementation:
+- Removed `label` from the replay content key. The canonical cache build uses label-neutral metadata, while each bound output receives the requested valid/test/probe label.
+- Installed the output `manifest.json` with a same-directory atomic replace. This creates a fresh inode after the view is hardlinked, so changing one run's label cannot mutate the cache manifest or another run's manifest; Parquet payloads remain hardlinked.
+- Added a per-key hidden lock file and Linux `flock`. A miss rechecks `cache_manifest.json` after acquiring the lock, so concurrent experiment workers perform one materialization.
+- Cache publication still uses an atomic directory rename, but unexpected rename failures now propagate. The staging tree is cleaned without converting a permission or filesystem failure into a false cache hit.
+- Updated the Pipeline living document to describe the label overlay, single-flight boundary, and inode rule.
+
+Validation:
+- Added a real two-process regression with synchronized workers and a deliberately slow provider. valid/test produced one build, one content entry, independent manifest inodes, and shared Parquet inodes.
+- Added a regression proving `PermissionError` from cache publication reaches the caller.
+- `PYTHONDONTWRITEBYTECODE=1 /home/lzp/miniconda3/envs/quant/bin/python -m unittest tests.unit.test_pipeline_config tests.unit.test_pipeline_e2e`: 60 tests OK.
+- `py_compile` and focused `git diff --check` passed. No experiment, data mutation, Docker build, network call, or external write was run.
+
+
+## 2026-07-13 Refresh overwrite fences, run-generation consistency, and formal-container base
+
+Task: close the remaining auction/generation races and establish the OS-level formal replay boundary before optimizing the replay loop.
+
+Implementation:
+- Removed `stk_auction` from the generic evening update, including the default-dataset path; the 23:20 invocation now force-runs the same strict capture. Capture rejects non-finite/negative or one-sided quantities, unrecoverable prices, hidden prices on zero-quantity rows, unstable reads, and material row loss.
+- Changed cron skip identity from the whole schedule to the selected job plus operation-relevant shared fields. The installer now rejects malformed/duplicate managed markers and verifies the complete installed crontab.
+- Added a cache format identity, label-neutral replay content, per-key `flock`, atomic local manifest overlay, and fail-fast rename errors.
+- Fold, Meta, and Held-out input sets now reject mixed or partially missing raw-generation stamps before any Agent/container starts.
+- Added the ephemeral formal-container mount allowlist and a development-container pause guard. The formal root is read-only/network-none; output/models/current snapshot/state are read-only and only staging/RPC remain writable.
+- Replaced the known-too-early 150-minute evening fallback with a conservative 210-minute boundary. This is a fallback, not a claim of exact historical completion.
+
+Validation:
+- Data-source/refresh-node/cron-installer suite: 99 tests OK.
+- Pipeline config/E2E suite: 64 tests OK.
+- Actual Docker sandbox lifecycle plus Dockerized Fold E2E: 2 tests OK.
+- No real data download/update, provider API call, experiment, or image build was run. Production crontab reinstall is deferred until the committed template is final.

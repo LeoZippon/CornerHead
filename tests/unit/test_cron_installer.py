@@ -1,0 +1,45 @@
+"""Safety contract for the managed TuShare crontab installer."""
+
+import importlib.util
+import unittest
+from pathlib import Path
+
+
+SCRIPT = Path(__file__).resolve().parents[2] / "ops" / "cron" / "install_tushare_cron.py"
+SPEC = importlib.util.spec_from_file_location("install_tushare_cron", SCRIPT)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError(f"cannot load {SCRIPT}")
+installer = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(installer)
+
+
+class CronInstallerTest(unittest.TestCase):
+    def test_replacement_preserves_unrelated_lines_and_has_one_marker_pair(self) -> None:
+        current = "MAILTO=owner@example.com\n0 1 * * * unrelated\n"
+        managed = f"{installer.BEGIN}\n5 2 * * * managed\n{installer.END}\n"
+        updated = installer.replace_managed_block(current, managed)
+        self.assertIn("0 1 * * * unrelated", updated)
+        self.assertEqual(updated.count(installer.BEGIN), 1)
+        self.assertEqual(updated.count(installer.END), 1)
+
+    def test_replacement_rejects_unpaired_or_duplicate_markers(self) -> None:
+        managed = f"{installer.BEGIN}\nmanaged\n{installer.END}\n"
+        invalid_tables = (
+            f"{installer.BEGIN}\nunterminated\n",
+            f"{installer.END}\n",
+            f"{installer.BEGIN}\na\n{installer.END}\n{installer.BEGIN}\nb\n{installer.END}\n",
+            f"{installer.END}\nreversed\n{installer.BEGIN}\n",
+        )
+        for current in invalid_tables:
+            with self.subTest(current=current), self.assertRaisesRegex(RuntimeError, "invalid managed cron markers"):
+                installer.replace_managed_block(current, managed)
+
+    def test_post_install_verification_requires_exact_content(self) -> None:
+        expected = f"unrelated\n{installer.BEGIN}\nmanaged\n{installer.END}\n"
+        installer.verify_installed_crontab(expected, expected.rstrip("\n"))
+        with self.assertRaisesRegex(RuntimeError, "differs from requested content"):
+            installer.verify_installed_crontab(expected, expected.replace("unrelated", "changed"))
+
+
+if __name__ == "__main__":
+    unittest.main()

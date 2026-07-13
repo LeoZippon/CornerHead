@@ -99,12 +99,41 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
         for job in schedule_jobs - AUDIT_ONLY_JOBS:
             self.assertIn(job, REFRESH_NODES, f"data-landing job {job!r} has no Timeview refresh node")
 
+    def test_evening_daily_set_cannot_bypass_dedicated_auction_capture(self) -> None:
+        schedule = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))
+        args = schedule["jobs"]["cn_evening_full"]["extra_args"]
+
+        def values_after(flag: str) -> list[str]:
+            start = args.index(flag) + 1
+            values: list[str] = []
+            for value in args[start:]:
+                if str(value).startswith("--"):
+                    break
+                values.append(str(value))
+            return values
+
+        daily = values_after("--daily-datasets")
+        refreshed = values_after("--refresh-daily-datasets")
+        self.assertTrue(daily)
+        self.assertNotIn("stk_auction", daily)
+        self.assertNotIn("stk_auction", refreshed)
+
+    def test_2320_auction_reconciliation_is_forced(self) -> None:
+        matching = [
+            line
+            for line in CRONTAB.read_text(encoding="utf-8").splitlines()
+            if re.match(r"^20\s+23\s+\*\s+\*\s+\*", line)
+            and "--job cn_open_auction_capture_0927" in line
+        ]
+        self.assertEqual(len(matching), 1)
+        self.assertIn("--force-run", matching[0])
+
     def test_evening_node_ready_at_matches_duration_fixture(self) -> None:
-        # Lock the calibrated refresh duration: 23:35 launch + 150 min -> 02:05 next day.
+        # Conservative fallback: 23:35 launch + 210 min -> 03:05 next day.
         node = REFRESH_NODES["cn_evening_full"]
         self.assertEqual(
             node.ready_at(date(2022, 1, 5)),
-            datetime(2022, 1, 6, 2, 5, tzinfo=CN_TZ),
+            datetime(2022, 1, 6, 3, 5, tzinfo=CN_TZ),
         )
 
     def test_dataset_overrides_reference_real_nodes(self) -> None:
@@ -136,15 +165,15 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
 class VisibilityCutoffTest(unittest.TestCase):
     def test_daily_domain_visible_only_through_prior_day_during_session(self) -> None:
         # During day D's session the evening node that lands D's daily core has not
-        # finished (it runs D 23:35 -> D+1 02:05), so the cutoff is D-1's evening
+        # finished (fallback D 23:35 -> D+1 03:05), so the cutoff is D-1's evening
         # start: daily for D-1 is visible, daily for D is not.
         when = datetime(2022, 1, 5, 9, 31, tzinfo=CN_TZ)
         cutoff = domain_visible_cutoff("daily", when)
         self.assertEqual(cutoff, datetime(2022, 1, 4, 23, 35, tzinfo=CN_TZ))
 
     def test_daily_domain_rolls_after_evening_completes(self) -> None:
-        # After 02:05 on D+1 the evening node that ran D 23:35 has completed.
-        when = datetime(2022, 1, 6, 2, 30, tzinfo=CN_TZ)
+        # After 03:05 on D+1 the evening node that ran D 23:35 has completed.
+        when = datetime(2022, 1, 6, 3, 30, tzinfo=CN_TZ)
         cutoff = domain_visible_cutoff("daily", when)
         self.assertEqual(cutoff, datetime(2022, 1, 5, 23, 35, tzinfo=CN_TZ))
 
@@ -198,8 +227,8 @@ class VisibilityCutoffTest(unittest.TestCase):
     def test_visible_cutoff_none_before_any_node_completes(self) -> None:
         # Just after midnight on the very first day, no evening node has finished.
         when = datetime(2022, 1, 1, 0, 5, tzinfo=CN_TZ)
-        # The prior day's evening node (2021-12-31 23:35 -> 2022-01-01 02:05) is not
-        # done at 00:05, and the day-before-that completed 2021-12-31 02:05.
+        # The prior day's evening node (2021-12-31 23:35 -> 2022-01-01 03:05) is not
+        # done at 00:05, and the day-before-that completed 2021-12-31 03:05.
         cutoff = visible_cutoff(("cn_evening_full",), when)
         self.assertEqual(cutoff, datetime(2021, 12, 30, 23, 35, tzinfo=CN_TZ))
 

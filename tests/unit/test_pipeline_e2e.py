@@ -68,6 +68,25 @@ class ModelArtifactFoldAgent:
         return {"finish_status": "fold_finished"}
 
 
+class SwitchingGenerationProvider(FakeSnapshotProvider):
+    """Simulates a committed raw-lake publication between input builds."""
+
+    def __init__(self, *, switch_after: int) -> None:
+        self.switch_after = switch_after
+        self.builds = 0
+
+    def _stamp(self, manifest: dict[str, object]) -> dict[str, object]:
+        self.builds += 1
+        generation_id = "generation_before" if self.builds <= self.switch_after else "generation_after"
+        return {**manifest, "raw_generation": {"generation_id": generation_id}}
+
+    def decision_snapshot(self, decision_time, out_dir):
+        return self._stamp(super().decision_snapshot(decision_time, out_dir))
+
+    def replay_slot(self, start, end, out_dir, *, label):
+        return self._stamp(super().replay_slot(start, end, out_dir, label=label))
+
+
 def make_config(tmp: Path, **overrides) -> ExperimentConfig:
     defaults = dict(
         experiment_id="exp_e2e",
@@ -939,6 +958,86 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual(second.fold_status, "frozen")
             cache_entries = [p for p in (config.experiment_dir / "snapshot_cache").iterdir() if not p.name.startswith(".")]
             self.assertEqual(len(cache_entries), decision_builds + replay_builds)
+
+    def test_fold_rejects_generation_switch_before_agent_or_container_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            agent_calls: list[str] = []
+
+            def agent_factory(ctx, fold, manifest):
+                agent_calls.append(fold.fold_id)
+                return ScriptedFoldAgent(ctx)
+
+            pipeline = ExperimentPipeline(
+                make_config(tmp),
+                SwitchingGenerationProvider(switch_after=2),
+                agent_factory,
+                proxy=ScriptedLLM([]),
+            )
+            fold = build_fold_schedule("2022Q1", "2022Q1", TRADING_DAYS)[0]
+            with patch.object(pipeline, "_start_container") as start_container:
+                with self.assertRaisesRegex(RuntimeError, "raw lake generation changed"):
+                    pipeline.run_fold(fold, epoch_id="epoch_001", parent=None)
+
+            start_container.assert_not_called()
+            self.assertEqual(agent_calls, [])
+
+    def test_meta_learning_rejects_generation_switch_before_agent_or_container_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            meta_calls: list[str] = []
+
+            def meta_learner(ctx):
+                meta_calls.append("called")
+
+            pipeline = ExperimentPipeline(
+                make_config(tmp),
+                SwitchingGenerationProvider(switch_after=1),
+                lambda ctx, fold, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+                meta_learner=meta_learner,
+            )
+            fold = build_fold_schedule("2022Q1", "2022Q1", TRADING_DAYS)[0]
+            with patch.object(pipeline, "_start_container") as start_container:
+                with self.assertRaisesRegex(RuntimeError, "raw lake generation changed"):
+                    pipeline.run_meta_learning(
+                        epoch_id="epoch_001",
+                        parent=None,
+                        visible_fold=fold,
+                    )
+
+            start_container.assert_not_called()
+            self.assertEqual(meta_calls, [])
+
+    def test_heldout_rejects_generation_switch_before_container_or_backtest_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            final_output = tmp / "final_output"
+            final_models = tmp / "final_models"
+            final_output.mkdir()
+            final_models.mkdir()
+            write_strategy(final_output)
+            final = FrozenArtifact(
+                artifact_id="strategy_final",
+                path=final_output,
+                artifact_hash=artifact_hash(final_output),
+                model_path=final_models,
+                model_artifact_hash=model_artifact_hash(final_models),
+            )
+            pipeline = ExperimentPipeline(
+                make_config(tmp),
+                SwitchingGenerationProvider(switch_after=1),
+                lambda ctx, fold, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+            )
+            with patch.object(pipeline, "_start_container") as start_container, patch(
+                "autotrade.pipelines.experiment.BacktestTool.run"
+            ) as backtest:
+                with self.assertRaisesRegex(RuntimeError, "raw lake generation changed"):
+                    pipeline.run_heldout(final, TRADING_DAYS, epoch_id="epoch_001")
+
+            start_container.assert_not_called()
+            backtest.assert_not_called()
 
     def test_failed_attempt_writes_permanent_ledger_record(self):
         # A run that throws before its success record must leave an

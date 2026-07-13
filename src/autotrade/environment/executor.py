@@ -16,6 +16,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, ContextManager, Sequence
 
 from autotrade.environment.runtime import SandboxPaths
 
@@ -151,10 +152,20 @@ class DockerExecutor:
 
     name = "docker"
 
-    def __init__(self, container: str, host_paths: SandboxPaths, *, python: str = "python3") -> None:
+    def __init__(
+        self,
+        container: str,
+        host_paths: SandboxPaths,
+        *,
+        python: str = "python3",
+        formal_factory: Callable[[Path], ContextManager["FormalDockerExecutor"]] | None = None,
+        formal_guard_factory: Callable[[], ContextManager[None]] | None = None,
+    ) -> None:
         self.container = container
         self.host_paths = host_paths
         self.python = python
+        self.formal_factory = formal_factory
+        self.formal_guard_factory = formal_guard_factory
 
     def runtime_path(self, host_path: Path | str) -> str:
         """Container path of the trusted runtime module (the main_ctx driver) baked
@@ -287,6 +298,53 @@ class DockerExecutor:
             text=True,
             errors="replace",
         )
+
+
+class FormalDockerExecutor(DockerExecutor):
+    """Executor for one ephemeral formal replay with explicit mount mappings.
+
+    Unlike the development executor, it cannot map the sandbox root. Paths not
+    present in the read/write allowlist fail closed before ``docker exec``.
+    """
+
+    formal_isolation = True
+
+    def __init__(
+        self,
+        container: str,
+        mappings: Sequence[tuple[Path, str]],
+        *,
+        python: str = "python3",
+    ) -> None:
+        # DockerExecutor methods only need these attributes; a synthetic
+        # SandboxPaths would incorrectly imply that the whole root is mounted.
+        self.container = container
+        self.python = python
+        self.formal_factory = None
+        self.formal_guard_factory = None
+        self._mappings = tuple((Path(host).resolve(), str(target)) for host, target in mappings)
+
+    def map_path(self, host_path: Path | str) -> str:
+        candidate = Path(host_path).resolve()
+        for host_root, container_root in self._mappings:
+            try:
+                relative = candidate.relative_to(host_root)
+            except ValueError:
+                continue
+            return str(Path(container_root) / relative)
+        raise ExecutorError(f"path is outside formal replay mounts: {host_path}")
+
+    @staticmethod
+    def _merged_env(env: dict[str, str] | None) -> dict[str, str]:
+        return {
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "HOME": "/tmp/formal_home",
+            "PYTHONUSERBASE": "/tmp/formal_home/.local",
+            "PIP_USER": "0",
+            "npm_config_prefix": "/tmp/formal_home/.npm-global",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            **(env or {}),
+        }
 
 
 def docker_available() -> bool:

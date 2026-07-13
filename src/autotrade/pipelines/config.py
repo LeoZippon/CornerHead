@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
@@ -22,6 +23,10 @@ from autotrade.environment.tools import ToolContext
 from .folds import FoldSpec, assert_no_overlap
 
 FINAL_EVAL_WALL_CAP_MULTIPLIER = 3.0
+# Increment only when the cached snapshot/replay on-disk contract changes.
+# Source revisions (including Git HEAD) are intentionally not cache inputs:
+# harmless code changes should not invalidate every expensive data view.
+SNAPSHOT_CACHE_FORMAT_VERSION = 1
 
 
 class SnapshotProvider(Protocol):
@@ -54,17 +59,16 @@ class RawSnapshotProvider:
 
 
 class CachingSnapshotProvider:
-    """Reuse identical snapshot builds within one experiment.
+    """Reuse identical snapshot content within one experiment.
 
     Adjacent folds share the expensive decision snapshot (fold N+1's validation
     anchor equals fold N's test anchor) and multi-epoch reruns rebuild every
-    view identically; each build is a pure function of (anchor/range, label,
-    provider config) over a raw lake that must not change mid-experiment.
-    Replay slots are label-specific — the label lands inside the built
-    manifest — so same-range valid/test slots build once per label rather than
-    sharing. Entries are built once under the experiment dir and hardlinked
-    into each run's sandbox; snapshot parquet views are write-once, so shared
-    inodes are safe (the same pattern as the step tree's link_copytree).
+    view identically. Replay content is a pure function of (range, provider
+    config) over a raw lake that must not change mid-experiment; ``label`` is
+    run-local manifest metadata and is overlaid only after the cached view is
+    linked into ``out_dir``. Entries are published once under the experiment
+    dir and hardlinked into each run's sandbox. A per-key ``flock`` makes cache
+    misses single-flight across workers; the winner is rechecked after locking.
     """
 
     def __init__(self, provider: SnapshotProvider, cache_root: Path) -> None:
@@ -84,12 +88,17 @@ class CachingSnapshotProvider:
         )
 
     def replay_slot(self, start: str, end: str, out_dir: Path, *, label: str) -> dict[str, object]:
-        # label lands inside the built manifest, so it is part of the key.
-        return self._cached(
-            ("replay", start, end, label),
-            lambda view: self._provider.replay_slot(start, end, view, label=label),
+        manifest = self._cached(
+            ("replay", start, end),
+            # SnapshotBuilder uses label only as manifest metadata. Keep the
+            # cached content label-neutral, then bind the requested role to the
+            # run-local output manifest below.
+            lambda view: self._provider.replay_slot(start, end, view, label=""),
             out_dir,
         )
+        manifest = {**manifest, "label": label}
+        self._replace_output_manifest(Path(out_dir), manifest)
+        return manifest
 
     def _cached(
         self,
@@ -101,22 +110,53 @@ class CachingSnapshotProvider:
         # rebuild, never resurface a view of the previous lake.
         generation = read_raw_generation(getattr(self._provider, "raw_dir", None))
         generation_key = str((generation or {}).get("generation_id", ""))
-        key = hashlib.sha256("|".join((*parts, self._config_key, generation_key)).encode("utf-8")).hexdigest()[:16]
+        key = hashlib.sha256(
+            "|".join(
+                (*parts, self._config_key, generation_key, f"format={SNAPSHOT_CACHE_FORMAT_VERSION}")
+            ).encode("utf-8")
+        ).hexdigest()[:16]
         entry = self._root / f"{parts[0]}_{key}"
         manifest_path = entry / "cache_manifest.json"
         if not manifest_path.exists():
-            staging = self._root / f".{parts[0]}_{key}.{uuid.uuid4().hex[:8]}"
-            manifest = build(staging / "view")
-            (staging / "cache_manifest.json").write_text(
-                json.dumps(manifest, ensure_ascii=False, sort_keys=True, default=str, allow_nan=False),
-                encoding="utf-8",
-            )
-            try:
-                staging.rename(entry)  # atomic publish; a concurrent builder may have won
-            except OSError:
-                shutil.rmtree(staging, ignore_errors=True)
+            lock_dir = self._root / ".locks"
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            with (lock_dir / f"{entry.name}.lock").open("a+b") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                # Another process may have completed this key while we waited.
+                if not manifest_path.exists():
+                    staging = self._root / f".{parts[0]}_{key}.{uuid.uuid4().hex[:8]}"
+                    try:
+                        manifest = build(staging / "view")
+                        (staging / "cache_manifest.json").write_text(
+                            json.dumps(manifest, ensure_ascii=False, sort_keys=True, default=str, allow_nan=False),
+                            encoding="utf-8",
+                        )
+                        # Atomic publish under the per-key lock. Any rename
+                        # failure indicates a real filesystem/cache problem and
+                        # must reach the caller instead of being mistaken for a
+                        # concurrent winner.
+                        staging.rename(entry)
+                    finally:
+                        if staging.exists():
+                            shutil.rmtree(staging, ignore_errors=True)
         link_copytree(entry / "view", out_dir)
         return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _replace_output_manifest(out_dir: Path, manifest: dict[str, object]) -> None:
+        """Install run-local metadata without writing through cache hardlinks."""
+        target = out_dir / "manifest.json"
+        staging = out_dir / f".manifest.{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            staging.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True, default=str, allow_nan=False),
+                encoding="utf-8",
+            )
+            # replace() swaps this directory entry onto a fresh inode; writing
+            # target in place would mutate the cache and every prior hardlink.
+            staging.replace(target)
+        finally:
+            staging.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)

@@ -953,6 +953,39 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         self.assertIn("duplicate_keys=1", errors)
 
+    def test_auction_capture_validates_trade_and_no_trade_quantities(self):
+        base = {
+            "trade_date": "20260713",
+            "pre_close": 9.9,
+            "turnover_rate": 0.1,
+            "volume_ratio": 1.0,
+            "float_share": 100000.0,
+        }
+        valid = pd.DataFrame([
+            {**base, "ts_code": "000001.SZ", "price": 10.0, "vol": 1000.0, "amount": 10000.0},
+            # A missing source price is safe when the clearing price can be
+            # reconstructed exactly from two positive finite quantities.
+            {**base, "ts_code": "000002.SZ", "price": None, "vol": 2000.0, "amount": 16000.0},
+            {**base, "ts_code": "000003.SZ", "price": None, "vol": 0.0, "amount": 0.0},
+        ])
+        self.assertEqual(download._validate_auction_capture(valid, "20260713", min_rows=3), [])
+
+        invalid = pd.DataFrame([
+            {**base, "ts_code": "000004.SZ", "price": 10.0, "vol": float("nan"), "amount": 10.0},
+            {**base, "ts_code": "000005.SZ", "price": 10.0, "vol": -1.0, "amount": 0.0},
+            {**base, "ts_code": "000006.SZ", "price": 10.0, "vol": 1.0, "amount": 0.0},
+            {**base, "ts_code": "000007.SZ", "price": 10.0, "vol": 1.0, "amount": float("nan")},
+            {**base, "ts_code": "000008.SZ", "price": 10.0, "vol": 1.0, "amount": -1.0},
+            {**base, "ts_code": "000009.SZ", "price": None, "vol": 5e-324, "amount": 1e308},
+            {**base, "ts_code": "000010.SZ", "price": 10.0, "vol": 0.0, "amount": 0.0},
+        ])
+        errors = download._validate_auction_capture(invalid, "20260713", min_rows=7)
+        self.assertIn("invalid_vol_rows=2", errors)
+        self.assertIn("invalid_amount_rows=2", errors)
+        self.assertIn("inconsistent_trade_rows=1", errors)
+        self.assertIn("unrecoverable_trade_price_rows=1", errors)
+        self.assertIn("hidden_no_trade_price_rows=1", errors)
+
     def test_auction_capture_row_floor_allows_only_small_day_to_day_drop(self):
         previous = self.raw_dir / "stk_auction" / "trade_date=20260710.parquet"
         previous.parent.mkdir(parents=True, exist_ok=True)
@@ -1101,6 +1134,48 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         command = cron_update.build_job_commands(ctx)[0]
         timeout_positions = [i for i, value in enumerate(command) if value == "--timeout-seconds"]
         self.assertEqual(command[timeout_positions[-1] + 1], "15")
+
+    def test_cron_job_hash_ignores_unrelated_job_edits(self):
+        selected_job = {"operation": "auction_capture", "skip_if_already_ok": True}
+        base_config = {
+            "schema_version": 1,
+            "timezone": "Asia/Shanghai",
+            "repo_root": str(self.root),
+            "python": "/env/python",
+            "default_start_date": "20200101",
+            "default_raw_dir": "raw",
+            "default_update_args": ["--timeout-seconds", "15"],
+            "jobs": {"auction": selected_job, "unrelated": {"extra_args": ["old"]}},
+        }
+        edited_config = {
+            **base_config,
+            "jobs": {"auction": selected_job, "unrelated": {"extra_args": ["new"]}},
+        }
+        contexts = [
+            cron_update.RunContext(
+                config=config,
+                repo_root=self.root,
+                python="/env/python",
+                job_name="auction",
+                job=selected_job,
+                start_date="20260713",
+                end_date="20260713",
+                timezone_name="Asia/Shanghai",
+            )
+            for config in (base_config, edited_config)
+        ]
+        first_hash, edited_hash = map(cron_update.job_config_hash, contexts)
+        self.assertEqual(first_hash, edited_hash)
+        payload = {"command_hash": "same-command", "config_hash": edited_hash}
+        state = {
+            "start_date": "20260713",
+            "end_date": "20260713",
+            "status": "ok",
+            "command_hash": "same-command",
+            "config_hash": first_hash,
+        }
+        args = argparse.Namespace(force_run=False)
+        self.assertTrue(cron_update.should_skip_completed(contexts[1], args, state, payload))
 
     def test_cron_full_audit_builds_all_formal_status_commands(self):
         ctx = cron_update.RunContext(
