@@ -47,6 +47,9 @@ class ReplayResult:
     # Peak RSS reported by the one-shot formal Agent process. Informational only;
     # it is never an acceptance or modification-check input.
     agent_peak_rss_bytes: int | None = None
+    # Peak RSS sampled for the host worker during this replay. This distinguishes
+    # Environment-side frame/copy cost from the isolated Agent process above.
+    host_peak_rss_bytes: int | None = None
 
 
 def compute_return_stats(result: ReplayResult) -> dict[str, object]:
@@ -178,6 +181,7 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "substep_runtime": result.substep_runtime or {},
         "phase_seconds": result.phase_seconds or {},
         "agent_peak_rss_bytes": result.agent_peak_rss_bytes,
+        "host_peak_rss_bytes": result.host_peak_rss_bytes,
         "total_ticks": result.total_ticks,
         "intraday_ticks": result.intraday_ticks,
         "offsession_ticks": result.offsession_ticks,

@@ -1,10 +1,18 @@
-"""Minute replay market indexing and date-slice behavior."""
+"""Minute replay market indexing, parsing, and bounded Parquet prefetch."""
 
+import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
-from autotrade.environment.replay_market import MinuteMarketData
+from autotrade.environment.replay_market import (
+    MinuteMarketData,
+    ParquetMinuteReplaySource,
+    _minute_key,
+)
 
 
 class MinuteMarketDataTest(unittest.TestCase):
@@ -34,6 +42,105 @@ class MinuteMarketDataTest(unittest.TestCase):
         missing = market.rows_for_date("20220106")
         self.assertTrue(missing.empty)
         self.assertEqual(missing.columns.tolist(), market._frame.columns.tolist())
+
+    def test_vectorized_iso_parser_preserves_legacy_fallback_formats(self) -> None:
+        times = [
+            "2022-01-04 09:30:00",
+            "09:31",
+            "093200",
+            "20220104093300",
+            pd.Timestamp("2022-01-04 09:34:00"),
+        ]
+        market = MinuteMarketData(
+            pd.DataFrame(
+                {
+                    "trade_date": ["20220104"] * len(times),
+                    "ts_code": [f"00000{i + 1}.SZ" for i in range(len(times))],
+                    "trade_time": times,
+                    "close": range(10, 10 + len(times)),
+                    "internal_only": "drop-me",
+                }
+            )
+        )
+        self.assertEqual(market._frame["minute_key"].tolist(), [_minute_key(value) for value in times])
+        self.assertEqual(market._frame["minute_sort"].tolist(), [570, 571, 572, 573, 574])
+        self.assertNotIn("internal_only", market._frame.columns)
+
+    def test_invalid_time_still_fails_explicitly(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid trade_time"):
+            MinuteMarketData(
+                pd.DataFrame(
+                    [{"trade_date": "20220104", "ts_code": "000001.SZ", "trade_time": "bad", "close": 10.0}]
+                )
+            )
+
+
+class ParquetMinuteReplaySourceTest(unittest.TestCase):
+    def test_reads_only_selected_day_and_keeps_one_future(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "intraday_1min.parquet"
+            first = pd.DataFrame(
+                [
+                    {
+                        "trade_date": "20220104", "ts_code": "000002.SZ",
+                        "trade_time": "2022-01-04 09:31:00", "open": 20.0,
+                        "high": 20.2, "low": 19.9, "close": 20.1, "vol": 2.0,
+                        "amount": 40.0, "available_at": "2022-01-04T09:31:00+08:00",
+                        "timeview_only": "a",
+                    },
+                    {
+                        "trade_date": "20220104", "ts_code": "000001.SZ",
+                        "trade_time": "2022-01-04 09:30:00", "open": 10.0,
+                        "high": 10.2, "low": 9.9, "close": 10.1, "vol": 1.0,
+                        "amount": 10.0, "available_at": "2022-01-04T09:30:00+08:00",
+                        "timeview_only": "b",
+                    },
+                ]
+            )
+            second = first.assign(
+                trade_date="20220105",
+                trade_time=first["trade_time"].str.replace("2022-01-04", "2022-01-05"),
+                available_at=first["available_at"].str.replace("2022-01-04", "2022-01-05"),
+            )
+            schema = pa.Table.from_pandas(first, preserve_index=False).schema
+            with pq.ParquetWriter(path, schema) as writer:
+                writer.write_table(pa.Table.from_pandas(first, schema=schema, preserve_index=False))
+                writer.write_table(pa.Table.from_pandas(second, schema=schema, preserve_index=False))
+
+            with ParquetMinuteReplaySource(
+                path,
+                trade_dates=("20220104", "20220105"),
+                include_timeview_rows=True,
+            ) as source:
+                self.assertEqual(source.selected_rows, 4)
+                source.prefetch("20220104")
+                with self.assertRaisesRegex(RuntimeError, "already holds"):
+                    source.prefetch("20220105")
+                partition = source.rows_for_date("20220104")
+                self.assertEqual(
+                    list(zip(partition.market_rows["minute_key"], partition.market_rows["ts_code"])),
+                    [("09:30", "000001.SZ"), ("09:31", "000002.SZ")],
+                )
+                self.assertNotIn("timeview_only", partition.market_rows.columns)
+                self.assertEqual(partition.timeview_rows["timeview_only"].tolist(), ["a", "b"])
+                stats = source.stats()
+                self.assertEqual(stats["minute_partitions_loaded"], 1)
+                self.assertEqual(stats["minute_rows_loaded"], 2)
+
+    def test_projection_mode_does_not_retain_timeview_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "intraday_1min.parquet"
+            pd.DataFrame(
+                [{
+                    "trade_date": "20220104", "ts_code": "000001.SZ",
+                    "trade_time": "2022-01-04 09:30:00", "close": 10.0,
+                    "available_at": "2022-01-04T09:30:00+08:00", "large_unused": "x",
+                }]
+            ).to_parquet(path, index=False)
+            with ParquetMinuteReplaySource(path, include_timeview_rows=False) as source:
+                partition = source.rows_for_date("20220104")
+                self.assertIsNone(partition.timeview_rows)
+                self.assertNotIn("large_unused", partition.market_rows.columns)
 
 
 if __name__ == "__main__":

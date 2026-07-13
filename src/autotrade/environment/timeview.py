@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,12 @@ from autotrade.environment.snapshot import to_cn_timestamps
 
 _EMPTY_INDICES = np.array([], dtype=np.int64)
 _ROW_AVAILABLE_AT = "row_available_at"
+
+
+@dataclass
+class _PendingReplayPartition:
+    frame: pd.DataFrame
+    keys: np.ndarray
 
 
 def _utc_ns(values: pd.Series) -> np.ndarray:
@@ -121,6 +128,7 @@ class Timeview:
         snapshot_dir: Path,
         replay_frames: dict[str, pd.DataFrame],
         replay_text_library_dir: Path | None = None,
+        incremental_domains: set[str] | frozenset[str] | None = None,
     ) -> None:
         self.host_dir = Path(host_dir)
         self.executor = executor
@@ -145,6 +153,7 @@ class Timeview:
         # multiple Path.resolve() calls), so it is computed once, lazily.
         self._mapped_dir: str | None = None
         self._domains: dict[str, _DomainView] = {}
+        incremental = frozenset(incremental_domains or ())
         for name, filename, cutoff_key in _DOMAINS:
             replay = replay_frames.get(name)
             self._domains[name] = _DomainView(
@@ -153,6 +162,7 @@ class Timeview:
                 out_dir=self.host_dir / name,
                 frozen_file=self.snapshot_dir / filename,
                 replay=replay if replay is not None else pd.DataFrame(),
+                incremental=name in incremental,
             )
         self._text = _TextView(
             out_index_dir=self.host_dir / "text_index",
@@ -166,6 +176,17 @@ class Timeview:
         universe = self.snapshot_dir / "universe.parquet"
         if universe.exists():
             _link_or_copy(universe, self.host_dir / "universe.parquet")
+
+    def append_replay_partition(self, domain: str, replay: pd.DataFrame) -> None:
+        """Add one bounded source partition to an incremental replay domain."""
+        try:
+            view = self._domains[str(domain)]
+        except KeyError as exc:
+            raise ValueError(f"unknown Timeview domain: {domain}") from exc
+        view.append_replay_partition(replay)
+        # A newly added partition may already be visible at the current node;
+        # force one domain traversal on the next refresh before restoring O(1).
+        self._boundary_gate_ready = False
 
     def refresh(self, when: pd.Timestamp) -> tuple[str, str]:
         """Append any newly-visible rows at ``when`` and return the container-mapped
@@ -204,22 +225,25 @@ class _DomainView:
         out_dir: Path,
         frozen_file: Path,
         replay: pd.DataFrame,
+        incremental: bool = False,
     ) -> None:
         self.name = name
         self.cutoff_key = cutoff_key
         self.out_dir = out_dir
         self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.incremental = bool(incremental)
+        self._pending: list[_PendingReplayPartition] = []
         replay = replay.reset_index(drop=True)
         # A replay frame can only roll if it carries the row-level available_at the
         # node gate needs; without it the domain stays frozen-only (conservative).
         if replay.empty or "available_at" not in replay.columns:
             replay = pd.DataFrame()
-        self.replay = replay
+        self.replay = pd.DataFrame() if self.incremental else replay
         self._part_seq = 0
         self._last_signature: object = object()  # sentinel: force the first roll
         self._cursor: _SortedCursor | None = None
         self._cursors: dict[str, _SortedCursor] = {}
-        if not replay.empty:
+        if not self.incremental and not replay.empty:
             available_at = to_cn_timestamps(replay["available_at"])
             valid = np.flatnonzero(available_at.notna().to_numpy())  # NaT rows never become visible
             keys = _utc_ns(available_at)
@@ -229,6 +253,35 @@ class _DomainView:
                 self._cursors = _dataset_cursors(replay["dataset"].astype(str).to_numpy(), valid, keys)
         self._dataset_names: list[str] = sorted(self._cursors)
         self._columns = self._init_frozen_part(frozen_file)
+        if self.incremental and not replay.empty:
+            self.append_replay_partition(replay)
+
+    def append_replay_partition(self, replay: pd.DataFrame) -> None:
+        if not self.incremental:
+            raise ValueError(f"Timeview domain {self.name} is not incremental")
+        if replay.empty or "available_at" not in replay.columns:
+            return
+        frame = replay
+        if not (
+            isinstance(frame.index, pd.RangeIndex)
+            and frame.index.start == 0
+            and frame.index.step == 1
+        ):
+            frame = frame.reset_index(drop=True)
+        available_at = to_cn_timestamps(frame["available_at"])
+        valid = np.flatnonzero(available_at.notna().to_numpy())
+        if valid.size == 0:
+            return
+        keys_all = _utc_ns(available_at)
+        if valid.size != len(frame):
+            frame = frame.iloc[valid].reset_index(drop=True)
+            keys = keys_all[valid]
+        else:
+            keys = keys_all
+        if not self._columns:
+            self._columns = [column for column in frame.columns if column != "available_at"]
+        self._pending.append(_PendingReplayPartition(frame=frame, keys=keys))
+        self._last_signature = object()
 
     def _init_frozen_part(self, frozen_file: Path) -> list[str]:
         """Seed part 0 from the frozen snapshot domain and fix the canonical schema.
@@ -259,6 +312,8 @@ class _DomainView:
 
     def roll(self, when: pd.Timestamp) -> bool:
         """Append a part for rows newly visible at ``when``; return True if written."""
+        if self.incremental:
+            return self._roll_incremental(when)
         if self.replay.empty:
             return False
         signature = self._signature(when)
@@ -270,6 +325,43 @@ class _DomainView:
             return False
         newly.sort()  # original frame order: parts read back exactly as the frame slice
         part = self.replay.iloc[newly].reindex(columns=self._columns)
+        part.to_parquet(self.out_dir / f"part_{self._part_seq:04d}.parquet", index=False)
+        self._part_seq += 1
+        return True
+
+    def _roll_incremental(self, when: pd.Timestamp) -> bool:
+        if not self._pending:
+            return False
+        signature = self._signature(when)
+        if signature == self._last_signature:
+            return False
+        self._last_signature = signature
+        cutoff = domain_visible_cutoff(str(self.cutoff_key), when) if self.cutoff_key is not None else None
+        if cutoff is None:
+            return False
+        cutoff_key = _cutoff_ns(cutoff)
+        newly: list[pd.DataFrame] = []
+        pending: list[_PendingReplayPartition] = []
+        for partition in self._pending:
+            visible = partition.keys <= cutoff_key
+            if bool(np.all(visible)):
+                newly.append(partition.frame)
+            elif bool(np.any(visible)):
+                newly.append(partition.frame.iloc[np.flatnonzero(visible)])
+                hidden = np.flatnonzero(~visible)
+                pending.append(
+                    _PendingReplayPartition(
+                        frame=partition.frame.iloc[hidden].reset_index(drop=True),
+                        keys=partition.keys[hidden],
+                    )
+                )
+            else:
+                pending.append(partition)
+        self._pending = pending
+        if not newly:
+            return False
+        rows = newly[0] if len(newly) == 1 else pd.concat(newly, ignore_index=True)
+        part = rows.reindex(columns=self._columns)
         part.to_parquet(self.out_dir / f"part_{self._part_seq:04d}.parquet", index=False)
         self._part_seq += 1
         return True
@@ -290,6 +382,11 @@ class _DomainView:
 
     def next_boundary(self, when: pd.Timestamp) -> np.datetime64 | None:
         """Earliest instant after ``when`` at which this view may grow."""
+        if self.incremental:
+            if not self._pending or self.cutoff_key is None:
+                return None
+            boundary = domain_next_visible_boundary(str(self.cutoff_key), when)
+            return _cutoff_ns(boundary) if boundary is not None else None
         if self._cursor is not None:
             if not self._cursor.has_pending():
                 return None

@@ -139,6 +139,71 @@ class TimeviewTest(unittest.TestCase):
             # Prior replay day visible once its evening node completed; today still not.
             self.assertEqual(self._dates(asof, "daily"), {"20211231", "20220104"})
 
+    def test_incremental_intraday_partitions_match_eager_visibility(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            snapshot.mkdir()
+            frozen = pd.DataFrame(
+                [{
+                    "trade_date": "20211231", "ts_code": TS,
+                    "trade_time": "2021-12-31 15:00:00", "open": 9.0, "close": 9.5,
+                }]
+            )
+            _write(snapshot / "intraday_1min.parquet", frozen)
+            day1 = pd.DataFrame(
+                [{
+                    "trade_date": "20220104", "ts_code": TS,
+                    "trade_time": "2022-01-04 15:00:00", "open": 10.0, "close": 10.2,
+                    "available_at": "2022-01-04T15:00:00+08:00",
+                }]
+            )
+            day2 = pd.DataFrame(
+                [{
+                    "trade_date": "20220105", "ts_code": TS,
+                    "trade_time": "2022-01-05 15:00:00", "open": 10.3, "close": 11.0,
+                    "available_at": "2022-01-05T15:00:00+08:00",
+                }]
+            )
+            eager = Timeview(
+                host_dir=root / "eager",
+                executor=FakeExecutor(),
+                snapshot_dir=snapshot,
+                replay_frames={"intraday_1min": pd.concat([day1, day2], ignore_index=True)},
+            )
+            incremental = Timeview(
+                host_dir=root / "incremental",
+                executor=FakeExecutor(),
+                snapshot_dir=snapshot,
+                replay_frames={},
+                incremental_domains={"intraday_1min"},
+            )
+
+            incremental.append_replay_partition("intraday_1min", day1)
+            eager_dir, eager_version = eager.refresh(_when("2022-01-04 09:10:00"))
+            incremental_dir, incremental_version = incremental.refresh(_when("2022-01-04 09:10:00"))
+            self.assertEqual(eager_version, incremental_version)
+            pd.testing.assert_frame_equal(
+                pd.read_parquet(Path(eager_dir) / "intraday_1min"),
+                pd.read_parquet(Path(incremental_dir) / "intraday_1min"),
+            )
+            incremental.append_replay_partition("intraday_1min", day2)
+            eager_dir, eager_version = eager.refresh(_when("2022-01-05 03:30:00"))
+            incremental_dir, incremental_version = incremental.refresh(_when("2022-01-05 03:30:00"))
+            self.assertEqual(eager_version, incremental_version)
+            pd.testing.assert_frame_equal(
+                pd.read_parquet(Path(eager_dir) / "intraday_1min"),
+                pd.read_parquet(Path(incremental_dir) / "intraday_1min"),
+            )
+            eager_dir, eager_version = eager.refresh(_when("2022-01-06 03:30:00"))
+            incremental_dir, incremental_version = incremental.refresh(_when("2022-01-06 03:30:00"))
+            self.assertEqual(eager_version, incremental_version)
+            pd.testing.assert_frame_equal(
+                pd.read_parquet(Path(eager_dir) / "intraday_1min"),
+                pd.read_parquet(Path(incremental_dir) / "intraday_1min"),
+            )
+            self.assertEqual(incremental._domains["intraday_1min"]._pending, [])
+
     def test_margin_secs_visible_same_day_block_trade_waits_for_evening(self):
         with tempfile.TemporaryDirectory() as tmp:
             tv = self._build(Path(tmp))

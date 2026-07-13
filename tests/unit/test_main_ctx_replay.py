@@ -11,7 +11,7 @@ import pandas as pd
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.executor import LocalExecutor
 from autotrade.environment.main_ctx_engine import BacktestError, MainPolicyRunner, _day_tick_plan, run_main_ctx_replay
-from autotrade.environment.replay_market import MinuteMarketData
+from autotrade.environment.replay_market import MinuteMarketData, ParquetMinuteReplaySource
 from autotrade.environment.replay_stats import compute_return_stats
 from autotrade.environment.sandbox import LocalSandbox
 
@@ -969,6 +969,35 @@ def main(ctx):
         self.assertEqual(buys[0]["price_label"], "minute:09:33")
         # Maker fill at exactly the limit price — no taker slippage.
         self.assertAlmostEqual(buys[0]["price"], 9.80)
+
+    def test_daily_parquet_source_matches_eager_minute_replay(self) -> None:
+        (self.sandbox.paths.agent_output / "main.py").write_text(LIMIT_FILL_MAIN, encoding="utf-8")
+        replay = _ohlc_replay()
+        minutes = _limit_minutes()
+        eager = self._run_with(replay, minutes, execution_lag_bars=1)
+        minute_path = Path(self._tmp.name) / "minutes.parquet"
+        minutes.assign(
+            trade_time="2022-01-04 " + minutes["trade_time"].astype(str) + ":00",
+            available_at="2022-01-04T" + minutes["trade_time"].astype(str) + ":00+08:00",
+        ).to_parquet(minute_path, index=False)
+        with ParquetMinuteReplaySource(minute_path, include_timeview_rows=False) as source:
+            lazy = self._run_with(
+                replay,
+                replay_minute_source=source,
+                execution_lag_bars=1,
+            )
+            self.assertEqual(source.stats()["minute_partitions_loaded"], 1)
+
+        def stable_orders(result):
+            return [
+                {key: value for key, value in order.items() if key != "order_id"}
+                for order in _all_orders(result.broker)
+            ]
+
+        self.assertEqual(stable_orders(lazy), stable_orders(eager))
+        eager_stats, lazy_stats = compute_return_stats(eager), compute_return_stats(lazy)
+        for key in ("total_return", "final_equity", "order_count", "trade_count"):
+            self.assertEqual(lazy_stats[key], eager_stats[key])
 
     def test_limit_order_day_end_cancels_when_unfilled(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(LIMIT_CANCEL_MAIN, encoding="utf-8")

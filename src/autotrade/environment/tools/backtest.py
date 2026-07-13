@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -36,6 +38,7 @@ from autotrade.environment.broker import (
 )
 from autotrade.environment.main_ctx_engine import BacktestError, MainPolicyRunner, run_main_ctx_replay
 from autotrade.environment.nl.service import StrategyNLService, cleanup_nl_rpc_files, prepare_nl_rpc_files
+from autotrade.environment.replay_market import ParquetMinuteReplaySource
 from autotrade.environment.identity import agent_visible_ref
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.snapshot import load_snapshot_manifest
@@ -56,6 +59,40 @@ from .modification_check import ModificationCheckTool
 
 _FINAL_EVAL_WALL_CAP_MULTIPLIER = 3.0
 _AGENT_MEMORY_ADVISORY_BYTES = 2 * 1024**3
+
+
+class _ProcessPeakRSS:
+    """Sample this host worker's resident set without touching replay semantics."""
+
+    def __init__(self, interval_seconds: float = 0.1) -> None:
+        self.interval_seconds = float(interval_seconds)
+        self.peak_bytes = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "_ProcessPeakRSS":
+        self._sample()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="backtest-rss-monitor")
+        self._thread.start()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        self._sample()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            self._sample()
+
+    def _sample(self) -> None:
+        try:
+            resident_pages = int(Path("/proc/self/statm").read_text(encoding="ascii").split()[1])
+            resident = resident_pages * int(os.sysconf("SC_PAGE_SIZE"))
+        except (OSError, ValueError, IndexError):
+            return
+        self.peak_bytes = max(self.peak_bytes, resident)
 
 MODES = ("valid", "frozen_eval")
 
@@ -193,8 +230,11 @@ class BacktestTool:
         with guard:
             artifact = load_strategy_artifact(self.ctx.paths.agent_output)
             decision_time = str(self.ctx.manifest.require("valid_decision_time"))
-            replay_minutes = _read_replay_minutes(self.ctx.paths.valid)
-            replay_granularity = "minute" if replay_minutes is not None else "daily"
+            replay_granularity = (
+                "minute"
+                if _replay_minutes_available(self.ctx.paths.valid / "intraday_1min.parquet")
+                else "daily"
+            )
             snapshot_dir = self._resolved_snapshot()
             with _formal_artifacts_readonly(self.ctx.paths, restore_writable=not self.ctx.write_locked):
                 with _formal_replay_execution(self.ctx) as (executor, runtime_dir, _rpc_agent):
@@ -240,6 +280,8 @@ class BacktestTool:
         probe = not complete_validation
         data_load: dict[str, object] = {}
         self._data_load = data_load
+        timeview_enabled = bool(manifest.get("timeview_enabled", manifest.get("rolling_asof_enabled", True)))
+        minute_source: ParquetMinuteReplaySource | None = None
         if replay_window is not None:
             load_t0 = time.monotonic()
             keep = _first_replay_trade_dates(
@@ -251,8 +293,13 @@ class BacktestTool:
             replay_daily = _read_replay_daily(replay_dir, trade_dates=keep)
             data_load["daily_seconds"] = round(time.monotonic() - load_t0, 6)
             load_t0 = time.monotonic()
-            replay_minutes = _read_replay_minutes(replay_dir, trade_dates=keep)
-            data_load["minutes_seconds"] = round(time.monotonic() - load_t0, 6)
+            minute_source = _minute_replay_source(
+                replay_dir,
+                trade_dates=keep,
+                include_timeview_rows=timeview_enabled,
+            )
+            data_load["minute_catalog_seconds"] = round(time.monotonic() - load_t0, 6)
+            data_load["minutes_seconds"] = 0.0
             load_t0 = time.monotonic()
             replay_auction = _read_replay_auction(replay_dir, trade_dates=keep)
             data_load["auction_seconds"] = round(time.monotonic() - load_t0, 6)
@@ -263,22 +310,26 @@ class BacktestTool:
             replay_daily = _read_replay_daily(replay_dir)
             data_load["daily_seconds"] = round(time.monotonic() - load_t0, 6)
             load_t0 = time.monotonic()
-            replay_minutes = _read_replay_minutes(replay_dir)
-            data_load["minutes_seconds"] = round(time.monotonic() - load_t0, 6)
+            minute_source = _minute_replay_source(
+                replay_dir,
+                include_timeview_rows=timeview_enabled,
+            )
+            data_load["minute_catalog_seconds"] = round(time.monotonic() - load_t0, 6)
+            data_load["minutes_seconds"] = 0.0
             load_t0 = time.monotonic()
             replay_auction = _read_replay_auction(replay_dir)
             data_load["auction_seconds"] = round(time.monotonic() - load_t0, 6)
         data_load.update(
             {
                 "daily_rows": int(len(replay_daily)),
-                "minute_rows": int(len(replay_minutes)) if replay_minutes is not None else 0,
+                "minute_rows": int(minute_source.selected_rows) if minute_source is not None else 0,
                 "auction_rows": int(len(replay_auction)) if replay_auction is not None else 0,
                 "daily_source_bytes": _path_bytes(replay_dir / "daily.parquet"),
                 "minute_source_bytes": _path_bytes(replay_dir / "intraday_1min.parquet"),
                 "auction_source_bytes": _path_bytes(replay_dir / "auction.parquet"),
             }
         )
-        replay_granularity = "minute" if replay_minutes is not None else "daily"
+        replay_granularity = "minute" if minute_source is not None else "daily"
         result_dir = self._planned_result_dir(mode, result_name)
         if result_dir.exists():
             raise ToolError(f"result directory already exists: {result_dir}")
@@ -345,7 +396,6 @@ class BacktestTool:
             per_day_cap = _optional_float(manifest.get("backtest_final_eval_max_seconds_per_trading_day"))
             if per_day_cap is None and valid_per_day_cap is not None:
                 per_day_cap = valid_per_day_cap * _FINAL_EVAL_WALL_CAP_MULTIPLIER
-        timeview_enabled = bool(manifest.get("timeview_enabled", manifest.get("rolling_asof_enabled", True)))
         public_nl_audit = mode == "valid" and not probe
         nl_log_dir = (
             self.ctx.paths.workspace / f".{new_id('nl_tool')}"
@@ -353,78 +403,88 @@ class BacktestTool:
             else _host_evidence_dir(self.ctx.paths.root, result_dir.name) / "nl_tool"
         )
         self._public_nl_tmp = nl_log_dir if public_nl_audit else None
-        with _formal_replay_execution(self.ctx) as (formal_executor, runtime_dir, rpc_agent):
-            requests_host, responses_host = prepare_nl_rpc_files(rpc_agent)
-            nl_service = StrategyNLService(
-                proxy=self.ctx.effective_nl_proxy,
-                snapshot_dir=snapshot_dir,
-                log_dir=nl_log_dir,
-                failure_policy=str(manifest.get("nl_failure_policy", "return_error_with_audit")),
-                # A single NL call gets a fraction of the decision cap so there is headroom
-                # for the surrounding compute before the per-decision wall cap kills the tick.
-                per_call_timeout_seconds=decision_cap * 0.8,
-                max_calls=_nl_call_budget(manifest, replay_daily),
-                # When the Timeview is on, ctx.nl() text rolls on the same nodes as the view.
-                replay_dir=replay_dir if timeview_enabled else None,
-                withhold_response=probe,
-            )
+        rss_monitor = _ProcessPeakRSS()
+        with rss_monitor:
             try:
-                profile = BrokerProfile(**_profile_kwargs(dict(manifest.require("broker_profile"))))
-                # Frozen decision-day set (agent snapshot view) is the fallback; the per-day
-                # map from the replay slot drives the broker's real same-day short gate (W7).
-                shortable = load_shortable_codes(snapshot_dir, _decision_date(decision_time))
-                shortable_by_date = load_shortable_by_date(replay_dir, trade_dates=keep)
-                with _formal_artifacts_readonly(self.ctx.paths, restore_writable=(mode == "valid")):
-                    with MainPolicyRunner(
-                        formal_executor,
-                        self.ctx.paths,
-                        timeout_seconds=decision_cap,
-                        decision_time=decision_time,
-                        replay_granularity=replay_granularity,
-                        nl_service=nl_service,
-                        requests_path=requests_host,
-                        responses_path=responses_host,
-                        decision_max_sim_minutes=_optional_float(manifest.get("decision_max_sim_minutes")),
-                        runtime_dir=runtime_dir,
-                        snapshot_path=(
-                            snapshot_dir
-                            if getattr(formal_executor, "formal_isolation", False)
-                            else self.ctx.paths.snapshot
-                        ),
-                    ) as policy:
-                        policy.validate_main()
-                        replay = run_main_ctx_replay(
-                            replay_daily,
-                            profile,
-                            shortable_codes=shortable,
-                            shortable_by_date=shortable_by_date,
-                            corporate_actions_by_date=load_corporate_actions_by_date(
-                                replay_dir, trade_dates=keep
-                            ),
-                            auction_prints_by_date=auction_prints_by_date(
-                                replay_auction if replay_auction is not None else pd.DataFrame()
-                            ),
-                            main_policy=policy,
-                            replay_intraday_1min=replay_minutes,
-                            replay_auction_results=replay_auction,
-                            auction_enabled=bool(manifest.get("auction_enabled", True)),
-                            auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
-                            auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
-                            auction_close_time=(manifest.get("auction_close_time", "14:57") or None),
-                            # No fallback default: manifests predating the knob replay
-                            # without the after-hours tick (frozen-eval reproducibility).
-                            afterhours_decision_time=(manifest.get("afterhours_decision_time") or None),
-                            execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
-                            offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 30)),
-                            intraday_decision_minutes=int(manifest.get("intraday_decision_minutes", 1)),
-                            max_seconds_per_trading_day=per_day_cap,
-                            timeview_enabled=timeview_enabled,
-                            snapshot_dir=snapshot_dir,
-                            replay_dir=replay_dir,
-                            on_progress=_on_progress,
-                        )
+                with _formal_replay_execution(self.ctx) as (formal_executor, runtime_dir, rpc_agent):
+                    requests_host, responses_host = prepare_nl_rpc_files(rpc_agent)
+                    nl_service = StrategyNLService(
+                        proxy=self.ctx.effective_nl_proxy,
+                        snapshot_dir=snapshot_dir,
+                        log_dir=nl_log_dir,
+                        failure_policy=str(manifest.get("nl_failure_policy", "return_error_with_audit")),
+                        # A single NL call gets a fraction of the decision cap so there is headroom
+                        # for the surrounding compute before the per-decision wall cap kills the tick.
+                        per_call_timeout_seconds=decision_cap * 0.8,
+                        max_calls=_nl_call_budget(manifest, replay_daily),
+                        # When the Timeview is on, ctx.nl() text rolls on the same nodes as the view.
+                        replay_dir=replay_dir if timeview_enabled else None,
+                        withhold_response=probe,
+                    )
+                    try:
+                        profile = BrokerProfile(**_profile_kwargs(dict(manifest.require("broker_profile"))))
+                        # Frozen decision-day set (agent snapshot view) is the fallback; the per-day
+                        # map from the replay slot drives the broker's real same-day short gate (W7).
+                        shortable = load_shortable_codes(snapshot_dir, _decision_date(decision_time))
+                        shortable_by_date = load_shortable_by_date(replay_dir, trade_dates=keep)
+                        with _formal_artifacts_readonly(self.ctx.paths, restore_writable=(mode == "valid")):
+                            with MainPolicyRunner(
+                                formal_executor,
+                                self.ctx.paths,
+                                timeout_seconds=decision_cap,
+                                decision_time=decision_time,
+                                replay_granularity=replay_granularity,
+                                nl_service=nl_service,
+                                requests_path=requests_host,
+                                responses_path=responses_host,
+                                decision_max_sim_minutes=_optional_float(manifest.get("decision_max_sim_minutes")),
+                                runtime_dir=runtime_dir,
+                                snapshot_path=(
+                                    snapshot_dir
+                                    if getattr(formal_executor, "formal_isolation", False)
+                                    else self.ctx.paths.snapshot
+                                ),
+                            ) as policy:
+                                policy.validate_main()
+                                replay = run_main_ctx_replay(
+                                    replay_daily,
+                                    profile,
+                                    shortable_codes=shortable,
+                                    shortable_by_date=shortable_by_date,
+                                    corporate_actions_by_date=load_corporate_actions_by_date(
+                                        replay_dir, trade_dates=keep
+                                    ),
+                                    auction_prints_by_date=auction_prints_by_date(
+                                        replay_auction if replay_auction is not None else pd.DataFrame()
+                                    ),
+                                    main_policy=policy,
+                                    replay_minute_source=minute_source,
+                                    replay_auction_results=replay_auction,
+                                    auction_enabled=bool(manifest.get("auction_enabled", True)),
+                                    auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
+                                    auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
+                                    auction_close_time=(manifest.get("auction_close_time", "14:57") or None),
+                                    # No fallback default: manifests predating the knob replay
+                                    # without the after-hours tick (frozen-eval reproducibility).
+                                    afterhours_decision_time=(manifest.get("afterhours_decision_time") or None),
+                                    execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
+                                    offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 30)),
+                                    intraday_decision_minutes=int(manifest.get("intraday_decision_minutes", 1)),
+                                    max_seconds_per_trading_day=per_day_cap,
+                                    timeview_enabled=timeview_enabled,
+                                    snapshot_dir=snapshot_dir,
+                                    replay_dir=replay_dir,
+                                    on_progress=_on_progress,
+                                )
+                    finally:
+                        cleanup_nl_rpc_files(requests_host, responses_host)
             finally:
-                cleanup_nl_rpc_files(requests_host, responses_host)
+                if minute_source is not None:
+                    minute_source.close()
+                    data_load.update(minute_source.stats())
+                data_load["host_peak_rss_bytes"] = int(rss_monitor.peak_bytes)
+        data_load["host_peak_rss_bytes"] = int(rss_monitor.peak_bytes)
+        replay.host_peak_rss_bytes = int(rss_monitor.peak_bytes) or None
         try:
             stats = compute_return_stats(replay)
             artifact = load_strategy_artifact(self.ctx.paths.agent_output)
@@ -543,6 +603,7 @@ class BacktestTool:
             ),
             "phase_seconds": stats.get("phase_seconds"),
             "agent_peak_rss_bytes": stats.get("agent_peak_rss_bytes"),
+            "host_peak_rss_bytes": stats.get("host_peak_rss_bytes"),
             "data_load": data_load,
             # Measured before manifest/trace publication and optional StepTree
             # snapshot; the name makes that boundary explicit.
@@ -834,6 +895,30 @@ def _read_replay_minutes(
         return None
     minutes = pd.read_parquet(path, filters=_trade_date_filters(trade_dates))
     return None if minutes.empty else minutes
+
+
+def _replay_minutes_available(path: Path) -> bool:
+    return path.exists() and pq.ParquetFile(path).metadata.num_rows > 0
+
+
+def _minute_replay_source(
+    replay_dir: Path,
+    *,
+    trade_dates: tuple[str, ...] | None = None,
+    include_timeview_rows: bool,
+) -> ParquetMinuteReplaySource | None:
+    path = replay_dir / "intraday_1min.parquet"
+    if not _replay_minutes_available(path):
+        return None
+    source = ParquetMinuteReplaySource(
+        path,
+        trade_dates=trade_dates,
+        include_timeview_rows=include_timeview_rows,
+    )
+    if source.selected_rows == 0:
+        source.close()
+        return None
+    return source
 
 
 def _read_replay_auction(

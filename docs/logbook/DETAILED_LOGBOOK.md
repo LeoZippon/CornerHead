@@ -17385,3 +17385,29 @@ Evidence:
 
 Decision:
 - Keep `SNAPSHOT_DOMAIN_WORKERS=2` on the shared host. Do not add a second data lake, cross-Fold container startup, or backtest-loop changes in this batch.
+
+
+## 2026-07-13 Minute replay daily loading and one-day prefetch
+
+Task: implement the approved minute normalization and bounded replay-loading optimizations without changing PIT, Broker, or Agent-visible data semantics.
+
+Implementation:
+- Parse each distinct minute timestamp once and expand by factorized integer codes; normalize only Broker-visible OHLCVA columns.
+- Read the existing single replay Parquet by `trade_date`, retain only the current day plus one asynchronously prefetched day, and skip the reserved exit-day minute load.
+- Feed raw daily partitions into an incremental Timeview; rows still roll only at the existing visibility boundary and are released after publication.
+- Add minute catalog/read/normalize/prefetch-wait and host-process peak-RSS telemetry. No read-optimized lake, new container, persistent worker pool, or cross-Fold prefetch was added.
+
+Evidence:
+- Real one-day `lap-test9` partition (1,297,663 rows): normalization fell from 4.776 s to 0.728 s; read was 0.411 s and process peak was 1.726 GiB.
+- Back-to-back 20-day `lcd-test1` A/B on the same frozen strategy: eager replay 135.677 s, lazy replay 135.863 s; both produced three orders, total return `0.04624810676941493`, and order SHA-256 `4fed38ed7864193c550417e61d89f7e9a27b2a3f548da0cabeb80642e800c0c8`. Timeview init fell from 6.706 s to 2.623 s; total runtime was neutral at this data size.
+- Full 61-day lazy run is recorded in `.runtime/bench/lap9_lazy_large.json`: 77,993,203 minute rows loaded across 60 partitions, 910.879 s replay, 34.68 GiB process peak, and 0.002546 s total prefetch wait. The earlier recorded eager run was 1169.415 s and about 99.7 GiB peak, an observed 22.1% wall-time and about 65% memory reduction.
+- The large comparison was not a controlled same-load A/B: the new shared-host load was roughly 25-41 on 192 logical CPUs versus about 12 on the earlier run. It nevertheless completed faster; causal attribution therefore relies on the one-day parser and back-to-back 20-day checks, not the large wall-time delta alone.
+- Forty non-performance return/Broker fields matched the earlier detailed result exactly. The empty order stream hash also matched.
+
+Validation and resources:
+- `scripts/dev/replay_benchmark.py` ran against `lap-test9/run_88cab9682eac` and `lcd-test1/run_06d738787968` with their frozen manifests and strategy artifacts.
+- Affected-module suite: 338 tests passed in 103.630 s. Full suite: 749 tests passed in 122.844 s. `py_compile` and `git diff --check` passed.
+- Before implementation work about 418 GiB RAM was available. After validation 416 GiB remained available; load average was 20.35/25.32/29.13. No GPU workload was started by this work.
+
+Decision:
+- Keep one-day prefetch and the existing single-file Parquet contract. Do not add more read parallelism yet: measured prefetch wait is already negligible, while shared-host I/O pressure and strategy/IPC dominate the remaining replay wall time.

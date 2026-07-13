@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import resource
 import shutil
 import sys
 import time
@@ -43,6 +44,7 @@ from autotrade.environment.broker import (
 )
 from autotrade.environment.executor import DockerExecutor
 from autotrade.environment.main_ctx_engine import MainPolicyRunner, run_main_ctx_replay
+from autotrade.environment.replay_market import ParquetMinuteReplaySource
 from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, SandboxSpec, link_copytree
 from autotrade.environment.runtime import write_json_atomic
 
@@ -66,6 +68,11 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=None, help="result JSON path (default .runtime/bench/<label>.json)")
     parser.add_argument("--offsession-tick-minutes", type=int, default=None, help="override the manifest value")
     parser.add_argument("--intraday-decision-minutes", type=int, default=None, help="override (engine support required)")
+    parser.add_argument(
+        "--eager-minutes",
+        action="store_true",
+        help="load the whole minute file before replay (legacy A/B baseline)",
+    )
     parser.add_argument("--keep-workdir", action="store_true")
     args = parser.parse_args()
 
@@ -98,7 +105,16 @@ def main() -> int:
         executor = DockerExecutor(docker.container, paths)
         replay_daily = pd.read_parquet(paths.valid / "daily.parquet")
         minute_file = paths.valid / "intraday_1min.parquet"
-        replay_minutes = pd.read_parquet(minute_file) if minute_file.exists() else None
+        replay_minutes = (
+            pd.read_parquet(minute_file)
+            if args.eager_minutes and minute_file.exists()
+            else None
+        )
+        minute_source = (
+            ParquetMinuteReplaySource(minute_file, include_timeview_rows=True)
+            if not args.eager_minutes and minute_file.exists()
+            else None
+        )
         decision_time = str(manifest["valid_decision_time"])
         offsession = (
             int(args.offsession_tick_minutes)
@@ -113,7 +129,7 @@ def main() -> int:
             paths,
             timeout_seconds=900.0,
             decision_time=decision_time,
-            replay_granularity="minute" if replay_minutes is not None else "daily",
+            replay_granularity="minute" if replay_minutes is not None or minute_source is not None else "daily",
             nl_service=None,
             decision_max_sim_minutes=manifest.get("decision_max_sim_minutes"),
         ) as policy:
@@ -127,6 +143,7 @@ def main() -> int:
                 corporate_actions_by_date=load_corporate_actions_by_date(paths.valid),
                 main_policy=policy,
                 replay_intraday_1min=replay_minutes,
+                replay_minute_source=minute_source,
                 auction_enabled=bool(manifest.get("auction_enabled", True)),
                 auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
                 auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
@@ -143,6 +160,9 @@ def main() -> int:
                 **engine_kwargs,
             )
             wall = time.monotonic() - started
+        if minute_source is not None:
+            minute_source.close()
+            result_payload["minute_source"] = minute_source.stats()
         stats = compute_return_stats(replay)
         orders = replay.broker.get_trade_detail_data(account_type="STOCK", data_type="ORDER") + \
             replay.broker.get_trade_detail_data(account_type="CREDIT", data_type="ORDER")
@@ -158,12 +178,15 @@ def main() -> int:
                 "intraday_ticks": replay.intraday_ticks,
                 "offsession_ticks": replay.offsession_ticks,
                 "phase_seconds": getattr(replay, "phase_seconds", None),
+                "host_peak_rss_bytes": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024),
                 "order_count": len(orders),
                 "orders_sha256": orders_digest,
                 "stats": stats,
             }
         )
     finally:
+        if "minute_source" in locals() and minute_source is not None:
+            minute_source.close()
         docker.stop()
         if not args.keep_workdir:
             shutil.rmtree(work_dir, ignore_errors=True)

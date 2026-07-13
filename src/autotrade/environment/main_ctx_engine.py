@@ -35,6 +35,7 @@ from autotrade.environment.broker_core import afterhours_available
 from autotrade.environment.data.contracts import sim_datetime
 from autotrade.environment.replay_market import (
     MinuteMarketData,
+    ParquetMinuteReplaySource,
     empty_minute_rows,
     minute_rows_with_daily_fallback,
     minute_sort,
@@ -439,6 +440,7 @@ def run_main_ctx_replay(
     auction_prints_by_date: dict[tuple[str, str], dict[str, float]] | None = None,
     main_policy: MainPolicyRunner,
     replay_intraday_1min: pd.DataFrame | None = None,
+    replay_minute_source: ParquetMinuteReplaySource | None = None,
     replay_auction_results: pd.DataFrame | None = None,
     auction_enabled: bool = True,
     auction_preopen_time: str | None = "09:15",
@@ -513,6 +515,8 @@ def run_main_ctx_replay(
     # construction included): a quarter of minute data makes init a first-class
     # cost, and the probe extrapolation must not hide it.
     replay_start = time.monotonic()
+    if replay_intraday_1min is not None and replay_minute_source is not None:
+        raise ValueError("pass either replay_intraday_1min or replay_minute_source, not both")
     market = MarketData(replay_daily)
     if len(market.trade_dates) < 2:
         raise BacktestError("replay region needs at least two trade dates for entry/exit")
@@ -521,6 +525,11 @@ def run_main_ctx_replay(
         if replay_intraday_1min is not None and not replay_intraday_1min.empty
         else None
     )
+    replay_days = market.trade_dates[:-1]
+    if replay_minute_source is not None and replay_days:
+        # Overlap the first daily read/normalization with Broker and Timeview
+        # construction. Subsequent days are prefetched during the prior day.
+        replay_minute_source.prefetch(replay_days[0])
     auction_results_by_date = {
         str(day): group.reset_index(drop=True)
         for day, group in (
@@ -529,7 +538,7 @@ def run_main_ctx_replay(
             else []
         )
     }
-    granularity = "minute" if minute_market is not None else "daily"
+    granularity = "minute" if minute_market is not None or replay_minute_source is not None else "daily"
     entry_date, exit_date = market.trade_dates[0], market.trade_dates[-1]
     broker = SimBroker(
         profile,
@@ -549,6 +558,7 @@ def run_main_ctx_replay(
                 replay_dir, replay_daily, replay_intraday_1min, replay_auction_results
             ),
             replay_text_library_dir=(Path(replay_dir) / "text_library") if replay_dir is not None else None,
+            incremental_domains={"intraday_1min"} if replay_minute_source is not None else None,
         )
         if timeview_enabled and snapshot_dir is not None and getattr(main_policy, "paths", None) is not None
         else None
@@ -597,7 +607,21 @@ def run_main_ctx_replay(
             on_progress(str(trade_date), day_idx, total_days, now - replay_start, len(broker.orders))
             last_progress_idx, last_progress_time = day_idx, now
         if trade_date != exit_date:
-            minute_seed = minute_market.rows_for_date(trade_date) if minute_market is not None else empty_minute_rows()
+            if replay_minute_source is not None:
+                next_trade_date = replay_days[day_idx + 1] if day_idx + 1 < len(replay_days) else None
+                partition = replay_minute_source.rows_for_date(
+                    trade_date,
+                    next_trade_date=next_trade_date,
+                )
+                minute_seed = partition.market_rows
+                if timeview is not None and partition.timeview_rows is not None:
+                    timeview.append_replay_partition("intraday_1min", partition.timeview_rows)
+            else:
+                minute_seed = (
+                    minute_market.rows_for_date(trade_date)
+                    if minute_market is not None
+                    else empty_minute_rows()
+                )
             minute_rows = minute_rows_with_daily_fallback(replay_daily, trade_date, minute_seed)
             if not minute_rows.empty:
                 plan = _day_tick_plan(

@@ -590,6 +590,7 @@ def main(ctx):
             self.assertEqual(list(ctx.paths.results.glob("valid_*")), [])
             errors = [item for item in ctx.manifest.get("backtest_summaries", []) if item.get("status") == "error"]
             self.assertEqual(len(errors), 1)
+            self.assertGreater(errors[0]["data_load"]["host_peak_rss_bytes"], 0)
 
     def test_minute_replay_when_available(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -631,6 +632,15 @@ def main(ctx):
 
             self.assertEqual(summary["status"], "ok")
             self.assertEqual(summary["replay_granularity"], "minute")
+            self.assertEqual(summary["data_load"]["minute_rows"], 3)
+            self.assertEqual(summary["data_load"]["minute_rows_loaded"], 3)
+            self.assertGreater(summary["data_load"]["minute_partitions_loaded"], 0)
+            self.assertIn("minute_prefetch_wait_seconds", summary["data_load"])
+            self.assertGreater(summary["host_peak_rss_bytes"], 0)
+            self.assertEqual(
+                summary["host_peak_rss_bytes"],
+                summary["data_load"]["host_peak_rss_bytes"],
+            )
             result_dir = Path(summary["result_path"])
             detailed = json.loads((result_dir / "detailed_return.json").read_text(encoding="utf-8"))
             self.assertEqual(detailed["replay_granularity"], "minute")
