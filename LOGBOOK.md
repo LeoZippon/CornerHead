@@ -1,3 +1,9 @@
+2026-07-13 空竞价 schema 回测修复与共享机资源审计（fix/auction-pit-performance）
+
+- `lzp-test8` 首个 Fold 证明：0 行 `auction.parquet` 被写为 Arrow `null` 列，带字符串日期过滤时在策略执行前报 `null vs string`；空策略和父基线同样失败。
+- Snapshot 现写固定 string/double 空 schema；Backtest 对已有 0 行缓存先查 footer 并返回无竞价数据。现有失败缓存实测通过，Snapshot/工具流 124 tests OK。
+- 主机 192 逻辑核/503 GiB，采样时 99% CPU idle、433 GiB 可用；实验热路径约单核、宿主峰值 RSS 约 52 GiB。维持 19.2 vCPU/50 GiB 容器配额，先向量化，再仅用 4–8 核有界并行，不并发两个重型分钟构建。
+
 2026-07-13 Formal 回放隔离、Probe 脱敏与回测热路径优化（fix/auction-pit-performance）
 
 - Probe/Valid/Test/Held-out 改为一次性 formal 容器；开发容器在完整工具调用期间 pause，workspace/阶段槽/结果不挂载；pause/unpause 不确定状态会终止会话。

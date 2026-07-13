@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from autotrade.environment.artifacts import (
     ArtifactError,
@@ -784,6 +785,12 @@ def _read_replay_auction(
 ) -> pd.DataFrame | None:
     path = replay_dir / "auction.parquet"
     if not path.exists():
+        return None
+    # Legacy empty auction files have Arrow null-typed columns. Applying a
+    # string trade_date predicate to that schema raises before pandas can
+    # return the empty frame, so use the footer to take the existing no-data
+    # path without scanning or filtering the file.
+    if pq.ParquetFile(path).metadata.num_rows == 0:
         return None
     frame = pd.read_parquet(path, filters=_trade_date_filters(trade_dates))
     return None if frame.empty else frame

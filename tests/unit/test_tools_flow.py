@@ -1058,6 +1058,22 @@ class ToolFlowTest(unittest.TestCase):
 
             pd.testing.assert_frame_equal(filtered.reset_index(drop=True), expected)
 
+    def test_probe_skips_legacy_null_typed_empty_auction_before_filtering(self):
+        from autotrade.environment.tools.backtest import _read_replay_auction
+
+        with tempfile.TemporaryDirectory() as tmp:
+            replay_dir = Path(tmp)
+            pd.DataFrame(columns=["ts_code", "trade_date", "session"]).to_parquet(
+                replay_dir / "auction.parquet", index=False
+            )
+
+            loaded = _read_replay_auction(
+                replay_dir,
+                trade_dates=("20241008", "20241231"),
+            )
+
+            self.assertIsNone(loaded)
+
     def test_probe_nl_content_is_withheld_but_counts_are_returned(self):
         marker = "positive_PROBE_NL_PRIVATE_MARKER"
         with tempfile.TemporaryDirectory() as tmp:

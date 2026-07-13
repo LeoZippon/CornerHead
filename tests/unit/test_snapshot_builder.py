@@ -8,6 +8,7 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from autotrade.environment import snapshot as snapshot_module
 from autotrade.environment.features.fundamental_events import read_fundamental_events
@@ -164,6 +165,25 @@ CONFIG = SnapshotConfig(
 
 
 class SnapshotBuilderTest(unittest.TestCase):
+    def test_empty_auction_builder_writes_canonical_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            (raw / "stk_auction").mkdir(parents=True)
+            auction, meta = SnapshotBuilder(raw, Path(tmp) / "missing_events")._build_auction(
+                "20241001", "20241231"
+            )
+            path = Path(tmp) / "auction.parquet"
+            auction.to_parquet(path, index=False)
+
+            schema = pq.ParquetFile(path).schema_arrow
+            field_types = {field.name: str(field.type) for field in schema}
+            self.assertEqual(meta["rows"], 0)
+            self.assertEqual(field_types["ts_code"], "string")
+            self.assertEqual(field_types["trade_date"], "string")
+            self.assertEqual(field_types["available_at"], "string")
+            self.assertEqual(field_types["price"], "double")
+            self.assertEqual(field_types["amount"], "double")
+
     def test_snapshot_hash_streams_files_without_changing_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

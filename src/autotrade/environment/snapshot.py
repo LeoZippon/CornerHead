@@ -680,13 +680,27 @@ class SnapshotBuilder:
         "ts_code", "trade_date", "session", "price", "vol", "amount", "pre_close",
         "turnover_rate", "volume_ratio", "float_share", "available_at", "available_at_rule",
     )
+    _AUCTION_STRING_COLUMNS = {
+        "ts_code", "trade_date", "session", "available_at", "available_at_rule",
+    }
 
     def _build_auction(self, start_key: str, end_key: str) -> tuple[pd.DataFrame, dict[str, object]]:
         """Exact opening call-auction results available from 2025-01-16."""
         frame = self.store.read_trade_range("stk_auction", start_key, end_key)
         price_quality = {"source_price_rows": 0, "derived_price_rows": 0, "no_trade_rows": 0}
         if frame.empty:
-            auction = pd.DataFrame(columns=list(self._AUCTION_COLUMNS))
+            # Object-typed empty columns serialize as Arrow ``null``. A later
+            # string trade-date predicate then fails before the backtest can
+            # observe that the file has no rows. Keep the empty payload, but
+            # preserve the same physical string/double schema as populated slots.
+            auction = pd.DataFrame(
+                {
+                    column: pd.Series(
+                        dtype="string" if column in self._AUCTION_STRING_COLUMNS else "float64"
+                    )
+                    for column in self._AUCTION_COLUMNS
+                }
+            )
         else:
             auction = frame.copy()
             price = pd.to_numeric(auction["price"], errors="coerce")

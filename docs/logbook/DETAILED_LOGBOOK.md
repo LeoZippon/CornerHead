@@ -17302,3 +17302,27 @@ Validation:
 - Final affected data/Snapshot/Broker/state/Docker/tool suite: 366 tests OK; `py_compile` and `git diff --check` passed.
 - Two final read-only Sub Agent audits rechecked formal lifecycle/state security and auction/history tolerance; no data/performance blocker remained. Probe's final strategy-controlled lifecycle/time vector is retained as an explicit user-approved utility trade-off; NL content, financial output, progressive daily feedback, and raw errors remain withheld.
 - `git diff --check` passed. No real experiment, raw-data mutation, provider API call, network fetch, or image build was run.
+
+
+## 2026-07-13 Empty-auction replay schema fix and shared-host resource audit
+
+Task: repair the live `lzp-test8` Fold blocker and determine whether more CPU, memory, or parallelism would improve Snapshot/Replay performance on the shared host.
+
+Observed failure:
+- The validation `auction.parquet` contains zero rows and twelve Arrow `null` columns. `_read_replay_auction(..., trade_dates=...)` bound a string filter to the null `trade_date` field and raised `ArrowTypeError: Array type doesn't match type of values set: null vs string` before any strategy code ran.
+- The failure reproduced in a fresh `quant` Python process against `.runtime/sandboxes/lzp-test8/run_28d11502e2a9/snapshots/valid`; an empty `main(ctx)` and the parent baseline therefore could not bypass it.
+
+Implementation:
+- `SnapshotBuilder._build_auction` now emits a typed empty frame: identity/time fields are Arrow strings and numeric fields are doubles, matching populated replay slots.
+- `_read_replay_auction` reads the Parquet footer first and returns `None` for a zero-row file. This handles existing null-schema caches without rebuilding or mutating them and avoids a data scan.
+- The Environment living document records the fixed-schema/footer-first empty-domain contract.
+
+Resource evidence and decision:
+- Host: 2×48-core AMD EPYC 7K62, SMT2, 192 logical CPUs, two NUMA nodes, 503 GiB RAM. At 13:34 local time: load 1.22/2.93/8.64, sampled CPU 99% idle, 433 GiB available RAM, and zero current CPU/memory/I/O PSI pressure.
+- Experiment worker: affinity 0-191, 452 threads, current RSS 18.0 GiB, high-water RSS 52.0 GiB. The active Docker contract is capped at 19.2 vCPU and 50 GiB; all eight L20 GPUs were idle and are irrelevant to this path.
+- More memory or a higher CPU quota would not accelerate the observed single-core Pandas/Python hot paths. Keep the current cap; vectorize first, then use a bounded 4–8 CPU pool for independent/light domains. Keep one heavy minute Replay build at a time so two roughly 50 GiB peaks cannot overlap on a shared machine.
+
+Validation:
+- Two focused regressions passed, including the real existing null-schema cache.
+- `tests.unit.test_snapshot_builder` plus `tests.unit.test_tools_flow`: 124 tests passed in 32.793 seconds.
+- `git diff --check` passed. No cache/data rewrite, download, provider call, experiment restart, or external mutation was performed. The already-running worker loaded the old module and must be restarted before retrying its Fold.
