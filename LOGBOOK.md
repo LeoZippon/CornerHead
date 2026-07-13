@@ -1,3 +1,10 @@
+2026-07-13 Formal 回放隔离、Probe 脱敏与回测热路径优化（fix/auction-pit-performance）
+
+- Probe/Valid/Test/Held-out 改为一次性 formal 容器；开发容器在完整工具调用期间 pause，workspace/阶段槽/结果不挂载；pause/unpause 不确定状态会终止会话。
+- Probe `ctx.nl()` 返回 `withheld_probe`，动态 substep 名与所有异常类统一脱敏；竞价结果 tick/不可撤阶段合同和 ask_user attempt nonce 补齐。
+- state 合并以 dirfd/O_NOFOLLOW/O_NONBLOCK 防换链与 FIFO，单文件64 MiB；竞价量价差超过0.005元三层 fail-fast。
+- Probe 日期谓词读取、分钟日切片、Timeview next-boundary、流式 hash/大表 footer profile 与加载 telemetry 落地；full suite 723 tests OK，实际 Docker lifecycle OK。
+
 2026-07-13 数据刷新、世代一致性与正式容器基础边界（fix/auction-pit-performance）
 
 - 晚间通用任务不再写 `stk_auction`，23:20 走强制严格复核；竞价量价校验、cron 安装 marker/全文核验和 job-scoped config identity 补齐。

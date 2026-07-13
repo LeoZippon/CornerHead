@@ -17277,3 +17277,28 @@ Validation:
 - Pipeline config/E2E suite: 64 tests OK.
 - Actual Docker sandbox lifecycle plus Dockerized Fold E2E: 2 tests OK.
 - No real data download/update, provider API call, experiment, or image build was run. Production crontab reinstall is deferred until the committed template is final.
+
+
+## 2026-07-13 Formal replay isolation, Probe declassification, and replay hot paths
+
+Task: close strategy/NL exfiltration paths and improve replay latency without adding Agent-facing decision entities or a second data lake.
+
+Implementation:
+- Every Docker contract check and Probe/Valid/Test/Held-out replay now uses an ephemeral network-none/read-only formal container. The development container is paused from preflight validation through result/StepTree publication, closing shared-inode TOCTOU; formal state is read-only and only staging/RPC are writable.
+- Formal strategy code cannot map or hardcode the development workspace. Runtime state/as-of/RPC roots are isolated per replay and deleted with the container.
+- Short future-window Probe no longer generates NL content: `ctx.nl()` returns `withheld_probe`. Public Probe output aggregates substep names, keeps only lifecycle/cost counts, and normalizes every post-start Exception/ToolError; raw failure detail is host-only.
+- `ask_user` reply identities include a per-worker-attempt nonce, so a restarted q1 cannot consume a durable reply to an earlier q1.
+- Probe reads only selected daily/minute/auction row groups and projects filtered shortability/corporate actions; Timeview auxiliary frames are bounded to the replay end.
+- Minute bars use precomputed trade-date slices. Timeview uses one global next-boundary comparison between node/row changes and preserves second-resolution auction boundaries.
+- Strategy/model/snapshot hashes stream files; large frame profiles use exact Parquet footer statistics for string date columns and conservatively scan timezone/other types. Load rows/bytes/seconds and pre-publication wall time are reported; failure audit retains completed load telemetry.
+- Opening/closing auction cancel phases are enforced: result/off-session ticks cannot cancel, open orders lock at 09:25, and 14:57 close-auction orders are final. Zero-quantity auction rows cannot create hidden Broker prints.
+- Auction capture, Snapshot, and Broker now reject a positive source price that differs from `amount/vol` by more than CNY 0.005. A read-only scan of all 358 local partitions (1,923,324 positive trades) found zero rejects; the maximum historical difference was 0.004761904762.
+- State merge resolves every component through no-follow directory FDs, opens the source nonblocking, bounds one file to 64 MiB, copies only the registered size, and rejects concurrent mutation. Parent swaps, symlinks, FIFOs, and append-based disk filling cannot escape or block the host merge.
+- Formal pause/unpause failures are retried and inspected. An unresolved lifecycle state raises a `BaseException` control signal that bypasses the Agent action catch-all and aborts the session; an ambiguous entry failure defensively unpauses before returning an ordinary tool failure.
+- Updated Agent/Environment docs and regenerated the prompt audit export. `check.md` is reduced to the requested before/after/example/decision table and explicitly records deferred storage/prefetch/refresh-history work.
+
+Validation:
+- `PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -t .`: 723 tests OK in 119.7s, including the actual Docker sandbox lifecycle test.
+- Final affected data/Snapshot/Broker/state/Docker/tool suite: 366 tests OK; `py_compile` and `git diff --check` passed.
+- Two final read-only Sub Agent audits rechecked formal lifecycle/state security and auction/history tolerance; no data/performance blocker remained. Probe's final strategy-controlled lifecycle/time vector is retained as an explicit user-approved utility trade-off; NL content, financial output, progressive daily feedback, and raw errors remain withheld.
+- `git diff --check` passed. No real experiment, raw-data mutation, provider API call, network fetch, or image build was run.

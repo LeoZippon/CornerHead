@@ -381,7 +381,10 @@ class ExperimentManager:
             index = int(question.get("index") or 0)
             if index <= 0:
                 raise ManagerError("status.json 缺少提问序号")
-            control.user_replies[f"{session_key}#q{index}"] = str(directive or "").strip()
+            reply_key = str(question.get("reply_key") or f"{session_key}#q{index}")
+            if reply_key.split("#", 1)[0] != session_key:
+                raise ManagerError("status.json 提问 reply_key 与 session_key 不一致")
+            control.user_replies[reply_key] = str(directive or "").strip()
         elif action == "set_parent_override":
             if not session_key:
                 raise ManagerError("set_parent_override requires session_key")

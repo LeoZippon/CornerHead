@@ -54,6 +54,10 @@ PYTHON_PACKAGES: tuple[tuple[str, str, str | None], ...] = (
 IMPORTANT_TOOLS = ("rg", "git", "npm", "pip", "hf", "huggingface-cli", "duckdb")
 
 
+class SandboxLifecycleFatal(BaseException):
+    """Unsafe container lifecycle state; must abort the Agent session."""
+
+
 @dataclass(frozen=True)
 class SandboxSpec:
     image: str = DEFAULT_IMAGE
@@ -741,25 +745,78 @@ class DockerSandbox:
         it paused through result publication closes that TOCTOU without copying
         potentially large model artifacts for every Probe.
         """
-        paused = subprocess.run(
-            ["docker", "pause", self.container],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if paused.returncode != 0:
-            raise RuntimeError(f"failed to pause development container: {paused.stderr.strip()}")
         try:
-            yield
-        finally:
-            resumed = subprocess.run(
-                ["docker", "unpause", self.container],
+            paused = subprocess.run(
+                ["docker", "pause", self.container],
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
-            if resumed.returncode != 0 and sys.exc_info()[0] is None:
-                raise RuntimeError(f"failed to unpause development container: {resumed.stderr.strip()}")
+            pause_error = (
+                None
+                if paused.returncode == 0
+                else RuntimeError(f"failed to pause development container: {paused.stderr.strip()}")
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            pause_error = RuntimeError(f"failed to pause development container: {type(exc).__name__}: {exc}")
+        if pause_error is not None:
+            resume_error = self._ensure_development_container_unpaused()
+            if resume_error is not None:
+                raise SandboxLifecycleFatal(
+                    f"development container pause state is unsafe: {resume_error}"
+                ) from pause_error
+            raise pause_error
+        body_error: BaseException | None = None
+        try:
+            yield
+        except BaseException as exc:
+            body_error = exc
+            raise
+        finally:
+            resume_error = self._ensure_development_container_unpaused()
+            if resume_error is not None:
+                fatal = SandboxLifecycleFatal(str(resume_error))
+                if body_error is not None:
+                    raise fatal from body_error
+                raise fatal
+
+    def _ensure_development_container_unpaused(self) -> RuntimeError | None:
+        """Retry unpause and verify state before declaring the session unsafe."""
+        details: list[str] = []
+        for _ in range(2):
+            try:
+                resumed = subprocess.run(
+                    ["docker", "unpause", self.container],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                details.append(f"{type(exc).__name__}: {exc}")
+                continue
+            if resumed.returncode == 0:
+                return None
+            details.append(resumed.stderr.strip() or f"exit {resumed.returncode}")
+        try:
+            inspected = subprocess.run(
+                ["docker", "inspect", "--format", "{{.State.Paused}}", self.container],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if inspected.returncode == 0 and inspected.stdout.strip().lower() == "false":
+                return None
+            details.append(
+                inspected.stderr.strip()
+                or inspected.stdout.strip()
+                or f"inspect exit {inspected.returncode}"
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            details.append(f"inspect {type(exc).__name__}: {exc}")
+        return RuntimeError(
+            "failed to unpause development container after retry: "
+            + "; ".join(filter(None, details))
+        )
 
     @contextmanager
     def formal_executor(self, runtime_root: Path):

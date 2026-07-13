@@ -162,6 +162,7 @@
 | `execution_lag_bars` | 2 | 决策 bar 到撮合 bar 的固定滞后（按当日 bar 数收敛 `max(1, min(lag, n-1))`） |
 | `decision_max_sim_minutes` | 30 min | `ctx.substep` 声明预算 `B` 的上限（超过在初始化即拒） |
 | substep `budget_minutes`（Agent 声明） | `B>0`，tick 内唯一 | 实测墙钟 fail-fast + `state_dir` 写可见性 + broker action 提交时点（`B<1` 当分钟、`B>=1` 到 `ready_at`） |
+| `ctx.state_dir` 单个暂存文件 | 64 MiB | 合并前按普通文件和大小门禁；父目录/符号链接/FIFO 换链拒绝 |
 | `backtest_max_seconds_per_decision` | 1800 s | 单 `main(ctx)` tick（含 NL）真实墙钟硬上限，超限杀驱动（仅 `mode="valid"`） |
 | `backtest_max_seconds_per_trading_day` | 3600 s | 单交易日累计 `main(ctx)` 计算硬上限（仅 `mode="valid"`） |
 | `backtest_final_eval_max_seconds_per_decision` | 配置值 None；有效值默认 5400 s | None 时按验证单决策上限的 3 倍派生；显式正值优先，仅作 frozen_eval 防挂死兜底 |

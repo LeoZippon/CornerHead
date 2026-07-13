@@ -23,7 +23,8 @@ from autotrade.environment.llm.proxy import (
 )
 from autotrade.environment.explore import ExploreSubAgentEngine
 from autotrade.environment.runtime import AgentTraceWriter, RunManifest
-from autotrade.environment.sandbox import LocalSandbox
+from autotrade.environment.sandbox import LocalSandbox, SandboxLifecycleFatal
+from autotrade.environment.tools.base import SessionInterrupt
 from autotrade.environment.tools import (
     BacktestTool,
     FinishFoldTool,
@@ -1038,9 +1039,180 @@ class ToolFlowTest(unittest.TestCase):
             self.assertIn("replayed_trade_days", summary)
             self.assertTrue(summary["probe_note"])
             result_dir = Path(summary["host_result_path"])
-            self.assertEqual(
-                sorted(path.name for path in result_dir.iterdir() if path.name != "nl_tool"), []
+            self.assertEqual(list(result_dir.iterdir()), [])
+            self.assertNotIn("nl_tool_dir", summary)
+            self.assertNotIn("host_nl_tool_dir", summary)
+
+    def test_probe_daily_predicate_matches_full_read_then_filter(self):
+        from autotrade.environment.tools.backtest import (
+            _first_replay_trade_dates,
+            _read_replay_daily,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            dates = _first_replay_trade_dates(ctx.paths.valid / "daily.parquet", 2)
+            filtered = _read_replay_daily(ctx.paths.valid, trade_dates=dates)
+            full = _read_replay_daily(ctx.paths.valid)
+            expected = full[full["trade_date"].astype(str).isin(dates)].reset_index(drop=True)
+
+            pd.testing.assert_frame_equal(filtered.reset_index(drop=True), expected)
+
+    def test_probe_nl_content_is_withheld_but_counts_are_returned(self):
+        marker = "positive_PROBE_NL_PRIVATE_MARKER"
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(NL_CALL_MAIN, encoding="utf-8")
+            ctx.proxy = ScriptedLLM([nl_subagent_response(stance=marker)])
+
+            summary = BacktestTool(ctx).run(mode="valid", replay_window=2)
+
+            self.assertEqual(summary["nl_calls"], 1)
+            self.assertEqual(summary["nl_outcome_counts"], {"withheld_probe": 1})
+            self.assertNotIn("nl_tool_dir", summary)
+            public = json.dumps(
+                {
+                    "summary": summary,
+                    "manifest": ctx.manifest.data,
+                    "trace": ctx.trace.read_events(),
+                },
+                ensure_ascii=False,
+                default=str,
             )
+            self.assertNotIn(marker, public)
+            result_dir = Path(summary["host_result_path"])
+            self.assertEqual(list(result_dir.iterdir()), [])
+            evidence_files = list((ctx.paths.root / "runtime" / "host_evidence").rglob("*.jsonl"))
+            self.assertTrue(evidence_files)
+            self.assertFalse(any(marker in path.read_text(encoding="utf-8") for path in evidence_files))
+
+    def test_probe_nl_cannot_exfiltrate_through_successful_substep_name(self):
+        marker = "PROBE_SUCCESS_SUBSTEP_EXFIL_MARKER"
+        strategy = '''
+from at_tools import nl
+
+_DONE = False
+
+def main(ctx):
+    global _DONE
+    if _DONE:
+        return
+    _DONE = True
+    with ctx.substep("nl_request", budget_minutes=0.5):
+        result = nl("000001.SZ", prompt="fixture")
+    name = result.get("content") or "nl_withheld"
+    with ctx.substep(name, budget_minutes=0.5):
+        return
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(strategy, encoding="utf-8")
+            ctx.proxy = ScriptedLLM([nl_subagent_response(stance=marker)])
+
+            summary = BacktestTool(ctx).run(mode="valid", replay_window=2)
+
+            self.assertEqual(set(summary["substep_runtime"]), {"aggregate"})
+            public = json.dumps(
+                {"summary": summary, "manifest": ctx.manifest.data, "trace": ctx.trace.read_events()},
+                ensure_ascii=False,
+                default=str,
+            )
+            self.assertNotIn(marker, public)
+            self.assertNotIn("nl_withheld", public)
+
+    def test_probe_cannot_exfiltrate_nl_content_through_strategy_error(self):
+        marker = "PROBE_ERROR_PRIVATE_MARKER"
+        strategy = '''
+from at_tools import nl
+
+_DONE = False
+
+def main(ctx):
+    global _DONE
+    with ctx.substep("probe_error", budget_minutes=0.5):
+        if _DONE:
+            return
+        _DONE = True
+        result = nl("000001.SZ", prompt="fixture")
+        raise RuntimeError(result.get("content", "missing"))
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(strategy, encoding="utf-8")
+            ctx.proxy = ScriptedLLM([nl_subagent_response(stance=marker)])
+
+            with self.assertRaisesRegex(ToolError, "raw strategy/runtime error text is host-only") as raised:
+                BacktestTool(ctx).run(mode="valid", replay_window=2)
+
+            self.assertNotIn(marker, str(raised.exception))
+            public = json.dumps(
+                {"manifest": ctx.manifest.data, "trace": ctx.trace.read_events()},
+                ensure_ascii=False,
+                default=str,
+            )
+            self.assertNotIn(marker, public)
+            evidence = ctx.paths.root / "runtime" / "host_evidence"
+            self.assertFalse(any(marker in path.read_text(encoding="utf-8") for path in evidence.rglob("*.*")))
+
+    def test_probe_unexpected_exception_detail_is_host_only(self):
+        marker = "PROBE_UNEXPECTED_EXCEPTION_PRIVATE_MARKER"
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            tool = BacktestTool(ctx)
+
+            def fail_after_start(**_kwargs):
+                tool._backtest_started = True
+                raise PermissionError(marker)
+
+            with patch.object(tool, "_execute", side_effect=fail_after_start):
+                with self.assertRaisesRegex(ToolError, "raw strategy/runtime error text is host-only") as raised:
+                    tool.run(mode="valid", replay_window=2)
+
+            self.assertNotIn(marker, str(raised.exception))
+            public = json.dumps(
+                {"manifest": ctx.manifest.data, "trace": ctx.trace.read_events()},
+                ensure_ascii=False,
+                default=str,
+            )
+            self.assertNotIn(marker, public)
+            evidence = ctx.paths.root / "runtime" / "host_evidence"
+            self.assertTrue(any(marker in path.read_text(encoding="utf-8") for path in evidence.rglob("*.*")))
+
+    def test_probe_evidence_write_failure_keeps_public_error_fixed(self):
+        marker = "PROBE_EVIDENCE_WRITE_FAILURE_PRIVATE_MARKER"
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            tool = BacktestTool(ctx)
+
+            def fail_after_start(**_kwargs):
+                tool._backtest_started = True
+                raise PermissionError(marker)
+
+            with (
+                patch.object(tool, "_execute", side_effect=fail_after_start),
+                patch(
+                    "autotrade.environment.tools.backtest._host_evidence_dir",
+                    side_effect=OSError("evidence disk unavailable"),
+                ),
+            ):
+                with self.assertRaisesRegex(ToolError, "raw strategy/runtime error text is host-only") as raised:
+                    tool.run(mode="valid", replay_window=2)
+
+            self.assertNotIn(marker, str(raised.exception))
+            public = json.dumps(
+                {"manifest": ctx.manifest.data, "trace": ctx.trace.read_events()},
+                ensure_ascii=False,
+                default=str,
+            )
+            self.assertNotIn(marker, public)
+
+    def test_session_interrupt_propagates_without_tool_error_wrapping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            tool = BacktestTool(ctx)
+            with patch.object(tool, "_execute", side_effect=SessionInterrupt("researcher stop")):
+                with self.assertRaisesRegex(SessionInterrupt, "researcher stop"):
+                    tool.run(mode="valid")
 
 
 class ShellToolTest(unittest.TestCase):
@@ -1326,6 +1498,16 @@ class ArtifactIOToolTest(unittest.TestCase):
             self.assertEqual(edited["observation"], "edit_file")
             self.assertEqual(edited["replacements"], 1)
             self.assertIn("x = 42", (ctx.paths.agent_output / "helpers" / "sig.py").read_text(encoding="utf-8"))
+
+    def test_sandbox_lifecycle_fatal_is_not_converted_to_agent_observation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            runner = self._runner(ctx)
+            runner._action_handlers["shell"] = lambda _args: (_ for _ in ()).throw(
+                SandboxLifecycleFatal("container remains paused")
+            )
+            with self.assertRaisesRegex(SandboxLifecycleFatal, "container remains paused"):
+                runner._dispatch("shell", {"action": "shell", "command": "true"})
 
     def test_edit_missing_and_stale_are_errors(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -12,7 +12,12 @@ from autotrade.agent import AgentSessionConfig, AgentSessionRunner
 from autotrade.environment.executor import DockerExecutor, ExecutorError, LocalExecutor, docker_available
 from autotrade.environment.llm.proxy import ScriptedLLM, tool_call, tool_call_response
 from autotrade.environment.runtime import SandboxPaths
-from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, SandboxSpec
+from autotrade.environment.sandbox import (
+    DockerSandbox,
+    LocalSandbox,
+    SandboxLifecycleFatal,
+    SandboxSpec,
+)
 from autotrade.environment.web_search import (
     SemanticScholarSearchProvider,
     TavilySearchProvider,
@@ -164,6 +169,55 @@ class SandboxSpecTest(unittest.TestCase):
                     ["docker", "unpause", "development-container"],
                 ],
             )
+
+    def test_formal_guard_preserves_body_error_when_unpause_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            docker = DockerSandbox(sandbox, SandboxSpec(gpu=None))
+            docker.container = "development-container"
+
+            class Completed:
+                def __init__(self, returncode, *, stdout="", stderr=""):
+                    self.returncode = returncode
+                    self.stdout = stdout
+                    self.stderr = stderr
+
+            results = [
+                Completed(0),
+                Completed(1, stderr="daemon busy"),
+                Completed(1, stderr="still paused"),
+                Completed(0, stdout="true\n"),
+            ]
+            with patch("subprocess.run", side_effect=results):
+                with self.assertRaises(SandboxLifecycleFatal) as raised:
+                    with docker.formal_guard():
+                        raise ValueError("original formal failure")
+
+            self.assertNotIsInstance(raised.exception, Exception)
+            self.assertIsInstance(raised.exception.__cause__, ValueError)
+            self.assertIn("failed to unpause development container", str(raised.exception))
+
+    def test_formal_guard_recovers_an_ambiguous_pause_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = LocalSandbox(Path(tmp) / "mnt")
+            docker = DockerSandbox(sandbox, SandboxSpec(gpu=None))
+            docker.container = "development-container"
+
+            class Completed:
+                def __init__(self, returncode, *, stdout="", stderr=""):
+                    self.returncode = returncode
+                    self.stdout = stdout
+                    self.stderr = stderr
+
+            results = [
+                Completed(1, stderr="pause response lost"),
+                Completed(0),  # defensive unpause succeeds
+            ]
+            with patch("subprocess.run", side_effect=results) as run:
+                with self.assertRaisesRegex(RuntimeError, "failed to pause"):
+                    with docker.formal_guard():
+                        self.fail("unsafe formal body must not run")
+            self.assertEqual(run.call_args_list[1].args[0][:2], ["docker", "unpause"])
 
     def test_docker_sandbox_redirects_tool_caches_out_of_workspace(self):
         # pip/HF/torch/CUDA caches must land in the ephemeral /tmp, never under

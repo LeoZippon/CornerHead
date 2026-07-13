@@ -1,12 +1,15 @@
+import hashlib
 import json
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from autotrade.environment import snapshot as snapshot_module
 from autotrade.environment.features.fundamental_events import read_fundamental_events
 from autotrade.environment.snapshot import SnapshotBuilder, SnapshotConfig, load_snapshot_manifest, verify_snapshot_hash
 
@@ -161,6 +164,95 @@ CONFIG = SnapshotConfig(
 
 
 class SnapshotBuilderTest(unittest.TestCase):
+    def test_snapshot_hash_streams_files_without_changing_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "nested"
+            nested.mkdir()
+            first_payload = (b"abcdefgh" * (1024 * 256)) + b"first-tail"
+            second_payload = b"second"
+            (root / "large.bin").write_bytes(first_payload)
+            (nested / "small.bin").write_bytes(second_payload)
+
+            digest = hashlib.sha256()
+            for relpath, payload in (("large.bin", first_payload), ("nested/small.bin", second_payload)):
+                digest.update(relpath.encode("utf-8"))
+                digest.update(b"\x00")
+                digest.update(payload)
+            expected = f"sha256:{digest.hexdigest()}"
+
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("whole-file read")):
+                manifest = snapshot_module.finalize_snapshot_dir(root, kind="test")
+                self.assertEqual(manifest["snapshot_hash"], expected)
+                snapshot_module.verify_snapshot_hash(root)
+
+    def test_large_frame_profile_uses_footer_without_changing_manifest_fields(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20210102",
+                    "available_at": "2021-01-02T17:30:00+08:00",
+                    "amount": 1.0,
+                },
+                {
+                    "ts_code": None,
+                    "trade_date": "20210101",
+                    "available_at": None,
+                    "amount": None,
+                },
+            ]
+        )
+        expected_ranges = snapshot_module._profile_date_ranges(frame)
+        expected_nulls = snapshot_module._profile_key_nulls(frame)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "large.parquet"
+            with (
+                patch.object(snapshot_module, "PROFILE_FULL_SCAN_MAX_ROWS", 0),
+                patch.object(
+                    snapshot_module,
+                    "_profile_date_ranges",
+                    side_effect=AssertionError("DataFrame date scan"),
+                ),
+                patch.object(
+                    snapshot_module,
+                    "_profile_key_nulls",
+                    side_effect=AssertionError("DataFrame null scan"),
+                ),
+            ):
+                profile = snapshot_module._write_with_profile(path, frame, build_seconds=0.25)
+
+        self.assertEqual(profile["rows"], len(frame))
+        self.assertEqual(profile["columns"], list(frame.columns))
+        self.assertEqual(profile["date_ranges"], expected_ranges)
+        self.assertEqual(profile["key_nulls"], expected_nulls)
+
+    def test_footer_profile_falls_back_for_timezone_timestamp_contract(self):
+        frame = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "available_at": pd.to_datetime(
+                    ["2021-01-02 17:30:00+08:00", "2021-01-03 18:00:00+08:00"]
+                ),
+            }
+        )
+        expected = snapshot_module._profile_date_ranges(frame)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "large.parquet"
+            with (
+                patch.object(snapshot_module, "PROFILE_FULL_SCAN_MAX_ROWS", 0),
+                patch.object(
+                    snapshot_module,
+                    "_profile_date_ranges",
+                    wraps=snapshot_module._profile_date_ranges,
+                ) as scanned,
+            ):
+                profile = snapshot_module._write_with_profile(path, frame, build_seconds=0.1)
+
+        scanned.assert_called_once()
+        self.assertEqual(profile["date_ranges"], expected)
+
     def test_auction_availability_before_match_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"
@@ -181,6 +273,70 @@ class SnapshotBuilderTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "precedes the 09:25 match"):
                 builder._auction_partition_availability("20260713")
+
+    def test_auction_builder_materializes_recovered_price_and_no_trade_sentinel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            path = raw / "stk_auction" / "trade_date=20260713.parquet"
+            write(
+                path,
+                pd.DataFrame(
+                    [
+                        {
+                            "trade_date": "20260713", "ts_code": "000001.SZ", "price": None,
+                            "vol": 1000, "amount": 10000, "pre_close": 9.8,
+                            "turnover_rate": 0.1, "volume_ratio": 1.2, "float_share": 100000,
+                        },
+                        {
+                            "trade_date": "20260713", "ts_code": "000002.SZ", "price": 99.0,
+                            "vol": 0, "amount": 0, "pre_close": 10.0,
+                            "turnover_rate": 0.0, "volume_ratio": 0.0, "float_share": 200000,
+                        },
+                    ]
+                ),
+            )
+            path.with_suffix(".parquet.meta.json").write_text(
+                json.dumps(
+                    {
+                        "availability": {
+                            "available_at": "2026-07-13T09:28:00+08:00",
+                            "rule": "observed:test_capture",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            auction, meta = SnapshotBuilder(raw, Path(tmp) / "missing_events")._build_auction(
+                "20260713", "20260713"
+            )
+
+            prices = auction.set_index("ts_code")["price"]
+            self.assertEqual(float(prices["000001.SZ"]), 10.0)
+            self.assertTrue(pd.isna(prices["000002.SZ"]))
+            self.assertEqual(meta["price_quality"]["derived_price_rows"], 1)
+            self.assertEqual(meta["price_quality"]["no_trade_rows"], 1)
+
+    def test_auction_builder_rejects_price_quantity_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            path = raw / "stk_auction" / "trade_date=20260713.parquet"
+            write(path, pd.DataFrame([{
+                "trade_date": "20260713", "ts_code": "000001.SZ", "price": 100.0,
+                "vol": 1000, "amount": 10000, "pre_close": 9.8,
+                "turnover_rate": 0.1, "volume_ratio": 1.2, "float_share": 100000,
+            }]))
+            path.with_suffix(".parquet.meta.json").write_text(
+                json.dumps({"availability": {
+                    "available_at": "2026-07-13T09:28:00+08:00",
+                    "rule": "observed:test_capture",
+                }}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "inconsistent clearing prices"):
+                SnapshotBuilder(raw, Path(tmp) / "missing_events")._build_auction(
+                    "20260713", "20260713"
+                )
 
     def test_decision_snapshot_is_pit_filtered_and_unit_normalized(self):
         with tempfile.TemporaryDirectory() as tmp:

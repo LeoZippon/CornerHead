@@ -26,7 +26,7 @@ FINAL_EVAL_WALL_CAP_MULTIPLIER = 3.0
 # Increment only when the cached snapshot/replay on-disk contract changes.
 # Source revisions (including Git HEAD) are intentionally not cache inputs:
 # harmless code changes should not invalidate every expensive data view.
-SNAPSHOT_CACHE_FORMAT_VERSION = 1
+SNAPSHOT_CACHE_FORMAT_VERSION = 2
 
 
 class SnapshotProvider(Protocol):

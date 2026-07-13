@@ -52,9 +52,19 @@ class MinuteMarketData:
             frame["low"] = pd.to_numeric(frame["low"], errors="coerce")
         frame = frame.sort_values(["trade_date", "minute_sort", "ts_code"], kind="stable").reset_index(drop=True)
         self._frame = frame
+        self._date_bounds: dict[str, tuple[int, int]] = {}
+        start = 0
+        for trade_date, count in frame.groupby("trade_date", sort=False).size().items():
+            end = start + int(count)
+            self._date_bounds[str(trade_date)] = (start, end)
+            start = end
 
     def rows_for_date(self, trade_date: str) -> pd.DataFrame:
-        return self._frame[self._frame["trade_date"] == str(trade_date)].copy()
+        bounds = self._date_bounds.get(str(trade_date))
+        if bounds is None:
+            return self._frame.iloc[0:0].copy()
+        start, end = bounds
+        return self._frame.iloc[start:end].copy()
 
 
 def _minute_key(value: object) -> str | None:

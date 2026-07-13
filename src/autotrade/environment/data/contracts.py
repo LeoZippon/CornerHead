@@ -117,7 +117,7 @@ class RefreshNode:
 
 REFRESH_NODES: dict[str, RefreshNode] = {
     # Evening rolling-window update: A-share daily core, minute history, money flow,
-    # block trade, holders/repurchase/float/top-list, macro, and bulk text. Launches
+    # block trade, holders/repurchase/float/top-list, macro, and bulk text.
     # Real dispatches have exceeded the former 150-minute estimate (one reached
     # 169 minutes). Historical replays have no per-run completion ledger, so use
     # a conservative 210-minute fallback (03:05) rather than knowingly exposing
@@ -142,6 +142,13 @@ REFRESH_NODES: dict[str, RefreshNode] = {
 }
 
 EVENING_NODE = "cn_evening_full"
+# The evening job resolves its end date to the latest SSE open day and skips an
+# already-successful identical range. Weekend launches therefore do not create
+# visibility boundaries. Weekday exchange holidays still need a future trading-
+# calendar/observed-completion ledger for exact modelling.
+NODE_ACTIVE_WEEKDAYS: dict[str, frozenset[int]] = {
+    EVENING_NODE: frozenset(range(5)),
+}
 
 # Whole-domain node assignment (a domain file's rows all roll on the same node).
 DOMAIN_REFRESH_NODES: dict[str, tuple[str, ...]] = {
@@ -182,14 +189,17 @@ def node_visible_cutoff(node: RefreshNode, when: datetime) -> datetime | None:
     ``start`` instant (the availability cutoff) or None if none has completed yet.
 
     A row is visible under this node when its ``available_at`` is at or before the
-    returned cutoff. Searching back three days covers any sub-day refresh duration
-    (the longest node, the evening update, completes ~2.5h after launch).
+    returned cutoff. Searching back ten days crosses weekends and ordinary
+    holiday gaps.
     """
     if when.tzinfo is None:
         when = when.replace(tzinfo=CN_TZ)
     base_day = when.astimezone(CN_TZ).date()
-    for delta in range(0, 3):
+    active_weekdays = NODE_ACTIVE_WEEKDAYS.get(node.name)
+    for delta in range(0, 10):
         day = base_day - timedelta(days=delta)
+        if active_weekdays is not None and day.weekday() not in active_weekdays:
+            continue
         if node.ready_at(day) <= when:
             return node.start_at(day)
     return None
@@ -209,10 +219,9 @@ def visible_cutoff(node_names: tuple[str, ...], when: datetime) -> datetime | No
 def next_visible_boundary(node_names: tuple[str, ...], when: datetime) -> datetime | None:
     """Earliest future ``ready_at`` among ``node_names``.
 
-    Timeview uses this as a fast gate between refreshes. The prior day's evening
-    job can finish after midnight, so candidates include both the previous and
-    current local calendar day. Boundaries are strict: a node ready exactly at
-    ``when`` has already been processed and the next daily instance is returned.
+    Timeview uses this as a fast gate between refreshes. Boundaries are strict:
+    a node ready exactly at ``when`` has already been processed and the next
+    scheduled instance is returned.
     """
     if not node_names:
         return None
@@ -223,7 +232,11 @@ def next_visible_boundary(node_names: tuple[str, ...], when: datetime) -> dateti
     candidates = [
         ready_at
         for name in node_names
-        for delta in (-1, 0, 1)
+        for delta in range(-1, 11)
+        if (
+            (active_weekdays := NODE_ACTIVE_WEEKDAYS.get(name)) is None
+            or (base_day + timedelta(days=delta)).weekday() in active_weekdays
+        )
         if (ready_at := REFRESH_NODES[name].ready_at(base_day + timedelta(days=delta))) > local_when
     ]
     return min(candidates) if candidates else None

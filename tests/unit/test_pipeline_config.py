@@ -161,7 +161,7 @@ class CachingSnapshotProviderGenerationTest(unittest.TestCase):
             caching = CachingSnapshotProvider(provider, root / "cache")
 
             caching.replay_slot("20220101", "20220131", root / "out_v1", label="valid")
-            with mock.patch("autotrade.pipelines.config.SNAPSHOT_CACHE_FORMAT_VERSION", 2):
+            with mock.patch("autotrade.pipelines.config.SNAPSHOT_CACHE_FORMAT_VERSION", 3):
                 caching.replay_slot("20220101", "20220131", root / "out_v2", label="valid")
 
             self.assertEqual(len(call_log.read_text(encoding="utf-8").splitlines()), 2)

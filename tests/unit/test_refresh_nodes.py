@@ -14,6 +14,7 @@ from autotrade.environment.data.contracts import (
     TEXT_DATASET_REFRESH_NODES,
     domain_visible_cutoff,
     event_dataset_visible_cutoff,
+    next_visible_boundary,
     text_dataset_visible_cutoff,
     visible_cutoff,
 )
@@ -231,6 +232,18 @@ class VisibilityCutoffTest(unittest.TestCase):
         # done at 00:05, and the day-before-that completed 2021-12-31 03:05.
         cutoff = visible_cutoff(("cn_evening_full",), when)
         self.assertEqual(cutoff, datetime(2021, 12, 30, 23, 35, tzinfo=CN_TZ))
+
+    def test_evening_node_does_not_advance_on_weekend_skip(self) -> None:
+        monday_morning = datetime(2022, 1, 10, 9, 0, tzinfo=CN_TZ)
+        self.assertEqual(
+            visible_cutoff(("cn_evening_full",), monday_morning),
+            datetime(2022, 1, 7, 23, 35, tzinfo=CN_TZ),
+        )
+        saturday = datetime(2022, 1, 8, 10, 0, tzinfo=CN_TZ)
+        self.assertEqual(
+            next_visible_boundary(("cn_evening_full",), saturday),
+            datetime(2022, 1, 11, 3, 5, tzinfo=CN_TZ),
+        )
 
 
 if __name__ == "__main__":

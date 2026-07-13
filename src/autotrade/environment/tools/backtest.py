@@ -41,7 +41,15 @@ from autotrade.environment.snapshot import load_snapshot_manifest
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.style_analysis import replay_style_analysis
 
-from .base import ActionField, ActionSpec, PHASE_FROZEN, PHASE_TRAIN_VALID, ToolContext, ToolError
+from .base import (
+    ActionField,
+    ActionSpec,
+    PHASE_FROZEN,
+    PHASE_TRAIN_VALID,
+    SessionInterrupt,
+    ToolContext,
+    ToolError,
+)
 from .modification_check import ModificationCheckTool
 
 _FINAL_EVAL_WALL_CAP_MULTIPLIER = 3.0
@@ -91,6 +99,10 @@ class BacktestTool:
         self.ctx = ctx
         self._backtest_started = False
         self._backtest_started_monotonic: float | None = None
+        self._probe_active = False
+        self._public_nl_tmp: Path | None = None
+        self._tool_started_monotonic: float | None = None
+        self._data_load: dict[str, object] = {}
 
     def run(
         self, *, mode: str, result_name: str | None = None, replay_window: int | None = None
@@ -105,42 +117,83 @@ class BacktestTool:
         else:
             self.ctx.require_phase(PHASE_FROZEN, tool=self.name)
             replay_window = None  # frozen_eval always replays the full region
+        self._probe_active = replay_window is not None
+        self._tool_started_monotonic = time.monotonic()
         self._backtest_started = False
         self._backtest_started_monotonic = None
-        try:
-            return self._execute(mode=mode, result_name=result_name, replay_window=replay_window)
-        except (BacktestError, ArtifactError) as exc:
-            self._record_failure(mode, str(exc))
-            raise ToolError(str(exc)) from exc
-        except ToolError as exc:
-            # A pre-flight rejection (dup result dir, modification-check/snapshot mismatch)
-            # happens before backtest_start, so no bracket is open and we record nothing.
-            # But the post-replay modification refresh can also raise ToolError AFTER
-            # backtest_start — that must close the bracket with a terminal event.
-            if self._backtest_started:
-                self._record_failure(mode, str(exc), status="error")
-            raise
-        except BaseException as exc:  # noqa: BLE001 - guarantee a terminal audit event on any abort
-            # An external/abort path (timeout kill, KeyboardInterrupt) would otherwise
-            # leave the trace open on an in-flight backtest with no outcome.
-            self._record_failure(mode, f"{type(exc).__name__}: {exc}", status="aborted")
-            raise
+        self._public_nl_tmp = None
+        self._data_load = {}
+        guard_factory = getattr(self.ctx.executor, "formal_guard_factory", None)
+        guard = guard_factory() if callable(guard_factory) else contextlib.nullcontext()
+        # Docker formal runs freeze the development container for the complete
+        # tool call: validation, replay, hashing, manifest publication and Step
+        # snapshot all observe one immutable output/models generation.
+        with guard:
+            try:
+                return self._execute(mode=mode, result_name=result_name, replay_window=replay_window)
+            except (BacktestError, ArtifactError) as exc:
+                detail = str(exc)
+                public_error = self._public_failure_error(detail)
+                self._record_failure(mode, public_error)
+                raise ToolError(public_error) from exc
+            except ToolError as exc:
+                # A pre-flight rejection happens before backtest_start, so no
+                # bracket is open. Post-start failures must terminate the audit;
+                # Probe details remain host-only regardless of exception class.
+                if self._backtest_started:
+                    public_error = self._public_failure_error(str(exc))
+                    self._record_failure(mode, public_error, status="error")
+                    if public_error != str(exc):
+                        raise ToolError(public_error) from exc
+                raise
+            except SessionInterrupt as exc:
+                # Researcher stop/ask control flow is not a strategy failure and
+                # must reach the session loop unchanged. If the replay bracket is
+                # already open, still close its host audit record first.
+                if self._backtest_started:
+                    public_error = self._public_failure_error(
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    self._record_failure(mode, public_error, status="aborted")
+                raise
+            except Exception as exc:  # noqa: BLE001 - strategy/runtime failures are normalized
+                detail = f"{type(exc).__name__}: {exc}"
+                public_error = self._public_failure_error(detail)
+                if self._backtest_started:
+                    self._record_failure(mode, public_error, status="aborted")
+                raise ToolError(public_error) from exc
+            except BaseException as exc:  # noqa: BLE001 - preserve stop/interrupt semantics
+                # KeyboardInterrupt/SystemExit must propagate, but their
+                # potentially strategy-derived text is never written publicly.
+                detail = f"{type(exc).__name__}: {exc}"
+                public_error = self._public_failure_error(detail)
+                if self._backtest_started:
+                    self._record_failure(mode, public_error, status="aborted")
+                raise
+            finally:
+                if self._public_nl_tmp is not None and self._public_nl_tmp.exists():
+                    shutil.rmtree(self._public_nl_tmp, ignore_errors=True)
 
     def contract_check(self) -> dict[str, object]:
         """finish_fold's light check: artifact loads and main(ctx) is defined."""
-        artifact = load_strategy_artifact(self.ctx.paths.agent_output)
-        decision_time = str(self.ctx.manifest.require("valid_decision_time"))
-        replay_minutes = _read_replay_minutes(self.ctx.paths.valid)
-        replay_granularity = "minute" if replay_minutes is not None else "daily"
-        with _formal_artifacts_readonly(self.ctx.paths, restore_writable=not self.ctx.write_locked):
-            with MainPolicyRunner(
-                self.ctx.executor,
-                self.ctx.paths,
-                timeout_seconds=float(self.ctx.manifest.get("per_call_timeout_seconds", 300)),
-                decision_time=decision_time,
-                replay_granularity=replay_granularity,
-            ) as policy:
-                policy.validate_main()
+        guard_factory = getattr(self.ctx.executor, "formal_guard_factory", None)
+        guard = guard_factory() if callable(guard_factory) else contextlib.nullcontext()
+        with guard:
+            artifact = load_strategy_artifact(self.ctx.paths.agent_output)
+            decision_time = str(self.ctx.manifest.require("valid_decision_time"))
+            replay_minutes = _read_replay_minutes(self.ctx.paths.valid)
+            replay_granularity = "minute" if replay_minutes is not None else "daily"
+            with _formal_artifacts_readonly(self.ctx.paths, restore_writable=not self.ctx.write_locked):
+                with _formal_replay_execution(self.ctx) as (executor, runtime_dir, _rpc_agent):
+                    with MainPolicyRunner(
+                        executor,
+                        self.ctx.paths,
+                        timeout_seconds=float(self.ctx.manifest.get("per_call_timeout_seconds", 300)),
+                        decision_time=decision_time,
+                        replay_granularity=replay_granularity,
+                        runtime_dir=runtime_dir,
+                    ) as policy:
+                        policy.validate_main()
         summary = {
             "tool": self.name,
             "tool_spec": self.spec.to_record(),
@@ -163,21 +216,50 @@ class BacktestTool:
         self._verify_snapshot_binding(mode, snapshot_dir)
         decision_time = str(manifest.require("valid_decision_time" if mode == "valid" else "test_decision_time"))
         replay_dir = self.ctx.paths.valid if mode == "valid" else self.ctx.paths.test
-        replay_daily = pd.read_parquet(replay_dir / "daily.parquet")
-        replay_minutes = _read_replay_minutes(replay_dir)
-        replay_auction = _read_replay_auction(replay_dir)
         # A short debug window replays only the first N trade days; such a run is
         # never accept-eligible (complete_validation=False).
         complete_validation = replay_window is None
+        probe = not complete_validation
+        data_load: dict[str, object] = {}
+        self._data_load = data_load
         if replay_window is not None:
-            keep = set(sorted(replay_daily["trade_date"].astype(str).unique())[: max(2, int(replay_window))])
-            replay_daily = replay_daily[replay_daily["trade_date"].astype(str).isin(keep)]
-            if replay_minutes is not None:
-                replay_minutes = replay_minutes[replay_minutes["trade_date"].astype(str).isin(keep)]
-                replay_minutes = None if replay_minutes.empty else replay_minutes
-            if replay_auction is not None:
-                replay_auction = replay_auction[replay_auction["trade_date"].astype(str).isin(keep)].reset_index(drop=True)
-                replay_auction = None if replay_auction.empty else replay_auction
+            load_t0 = time.monotonic()
+            keep = _first_replay_trade_dates(
+                replay_dir / "daily.parquet",
+                max(2, int(replay_window)),
+            )
+            data_load["catalog_seconds"] = round(time.monotonic() - load_t0, 6)
+            load_t0 = time.monotonic()
+            replay_daily = _read_replay_daily(replay_dir, trade_dates=keep)
+            data_load["daily_seconds"] = round(time.monotonic() - load_t0, 6)
+            load_t0 = time.monotonic()
+            replay_minutes = _read_replay_minutes(replay_dir, trade_dates=keep)
+            data_load["minutes_seconds"] = round(time.monotonic() - load_t0, 6)
+            load_t0 = time.monotonic()
+            replay_auction = _read_replay_auction(replay_dir, trade_dates=keep)
+            data_load["auction_seconds"] = round(time.monotonic() - load_t0, 6)
+        else:
+            keep = None
+            data_load["catalog_seconds"] = 0.0
+            load_t0 = time.monotonic()
+            replay_daily = _read_replay_daily(replay_dir)
+            data_load["daily_seconds"] = round(time.monotonic() - load_t0, 6)
+            load_t0 = time.monotonic()
+            replay_minutes = _read_replay_minutes(replay_dir)
+            data_load["minutes_seconds"] = round(time.monotonic() - load_t0, 6)
+            load_t0 = time.monotonic()
+            replay_auction = _read_replay_auction(replay_dir)
+            data_load["auction_seconds"] = round(time.monotonic() - load_t0, 6)
+        data_load.update(
+            {
+                "daily_rows": int(len(replay_daily)),
+                "minute_rows": int(len(replay_minutes)) if replay_minutes is not None else 0,
+                "auction_rows": int(len(replay_auction)) if replay_auction is not None else 0,
+                "daily_source_bytes": _path_bytes(replay_dir / "daily.parquet"),
+                "minute_source_bytes": _path_bytes(replay_dir / "intraday_1min.parquet"),
+                "auction_source_bytes": _path_bytes(replay_dir / "auction.parquet"),
+            }
+        )
         replay_granularity = "minute" if replay_minutes is not None else "daily"
         result_dir = self._planned_result_dir(mode, result_name)
         if result_dir.exists():
@@ -200,6 +282,8 @@ class BacktestTool:
         self._backtest_started_monotonic = time.monotonic()
 
         def _on_progress(date: str, idx: int, total: int, elapsed: float, orders: int) -> None:
+            if probe:
+                return  # do not stream progressive future-window/order feedback
             self.ctx.trace.emit(
                 "backtest_progress",
                 {
@@ -242,69 +326,82 @@ class BacktestTool:
             per_day_cap = _optional_float(manifest.get("backtest_final_eval_max_seconds_per_trading_day"))
             if per_day_cap is None and valid_per_day_cap is not None:
                 per_day_cap = valid_per_day_cap * _FINAL_EVAL_WALL_CAP_MULTIPLIER
-        tmp_nl_dir = self.ctx.paths.workspace / f".{new_id('nl_tool')}"
-        requests_host, responses_host = prepare_nl_rpc_files(self.ctx.paths.agent)
-
         timeview_enabled = bool(manifest.get("timeview_enabled", manifest.get("rolling_asof_enabled", True)))
-        nl_service = StrategyNLService(
-            proxy=self.ctx.effective_nl_proxy,
-            snapshot_dir=snapshot_dir,
-            log_dir=tmp_nl_dir,
-            failure_policy=str(manifest.get("nl_failure_policy", "return_error_with_audit")),
-            # A single NL call gets a fraction of the decision cap so there is headroom
-            # for the surrounding compute before the per-decision wall cap kills the tick.
-            per_call_timeout_seconds=decision_cap * 0.8,
-            max_calls=_nl_call_budget(manifest, replay_daily),
-            # When the Timeview is on, ctx.nl() text rolls on the same nodes as the view.
-            replay_dir=replay_dir if timeview_enabled else None,
+        public_nl_audit = mode == "valid" and not probe
+        nl_log_dir = (
+            self.ctx.paths.workspace / f".{new_id('nl_tool')}"
+            if public_nl_audit
+            else _host_evidence_dir(self.ctx.paths.root, result_dir.name) / "nl_tool"
         )
+        self._public_nl_tmp = nl_log_dir if public_nl_audit else None
+        with _formal_replay_execution(self.ctx) as (formal_executor, runtime_dir, rpc_agent):
+            requests_host, responses_host = prepare_nl_rpc_files(rpc_agent)
+            nl_service = StrategyNLService(
+                proxy=self.ctx.effective_nl_proxy,
+                snapshot_dir=snapshot_dir,
+                log_dir=nl_log_dir,
+                failure_policy=str(manifest.get("nl_failure_policy", "return_error_with_audit")),
+                # A single NL call gets a fraction of the decision cap so there is headroom
+                # for the surrounding compute before the per-decision wall cap kills the tick.
+                per_call_timeout_seconds=decision_cap * 0.8,
+                max_calls=_nl_call_budget(manifest, replay_daily),
+                # When the Timeview is on, ctx.nl() text rolls on the same nodes as the view.
+                replay_dir=replay_dir if timeview_enabled else None,
+                withhold_response=probe,
+            )
+            try:
+                profile = BrokerProfile(**_profile_kwargs(dict(manifest.require("broker_profile"))))
+                # Frozen decision-day set (agent snapshot view) is the fallback; the per-day
+                # map from the replay slot drives the broker's real same-day short gate (W7).
+                shortable = load_shortable_codes(snapshot_dir, _decision_date(decision_time))
+                shortable_by_date = load_shortable_by_date(replay_dir, trade_dates=keep)
+                with _formal_artifacts_readonly(self.ctx.paths, restore_writable=(mode == "valid")):
+                    with MainPolicyRunner(
+                        formal_executor,
+                        self.ctx.paths,
+                        timeout_seconds=decision_cap,
+                        decision_time=decision_time,
+                        replay_granularity=replay_granularity,
+                        nl_service=nl_service,
+                        requests_path=requests_host,
+                        responses_path=responses_host,
+                        decision_max_sim_minutes=_optional_float(manifest.get("decision_max_sim_minutes")),
+                        runtime_dir=runtime_dir,
+                    ) as policy:
+                        policy.validate_main()
+                        replay = run_main_ctx_replay(
+                            replay_daily,
+                            profile,
+                            shortable_codes=shortable,
+                            shortable_by_date=shortable_by_date,
+                            corporate_actions_by_date=load_corporate_actions_by_date(
+                                replay_dir, trade_dates=keep
+                            ),
+                            auction_prints_by_date=auction_prints_by_date(
+                                replay_auction if replay_auction is not None else pd.DataFrame()
+                            ),
+                            main_policy=policy,
+                            replay_intraday_1min=replay_minutes,
+                            replay_auction_results=replay_auction,
+                            auction_enabled=bool(manifest.get("auction_enabled", True)),
+                            auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
+                            auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
+                            auction_close_time=(manifest.get("auction_close_time", "14:57") or None),
+                            # No fallback default: manifests predating the knob replay
+                            # without the after-hours tick (frozen-eval reproducibility).
+                            afterhours_decision_time=(manifest.get("afterhours_decision_time") or None),
+                            execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
+                            offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 30)),
+                            intraday_decision_minutes=int(manifest.get("intraday_decision_minutes", 1)),
+                            max_seconds_per_trading_day=per_day_cap,
+                            timeview_enabled=timeview_enabled,
+                            snapshot_dir=snapshot_dir,
+                            replay_dir=replay_dir,
+                            on_progress=_on_progress,
+                        )
+            finally:
+                cleanup_nl_rpc_files(requests_host, responses_host)
         try:
-            profile = BrokerProfile(**_profile_kwargs(dict(manifest.require("broker_profile"))))
-            # Frozen decision-day set (agent snapshot view) is the fallback; the per-day
-            # map from the replay slot drives the broker's real same-day short gate (W7).
-            shortable = load_shortable_codes(snapshot_dir, _decision_date(decision_time))
-            shortable_by_date = load_shortable_by_date(replay_dir)
-            with _formal_artifacts_readonly(self.ctx.paths, restore_writable=(mode == "valid")):
-                with MainPolicyRunner(
-                    self.ctx.executor,
-                    self.ctx.paths,
-                    timeout_seconds=decision_cap,
-                    decision_time=decision_time,
-                    replay_granularity=replay_granularity,
-                    nl_service=nl_service,
-                    requests_path=requests_host,
-                    responses_path=responses_host,
-                    decision_max_sim_minutes=_optional_float(manifest.get("decision_max_sim_minutes")),
-                ) as policy:
-                    policy.validate_main()
-                    replay = run_main_ctx_replay(
-                        replay_daily,
-                        profile,
-                        shortable_codes=shortable,
-                        shortable_by_date=shortable_by_date,
-                        corporate_actions_by_date=load_corporate_actions_by_date(replay_dir),
-                        auction_prints_by_date=auction_prints_by_date(
-                            replay_auction if replay_auction is not None else pd.DataFrame()
-                        ),
-                        main_policy=policy,
-                        replay_intraday_1min=replay_minutes,
-                        replay_auction_results=replay_auction,
-                        auction_enabled=bool(manifest.get("auction_enabled", True)),
-                        auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
-                        auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
-                        auction_close_time=(manifest.get("auction_close_time", "14:57") or None),
-                        # No fallback default: manifests predating the knob replay
-                        # without the after-hours tick (frozen-eval reproducibility).
-                        afterhours_decision_time=(manifest.get("afterhours_decision_time") or None),
-                        execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
-                        offsession_tick_minutes=int(manifest.get("offsession_tick_minutes", 30)),
-                        intraday_decision_minutes=int(manifest.get("intraday_decision_minutes", 1)),
-                        max_seconds_per_trading_day=per_day_cap,
-                        timeview_enabled=timeview_enabled,
-                        snapshot_dir=snapshot_dir,
-                        replay_dir=replay_dir,
-                        on_progress=_on_progress,
-                    )
             stats = compute_return_stats(replay)
             artifact = load_strategy_artifact(self.ctx.paths.agent_output)
             model_artifacts = load_model_artifacts(self.ctx.paths.model_artifacts)
@@ -312,22 +409,22 @@ class BacktestTool:
                 mode, modification_check, artifact.artifact_hash, model_artifacts.artifact_hash
             )
             result_dir.mkdir(parents=True)
-            nl_tool_dir = result_dir / "nl_tool"
-            if tmp_nl_dir.exists():
-                shutil.move(str(tmp_nl_dir), str(nl_tool_dir))
-            else:
-                nl_tool_dir.mkdir(parents=True, exist_ok=True)
+            nl_tool_dir: Path | None = None
+            if public_nl_audit:
+                nl_tool_dir = result_dir / "nl_tool"
+                if nl_log_dir.exists():
+                    shutil.move(str(nl_log_dir), str(nl_tool_dir))
+                else:
+                    nl_tool_dir.mkdir(parents=True, exist_ok=True)
         finally:
-            if tmp_nl_dir.exists():
-                shutil.rmtree(tmp_nl_dir, ignore_errors=True)
-            cleanup_nl_rpc_files(requests_host, responses_host)
+            if public_nl_audit and nl_log_dir.exists():
+                shutil.rmtree(nl_log_dir, ignore_errors=True)
 
         # replay_window probes replay a FUTURE window relative to the decision
         # time: their financial outputs (returns, fill prices, EOD positions)
         # are lookahead for the Agent and were demonstrably used to tune against
         # the first-N-days P&L. Probes keep only run-cost/lifecycle statistics;
         # no financial artifact lands in the agent-readable results dir.
-        probe = replay_window is not None
         style_payload: dict[str, object] = {}
         orders_path = None
         if not probe:
@@ -361,7 +458,13 @@ class BacktestTool:
         staging_audit = replay.state_staging_audit or []
         unmerged = sum(1 for record in staging_audit if not record.get("merged"))
         if staging_audit:
-            (result_dir / "state_staging_audit.json").write_text(
+            state_audit_path = (
+                result_dir / "state_staging_audit.json"
+                if mode == "valid" and not probe
+                else nl_log_dir.parent / "state_staging_audit.json"
+            )
+            state_audit_path.parent.mkdir(parents=True, exist_ok=True)
+            state_audit_path.write_text(
                 json.dumps(sanitize_for_log(staging_audit), ensure_ascii=False, indent=2, sort_keys=True, default=str),
                 encoding="utf-8",
             )
@@ -386,6 +489,7 @@ class BacktestTool:
             "replay_granularity": replay.granularity,
             "order_count": int(stats["order_count"]),
             "nl_calls": int(nl_service.calls),
+            "nl_outcome_counts": dict(sorted(nl_service.outcome_counts.items())),
             "nl_max_calls_per_backtest": nl_service.max_calls,
             "trade_count": int(stats["trade_count"]),
             "margin_secs_reject_count": stats["margin_secs_reject_count"],
@@ -393,8 +497,6 @@ class BacktestTool:
             # Lifecycle signal (also on probes): how many positions the HOST
             # had to liquidate at region end because the strategy never exited.
             "host_exit_liquidation_count": stats["host_exit_liquidation_count"],
-            "nl_tool_dir": self.ctx.executor.map_path(nl_tool_dir),
-            "host_nl_tool_dir": str(nl_tool_dir),
             "modification_delta_summary": _modification_delta_summary(modification_check),
             "probe_note": (
                 "replay_window 前 N 交易日探针：只返回运行成本与订单生命周期统计，"
@@ -405,14 +507,32 @@ class BacktestTool:
             "finished_at": utc_now_iso(),
             "replay_wall_seconds": stats.get("replay_wall_seconds"),
             "replayed_trade_days": stats.get("replayed_trade_days"),
-            "substep_runtime": stats.get("substep_runtime"),
+            "substep_runtime": (
+                _probe_substep_runtime(stats.get("substep_runtime"))
+                if probe
+                else stats.get("substep_runtime")
+            ),
             "phase_seconds": stats.get("phase_seconds"),
+            "data_load": data_load,
+            # Measured before manifest/trace publication and optional StepTree
+            # snapshot; the name makes that boundary explicit.
+            "pre_publish_wall_seconds": round(
+                time.monotonic() - self._tool_started_monotonic,
+                3,
+            ) if self._tool_started_monotonic is not None else None,
             "total_ticks": stats.get("total_ticks"),
             "intraday_ticks": stats.get("intraday_ticks"),
             "offsession_ticks": stats.get("offsession_ticks"),
             "state_staged_writes": len(staging_audit),
             "state_unmerged_writes": unmerged,
         }
+        if nl_tool_dir is not None:
+            summary.update(
+                {
+                    "nl_tool_dir": self.ctx.executor.map_path(nl_tool_dir),
+                    "host_nl_tool_dir": str(nl_tool_dir),
+                }
+            )
         if not probe:
             summary.update({
                 "total_return": stats["total_return"],
@@ -553,6 +673,8 @@ class BacktestTool:
                 if self._backtest_started_monotonic is not None else None
             ),
         }
+        if self._data_load:
+            summary["data_load"] = dict(self._data_load)
         self.ctx.manifest.append_backtest_summary(summary)
         self.ctx.trace.emit("backtest", summary, step_id=self.ctx.current_step_id)
         manifest = self.ctx.manifest
@@ -569,26 +691,131 @@ class BacktestTool:
                 artifact_hash=failed_hash,
             )
 
+    def _record_probe_failure_detail(self, error: str) -> None:
+        try:
+            evidence = _host_evidence_dir(self.ctx.paths.root, "failed_probe")
+            (evidence / "error.txt").write_text(str(error), encoding="utf-8", errors="replace")
+        except OSError:
+            # Evidence durability must never reopen the public error channel.
+            pass
+
+    def _public_failure_error(self, detail: str) -> str:
+        if not (self._probe_active and self._backtest_started):
+            return detail
+        self._record_probe_failure_detail(detail)
+        return (
+            "probe failed inside the isolated replay; raw strategy/runtime error text is host-only. "
+            "Use the returned failure state to fix control flow, then rerun a small probe."
+        )
+
 
 def _profile_kwargs(record: dict[str, object]) -> dict[str, object]:
     fields = set(BrokerProfile.__dataclass_fields__)
     return {key: value for key, value in record.items() if key in fields}
 
 
-def _read_replay_minutes(replay_dir: Path) -> pd.DataFrame | None:
+def _first_replay_trade_dates(path: Path, count: int) -> tuple[str, ...]:
+    dates = pd.read_parquet(path, columns=["trade_date"])
+    if dates.empty:
+        raise ToolError(f"replay daily data is empty: {path}")
+    return tuple(sorted(dates["trade_date"].astype(str).unique())[: max(1, int(count))])
+
+
+def _trade_date_filters(trade_dates: tuple[str, ...] | None):
+    return [("trade_date", "in", list(trade_dates))] if trade_dates else None
+
+
+def _path_bytes(path: Path) -> int:
+    try:
+        return int(path.stat().st_size)
+    except OSError:
+        return 0
+
+
+def _probe_substep_runtime(value: object) -> dict[str, dict[str, float]]:
+    """Aggregate Probe cost without returning strategy-controlled step names."""
+    if not isinstance(value, dict):
+        return {}
+    records = [record for record in value.values() if isinstance(record, dict)]
+    if not records:
+        return {}
+    return {
+        "aggregate": {
+            "count": float(sum(float(record.get("count", 0.0) or 0.0) for record in records)),
+            "total_real_wall_s": round(
+                sum(float(record.get("total_real_wall_s", 0.0) or 0.0) for record in records),
+                6,
+            ),
+            "max_real_wall_s": round(
+                max(float(record.get("max_real_wall_s", 0.0) or 0.0) for record in records),
+                6,
+            ),
+        }
+    }
+
+
+def _read_replay_daily(
+    replay_dir: Path,
+    *,
+    trade_dates: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    return pd.read_parquet(
+        replay_dir / "daily.parquet",
+        filters=_trade_date_filters(trade_dates),
+    )
+
+
+def _read_replay_minutes(
+    replay_dir: Path,
+    *,
+    trade_dates: tuple[str, ...] | None = None,
+) -> pd.DataFrame | None:
     path = replay_dir / "intraday_1min.parquet"
     if not path.exists():
         return None
-    minutes = pd.read_parquet(path)
+    minutes = pd.read_parquet(path, filters=_trade_date_filters(trade_dates))
     return None if minutes.empty else minutes
 
 
-def _read_replay_auction(replay_dir: Path) -> pd.DataFrame | None:
+def _read_replay_auction(
+    replay_dir: Path,
+    *,
+    trade_dates: tuple[str, ...] | None = None,
+) -> pd.DataFrame | None:
     path = replay_dir / "auction.parquet"
     if not path.exists():
         return None
-    frame = pd.read_parquet(path)
+    frame = pd.read_parquet(path, filters=_trade_date_filters(trade_dates))
     return None if frame.empty else frame
+
+
+@contextlib.contextmanager
+def _formal_replay_execution(ctx: ToolContext):
+    """Yield an executor and isolated runtime for one formal strategy process."""
+    factory = getattr(ctx.executor, "formal_factory", None)
+    if not callable(factory):
+        # LocalExecutor is intentionally a non-secure development/test mode.
+        yield ctx.executor, None, ctx.paths.agent
+        return
+    runtime_dir = ctx.paths.root / "runtime" / "formal" / new_id("replay")
+    rpc_agent = runtime_dir / "rpc_agent"
+    runtime_dir.mkdir(parents=True, exist_ok=False)
+    runtime_dir.chmod(0o755)
+    try:
+        with factory(runtime_dir) as executor:
+            yield executor, runtime_dir, rpc_agent
+    finally:
+        shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
+def _host_evidence_dir(sandbox_root: Path, result_name: str) -> Path:
+    root = Path(sandbox_root) / "runtime" / "host_evidence" / "backtests"
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o700)
+    target = root / f"{result_name}_{new_id('audit')}"
+    target.mkdir(parents=True, exist_ok=False)
+    target.chmod(0o700)
+    return target
 
 
 def _decision_date(decision_time: str) -> str:

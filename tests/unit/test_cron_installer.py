@@ -1,8 +1,10 @@
 """Safety contract for the managed TuShare crontab installer."""
 
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
+from stat import S_IMODE
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "ops" / "cron" / "install_tushare_cron.py"
@@ -39,6 +41,13 @@ class CronInstallerTest(unittest.TestCase):
         installer.verify_installed_crontab(expected, expected.rstrip("\n"))
         with self.assertRaisesRegex(RuntimeError, "differs from requested content"):
             installer.verify_installed_crontab(expected, expected.replace("unrelated", "changed"))
+
+    def test_backup_permissions_are_private(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cron_backups" / "crontab.bak"
+            installer.write_private_backup(path, "MAILTO=private@example.com\n")
+            self.assertEqual(S_IMODE(path.parent.stat().st_mode), 0o700)
+            self.assertEqual(S_IMODE(path.stat().st_mode), 0o600)
 
 
 if __name__ == "__main__":

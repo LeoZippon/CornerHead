@@ -27,9 +27,15 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
-from autotrade.data_sources.tushare.common import STK_AUCTION_OBSERVED_AVAILABILITY_START
+from autotrade.data_sources.tushare.common import (
+    STK_AUCTION_OBSERVED_AVAILABILITY_START,
+    STK_AUCTION_PRICE_ABS_TOLERANCE,
+)
 from autotrade.data_sources.tushare.io import parquet_meta
 from autotrade.environment.data import PITDataStore, default_tushare_contracts
 from autotrade.environment.data.contracts import CN_TZ
@@ -686,9 +692,49 @@ class SnapshotBuilder:
             price = pd.to_numeric(auction["price"], errors="coerce")
             volume = pd.to_numeric(auction["vol"], errors="coerce")
             amount = pd.to_numeric(auction["amount"], errors="coerce")
-            valid_price = price.notna() & price.gt(0)
-            derived_price = ~valid_price & volume.gt(0) & amount.gt(0)
-            no_trade = ~valid_price & volume.fillna(0).eq(0) & amount.fillna(0).eq(0)
+            valid_quantities = (
+                pd.Series(np.isfinite(volume), index=auction.index)
+                & pd.Series(np.isfinite(amount), index=auction.index)
+                & volume.ge(0)
+                & amount.ge(0)
+            )
+            traded = valid_quantities & volume.gt(0) & amount.gt(0)
+            no_trade = valid_quantities & volume.eq(0) & amount.eq(0)
+            inconsistent = ~(traded | no_trade)
+            if inconsistent.any():
+                sample = auction.loc[inconsistent, ["trade_date", "ts_code", "price", "vol", "amount"]]
+                raise ValueError(f"stk_auction has invalid quantity combinations: {sample.head(5).to_dict('records')}")
+            finite_price = pd.Series(np.isfinite(price), index=auction.index)
+            valid_price = traded & finite_price & price.gt(0)
+            derived_price = traded & ~valid_price
+            recovered = amount.div(volume)
+            recoverable = (
+                pd.Series(np.isfinite(recovered), index=auction.index) & recovered.gt(0)
+            )
+            unrecoverable = traded & ~recoverable
+            if unrecoverable.any():
+                sample = auction.loc[unrecoverable, ["trade_date", "ts_code", "price", "vol", "amount"]]
+                raise ValueError(f"stk_auction has unrecoverable clearing prices: {sample.head(5).to_dict('records')}")
+            price_mismatch = (
+                valid_price
+                & recoverable
+                & ~pd.Series(
+                    np.isclose(
+                        price,
+                        recovered,
+                        rtol=1e-9,
+                        atol=STK_AUCTION_PRICE_ABS_TOLERANCE,
+                    ),
+                    index=auction.index,
+                )
+            )
+            if price_mismatch.any():
+                sample = auction.loc[price_mismatch, ["trade_date", "ts_code", "price", "vol", "amount"]]
+                raise ValueError(f"stk_auction has inconsistent clearing prices: {sample.head(5).to_dict('records')}")
+            auction.loc[derived_price, "price"] = recovered[derived_price]
+            # A source price without matched quantity must never become a hidden
+            # Broker fill. Preserve the row but normalize it to the no-trade sentinel.
+            auction.loc[no_trade, "price"] = float("nan")
             price_quality = {
                 "source_price_rows": int(valid_price.sum()),
                 "derived_price_rows": int(derived_price.sum()),
@@ -1386,7 +1432,8 @@ def _snapshot_hash(snapshot_dir: Path) -> str:
         if path.is_file() and path.name != "manifest.json":
             digest.update(str(path.relative_to(snapshot_dir)).encode("utf-8"))
             digest.update(b"\x00")
-            digest.update(path.read_bytes())
+            with path.open("rb") as stream:
+                hashlib.file_digest(stream, lambda: digest)
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -1404,6 +1451,7 @@ PROFILE_NULL_COLUMNS = (
     "dataset",
     "text_id",
 )
+PROFILE_FULL_SCAN_MAX_ROWS = 1_000_000
 
 
 def _write_with_profile(path: Path, frame: pd.DataFrame, *, build_seconds: float) -> dict[str, object]:
@@ -1436,18 +1484,82 @@ def _frame_profile(
         "write_seconds": round(float(write_seconds), 3),
     }
     if not frame.empty:
-        date_ranges = _profile_date_ranges(frame)
+        footer_profile = _parquet_footer_profile(path) if len(frame) > PROFILE_FULL_SCAN_MAX_ROWS else None
+        date_ranges = footer_profile[0] if footer_profile is not None else _profile_date_ranges(frame)
         if date_ranges:
             profile["date_ranges"] = date_ranges
-        key_nulls = _profile_key_nulls(frame)
+        key_nulls = footer_profile[1] if footer_profile is not None else _profile_key_nulls(frame)
         if key_nulls:
             profile["key_nulls"] = key_nulls
-        if "dataset" in frame.columns and len(frame) <= 1_000_000:
+        if "dataset" in frame.columns and len(frame) <= PROFILE_FULL_SCAN_MAX_ROWS:
             counts = frame["dataset"].fillna("").astype(str).value_counts().head(50)
             profile["dataset_counts"] = {str(key): int(value) for key, value in counts.items()}
         elif "dataset" in frame.columns:
             profile["dataset_counts"] = "skipped_large_frame"
     return profile
+
+
+def _parquet_footer_profile(
+    path: Path,
+) -> tuple[dict[str, dict[str, str]], dict[str, int]] | None:
+    """Read exact large-frame range/null statistics from Parquet metadata.
+
+    Pandas/pyarrow snapshot writes include per-row-group statistics. If a
+    different writer omits any statistic needed by the existing manifest
+    contract, return ``None`` so the caller keeps the prior DataFrame scan.
+    """
+    parquet = pq.ParquetFile(path)
+    metadata = parquet.metadata
+    columns = {name: index for index, name in enumerate(parquet.schema_arrow.names)}
+    date_ranges: dict[str, dict[str, str]] = {}
+    key_nulls: dict[str, int] = {}
+
+    for column in PROFILE_DATE_COLUMNS:
+        index = columns.get(column)
+        if index is None:
+            continue
+        # The prior manifest contract stringified the in-memory values. Parquet
+        # timestamp statistics may normalize timezone-aware values to UTC, which
+        # is the same instant but a different manifest string. Keep the footer
+        # fast path for production string date columns and fall back to the
+        # DataFrame scan for temporal/other representations.
+        field_type = parquet.schema_arrow.field(column).type
+        if not (pa.types.is_string(field_type) or pa.types.is_large_string(field_type)):
+            return None
+        minimums: list[str] = []
+        maximums: list[str] = []
+        for group_index in range(metadata.num_row_groups):
+            group = metadata.row_group(group_index)
+            statistics = group.column(index).statistics
+            if statistics is None or statistics.null_count is None:
+                return None
+            if int(statistics.null_count) == int(group.num_rows):
+                continue
+            if not statistics.has_min_max:
+                return None
+            minimums.append(_footer_stat_text(statistics.min))
+            maximums.append(_footer_stat_text(statistics.max))
+        if minimums:
+            date_ranges[column] = {"min": min(minimums), "max": max(maximums)}
+
+    for column in PROFILE_NULL_COLUMNS:
+        index = columns.get(column)
+        if index is None:
+            continue
+        null_count = 0
+        for group_index in range(metadata.num_row_groups):
+            statistics = metadata.row_group(group_index).column(index).statistics
+            if statistics is None or statistics.null_count is None:
+                return None
+            null_count += int(statistics.null_count)
+        key_nulls[column] = null_count
+    return date_ranges, key_nulls
+
+
+def _footer_stat_text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def _profile_date_ranges(frame: pd.DataFrame) -> dict[str, dict[str, str]]:

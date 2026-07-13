@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 
 from autotrade.environment.broker import MarketData, SimBroker, optype, prtype
 from autotrade.environment.broker_core import afterhours_available
@@ -190,6 +191,7 @@ class MainPolicyRunner:
         requests_path: Path | None = None,
         responses_path: Path | None = None,
         decision_max_sim_minutes: float | None = None,
+        runtime_dir: Path | None = None,
     ) -> None:
         self.executor = executor
         self.paths = paths
@@ -200,6 +202,16 @@ class MainPolicyRunner:
         self.nl_service = nl_service
         self.requests_path = requests_path
         self.responses_path = responses_path
+        self.formal_isolation = bool(getattr(executor, "formal_isolation", False))
+        if runtime_dir is None:
+            self.state_dir = self.paths.workspace / ".state"
+            self.staging_dir = self.paths.workspace / ".state_staging"
+            self.asof_dir = self.paths.workspace / ".asof"
+        else:
+            runtime_dir = Path(runtime_dir)
+            self.state_dir = runtime_dir / "state"
+            self.staging_dir = runtime_dir / "state_staging"
+            self.asof_dir = runtime_dir / "asof"
         self.proc = None
         # Unique cmdline marker so the in-container driver tree can be reaped on
         # timeout/teardown (killing the host docker exec client does not signal it).
@@ -220,12 +232,16 @@ class MainPolicyRunner:
                 "AT_SNAPSHOT_DIR": self.executor.map_path(self.paths.snapshot),
                 "AT_AGENT_OUTPUT_DIR": self.executor.map_path(self.paths.agent_output),
                 "AT_MODEL_DIR": self.executor.map_path(self.paths.model_artifacts),
-                "AT_STATE_DIR": self.executor.map_path(self.paths.workspace / ".state"),
-                "AT_STATE_STAGING_DIR": self.executor.map_path(self.paths.workspace / ".state_staging"),
+                "AT_STATE_DIR": self.executor.map_path(self.state_dir),
+                "AT_STATE_STAGING_DIR": self.executor.map_path(self.staging_dir),
                 "AT_DECISION_TIME": self.decision_time,
                 "AT_REPLAY_GRANULARITY": self.replay_granularity,
-                "AT_FORBIDDEN_PATHS": _executor_pathsep_join(
-                    self.executor, [self.paths.train, self.paths.valid, self.paths.test, self.paths.artifacts]
+                "AT_FORBIDDEN_PATHS": (
+                    "/mnt/agent/workspace:/mnt/artifacts:/mnt/snapshots"
+                    if self.formal_isolation
+                    else _executor_pathsep_join(
+                        self.executor, [self.paths.train, self.paths.valid, self.paths.test, self.paths.artifacts]
+                    )
                 ),
                 "AT_WRITE_FORBIDDEN_PATHS": _executor_pathsep_join(
                     self.executor, [self.paths.agent_output, self.paths.model_artifacts]
@@ -238,9 +254,10 @@ class MainPolicyRunner:
                 env["AT_NL_REQUESTS_PATH"] = self.executor.map_path(self.requests_path)
                 env["AT_NL_RESPONSES_PATH"] = self.executor.map_path(self.responses_path)
                 env["AT_NL_TOOL_TIMEOUT_SECONDS"] = str(self.timeout_seconds)
-            self._hide_cm = hide_snapshot_slots_from_agent(self.paths)
-            self._hide_cm.__enter__()
-            self._hide_entered = True
+            if not self.formal_isolation:
+                self._hide_cm = hide_snapshot_slots_from_agent(self.paths)
+                self._hide_cm.__enter__()
+                self._hide_entered = True
             self.proc = self.executor.popen(
                 [
                     self.executor.python,
@@ -249,7 +266,7 @@ class MainPolicyRunner:
                     self._run_marker,
                 ],
                 env=env,
-                cwd=self.paths.agent,
+                cwd=self.paths.agent_output if self.formal_isolation else self.paths.agent,
                 user="agent",
             )
             self._start_stderr_drainer()
@@ -516,7 +533,7 @@ def run_main_ctx_replay(
     _tv_init_t0 = time.monotonic()
     timeview = (
         Timeview(
-            host_dir=main_policy.paths.workspace / ".asof",
+            host_dir=main_policy.asof_dir,
             executor=main_policy.executor,
             snapshot_dir=snapshot_dir,
             replay_frames=_timeview_replay_frames(
@@ -532,8 +549,8 @@ def run_main_ctx_replay(
     # visible dir at ready_at = tick + B. Reset per backtest for reproducibility.
     stager = (
         StateStager(
-            visible_dir=main_policy.paths.workspace / ".state",
-            staging_dir=main_policy.paths.workspace / ".state_staging",
+            visible_dir=main_policy.state_dir,
+            staging_dir=main_policy.staging_dir,
         )
         if getattr(main_policy, "paths", None) is not None
         else None
@@ -1191,6 +1208,25 @@ def _place_actions_at_tick(
         name = _action_name(action)
         if name == "cancel":
             order_id = str(action.get("order_id") or "").strip()
+            if not _is_orderable_tick(tick):
+                broker.record_event(
+                    "main_action_ignored",
+                    trade_date=trade_date,
+                    minute_key=tick.minute_key,
+                    action=_jsonable(action),
+                    reason="cancel_not_orderable_tick",
+                )
+                continue
+            cancel_block_reason = _incoming_cancel_block_reason(incoming, order_id, when=when)
+            if cancel_block_reason:
+                broker.record_event(
+                    "main_action_ignored",
+                    trade_date=trade_date,
+                    minute_key=tick.minute_key,
+                    action=_jsonable(action),
+                    reason=cancel_block_reason,
+                )
+                continue
             if order_id and _cancel_pending_order(
                 broker,
                 incoming,
@@ -1590,6 +1626,33 @@ def _cancel_pending_order(
     return False
 
 
+def _incoming_cancel_block_reason(
+    incoming: dict[int, list[tuple[dict[str, object], bool, bool]]],
+    order_id: str,
+    *,
+    when: datetime,
+) -> str | None:
+    """Return the exchange phase that makes an in-flight auction order final.
+
+    The submit-lag queue already carries the open-/close-auction flags needed for
+    matching. Reuse those flags to enforce the corresponding no-cancel phases,
+    without introducing a second order-state model.
+    """
+    if not order_id:
+        return None
+    open_auction_cancel_cutoff = 9 * 3600 + 25 * 60
+    for items in incoming.values():
+        for action, is_auction, is_close_auction in items:
+            if str(action.get("order_id") or "") != order_id:
+                continue
+            if is_close_auction:
+                return "close_auction_cancel_window_closed"
+            if is_auction and _seconds_since_midnight(when) >= open_auction_cancel_cutoff:
+                return "open_auction_cancel_window_closed"
+            return None
+    return None
+
+
 def _pending_view(
     broker: SimBroker,
     incoming: dict[int, list[tuple[dict[str, object], bool, bool]]],
@@ -1708,6 +1771,8 @@ def _timeview_replay_frames(
     if replay_auction_results is not None:
         frames["auction"] = replay_auction_results
     if replay_dir is not None:
+        end_date = str(replay_daily["trade_date"].astype(str).max())
+        cutoff = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}T23:59:59+08:00"
         for name, filename in (
             ("events", "events.parquet"),
             ("macro", "macro.parquet"),
@@ -1716,7 +1781,17 @@ def _timeview_replay_frames(
         ):
             path = Path(replay_dir) / filename
             if path.exists():
-                frames[name] = pd.read_parquet(path)
+                try:
+                    frames[name] = pd.read_parquet(
+                        path,
+                        filters=[("available_at", "<=", cutoff)],
+                    )
+                except (KeyError, TypeError, ValueError, pa.ArrowNotImplementedError):
+                    frame = pd.read_parquet(path)
+                    if "available_at" in frame.columns:
+                        available = pd.to_datetime(frame["available_at"], errors="coerce", utc=True)
+                        frame = frame[available <= pd.Timestamp(cutoff).tz_convert("UTC")]
+                    frames[name] = frame.reset_index(drop=True)
     return frames
 
 

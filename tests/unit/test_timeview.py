@@ -2,7 +2,9 @@
 
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -125,7 +127,7 @@ class TimeviewTest(unittest.TestCase):
             tv = self._build(Path(tmp))
             asof, version = tv.refresh(_when("2022-01-04 09:10:00"))
             # Intraday-session day: daily view is just the frozen history; today's bar
-            # waits for that night's evening node (~02:05 next day).
+            # waits for that night's conservative evening boundary (~03:05 next day).
             self.assertEqual(self._dates(asof, "daily"), {"20211231"})
             self.assertTrue((Path(asof) / "daily" / "part_0000.parquet").exists())
 
@@ -145,7 +147,7 @@ class TimeviewTest(unittest.TestCase):
             events = pd.read_parquet(Path(asof) / "events")
             self.assertEqual(set(events["dataset"]), {"margin_secs"})
             # Block trade (evening dataset) only rolls in after its evening node completes.
-            asof2, _ = tv.refresh(_when("2022-01-05 03:00:00"))
+            asof2, _ = tv.refresh(_when("2022-01-05 03:06:00"))
             events2 = pd.read_parquet(Path(asof2) / "events")
             self.assertEqual(set(events2["dataset"]), {"margin_secs", "block_trade"})
 
@@ -186,6 +188,45 @@ class TimeviewTest(unittest.TestCase):
             _, v_next = tv.refresh(_when("2022-01-05 09:20:00"))
             self.assertNotEqual(v_open, v_next)
 
+    def test_ticks_before_next_boundary_do_not_traverse_views(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tv = self._build(Path(tmp))
+            tv.refresh(_when("2022-01-04 09:10:00"))
+            with ExitStack() as stack:
+                rolls = [
+                    stack.enter_context(mock.patch.object(view, "roll", wraps=view.roll))
+                    for view in tv._domains.values()
+                ]
+                text_roll = stack.enter_context(mock.patch.object(tv._text, "roll", wraps=tv._text.roll))
+                tv.refresh(_when("2022-01-04 11:00:00"))
+                tv.refresh(_when("2022-01-04 14:30:00"))
+                for roll in rolls:
+                    roll.assert_not_called()
+                text_roll.assert_not_called()
+
+    def test_node_boundary_is_inclusive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tv = self._build(Path(tmp))
+            asof, _ = tv.refresh(_when("2022-01-04 09:04:59"))
+            self.assertEqual(list((Path(asof) / "events").glob("*.parquet")), [])
+
+            asof, _ = tv.refresh(_when("2022-01-04 09:05:00"))
+            events = pd.read_parquet(Path(asof) / "events")
+            self.assertEqual(events["dataset"].tolist(), ["margin_secs"])
+
+    def test_one_refresh_catches_up_across_multiple_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tv = self._build(Path(tmp))
+            tv.refresh(_when("2022-01-04 08:59:00"))
+
+            # One clock jump crosses the 09:00 text and 09:05 margin nodes. Both
+            # cursors catch up to the latest eligible cutoff in a single refresh.
+            asof, _ = tv.refresh(_when("2022-01-04 09:10:00"))
+            events = pd.read_parquet(Path(asof) / "events")
+            text = pd.read_parquet(Path(asof) / "text_index")
+            self.assertEqual(events["dataset"].tolist(), ["margin_secs"])
+            self.assertIn("news_early", set(text["text_id"].astype(str)))
+
     def test_parts_are_write_once_no_duplicate_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             tv = self._build(Path(tmp))
@@ -215,9 +256,13 @@ class TimeviewTest(unittest.TestCase):
                 replay_frames=frames,
             )
 
-            asof, before = tv.refresh(_when("2022-01-04 09:28:00"))
+            asof, before = tv.refresh(_when("2022-01-04 09:28:30"))
             self.assertEqual(list((Path(asof) / "auction").glob("*.parquet")), [])
-            asof, after = tv.refresh(_when("2022-01-04 09:29:00"))
+            # The observed boundary is second-precision; crossing it within the
+            # same minute must not be hidden by a minute-rounded signature.
+            _, still_before = tv.refresh(_when("2022-01-04 09:28:35"))
+            self.assertEqual(still_before, before)
+            asof, after = tv.refresh(_when("2022-01-04 09:28:40"))
             self.assertNotEqual(before, after)
             auction = pd.read_parquet(Path(asof) / "auction")
             self.assertEqual(auction["ts_code"].tolist(), [TS])
@@ -258,7 +303,7 @@ class TimeviewIntradaySchemaTest(unittest.TestCase):
                 "intraday_1min": self._minute("20220104", available_at="2022-01-04T09:30:00+08:00"),
             }
             tv = Timeview(host_dir=root / "asof", executor=FakeExecutor(), snapshot_dir=snap, replay_frames=replay)
-            # After the 20220104 evening node completes (~02:05 on 0105) the replay bar rolls in.
+            # After the 20220104 evening node completes (fallback ~03:05 on 0105) the replay bar rolls in.
             asof, _ = tv.refresh(_when("2022-01-05 09:10:00"))
             intraday = pd.read_parquet(Path(asof) / "intraday_1min")
             self.assertEqual(sorted(intraday["trade_date"].astype(str)), ["20211231", "20220104"])

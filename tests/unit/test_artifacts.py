@@ -1,7 +1,9 @@
+import hashlib
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from autotrade.environment.artifacts import (
     ArtifactError,
@@ -35,6 +37,16 @@ def write_artifact(root: Path, *, main: str = VALID_MAIN) -> Path:
     return root
 
 
+def legacy_aggregate_hash(root: Path, relpaths: set[str]) -> str:
+    digest = hashlib.sha256()
+    for relpath in sorted(relpaths):
+        digest.update(relpath.encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update((root / relpath).read_bytes())
+        digest.update(b"\x00")
+    return f"sha256:{digest.hexdigest()}"
+
+
 class ArtifactContractTest(unittest.TestCase):
     def test_loads_valid_artifact_directory_and_hashes_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -57,6 +69,14 @@ class ArtifactContractTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = write_artifact(Path(tmp), main='def main(ctx):\n    return open("/mnt/artifacts/x").read()\n')
+            with self.assertRaisesRegex(ArtifactError, "stage directories"):
+                load_strategy_artifact(root)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = write_artifact(
+                Path(tmp),
+                main='def main(ctx):\n    return open("/mnt/agent/workspace/secret").read()\n',
+            )
             with self.assertRaisesRegex(ArtifactError, "stage directories"):
                 load_strategy_artifact(root)
 
@@ -182,6 +202,37 @@ def main(ctx):
             delta = model_artifact_delta(Path(tmp) / "empty_parent", dest)
             self.assertEqual(delta.total_files, 2)
             self.assertEqual(set(delta.changed_files), {"params.json", "ranker/weights.pt"})
+
+    def test_large_hashes_and_model_comparison_stream_without_changing_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            strategy = write_artifact(tmp_path / "strategy")
+            large_payload = (b"0123456789abcdef" * (1024 * 128)) + b"tail"
+            (strategy / "large.txt").write_bytes(large_payload)
+            strategy_files = {
+                path.relative_to(strategy).as_posix()
+                for path in strategy.rglob("*")
+                if path.is_file()
+            }
+            expected_strategy_hash = legacy_aggregate_hash(strategy, strategy_files)
+
+            parent = tmp_path / "parent_models"
+            work = tmp_path / "work_models"
+            parent.mkdir()
+            work.mkdir()
+            (parent / "weights.bin").write_bytes(large_payload)
+            (work / "weights.bin").write_bytes(large_payload)
+            expected_model_hash = legacy_aggregate_hash(parent, {"weights.bin"})
+
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("whole-file read")):
+                self.assertEqual(artifact_hash(strategy), expected_strategy_hash)
+                self.assertEqual(model_artifact_hash(parent), expected_model_hash)
+                self.assertEqual(model_artifact_delta(parent, work).changed_files, ())
+
+                with (work / "weights.bin").open("r+b") as stream:
+                    stream.seek(-1, 2)
+                    stream.write(b"X")
+                self.assertEqual(model_artifact_delta(parent, work).changed_files, ("weights.bin",))
 
     def test_model_artifacts_reject_hidden_cache_and_unsupported_files(self):
         with tempfile.TemporaryDirectory() as tmp:

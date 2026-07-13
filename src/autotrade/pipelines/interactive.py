@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -486,20 +487,29 @@ class InteractiveExperimentRunner:
         """ask_user tool bridge, evaluated live from control.json.
 
         Holds the session (state=waiting_user_reply) until the researcher
-        answers via the console (control.user_replies["<session>#q<n>"]),
+        answers via the console (a per-attempt nonce key published in status),
         then returns the reply text ("" = proceed without guidance). Returns
         None immediately when nobody is attending (mode=auto), so the Agent
         decides autonomously. Wait time is credited back to the fold deadline
         by the runner."""
 
+        # A worker/session retry restarts the Agent's question counter at q1.
+        # Include a per-hook attempt nonce so an old durable q1 reply cannot
+        # silently answer a different question after a crash.
+        attempt = uuid.uuid4().hex[:12]
+
         def hook(question_index: int, question: str) -> str | None:
             control = read_control(self.control_path)
             if control.mode == "auto":
                 return None
-            reply_key = f"{key}#q{int(question_index)}"
+            reply_key = f"{key}#ask{attempt}#q{int(question_index)}"
             self.status.set(
                 state="waiting_user_reply", session_key=key,
-                awaiting_question={"index": int(question_index), "question": str(question)},
+                awaiting_question={
+                    "index": int(question_index),
+                    "question": str(question),
+                    "reply_key": reply_key,
+                },
             )
             try:
                 while True:

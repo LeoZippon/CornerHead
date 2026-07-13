@@ -390,7 +390,8 @@ def _validate_auction_capture(frame_: pd.DataFrame, trade_date: str, *, min_rows
 
         valid_quantities = ~invalid_volume & ~invalid_amount
         traded = valid_quantities & (volume.gt(0) | amount.gt(0))
-        inconsistent = traded & ~(volume.gt(0) & amount.gt(0))
+        matched_trade = valid_quantities & volume.gt(0) & amount.gt(0)
+        inconsistent = traded & ~matched_trade
         if inconsistent.any():
             errors.append(f"inconsistent_trade_rows={int(inconsistent.sum())}")
 
@@ -402,9 +403,25 @@ def _validate_auction_capture(frame_: pd.DataFrame, trade_date: str, *, min_rows
             & pd.Series(np.isfinite(recovered_price), index=frame_.index)
             & recovered_price.gt(0)
         )
-        bad_trade_price = traded & ~(direct_price | recoverable)
+        bad_trade_price = matched_trade & ~recoverable
         if bad_trade_price.any():
             errors.append(f"unrecoverable_trade_price_rows={int(bad_trade_price.sum())}")
+        price_mismatch = (
+            matched_trade
+            & direct_price
+            & recoverable
+            & ~pd.Series(
+                np.isclose(
+                    price,
+                    recovered_price,
+                    rtol=1e-9,
+                    atol=STK_AUCTION_PRICE_ABS_TOLERANCE,
+                ),
+                index=frame_.index,
+            )
+        )
+        if price_mismatch.any():
+            errors.append(f"inconsistent_trade_price_rows={int(price_mismatch.sum())}")
         no_trade = valid_quantities & volume.eq(0) & amount.eq(0)
         hidden_no_trade_price = no_trade & direct_price
         if hidden_no_trade_price.any():
@@ -494,6 +511,10 @@ def capture_open_auction(args: argparse.Namespace) -> int:
         return NO_MUTATION_RETRY_EXIT_CODE
 
     captured, result, pages = accepted
+    # Stable identity is key-based, so persist the same canonical order. A
+    # source response that only reorders rows must remain byte-identical and
+    # keep the first observed availability instead of looking like a revision.
+    captured = captured.sort_values(["trade_date", "ts_code"], kind="stable").reset_index(drop=True)
     landed_at = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).isoformat()
     path = raw_dir / "stk_auction" / f"trade_date={trade_date}.parquet"
     availability = {

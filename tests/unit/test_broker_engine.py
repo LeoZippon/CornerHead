@@ -1147,13 +1147,24 @@ class FillRealismTest(unittest.TestCase):
                 {"trade_date": "20220104", "session": "open", "ts_code": "000001.SZ",
                  "price": None, "vol": 1000, "amount": 10000},
                 {"trade_date": "20220104", "session": "open", "ts_code": "000002.SZ",
-                 "price": None, "vol": 0, "amount": 0},
+                 "price": 99.0, "vol": 0, "amount": 0},
             ]).to_parquet(replay / "auction.parquet", index=False)
 
             prints = load_auction_prints_by_date(replay)
 
             self.assertEqual(prints[("20220104", "open")]["000001.SZ"], 10.0)
             self.assertEqual(prints[("20220104", "open")]["000002.SZ"], 0.0)
+
+    def test_auction_loader_rejects_price_quantity_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            replay = Path(tmp)
+            pd.DataFrame([
+                {"trade_date": "20220104", "session": "open", "ts_code": "000001.SZ",
+                 "price": 100.0, "vol": 1000, "amount": 10000},
+            ]).to_parquet(replay / "auction.parquet", index=False)
+
+            with self.assertRaisesRegex(ValueError, "inconsistent opening price"):
+                load_auction_prints_by_date(replay)
 
     def test_explicit_no_auction_trade_rolls_order_to_continuous_session(self):
         broker = self.make_broker()

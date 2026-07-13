@@ -299,4 +299,3 @@ def _candidate_terms(ts_code: str, company_terms: list[str] | None = None) -> li
             ordered.append(term)
     return ordered
 
-

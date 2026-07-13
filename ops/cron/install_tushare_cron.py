@@ -84,6 +84,14 @@ def verify_installed_crontab(expected: str, installed: str) -> None:
         raise RuntimeError("post-install verification failed: installed crontab differs from requested content")
 
 
+def write_private_backup(path: Path, content: str) -> None:
+    """Store the full user crontab without exposing unrelated job secrets."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o600)
+
+
 def main() -> int:
     args = parse_args()
     if not TEMPLATE.exists():
@@ -94,9 +102,8 @@ def main() -> int:
         print(updated, end="")
         return 0
     if current.strip():
-        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
         backup = BACKUP_DIR / f"crontab-{time.strftime('%Y%m%d-%H%M%S')}.bak"
-        backup.write_text(current, encoding="utf-8")
+        write_private_backup(backup, current)
         print(f"backed up current crontab to {backup}")
     subprocess.run(["crontab", "-"], input=updated, text=True, check=True)
     installed = subprocess.run(["crontab", "-l"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)

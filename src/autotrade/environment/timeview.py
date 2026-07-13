@@ -13,8 +13,8 @@ that ``pandas.read_parquet`` concatenates into one table:
     (``REFRESH_NODES`` in data/contracts.py).
 
 Visibility only grows forward in time, so each replay row is written exactly once
-and unchanged domains cost nothing. During the 09:20 -> next-day 02:05 session no
-covering node completes, so the whole view is frozen and ``refresh`` is a no-op.
+and unchanged domains cost nothing. Between the next pending refresh or row-level
+boundary (including observed auction availability), ``refresh`` is an O(1) no-op.
 ``ctx.asof_version`` bumps whenever a new part lands, so strategy code can cache a
 read and re-run only when the view actually rolls.
 
@@ -34,8 +34,11 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from autotrade.environment.data.contracts import (
+    domain_next_visible_boundary,
     domain_visible_cutoff,
+    event_dataset_next_visible_boundary,
     event_dataset_visible_cutoff,
+    text_dataset_next_visible_boundary,
     text_dataset_visible_cutoff,
 )
 from autotrade.environment.snapshot import to_cn_timestamps
@@ -78,6 +81,12 @@ class _SortedCursor:
         self.pos = new_pos
         return newly
 
+    def has_pending(self) -> bool:
+        return self.pos < len(self.keys)
+
+    def next_key(self) -> np.datetime64 | None:
+        return self.keys[self.pos] if self.has_pending() else None
+
 
 def _dataset_cursors(datasets: np.ndarray, valid_indices: np.ndarray, keys_all: np.ndarray) -> dict[str, _SortedCursor]:
     cursors: dict[str, _SortedCursor] = {}
@@ -116,10 +125,21 @@ class Timeview:
         self.host_dir = Path(host_dir)
         self.executor = executor
         self.snapshot_dir = Path(snapshot_dir)
-        # Fresh per backtest: no stale parts from an earlier run leak in.
-        shutil.rmtree(self.host_dir, ignore_errors=True)
+        # Fresh per backtest: no stale parts from an earlier run leak in. Keep
+        # the root inode because formal Docker mounts this directory read-only
+        # before the host starts rolling parts into it.
         self.host_dir.mkdir(parents=True, exist_ok=True)
+        for child in self.host_dir.iterdir():
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
         self._version = 0
+        # After the first refresh, ordinary ticks need one timestamp comparison
+        # only. Domain/node traversal resumes when the simulation clock reaches
+        # the earliest pending row or refresh-node boundary.
+        self._boundary_gate_ready = False
+        self._next_boundary: np.datetime64 | None = None
         # The container mapping of host_dir is invariant for the whole replay;
         # resolving it per tick costs several filesystem walks (map_path does
         # multiple Path.resolve() calls), so it is computed once, lazily.
@@ -150,11 +170,24 @@ class Timeview:
     def refresh(self, when: pd.Timestamp) -> tuple[str, str]:
         """Append any newly-visible rows at ``when`` and return the container-mapped
         ``asof_dir`` plus the current ``asof_version`` (bumps on each new part)."""
+        now = _cutoff_ns(when)
+        if self._boundary_gate_ready and (
+            self._next_boundary is None or now < self._next_boundary
+        ):
+            return self._result()
         for view in self._domains.values():
             if view.roll(when):
                 self._version += 1
         if self._text.roll(when):
             self._version += 1
+        boundaries = [view.next_boundary(when) for view in self._domains.values()]
+        boundaries.append(self._text.next_boundary(when))
+        pending = [boundary for boundary in boundaries if boundary is not None]
+        self._next_boundary = min(pending) if pending else None
+        self._boundary_gate_ready = True
+        return self._result()
+
+    def _result(self) -> tuple[str, str]:
         if self._mapped_dir is None:
             self._mapped_dir = self.executor.map_path(self.host_dir)
         return self._mapped_dir, str(self._version)
@@ -255,10 +288,27 @@ class _DomainView:
         ]
         return np.concatenate(parts) if parts else _EMPTY_INDICES
 
+    def next_boundary(self, when: pd.Timestamp) -> np.datetime64 | None:
+        """Earliest instant after ``when`` at which this view may grow."""
+        if self._cursor is not None:
+            if not self._cursor.has_pending():
+                return None
+            if self.cutoff_key == _ROW_AVAILABLE_AT:
+                return self._cursor.next_key()
+            boundary = domain_next_visible_boundary(self.cutoff_key, when)
+            return _cutoff_ns(boundary) if boundary is not None else None
+        boundaries = [
+            boundary
+            for name, cursor in self._cursors.items()
+            if cursor.has_pending()
+            and (boundary := event_dataset_next_visible_boundary(name, when)) is not None
+        ]
+        return min(map(_cutoff_ns, boundaries)) if boundaries else None
+
     def _signature(self, when: pd.Timestamp) -> object:
         if self.cutoff_key is not None:
             if self.cutoff_key == _ROW_AVAILABLE_AT:
-                return str(pd.Timestamp(when).floor("min"))
+                return _cutoff_ns(when)
             return str(domain_visible_cutoff(self.cutoff_key, when))
         return tuple((d, str(event_dataset_visible_cutoff(d, when))) for d in self._dataset_names)
 
@@ -347,6 +397,16 @@ class _TextView:
         rows.to_parquet(self.out_index_dir / f"part_{self._part_seq:04d}.parquet", index=False)
         self._part_seq += 1
         return True
+
+    def next_boundary(self, when: pd.Timestamp) -> np.datetime64 | None:
+        """Earliest pending text refresh-node boundary after ``when``."""
+        boundaries = [
+            boundary
+            for name, cursor in self._cursors.items()
+            if cursor.has_pending()
+            and (boundary := text_dataset_next_visible_boundary(name, when)) is not None
+        ]
+        return min(map(_cutoff_ns, boundaries)) if boundaries else None
 
     def _write_body_part(self, dataset: str, text_ids: set[str], part_name: str) -> None:
         body = self._read_body_rows(dataset, text_ids)

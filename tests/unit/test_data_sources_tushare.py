@@ -889,6 +889,19 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(availability["rule"], "observed:cn_open_auction_capture")
         self.assertEqual(availability["row_count"], 2)
 
+        # A later strict reconciliation may return the same keyed rows in a
+        # different API order. Canonical persistence keeps the first landing.
+        reversed_result = result(list(reversed(full)))
+        with (
+            patch.object(download, "load_token", return_value="token"),
+            patch.object(download, "TuShareClient"),
+            patch.object(download, "query_paged", side_effect=[(reversed_result, 1), (reversed_result, 1)]),
+            patch.object(download.time, "sleep", return_value=None),
+        ):
+            self.assertEqual(download.capture_open_auction(args), 0)
+        self.assertEqual(common.parquet_meta(target)["availability"], availability)
+        self.assertEqual(pd.read_parquet(target)["ts_code"].tolist(), ["000001.SZ", "600000.SH"])
+
     def test_capture_open_auction_timeout_does_not_replace_partition(self):
         self._write_trade_cal("20260713")
         target = self.raw_dir / "stk_auction" / "trade_date=20260713.parquet"
@@ -978,13 +991,15 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {**base, "ts_code": "000008.SZ", "price": 10.0, "vol": 1.0, "amount": -1.0},
             {**base, "ts_code": "000009.SZ", "price": None, "vol": 5e-324, "amount": 1e308},
             {**base, "ts_code": "000010.SZ", "price": 10.0, "vol": 0.0, "amount": 0.0},
+            {**base, "ts_code": "000011.SZ", "price": 100.0, "vol": 1000.0, "amount": 10000.0},
         ])
-        errors = download._validate_auction_capture(invalid, "20260713", min_rows=7)
+        errors = download._validate_auction_capture(invalid, "20260713", min_rows=8)
         self.assertIn("invalid_vol_rows=2", errors)
         self.assertIn("invalid_amount_rows=2", errors)
         self.assertIn("inconsistent_trade_rows=1", errors)
         self.assertIn("unrecoverable_trade_price_rows=1", errors)
         self.assertIn("hidden_no_trade_price_rows=1", errors)
+        self.assertIn("inconsistent_trade_price_rows=1", errors)
 
     def test_auction_capture_row_floor_allows_only_small_day_to_day_drop(self):
         previous = self.raw_dir / "stk_auction" / "trade_date=20260710.parquet"

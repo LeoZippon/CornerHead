@@ -52,6 +52,7 @@ from typing import Protocol
 
 import pandas as pd
 
+from autotrade.data_sources.tushare.common import STK_AUCTION_PRICE_ABS_TOLERANCE
 from autotrade.environment.broker_core import (
     LOT_SIZE,
     STAR_MIN_LOT_SIZE,
@@ -2234,7 +2235,11 @@ def load_shortable_codes(snapshot_dir: str | Path, decision_date: str) -> frozen
     return frozenset(rows["ts_code"].astype(str)) if "ts_code" in rows.columns else frozenset()
 
 
-def load_shortable_by_date(replay_dir: str | Path) -> dict[str, frozenset[str]]:
+def load_shortable_by_date(
+    replay_dir: str | Path,
+    *,
+    trade_dates: tuple[str, ...] | None = None,
+) -> dict[str, frozenset[str]]:
     """Per-fill-day margin_secs membership from a replay slot's events domain.
 
     Maps each replay trade_date to that day's complete shortable set so the broker
@@ -2244,7 +2249,19 @@ def load_shortable_by_date(replay_dir: str | Path) -> dict[str, frozenset[str]]:
     events_path = Path(replay_dir) / "events.parquet"
     if not events_path.exists():
         return {}
-    events = pd.read_parquet(events_path)
+    filters = [("dataset", "==", "margin_secs")]
+    if trade_dates:
+        filters.append(("trade_date", "in", list(trade_dates)))
+    try:
+        events = pd.read_parquet(
+            events_path,
+            columns=["dataset", "trade_date", "ts_code"],
+            filters=filters,
+        )
+    except (KeyError, ValueError):
+        # Conservative compatibility for old/malformed fixtures: retain the
+        # existing validation path and let missing columns return an empty map.
+        events = pd.read_parquet(events_path)
     if events.empty or "dataset" not in events.columns:
         return {}
     rows = events[events["dataset"] == "margin_secs"]
@@ -2290,25 +2307,59 @@ def auction_prints_by_date(prints: pd.DataFrame) -> dict[tuple[str, str], dict[s
         price = row.get("price")
         volume = pd.to_numeric(row.get("vol"), errors="coerce")
         amount = pd.to_numeric(row.get("amount"), errors="coerce")
-        if price is None or pd.isna(price) or not math.isfinite(float(price)) or float(price) <= 0:
-            if pd.notna(volume) and pd.notna(amount) and float(volume) > 0 and float(amount) > 0:
-                price = float(amount) / float(volume)
-            elif (pd.isna(volume) or float(volume) == 0) and (pd.isna(amount) or float(amount) == 0):
-                # Explicit source row with no matched opening-auction trade.
-                # Zero is an internal sentinel consumed before fill pricing.
-                price = 0.0
-            else:
+        quantities_valid = (
+            pd.notna(volume)
+            and pd.notna(amount)
+            and math.isfinite(float(volume))
+            and math.isfinite(float(amount))
+            and float(volume) >= 0
+            and float(amount) >= 0
+        )
+        if not quantities_valid:
+            raise ValueError(
+                f"auction.parquet has invalid opening quantities for "
+                f"{row.get('trade_date')}/{row.get('ts_code')}: vol={volume!r}, amount={amount!r}"
+            )
+        if float(volume) == 0 and float(amount) == 0:
+            # Quantity truth wins over a stray source price: no matched trade
+            # must not create a Broker-only clearing print.
+            price = 0.0
+        elif float(volume) > 0 and float(amount) > 0:
+            recovered = float(amount) / float(volume)
+            if not math.isfinite(recovered) or recovered <= 0:
                 raise ValueError(
-                    f"auction.parquet has inconsistent opening result for "
-                    f"{row.get('trade_date')}/{row.get('ts_code')}: "
-                    f"price={price!r}, vol={volume!r}, amount={amount!r}"
+                    f"auction.parquet has unrecoverable opening price for "
+                    f"{row.get('trade_date')}/{row.get('ts_code')}"
                 )
+            if price is None or pd.isna(price) or not math.isfinite(float(price)) or float(price) <= 0:
+                price = recovered
+            elif not math.isclose(
+                float(price),
+                recovered,
+                rel_tol=1e-9,
+                abs_tol=STK_AUCTION_PRICE_ABS_TOLERANCE,
+            ):
+                raise ValueError(
+                    f"auction.parquet has inconsistent opening price for "
+                    f"{row.get('trade_date')}/{row.get('ts_code')}: "
+                    f"price={price!r}, amount/vol={recovered!r}"
+                )
+        else:
+            raise ValueError(
+                f"auction.parquet has inconsistent opening result for "
+                f"{row.get('trade_date')}/{row.get('ts_code')}: "
+                f"price={price!r}, vol={volume!r}, amount={amount!r}"
+            )
         key = (str(row.get("trade_date") or ""), session)
         grouped.setdefault(key, {})[str(row.get("ts_code") or "")] = float(price)
     return grouped
 
 
-def load_corporate_actions_by_date(replay_dir: str | Path) -> dict[str, list[dict[str, object]]]:
+def load_corporate_actions_by_date(
+    replay_dir: str | Path,
+    *,
+    trade_dates: tuple[str, ...] | None = None,
+) -> dict[str, list[dict[str, object]]]:
     """Ex-date corporate actions from a replay slot, keyed by ex_date.
 
     Environment-side market truth consumed by SimBroker at ``roll_to_date`` (the
@@ -2318,7 +2369,10 @@ def load_corporate_actions_by_date(replay_dir: str | Path) -> dict[str, list[dic
     path = Path(replay_dir) / "corporate_actions.parquet"
     if not path.exists():
         return {}
-    actions = pd.read_parquet(path)
+    actions = pd.read_parquet(
+        path,
+        filters=[("ex_date", "in", list(trade_dates))] if trade_dates else None,
+    )
     if actions.empty:
         return {}
     grouped: dict[str, list[dict[str, object]]] = {}

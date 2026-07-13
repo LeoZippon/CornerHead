@@ -65,7 +65,12 @@ MODEL_ARTIFACT_ALLOWED_SUFFIXES = frozenset(
 # and are kept here to fail fast if the agent copies them from prompts/docs. The
 # singular "/mnt/snapshot" is intentionally absent: it is the legitimate formal
 # read root (see sandbox.py formal_strategy_read_roots).
-FORBIDDEN_CODE_REFERENCES = ("/mnt/snapshots/", "/mnt/runtime/", "/mnt/artifacts")
+FORBIDDEN_CODE_REFERENCES = (
+    "/mnt/snapshots/",
+    "/mnt/runtime/",
+    "/mnt/artifacts",
+    "/mnt/agent/workspace",
+)
 MAX_PROMPT_CHARS = 8000
 
 
@@ -128,7 +133,8 @@ def artifact_hash(root: str | Path) -> str:
     for relpath in sorted(_artifact_files(root)):
         digest.update(relpath.encode("utf-8"))
         digest.update(b"\x00")
-        digest.update((root / relpath).read_bytes())
+        with (root / relpath).open("rb") as stream:
+            hashlib.file_digest(stream, lambda: digest)
         digest.update(b"\x00")
     return f"sha256:{digest.hexdigest()}"
 
@@ -140,7 +146,8 @@ def model_artifact_hash(root: str | Path) -> str:
     for relpath in sorted(_model_artifact_files(root, missing_ok=True)):
         digest.update(relpath.encode("utf-8"))
         digest.update(b"\x00")
-        digest.update((root / relpath).read_bytes())
+        with (root / relpath).open("rb") as stream:
+            hashlib.file_digest(stream, lambda: digest)
         digest.update(b"\x00")
     return f"sha256:{digest.hexdigest()}"
 
@@ -267,7 +274,7 @@ def model_artifact_delta(parent_root: str | Path, work_root: str | Path) -> Mode
     for relpath in sorted(parent_files | work_files):
         if relpath not in parent_files or relpath not in work_files:
             changed.append(relpath)
-        elif (parent_root / relpath).read_bytes() != (work_root / relpath).read_bytes():
+        elif not _files_equal(parent_root / relpath, work_root / relpath):
             changed.append(relpath)
     return ModelArtifactDelta(
         changed_files=tuple(changed),
@@ -501,3 +508,17 @@ def _docstring_constant_ids(tree: ast.AST) -> set[int]:
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _files_equal(left: Path, right: Path, *, chunk_size: int = 1024 * 1024) -> bool:
+    """Compare regular files without materialising either file in memory."""
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with left.open("rb") as left_stream, right.open("rb") as right_stream:
+        while True:
+            left_chunk = left_stream.read(chunk_size)
+            right_chunk = right_stream.read(chunk_size)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True

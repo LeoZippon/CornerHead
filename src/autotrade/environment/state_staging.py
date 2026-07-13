@@ -14,11 +14,17 @@ reproducible; durable cross-backtest data belongs in models/, not state_dir.
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import os
 import shutil
+import stat
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+
+_MAX_STATE_FILE_BYTES = 64 * 1024 * 1024
 
 
 def _contained(root: Path, rel: str) -> Path:
@@ -32,8 +38,7 @@ def _contained(root: Path, rel: str) -> Path:
 class _Staged:
     seq: int
     state_rel: str
-    staging_path: Path
-    visible_path: Path
+    staging_rel: str
     substep: str
     budget_minutes: float
     gen_at: str
@@ -55,8 +60,14 @@ class StateStager:
     def __post_init__(self) -> None:
         # Fresh per backtest: never read a prior run's leftover state.
         for path in (self.visible_dir, self.staging_dir):
-            shutil.rmtree(path, ignore_errors=True)
             path.mkdir(parents=True, exist_ok=True)
+            # Preserve the root inode: formal Docker binds these exact
+            # directories before the host stager initializes them.
+            for child in path.iterdir():
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
             # Docker sandboxes run strategy code as the container ``agent`` user,
             # which maps to a subuid under rootless Docker. These host-managed
             # scratch directories therefore must be world-writable, like
@@ -79,13 +90,12 @@ class StateStager:
             # agent-controlled code: containment is enforced HERE, host-side.
             # resolve() also follows symlinks, so a staged link pointing outside
             # either root is rejected at registration.
-            staging_path = _contained(self.staging_dir, staging_rel)
-            visible_path = _contained(self.visible_dir, state_rel)
+            _contained(self.staging_dir, staging_rel)
+            _contained(self.visible_dir, state_rel)
             record = _Staged(
                 seq=self._seq,
                 state_rel=state_rel,
-                staging_path=staging_path,
-                visible_path=visible_path,
+                staging_rel=staging_rel,
                 substep=str(item.get("substep", "")),
                 budget_minutes=budget,
                 gen_at=when.isoformat(),
@@ -106,19 +116,31 @@ class StateStager:
         merged = 0
         for record in ready:
             self._pending.remove(record)
-            if record.staging_path.is_symlink() or not record.staging_path.is_file():
-                # Re-checked at merge time (registration-time containment can be
-                # raced by swapping the file for a symlink/dir before ready_at).
-                record.status = (
-                    "missing_staging_file" if not record.staging_path.exists() else "rejected_not_regular_file"
-                )
-                continue
             if self._applied_seq.get(record.state_rel, -1) > record.seq:
                 record.status = "superseded"
                 continue
-            record.file_hash = _sha256(record.staging_path)
-            record.visible_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(record.staging_path), str(record.visible_path))
+            try:
+                record.file_hash = _secure_merge_file(
+                    self.staging_dir,
+                    record.staging_rel,
+                    self.visible_dir,
+                    record.state_rel,
+                )
+            except FileNotFoundError:
+                record.status = "missing_staging_file"
+                continue
+            except OSError as exc:
+                if exc.errno not in {errno.ELOOP, errno.ENOTDIR, errno.EISDIR}:
+                    raise
+                record.status = "rejected_not_regular_file"
+                continue
+            except ValueError:
+                # Every path component and the final source are opened relative
+                # to already-open directory FDs with O_NOFOLLOW. A parent swap,
+                # symlink, directory or special file therefore fails here even
+                # if it happened after registration.
+                record.status = "rejected_not_regular_file"
+                continue
             self._applied_seq[record.state_rel] = record.seq
             record.status = "merged"
             record.merged_at = when.isoformat()
@@ -146,7 +168,109 @@ class StateStager:
         return records
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    digest.update(path.read_bytes())
-    return f"sha256:{digest.hexdigest()}"
+def _relative_parts(rel: str) -> tuple[str, ...]:
+    path = Path(rel)
+    if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError(f"invalid staged state relative path: {rel!r}")
+    return tuple(path.parts)
+
+
+def _open_parent(root_fd: int, parts: tuple[str, ...], *, create: bool) -> int:
+    current = os.dup(root_fd)
+    try:
+        for part in parts:
+            if create:
+                try:
+                    os.mkdir(part, mode=0o777, dir_fd=current)
+                except FileExistsError:
+                    pass
+            child = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=current,
+            )
+            os.close(current)
+            current = child
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _secure_merge_file(staging_root: Path, staging_rel: str, visible_root: Path, state_rel: str) -> str:
+    """Copy one staged regular file through no-follow dirfds, then unlink it.
+
+    Holding each directory/file descriptor makes later rename/symlink swaps
+    irrelevant: resolution never restarts from an attacker-controlled pathname.
+    The destination is atomically replaced inside its verified parent directory.
+    """
+    source_parts = _relative_parts(staging_rel)
+    destination_parts = _relative_parts(state_rel)
+    root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    staging_fd = os.open(staging_root, root_flags)
+    visible_fd = os.open(visible_root, root_flags)
+    source_parent = destination_parent = source_fd = -1
+    temp_name = f".{destination_parts[-1]}.{uuid.uuid4().hex[:12]}.tmp"
+    temp_created = False
+    try:
+        source_parent = _open_parent(staging_fd, source_parts[:-1], create=False)
+        source_fd = os.open(
+            source_parts[-1],
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=source_parent,
+        )
+        source_stat = os.fstat(source_fd)
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise ValueError("staged state source is not a regular file")
+        if source_stat.st_size > _MAX_STATE_FILE_BYTES:
+            raise ValueError(
+                f"staged state file exceeds {_MAX_STATE_FILE_BYTES} bytes"
+            )
+        destination_parent = _open_parent(visible_fd, destination_parts[:-1], create=True)
+        output_fd = os.open(
+            temp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o666,
+            dir_fd=destination_parent,
+        )
+        temp_created = True
+        digest = hashlib.sha256()
+        with os.fdopen(os.dup(source_fd), "rb") as source, os.fdopen(output_fd, "wb") as output:
+            remaining = source_stat.st_size
+            while remaining:
+                chunk = source.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise ValueError("staged state file changed size during merge")
+                digest.update(chunk)
+                output.write(chunk)
+                remaining -= len(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        after_stat = os.fstat(source_fd)
+        if (
+            after_stat.st_size != source_stat.st_size
+            or after_stat.st_mtime_ns != source_stat.st_mtime_ns
+            or after_stat.st_ctime_ns != source_stat.st_ctime_ns
+        ):
+            raise ValueError("staged state file changed during merge")
+        os.replace(
+            temp_name,
+            destination_parts[-1],
+            src_dir_fd=destination_parent,
+            dst_dir_fd=destination_parent,
+        )
+        temp_created = False
+        try:
+            os.unlink(source_parts[-1], dir_fd=source_parent)
+        except FileNotFoundError:
+            pass
+        return f"sha256:{digest.hexdigest()}"
+    finally:
+        if temp_created and destination_parent >= 0:
+            try:
+                os.unlink(temp_name, dir_fd=destination_parent)
+            except FileNotFoundError:
+                pass
+        for fd in (source_fd, source_parent, destination_parent, staging_fd, visible_fd):
+            if fd >= 0:
+                os.close(fd)

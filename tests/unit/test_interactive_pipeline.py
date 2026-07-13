@@ -327,8 +327,17 @@ class InteractiveRunnerTest(unittest.TestCase):
         self._control(mode="manual")
 
         def reply() -> None:
-            time.sleep(0.15)
-            self._control(mode="manual", user_replies={f"{key}#q2": "优先流动性筛选"})
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                question = read_status(self.hitl_dir / STATUS_NAME).get("awaiting_question") or {}
+                if question.get("reply_key"):
+                    self._control(
+                        mode="manual",
+                        user_replies={str(question["reply_key"]): "优先流动性筛选"},
+                    )
+                    return
+                time.sleep(0.02)
+            raise AssertionError("question reply_key was not published")
 
         thread = threading.Thread(target=reply)
         thread.start()
@@ -341,12 +350,57 @@ class InteractiveRunnerTest(unittest.TestCase):
         self.assertEqual(status["state"], "running_session")
         self.assertIsNone(status.get("awaiting_question"))
         # Empty reply releases without guidance.
-        self._control(mode="step", user_replies={f"{key}#q3": ""})
-        self.assertEqual(hook(3, "继续吗？"), "")
+        self._control(mode="step")
+
+        def release_empty() -> None:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                question = read_status(self.hitl_dir / STATUS_NAME).get("awaiting_question") or {}
+                if question.get("reply_key"):
+                    self._control(mode="step", user_replies={str(question["reply_key"]): ""})
+                    return
+                time.sleep(0.02)
+            raise AssertionError("question reply_key was not published")
+
+        thread = threading.Thread(target=release_empty)
+        thread.start()
+        try:
+            self.assertEqual(hook(3, "继续吗？"), "")
+        finally:
+            thread.join()
         # Stop request raises out of the wait.
         self._control(mode="manual", request="stop")
         with self.assertRaises(ExperimentStopped):
             hook(4, "还在吗？")
+
+    def test_user_question_hook_does_not_reuse_reply_from_prior_attempt(self) -> None:
+        pipeline = FakePipeline(self.config)
+        key = fold_session_key("epoch_001", "fold_2022Q1")
+        hook = self._runner(pipeline)._user_question_hook(key)
+        stale_key = f"{key}#askoldattempt#q1"
+        self._control(mode="manual", user_replies={stale_key: "旧问题的答案"})
+
+        def reply_current_attempt() -> None:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                question = read_status(self.hitl_dir / STATUS_NAME).get("awaiting_question") or {}
+                reply_key = question.get("reply_key")
+                if reply_key:
+                    self.assertNotEqual(reply_key, stale_key)
+                    self._control(
+                        mode="manual",
+                        user_replies={stale_key: "旧问题的答案", str(reply_key): "新问题的答案"},
+                    )
+                    return
+                time.sleep(0.02)
+            raise AssertionError("question reply_key was not published")
+
+        thread = threading.Thread(target=reply_current_attempt)
+        thread.start()
+        try:
+            self.assertEqual(hook(1, "这是重启后的新问题吗？"), "新问题的答案")
+        finally:
+            thread.join()
 
     def test_parent_override_rejects_failed_node(self) -> None:
         from autotrade.environment.step_tree import StepTree

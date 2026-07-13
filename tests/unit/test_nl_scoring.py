@@ -366,6 +366,25 @@ class NLBudgetTest(unittest.TestCase):
             self.assertIn("配额已用完", second["feedback"])
             self.assertIn("退化路径", first["feedback"])  # proxy=None -> failed_with_policy guidance
 
+    def test_probe_withheld_calls_still_obey_budget(self):
+        from autotrade.environment.nl.service import StrategyNLService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = StrategyNLService(
+                proxy=None,
+                snapshot_dir=Path(tmp) / "unused_snapshot",
+                log_dir=Path(tmp) / "log",
+                failure_policy="return_error_with_audit",
+                per_call_timeout_seconds=1.0,
+                max_calls=1,
+                withhold_response=True,
+            )
+            first = service.run("000001.SZ", prompt="x", kwargs={}, request={"request_id": "1"})
+            second = service.run("000001.SZ", prompt="x", kwargs={}, request={"request_id": "2"})
+
+            self.assertEqual(first["state"], "withheld_probe")
+            self.assertEqual(second["state"], "budget_exhausted")
+
 
 class CompanyContextStoreTest(unittest.TestCase):
     """The frozen snapshot is immutable for a backtest, so the company-context
@@ -450,7 +469,7 @@ class TextRetrieverRollingTest(unittest.TestCase):
             from zoneinfo import ZoneInfo
             retriever = self._retriever(Path(tmp))
             # 20220104 noon: the announcement (available 18:00) and its evening node
-            # (completes ~02:05 the next day) have not landed.
+            # (historical conservative boundary ~03:05 next day) have not landed.
             retriever.as_of = datetime(2022, 1, 4, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
             self.assertEqual(self._ids(retriever), {"f1"})
 

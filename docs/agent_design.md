@@ -39,6 +39,7 @@ Agent 遵循以下使用原则：
 
 - 正式策略代码只能依赖当前 `ctx`、`/mnt/snapshot`、`output` 自身和 `/mnt/agent/models`；不得硬编码研究槽、结果槽、宿主路径或测试区间。
 - `workspace/` 是临时探索区，不冻结、不回放、不复制到下一 Fold；`output/` 是正式策略代码来源；`models/` 是可选正式模型参数来源。
+- 正式回放在一次性隔离容器中执行，看不到开发 `workspace`、阶段槽或结果目录；短窗口 Probe 的 `ctx.nl()` 只返回 `withheld_probe`，NL 策略效果用完整 Valid 验证。
 - 数据域用途、字段、单位、可见时间、窗口覆盖和路径权限，以本次运行注入的事实摘要与清单为准；Environment 文档解释这些事实的稳定语义。
 - 工具通过原生 function calling 调用；不要在正文里手写 JSON 动作。先用 `grep/glob/read` 做只读定位，再用受控写工具或 Shell 修改正式产物。
 - 大表先看 Parquet metadata，再用 DuckDB、pyarrow 或 pandas 按列/日期过滤读取；不要在未知规模时直接全量 `pd.read_parquet()`。
@@ -99,7 +100,7 @@ def main(ctx) -> None:
 - 所有实质步骤都包进 `with ctx.substep(name, budget_minutes=B):`，包括状态读写、持仓/在途管理、横截面筛选、模型推理、NL、批量下单计划、broker action、撤单扫描等。
 - 普通 off-session tick 只做研究、状态更新和计划交接；报单/撤单只在 Environment 定义的可报单 tick 内由策略显式触发。
 - 重操作只在少数选定时点执行；模型、as-of 数据和特征读取应按 `ctx.asof_version` 或策略自定义 key 缓存，避免每 tick 重算。
-- 跨 tick 暂存写 `ctx.state_dir`；Broker 是现金、持仓、负债和在途订单的真相源，`state_dir` 只保存策略自己的目标、计划和轻量状态。
+- 跨 tick 暂存写 `ctx.state_dir`（单个文件不超过64 MiB）；Broker 是现金、持仓、负债和在途订单的真相源，`state_dir` 只保存策略自己的目标、计划和轻量状态。
 - 仓位 sizing 由策略显式读取现金、价格、可卖量和账户约束后计算；Broker 不接受 `weight` 下单参数，也不会替策略压量或取整。
 - 当复杂度确有需要时，把横截面候选生成与逐标的持仓、下单和撤单管理拆成小模块；简单策略不为拆分而拆分。
 
@@ -117,7 +118,7 @@ def main(ctx) -> None:
 **禁止行为**
 
 - 读取测试或 held-out 数据，或把测试/held-out 结果、日志、NL 明细和 Broker 事件反馈给策略探索或元学习。
-- 在正式策略中引用 `/mnt/snapshots/`、`/mnt/artifacts`、`/mnt/runtime`、主仓库路径、宿主绝对路径或测试区间。
+- 在正式策略中引用 `/mnt/agent/workspace`、`/mnt/snapshots/`、`/mnt/artifacts`、`/mnt/runtime`、主仓库路径、宿主绝对路径或测试区间。
 - 直接调用外部网络、LLM API、真实券商或未授权凭据。
 - 写入成交、持仓、现金、收益、Broker 事件或实验账本。
 - 用当前验证/测试收益硬编码具体股票、日期、题材或行情事件。

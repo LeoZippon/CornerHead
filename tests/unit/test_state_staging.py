@@ -1,10 +1,13 @@
 """Host-side managed ctx.state_dir staging: ready_at merge timing + audit."""
 
+import errno
+import os
 import tempfile
 import unittest
 from stat import S_IMODE
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from autotrade.environment.state_staging import StateStager
@@ -139,6 +142,84 @@ class StateStagerTest(unittest.TestCase):
             target.symlink_to(secret)
             self.assertEqual(stager.merge_ready(T0 + timedelta(minutes=2)), 0)
             self.assertFalse((stager.visible_dir / "x.txt").exists())
+            self.assertEqual(stager.audit()[0]["status"], "rejected_not_regular_file")
+
+    def test_parent_directory_symlink_swap_is_rejected_at_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            stager = _stager(tmp)
+            _stage_file(stager, "parent/x.txt", "registered")
+            stager.register(
+                [{"staging_rel": "parent/x.txt", "state_rel": "x.txt", "substep": "s", "budget_minutes": 1}],
+                when=T0,
+            )
+            original = stager.staging_dir / "original_parent"
+            (stager.staging_dir / "parent").rename(original)
+            outside = tmp / "outside"
+            outside.mkdir()
+            (outside / "x.txt").write_text("HOST_MARKER", encoding="utf-8")
+            (stager.staging_dir / "parent").symlink_to(outside, target_is_directory=True)
+
+            self.assertEqual(stager.merge_ready(T0 + timedelta(minutes=2)), 0)
+            self.assertFalse((stager.visible_dir / "x.txt").exists())
+            self.assertEqual((outside / "x.txt").read_text(encoding="utf-8"), "HOST_MARKER")
+            self.assertEqual(stager.audit()[0]["status"], "rejected_not_regular_file")
+
+    def test_visible_parent_symlink_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            stager = _stager(tmp)
+            _stage_file(stager, "source/x.txt", "safe")
+            stager.register(
+                [{"staging_rel": "source/x.txt", "state_rel": "parent/x.txt", "substep": "s", "budget_minutes": 1}],
+                when=T0,
+            )
+            outside = tmp / "outside"
+            outside.mkdir()
+            (stager.visible_dir / "parent").symlink_to(outside, target_is_directory=True)
+
+            self.assertEqual(stager.merge_ready(T0 + timedelta(minutes=2)), 0)
+            self.assertFalse((outside / "x.txt").exists())
+            self.assertEqual(stager.audit()[0]["status"], "rejected_not_regular_file")
+
+    def test_host_storage_error_fails_fast(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stager = _stager(Path(tmp))
+            _stage_file(stager, "source/x.txt", "safe")
+            stager.register(
+                [{"staging_rel": "source/x.txt", "state_rel": "x.txt", "substep": "s", "budget_minutes": 1}],
+                when=T0,
+            )
+            with patch(
+                "autotrade.environment.state_staging._secure_merge_file",
+                side_effect=OSError(errno.ENOSPC, "disk full"),
+            ):
+                with self.assertRaises(OSError) as raised:
+                    stager.merge_ready(T0 + timedelta(minutes=2))
+            self.assertEqual(raised.exception.errno, errno.ENOSPC)
+
+    def test_source_open_is_nonblocking_and_file_size_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stager = _stager(Path(tmp))
+            _stage_file(stager, "source/x.txt", "safe")
+            stager.register(
+                [{"staging_rel": "source/x.txt", "state_rel": "x.txt", "substep": "s", "budget_minutes": 1}],
+                when=T0,
+            )
+            with patch("autotrade.environment.state_staging.os.open", wraps=os.open) as opened:
+                stager.merge_ready(T0 + timedelta(minutes=2))
+            source_calls = [call for call in opened.call_args_list if call.args[0] == "x.txt"]
+            self.assertTrue(source_calls[0].args[1] & os.O_NONBLOCK)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stager = _stager(Path(tmp))
+            _stage_file(stager, "source/x.txt", "four")
+            stager.register(
+                [{"staging_rel": "source/x.txt", "state_rel": "x.txt", "substep": "s", "budget_minutes": 1}],
+                when=T0,
+            )
+            with patch("autotrade.environment.state_staging._MAX_STATE_FILE_BYTES", 3):
+                self.assertEqual(stager.merge_ready(T0 + timedelta(minutes=2)), 0)
             self.assertEqual(stager.audit()[0]["status"], "rejected_not_regular_file")
 
     def test_missing_staging_file_is_flagged(self):

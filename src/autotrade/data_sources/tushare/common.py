@@ -41,6 +41,10 @@ BOARD_TRADING_STATUS_PATH = "results/data_quality/board_trading_status.json"
 # From this deployment date onward a missing observed stk_auction availability
 # must fall back to the sidecar fetch time, not the historical 09:29 imputation.
 STK_AUCTION_OBSERVED_AVAILABILITY_START = "20260713"
+# TuShare amount/vol can differ from the quoted cent price through rounding.
+# Half one stock tick accepts the full local history while rejecting grossly
+# inconsistent clearing truth.
+STK_AUCTION_PRICE_ABS_TOLERANCE = 0.005
 
 # Child-process contract: validation/polling ended before any raw write began.
 # The cron runner may restore the previous committed generation and retry later.

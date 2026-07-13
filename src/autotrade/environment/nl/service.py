@@ -31,6 +31,7 @@ class StrategyNLService:
         per_call_timeout_seconds: float,
         max_calls: int | None = None,
         replay_dir: Path | None = None,
+        withhold_response: bool = False,
     ) -> None:
         self.proxy = proxy
         self.snapshot_dir = snapshot_dir
@@ -40,6 +41,8 @@ class StrategyNLService:
         self.max_calls = max_calls
         self.calls = 0
         self.nl_wall_seconds = 0.0  # cumulative LLM-service wall, reported as a replay phase
+        self.outcome_counts: dict[str, int] = {}
+        self.withhold_response = bool(withhold_response)
         # Set per tick by the replay engine; rolls ctx.nl() text on the same nodes as
         # the Timeview. None (Timeview off / no replay) keeps the frozen PIT corpus.
         self.current_when = None
@@ -49,14 +52,18 @@ class StrategyNLService:
         # Per-ts_code company context is constant for the frozen snapshot, so load the
         # universe/fundamentals parquet once and memoize rather than re-reading both on
         # every nl() call.
-        self.company_context_store = CompanyContextStore(snapshot_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.retriever = TextRetriever(
-            snapshot_dir / "text_index.parquet",
-            snapshot_dir / "text_library",
-            replay_index_path=(replay_dir / "text_index.parquet") if replay_dir is not None else None,
-            replay_library_dir=(replay_dir / "text_library") if replay_dir is not None else None,
-        )
+        if self.withhold_response:
+            self.company_context_store = None
+            self.retriever = None
+        else:
+            self.company_context_store = CompanyContextStore(snapshot_dir)
+            self.retriever = TextRetriever(
+                snapshot_dir / "text_index.parquet",
+                snapshot_dir / "text_library",
+                replay_index_path=(replay_dir / "text_index.parquet") if replay_dir is not None else None,
+                replay_library_dir=(replay_dir / "text_library") if replay_dir is not None else None,
+            )
 
     def run(
         self,
@@ -69,17 +76,32 @@ class StrategyNLService:
         ts_code = str(ts_code or "").strip()
         scope = "stock" if ts_code else "general"
         self.calls += 1
-        # Bind the retriever to the requesting tick's sim clock so announcements/news
-        # become visible to ctx.nl() only once their refresh node has completed.
-        self.retriever.as_of = self.current_when
         if self.max_calls is not None and self.calls > self.max_calls:
-            # Hard backstop on API spend; strategy code sees an audited error and
-            # degrades (the prompt asks it to keep NL frequency low to begin with).
+            # The budget also applies to Probe-withheld calls: otherwise an
+            # erroneous strategy can still flood the RPC/audit files.
             result = _error_result(
                 ts_code, state="budget_exhausted", error=f"nl call budget exhausted (max {self.max_calls})"
             )
             self._write_result(request, result)
             return result
+        if self.withhold_response:
+            # A Probe replays a known future window. Returning NL content to
+            # strategy code would let it encode that content into substep names,
+            # order counts, errors or timing and hand it back to the Agent. Full
+            # validation remains representative; Probe exercises the explicit
+            # no-NL fallback and records only this generic outcome.
+            result = _error_result(
+                ts_code,
+                state="withheld_probe",
+                error="nl content is unavailable in short future-window probes",
+            )
+            self._write_result(request, result)
+            return result
+        # Bind the retriever to the requesting tick's sim clock so announcements/news
+        # become visible to ctx.nl() only once their refresh node has completed.
+        assert self.retriever is not None
+        assert self.company_context_store is not None
+        self.retriever.as_of = self.current_when
         if self.proxy is None:
             if self.failure_policy == "return_error_with_audit":
                 result = _error_result(ts_code, state="failed_with_policy", error="nl proxy is not configured")
@@ -132,6 +154,8 @@ class StrategyNLService:
         request: dict[str, object],
         result: dict[str, object],
     ) -> None:
+        state = str(result.get("state") or result.get("status") or "unknown")
+        self.outcome_counts[state] = self.outcome_counts.get(state, 0) + 1
         _append_jsonl(
             self.log_dir / "nl_requests.jsonl",
             {"request": request, "result": result},
@@ -189,6 +213,7 @@ def cleanup_nl_rpc_files(requests_host: Path, responses_host: Path) -> None:
 # (and the Agent debugging it) sees why the call failed and which degrade path
 # to take, while status/state/error stay stable for programmatic branching.
 _FAILURE_FEEDBACK = {
+    "withheld_probe": "短窗口 Probe 不返回 NL 内容，防止未来窗口文本经策略输出反馈给 Agent。请在 Probe 中走无文本退化路径；完整 Valid 仍按正常合同执行 NL。",
     "budget_exhausted": "本次回测的 nl() 配额已用完：本条无结论。请降低 NL 调用频率（批量合并问题、缓存已得结论），改用数值信号继续本次回放。",
     "failed_with_policy": "本运行未配置 NL 代理：nl() 在此环境不可用。请走无文本的退化路径（纯数值信号），不要重试。",
     "timeout": "本决策 tick 的墙钟剩余不足，NL 请求未执行或未完成：本条无结论。请减少该 tick 的计算量或降低 nl() 频率，稍后 tick 可重试。",

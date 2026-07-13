@@ -303,7 +303,7 @@ def main(ctx):
 
 # Asserts the per-tick Timeview daily view at 20220105 09:15 holds the frozen
 # snapshot history + the prior replay day (visible once that night's evening node
-# completed ~02:05) but never today or the future; raises (failing the run) on a
+# completed by the conservative ~03:05 boundary) but never today or the future;
 # leak. The agent reads the domain as a directory of parquet parts.
 ASOF_GUARD_MAIN = '''
 from pathlib import Path
@@ -1360,6 +1360,94 @@ def main(ctx):
         # The blind 09:15 order fills at the 09:30 opening-auction print (10.0, no slippage).
         self.assertAlmostEqual(buys[0]["price"], 10.0)
 
+    def test_open_auction_order_cannot_be_cancelled_at_0925(self) -> None:
+        main = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "09:15":
+        with ctx.substep("open_order", budget_minutes=0.5):
+            ctx.broker.buy(code, amount=1000, reason="open_cancel_target")
+    if ctx.cur_time == "09:25":
+        with ctx.substep("late_cancel", budget_minutes=0.5):
+            pending = ctx.broker.pending(code)
+            assert len(pending) == 1, pending
+            ctx.broker.cancel(pending[0]["order_id"], reason="cancel_at_0925")
+'''
+        (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _auction_minutes())
+        buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        self.assertTrue(
+            any(
+                event.get("event_type") == "main_action_ignored"
+                and event.get("minute_key") == "09:25"
+                and event.get("reason") == "open_auction_cancel_window_closed"
+                for event in result.broker.events
+            )
+        )
+
+    def test_same_open_auction_stage_cancel_remains_legal(self) -> None:
+        main = '''
+def main(ctx):
+    if ctx.cur_time != "09:15":
+        return
+    with ctx.substep("open_order", budget_minutes=0.5):
+        order_id = ctx.broker.buy("000001.SZ", amount=1000, reason="same_stage_target")
+        ctx.broker.cancel(order_id, reason="same_stage_cancel")
+'''
+        (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), _auction_minutes())
+        buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(buys, [])
+        self.assertTrue(
+            any(
+                event.get("event_type") == "order_cancelled"
+                and event.get("minute_key") == "09:15"
+                and event.get("reason") == "same_stage_cancel"
+                for event in result.broker.events
+            )
+        )
+
+    def test_auction_result_tick_cannot_submit_or_cancel(self) -> None:
+        main = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "09:15":
+        with ctx.substep("open_order", budget_minutes=0.5):
+            ctx.broker.buy(code, amount=1000, reason="result_cancel_target")
+    if ctx.cur_time == "09:29":
+        with ctx.substep("result_actions", budget_minutes=0.5):
+            pending = ctx.broker.pending(code)
+            assert len(pending) == 1, pending
+            ctx.broker.cancel(pending[0]["order_id"], reason="cancel_on_result")
+            ctx.broker.buy(code, amount=1000, reason="buy_on_result")
+'''
+        (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+        replay = _ohlc_replay()
+        result = self._run_with(
+            replay,
+            _auction_minutes(),
+            replay_auction_results=_auction_results(replay),
+        )
+        buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        self.assertTrue(
+            any(
+                event.get("event_type") == "main_action_ignored"
+                and event.get("minute_key") == "09:29"
+                and event.get("reason") == "cancel_not_orderable_tick"
+                for event in result.broker.events
+            )
+        )
+        self.assertTrue(
+            any(
+                event.get("event_type") == "main_actions_unfilled"
+                and event.get("minute_key") == "09:29"
+                and event.get("reason") == "not_orderable_tick"
+                for event in result.broker.events
+            )
+        )
+
     def test_auction_buy_rejected_at_one_sided_limit_up_open(self) -> None:
         (self.sandbox.paths.agent_output / "main.py").write_text(AUCTION_MAIN, encoding="utf-8")
         replay = _limit_up_open_replay()
@@ -1525,6 +1613,41 @@ def main(ctx):
         self.assertEqual(buys[0]["price_label"], "auction")
         # Fills at the 15:00 close (10.6), not the 15:00 open (10.5); auction, no slippage.
         self.assertAlmostEqual(buys[0]["price"], 10.6)
+
+    def test_close_auction_order_cannot_be_cancelled_after_1457(self) -> None:
+        main = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "14:57":
+        with ctx.substep("close_order", budget_minutes=0.5):
+            ctx.broker.buy(code, amount=1000, reason="close_cancel_target")
+    if ctx.cur_time == "14:58":
+        with ctx.substep("close_cancel", budget_minutes=0.5):
+            pending = ctx.broker.pending(code)
+            assert len(pending) == 1, pending
+            ctx.broker.cancel(pending[0]["order_id"], reason="cancel_after_1457")
+'''
+        (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+        minutes = pd.DataFrame(
+            [
+                {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": "09:31", "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0},
+                {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": "14:57", "open": 10.4, "high": 10.4, "low": 10.4, "close": 10.4},
+                {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": "14:58", "open": 10.45, "high": 10.5, "low": 10.4, "close": 10.45},
+                {"trade_date": "20220104", "ts_code": TS_CODE, "trade_time": "15:00", "open": 10.5, "high": 10.7, "low": 10.4, "close": 10.6},
+            ]
+        )
+        result = self._run_with(_ohlc_replay(), minutes)
+        buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["price_label"], "auction")
+        self.assertTrue(
+            any(
+                event.get("event_type") == "main_action_ignored"
+                and event.get("minute_key") == "14:58"
+                and event.get("reason") == "close_auction_cancel_window_closed"
+                for event in result.broker.events
+            )
+        )
 
     def test_cur_datetime_is_exposed(self) -> None:
         # ctx.cur_datetime carries the Beijing-time sim clock for the tick.
