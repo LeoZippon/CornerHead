@@ -2109,6 +2109,7 @@ class AgentSessionRunnerTest(unittest.TestCase):
             )
             summary = runner.run()
             self.assertEqual(summary["finish_status"], "fold_finished")
+            self.assertGreaterEqual(summary["researcher_wait_seconds"], 0.0)
             # Hook fired once with the backtest result of the formal validation.
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0][0], 1)

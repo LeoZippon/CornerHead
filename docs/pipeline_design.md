@@ -577,7 +577,7 @@ experiments/<experiment_id>/
 
 **会话门控**
 
-- 三档运行模式：`auto` 连续执行；`manual` 每个会话启动前需批准；`step` 在 `manual` 基础上，每次正式验证回测后再挂起等待批准并可注入 Step 级指令（逐 Fold 可用 `set_step_gate` 显式覆盖开/关，清空恢复模式默认；等待时间回补 Fold 推理预算）。
+- 三档运行模式：`auto` 连续执行；`manual` 每个会话启动前需批准；`step` 在 `manual` 基础上，每次正式验证回测后再挂起等待批准并可注入 Step 级指令（逐 Fold 可用 `set_step_gate` 显式覆盖开/关，清空恢复模式默认；等待时间回补 Fold 推理预算，且不计入实时/完成 Fold 有效耗时）。
 - `status.json` 的 `run_id`、trace 路径和 deadline 始终绑定同一个、且不早于 `session_started_at` 的 run；运行态和两种研究者等待态都会发现新 run。Web 在 state、session 或 run 变化时强制重取详情并重建 SSE。倒计时指 Agent 活跃会话预算，回测与研究者等待独立计时并回补。
 - 实时 Trace 节点重挂后在“自动滚动”开启时回到底部；长回测在首个按日进度前也持续显示已用墙钟，避免把初始化/首日计算误判为停止。
 - 暂停和停止在会话边界生效，不中断正在运行的 Fold。

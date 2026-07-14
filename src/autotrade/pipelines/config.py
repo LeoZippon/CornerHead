@@ -263,7 +263,7 @@ class ExperimentConfig:
     fold_period: str = "quarter"
     epochs: int = 1
     window_months: int = 21
-    max_fold_minutes: int = 60
+    max_fold_minutes: int = 20
     finalize_before_deadline_seconds: int = 300
     per_call_timeout_seconds: int = 300
     max_steps_per_fold: int = 10

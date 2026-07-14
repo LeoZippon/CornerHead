@@ -17611,3 +17611,12 @@ Evidence and decision:
 - `StatusReporter` discovered the new run directory and unconditionally published its future `agent_trace.jsonl` path. The frontend therefore selected “正在加载 Agent Trace” instead of its existing Snapshot/Sandbox preparation message.
 - The reporter now publishes `run_id` immediately but keeps `trace_path=None` until the file exists. On a new run it also clears any previous trace path together with the deadline. The frontend treats Trace as ready only when both its path and the run deadline exist; this also corrects an already-running worker that still publishes the future path. No new state, API field, polling loop, or display branch was added.
 - Four focused status tests and the combined Interactive/WebUI suites passed 83 tests in 3.171 s; `git diff --check` passed. The already-running worker retains the old in-memory reporter until its trace appears, so it was deliberately not restarted.
+
+
+## 2026-07-14 Researcher-wait timing boundary
+
+- Step-gate and `ask_user` waits were already credited back to the Agent deadline, but live Fold elapsed time and durable `run_wall_seconds` still used unadjusted wall time.
+- The runner now records only those external holds as `researcher_wait_seconds`. Status tracks completed and active holds so the live Fold timer pauses; fold/meta ledgers subtract the same completed hold from `run_wall_seconds` and preserve it as a separate audit field. Backtests, Snapshot/Sandbox preparation and Environment finalization remain included.
+- The active `lap-test15` worker predates this code and was not interrupted; its current Agent deadline remains correctly credited, but its old final wall-time record cannot be retroactively separated.
+- The default `max_fold_minutes` is now 20 instead of 60 across `ExperimentConfig`, interactive `PARAM_DEFAULTS`, `run_experiment.py`, and `run_audit_session.py`; explicit values remain supported and the active `lap-test15` was already configured for 20 minutes.
+- Validation: Pipeline config, interactive orchestration, Agent tool flow, pipeline E2E and WebUI backend passed 257 tests in 72.158 s; JavaScript syntax and `git diff --check` passed.

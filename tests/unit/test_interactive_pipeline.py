@@ -839,6 +839,19 @@ class InteractiveRunnerTest(unittest.TestCase):
             status._refresh_live_run_locked()
         self.assertTrue(str(status._data["trace_path"]).endswith("agent_trace.jsonl"))
 
+    def test_status_reporter_excludes_researcher_wait_from_live_elapsed(self) -> None:
+        status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=Path(self.config.work_root))
+        status.set(state="running_session", session_started_at=utc_now_iso())
+        status.set(state="waiting_user_reply")
+        self.assertIsNotNone(status._data["wait_started_at"])
+        time.sleep(0.01)
+        status.set(state="running_session")
+        self.assertGreater(status._data["researcher_wait_seconds"], 0.0)
+        self.assertIsNone(status._data["wait_started_at"])
+
+        status.set(state="running_session", session_started_at=utc_now_iso())
+        self.assertEqual(status._data["researcher_wait_seconds"], 0.0)
+
     def test_status_reporter_does_not_attach_previous_session_run(self) -> None:
         work_root = Path(self.config.work_root)
         old_artifacts = work_root / "run_meta" / "artifacts"

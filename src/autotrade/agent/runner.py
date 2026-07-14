@@ -191,6 +191,7 @@ class AgentSessionRunner:
         self._meta_search_perspectives: set[str] = set()
         # Backtest wall-time excluded from the reasoning deadline, and a running count.
         self._excluded_backtest_seconds: float = 0.0
+        self._researcher_wait_seconds: float = 0.0
         self._backtest_count: int = 0
         self._token_totals: dict[str, int] = {
             key: 0
@@ -339,6 +340,7 @@ class AgentSessionRunner:
             "context_compactions": self.compactor.compaction_count if self.compactor is not None else 0,
             "context_compaction_calls": self.compactor.compaction_attempts if self.compactor is not None else 0,
             "token_usage": self._token_usage_summary(),
+            "researcher_wait_seconds": round(self._researcher_wait_seconds, 3),
             "ended_at": utc_now_iso(),
         }
         self.ctx.extra["agent_session_summary"] = summary
@@ -538,6 +540,7 @@ class AgentSessionRunner:
             directive = hook(self._gated_step_count, dict(result))
             waited_seconds = time.monotonic() - gate_started
             self._excluded_backtest_seconds += waited_seconds
+            self._researcher_wait_seconds += waited_seconds
             if waited_seconds >= 1.0:
                 self.ctx.trace.emit(
                     "step_gate",
@@ -581,6 +584,7 @@ class AgentSessionRunner:
         reply = hook(self._question_count, question)
         waited_seconds = time.monotonic() - started
         self._excluded_backtest_seconds += waited_seconds
+        self._researcher_wait_seconds += waited_seconds
         self.ctx.trace.emit(
             "ask_user",
             {

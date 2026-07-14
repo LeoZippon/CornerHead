@@ -543,7 +543,7 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual(meta_manifest["experiment_parameters"]["fold_period"], "quarter")
             self.assertEqual(meta_manifest["experiment_parameters"]["snapshot_config"]["decision_windows"]["daily_months"], 6)
             self.assertEqual(meta_manifest["experiment_parameters"]["snapshot_config"]["decision_windows"]["intraday_trade_days"], 2)
-            self.assertEqual(meta_manifest["experiment_parameters"]["max_fold_minutes"], 60)
+            self.assertEqual(meta_manifest["experiment_parameters"]["max_fold_minutes"], 20)
             self.assertTrue((meta_run_dir / "runtime_env.json").exists())
             self.assertTrue((meta_run_dir / "data_summary.json").exists())
             self.assertIn("daily.parquet", captured_meta["snapshot_files"])
@@ -800,6 +800,7 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual(meta_records[1]["status"], "meta_regularized")
             for record in meta_records:
                 self.assertGreaterEqual(record["run_wall_seconds"], 0)
+                self.assertEqual(record["researcher_wait_seconds"], 0.0)
                 trace_ref = Path(str(record["agent_trace_ref"]))
                 self.assertTrue(trace_ref.exists())
                 self.assertFalse(

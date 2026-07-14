@@ -69,7 +69,7 @@ def main() -> int:
     parser.add_argument("--heldout-first-period", help="default 2026Q1 for quarter folds; required otherwise")
     parser.add_argument("--heldout-last-period", help="default 2026Q1 for quarter folds; required otherwise")
     add_snapshot_window_arguments(parser, verbose_help=False)
-    parser.add_argument("--max-fold-minutes", type=int, default=60)
+    parser.add_argument("--max-fold-minutes", type=int, default=20)
     add_model_arguments(parser, verbose_help=False)
     parser.add_argument("--local-dev", action="store_true", help="Use local executor; audit default is real Docker.")
     parser.add_argument("--sandbox-image", help="Optional Docker image override for this audit session.")

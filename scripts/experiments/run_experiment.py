@@ -88,7 +88,7 @@ def build_parser(repo_root: Path) -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-fold-minutes",
         type=int,
-        default=60,
+        default=20,
         help="Wall-clock deadline per Fold and meta-learning run.",
     )
     parser.add_argument(

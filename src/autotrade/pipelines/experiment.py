@@ -488,6 +488,7 @@ class ExperimentPipeline:
                 ctx.extra["user_question_hook"] = user_question_hook
             agent = self.agent_factory(ctx, fold, dict(manifest.data))
             session_summary = agent.run()
+            researcher_wait_seconds = _researcher_wait_seconds(session_summary)
 
             frozen, fold_status, accept_reasons, accept_warnings, selected = self._accept_or_fallback(
                 ctx, fold, epoch_id=epoch_id, run_id=run_id, parent=parent, is_initial=is_initial
@@ -523,10 +524,12 @@ class ExperimentPipeline:
                     "epoch_id": epoch_id,
                     "fold_id": fold.fold_id,
                     "run_id": run_id,
-                    # Sandbox start -> record time: snapshots, agent session,
-                    # freeze and the frozen test eval (the researcher-facing
-                    # "how long did this fold take").
-                    "run_wall_seconds": round(time.monotonic() - run_started, 1),
+                    # Sandbox start -> record time excluding external researcher
+                    # holds; backtests and all Environment work remain included.
+                    "run_wall_seconds": round(
+                        max(0.0, time.monotonic() - run_started - researcher_wait_seconds), 1
+                    ),
+                    "researcher_wait_seconds": round(researcher_wait_seconds, 1),
                     **fold.to_record(),
                     "parent_strategy_artifact_id": parent.artifact_id if parent else None,
                     "fold_directive": fold_directive.strip() or None,
@@ -774,6 +777,7 @@ class ExperimentPipeline:
             if session_summary is None:
                 session_summary = ctx.extra.get("agent_session_summary")
             self._validate_meta_learning_session(session_summary)
+            researcher_wait_seconds = _researcher_wait_seconds(session_summary)
             taste_current = _read_text(paths.workspace / "taste.md").strip()
             if not taste_current:
                 raise RuntimeError("meta-learning completed without writing non-empty taste.md")
@@ -836,9 +840,12 @@ class ExperimentPipeline:
                     "epoch_id": epoch_id,
                     "fold_id": fold_id,
                     "run_id": run_id,
-                    # Same boundary as a regular Fold: sandbox preparation,
-                    # visible snapshots, Agent work and finalization.
-                    "run_wall_seconds": round(time.monotonic() - run_started, 1),
+                    # Same boundary as a regular Fold, excluding external
+                    # researcher holds but retaining all Environment work.
+                    "run_wall_seconds": round(
+                        max(0.0, time.monotonic() - run_started - researcher_wait_seconds), 1
+                    ),
+                    "researcher_wait_seconds": round(researcher_wait_seconds, 1),
                     "status": status,
                     "modification_check": {
                         k: check.get(k)
@@ -1497,6 +1504,15 @@ def _read_json(path: Path) -> dict[str, object]:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _researcher_wait_seconds(summary: object) -> float:
+    if not isinstance(summary, dict):
+        return 0.0
+    try:
+        return max(0.0, float(summary.get("researcher_wait_seconds") or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _read_text(path: Path) -> str:

@@ -891,7 +891,7 @@ substep 的声明预算 `B` 同时定义三件事：
 - 完整 Valid 进入/离开 `ctx.nl()` 时记录不含文本内容的 `backtest_activity`；控制台显示 NL 调用序号和当前等待时间，长研究日不再表现为无状态卡死。
 - Agent 观察中的每次回测成功或失败都附带 `backtests_used`、`backtests_limit`、`backtests_remaining`；零订单与静态发现的吞宽泛异常分支会合并成非阻断诊断。
 - 结束或中止保证有一条终止 `backtest` 事件；外部中止记录 `status="aborted"`。
-- Runner 另记完整工具墙钟的 `budget_exclusion`，使控制台显示的活跃会话预算与真实回补一致；Step/ask_user 等待同样回补。
+- Runner 另记完整工具墙钟的 `budget_exclusion`，使控制台显示的活跃会话预算与真实回补一致；Step/ask_user 等待同样回补，并单列 `researcher_wait_seconds`，不进入实时或账本 `run_wall_seconds`。
 - 结果目录结构集中列在 §2.1。
 
 `detailed_return.json` 至少包含：

@@ -148,7 +148,7 @@
 
 | 参数 | 默认 | 约束对象 |
 |---|---:|---|
-| `max_fold_minutes` | 60 min | Fold 推理墙钟（回测耗时回补排除） |
+| `max_fold_minutes` | 20 min | Fold/元学习推理墙钟；回测与研究者等待分别回补 |
 | `fold_deadline_at` | 运行时派生 | 会话启动时间加有效推理预算得到的绝对截止时间，无固定默认 |
 | `finalize_before_deadline_seconds` | 300 s | deadline 前的收尾提示窗口（最多一次 wrap-up 提示） |
 | `per_call_timeout_seconds` | 300 s | Agent 主 LLM 调用与 contract_check 单次超时 |

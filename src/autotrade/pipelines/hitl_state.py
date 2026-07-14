@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from dataclasses import MISSING, dataclass, field, fields
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Mapping
@@ -38,6 +38,7 @@ SCHEDULE_NAME = "schedule.json"
 ANALYSIS_DIR_NAME = "analysis"
 HELDOUT_SESSION_KEY = "heldout"
 _LIVE_RUN_STATES = {"running_session", "waiting_step_user", "waiting_user_reply"}
+_RESEARCHER_WAIT_STATES = {"waiting_step_user", "waiting_user_reply"}
 
 # auto: run continuously; manual: approve each SESSION before it starts;
 # step: manual PLUS every fold session holds at each validated step
@@ -95,7 +96,7 @@ PARAM_DEFAULTS: dict[str, object] = {
     "screen_min_price": None,
     "screen_max_price": None,
     "screen_boards": (),
-    "max_fold_minutes": 60,
+    "max_fold_minutes": 20,
     "convergence_start_epoch": 3,
     "disable_step_tree": False,
     "nl_failure_policy": "return_error_with_audit",
@@ -408,6 +409,8 @@ class StatusReporter:
             "run_id": None,
             "trace_path": None,
             "session_started_at": None,
+            "researcher_wait_seconds": 0.0,
+            "wait_started_at": None,
             "fold_deadline_at": None,
             "completed_sessions": 0,
             "total_sessions": None,
@@ -429,6 +432,27 @@ class StatusReporter:
     def set(self, **fields: object) -> None:
         with self._lock:
             previous = self._data.get("state")
+            state = fields.get("state", previous)
+            new_session = "session_started_at" in fields
+            if new_session:
+                fields.setdefault("researcher_wait_seconds", 0.0)
+                fields.setdefault("wait_started_at", None)
+            elif previous not in _RESEARCHER_WAIT_STATES and state in _RESEARCHER_WAIT_STATES:
+                fields.setdefault("wait_started_at", utc_now_iso())
+            elif previous in _RESEARCHER_WAIT_STATES and state not in _RESEARCHER_WAIT_STATES:
+                waited = 0.0
+                try:
+                    started = datetime.fromisoformat(
+                        str(self._data.get("wait_started_at") or "").replace("Z", "+00:00")
+                    )
+                    waited = max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
+                except (TypeError, ValueError):
+                    pass
+                fields.setdefault(
+                    "researcher_wait_seconds",
+                    round(float(self._data.get("researcher_wait_seconds") or 0.0) + waited, 3),
+                )
+                fields.setdefault("wait_started_at", None)
             self._data.update(fields)
             state = self._data.get("state")
             changed = "state" in fields and state != previous

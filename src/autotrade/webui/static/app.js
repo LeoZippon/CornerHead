@@ -130,7 +130,12 @@ function foldDurationNode(detail, session, prefix = "", className = "") {
   const startedAt = status.session_key === session.key ? Date.parse(status.session_started_at || "") : NaN;
   const isLive = !isFixed && detail.worker_alive && Number.isFinite(startedAt);
   const update = () => {
-    const seconds = isFixed ? fixed : isLive ? (Date.now() - startedAt) / 1000 : null;
+    const completedWait = Number(status.researcher_wait_seconds) || 0;
+    const waitStartedAt = ["waiting_step_user", "waiting_user_reply"].includes(status.state)
+      ? Date.parse(status.wait_started_at || "") : NaN;
+    const activeWait = Number.isFinite(waitStartedAt) ? Math.max(0, (Date.now() - waitStartedAt) / 1000) : 0;
+    const seconds = isFixed ? fixed : isLive
+      ? Math.max(0, (Date.now() - startedAt) / 1000 - completedWait - activeWait) : null;
     node.textContent = [prefix, seconds === null ? "" : fmtDuration(seconds)].filter(Boolean).join(" · ");
   };
   update();
