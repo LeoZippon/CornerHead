@@ -490,6 +490,14 @@ class AgentSessionRunner:
             **self.step_rollback.run(str(args["node_id"]), include_models=bool(args["include_models"])),
         }
 
+    def _backtest_budget(self) -> dict[str, int]:
+        limit = int(self.config.max_backtests_per_fold)
+        return {
+            "backtests_used": self._backtest_count,
+            "backtests_limit": limit,
+            "backtests_remaining": max(0, limit - self._backtest_count),
+        }
+
     def _do_backtest(self, args: dict[str, object]) -> dict[str, object]:
         if self._backtest_count >= self.config.max_backtests_per_fold:
             return {
@@ -498,6 +506,7 @@ class AgentSessionRunner:
                     f"backtest budget exhausted: {self.config.max_backtests_per_fold} backtests already "
                     "run this fold; consolidate changes before validating again"
                 ),
+                **self._backtest_budget(),
             }
         self._backtest_count += 1
         started = time.monotonic()
@@ -537,7 +546,11 @@ class AgentSessionRunner:
                 )
             if directive and str(directive).strip():
                 researcher_directive = str(directive).strip()
-        observation = {"observation": "backtest", **agent_visible_backtest_result(result)}
+        observation = {
+            "observation": "backtest",
+            **agent_visible_backtest_result(result),
+            **self._backtest_budget(),
+        }
         if researcher_directive:
             observation["researcher_step_directive"] = (
                 "研究者 Step 级指令（用户注入的待检验假设，不放宽任何硬约束）：" + researcher_directive
@@ -889,7 +902,10 @@ class AgentSessionRunner:
         except SessionInterrupt:
             raise  # researcher stop at a gate: abort the session, never an observation
         except ToolError as exc:
-            return _tool_error_observation(action, exc)
+            observation = _tool_error_observation(action, exc)
+            if action == "backtest":
+                observation.update(self._backtest_budget())
+            return observation
         except (WebSearchError, WebFetchError) as exc:
             return {"observation": "error", "action": action, "error": safe_error_summary(exc)}
         except Exception as exc:  # noqa: BLE001 - an agent action must never kill the fold

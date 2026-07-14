@@ -606,7 +606,12 @@ class BacktestTool:
         nl_outcome_counts = dict(sorted(nl_service.outcome_counts.items()))
         withheld_probe_nl = int(nl_outcome_counts.get("withheld_probe", 0)) if probe else 0
         runtime_representative = withheld_probe_nl == 0
-        diagnostic_warnings = _diagnostic_warnings(stats)
+        strategy_advisories = (
+            list(modification_check.get("advisories") or [])
+            if isinstance(modification_check, dict)
+            else []
+        )
+        diagnostic_warnings = _diagnostic_warnings(stats, strategy_advisories=strategy_advisories)
         if withheld_probe_nl:
             diagnostic_warnings.insert(
                 0,
@@ -644,11 +649,7 @@ class BacktestTool:
             # had to liquidate at region end because the strategy never exited.
             "host_exit_liquidation_count": stats["host_exit_liquidation_count"],
             "modification_delta_summary": _modification_delta_summary(modification_check),
-            "strategy_advisories": (
-                list(modification_check.get("advisories") or [])
-                if isinstance(modification_check, dict)
-                else []
-            ),
+            "strategy_advisories": strategy_advisories,
             "probe_note": (
                 "replay_window 前 N 个策略交易日 + 1 个独立退出日探针："
                 "只返回运行成本与订单生命周期统计，"
@@ -1002,7 +1003,9 @@ def _strategy_reject_category_counts(value: object) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def _diagnostic_warnings(stats: dict[str, object]) -> list[str]:
+def _diagnostic_warnings(
+    stats: dict[str, object], *, strategy_advisories: list[dict[str, object]] | None = None
+) -> list[str]:
     """Return non-blocking strategy feedback without exposing private state."""
     warnings: list[str] = []
     if int(stats.get("order_count") or 0) == 0:
@@ -1013,6 +1016,16 @@ def _diagnostic_warnings(stats: dict[str, object]) -> list[str]:
             "with zero orders. This is not rejected; inspect empty/date-stale plans and exceptions caught "
             "by strategy code before accepting the result."
         )
+        broad_count = sum(
+            1
+            for advisory in strategy_advisories or []
+            if advisory.get("kind") == "suppressed_broad_exception"
+        )
+        if broad_count:
+            warnings.append(
+                f"策略含 {broad_count} 处吞掉宽泛异常的分支，可能把运行错误变成空候选；"
+                "调试阶段请让异常显式失败，定位后再保留有明确状态的降级处理。"
+            )
     elif "trade_count" in stats and int(stats.get("trade_count") or 0) == 0:
         categories = _strategy_reject_category_counts(stats.get("reject_counts"))
         category_note = (

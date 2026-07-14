@@ -17595,3 +17595,11 @@ Evidence and decision:
 - Full regression: 797 tests passed in 96.254 s. Real Docker lifecycle/fold E2E: 2 tests passed in 10.528 s. Prompt export was idempotent, JavaScript syntax and `git diff --check` passed.
 - Rebuilt `autotrade-sandbox:latest` as `sha256:a11c20f242dadf8b8e007112d43343863e84837cf16c06f72f227c8aeced42d8`; source and baked `main_ctx_driver.py` SHA-256 both equal `ad343183a9cfc7f0991f76a8dbe68142d178cfa13b886299430b3d486d8f3ce9`.
 - Final resource check: 445 GiB RAM available, swap essentially unused, and all eight L20 GPUs idle.
+
+
+## 2026-07-14 Probe iteration convergence guidance
+
+- The runner now appends `backtests_used`, `backtests_limit`, and `backtests_remaining` to every successful backtest observation, counted ToolError, and exhausted-budget response. It reuses the existing in-memory counter and configuration; no new state or persistence contract was introduced.
+- A zero-order result now counts existing `suppressed_broad_exception` advisories and emits one linked Chinese diagnostic. The result remains successful and acceptance/freeze behavior is unchanged.
+- The Fold workflow replaces one generic small-step sentence with a minimal vertical slice: confirmed read, small candidate set, order, next-day T+1 exit; then add one major component at a time, surface broad exceptions during debugging, reserve a full Valid plus necessary recheck, and preserve a successful full-Valid Step before further exploration.
+- Validation: four focused regressions passed; combined tool-flow and sandbox-isolation suites passed 161 tests in 33.844 s; full discovery passed 799 tests in 97.499 s. Prompt export was idempotent and `git diff --check` passed. One earlier aggregate command was invalid because it named a nonexistent `tests.unit.test_prompt_audit` module and hid stderr; it was discarded and rerun without output suppression.

@@ -583,6 +583,20 @@ class ToolFlowTest(unittest.TestCase):
             # Diagnostics explain but never become an Environment-side fence.
             self.assertTrue(ModificationCheckTool(ctx).run()["allowed_to_backtest"])
 
+    def test_zero_order_links_suppressed_broad_exception_advisory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(
+                "def main(ctx):\n    try:\n        raise ValueError('x')\n    except Exception:\n        pass\n",
+                encoding="utf-8",
+            )
+
+            summary = BacktestTool(ctx).run(mode="valid")
+
+            self.assertEqual(summary["status"], "ok")
+            self.assertTrue(any("1 处吞掉宽泛异常" in item for item in summary["diagnostic_warnings"]))
+            self.assertTrue(ModificationCheckTool(ctx).run()["allowed_to_backtest"])
+
     def test_memory_diagnostic_is_a_neutral_chinese_performance_note(self):
         from autotrade.environment.tools.backtest import _diagnostic_warnings
 
@@ -1952,6 +1966,27 @@ class ArtifactIOToolTest(unittest.TestCase):
 
 
 class AgentSessionRunnerTest(unittest.TestCase):
+    def test_failed_backtest_reports_consumed_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([]),
+                AgentSessionConfig(
+                    fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+                    max_backtests_per_fold=2,
+                ),
+                fold_info={"fold_id": "fold_2022Q1"},
+                acceptance_rules={},
+            )
+            with patch.object(runner.backtest, "run", side_effect=ToolError("probe failed")):
+                observation = runner._dispatch("backtest", {"replay_window": 2})
+
+            self.assertEqual(observation["observation"], "error")
+            self.assertEqual(observation["backtests_used"], 1)
+            self.assertEqual(observation["backtests_limit"], 2)
+            self.assertEqual(observation["backtests_remaining"], 1)
+
     def test_context_compactor_reserves_time_for_next_main_call(self):
         compact_payload = {
             "primary_request": "continue",
@@ -2038,6 +2073,14 @@ class AgentSessionRunnerTest(unittest.TestCase):
             llm_events = [e for e in ctx.trace.read_events() if e["event_type"] == "llm_call"]
             self.assertGreaterEqual(len(llm_events), 4)
             self.assertTrue(all("new_messages" in e and "content" in e for e in llm_events))
+            backtest_observation = next(
+                json.loads(message["content"])
+                for message in proxy.calls[-1]["messages"]
+                if message.get("tool_call_id") == "call_backtest"
+            )
+            self.assertEqual(backtest_observation["backtests_used"], 1)
+            self.assertEqual(backtest_observation["backtests_limit"], 30)
+            self.assertEqual(backtest_observation["backtests_remaining"], 29)
 
     def test_step_gate_hook_holds_and_injects_directive(self):
         with tempfile.TemporaryDirectory() as tmp:

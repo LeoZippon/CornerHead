@@ -1528,3 +1528,8 @@
 - Probe 新增 `runtime_representative=false` 和固定警告；正式 Valid Trace 显示当前 NL 序号与耗时。个股正文检索限定到候选关联文档，同一 PIT 时点复用可见索引；真实 378.9 万行文本基准的无命中个股检索由旧基线 15.77 秒降至首次 11.59 秒、同一时点后续 9.32 秒。
 - Timeview 接受带明确 Arrow 类型的零行 Parquet，DuckDB 误读数据集目录时给出 `*.parquet` 安全提示。Q2 已优雅终止且产物保留；修复后无需重跑 Meta/Q1，只需按需续跑未冻结的 Q2。
 - 全量 797 tests、真实 Docker E2E 2 tests 通过；新镜像 `a11c20f242da` 与源码 driver hash 均为 `ad343183a9cf`，结束时 445 GiB 内存可用、8 张 L20 空闲。
+
+2026-07-14 Probe 迭代收敛提示
+
+- 每次回测成功、ToolError 或额度耗尽均返回已用/上限/剩余次数；零订单且存在吞宽泛异常分支时返回一条关联的非阻断诊断。
+- Fold Prompt 用一条最小垂直链路工作流替换笼统“小步修改”：先验证读取、选股、下单和 T+1 主动退出，再逐个加组件，并为完整 Valid 与必要复验保留额度。相关 161 tests、全量 799 tests 通过，提示词导出与 `git diff --check` 通过。
