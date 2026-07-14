@@ -728,71 +728,75 @@ def run_interactive_worker(experiment_dir: Path, *, repo_root: Path, poll_second
 
     # Provider key loading matches the CLI entrypoints: .env is read relative to
     # the repo root (DeepSeekProxy.from_env and web-search providers).
+    previous_cwd = Path.cwd()
+    status = None
     os.chdir(repo_root)
-
-    config = build_config_from_options(options, repo_root=repo_root)
-    proxies = build_proxies(options)
-    web_search_providers = build_web_search_providers(options)
-    agent_factory, meta_learner = build_session_builders(
-        config=config,
-        proxies=proxies,
-        web_search_providers=web_search_providers,
-    )
-    pipeline = build_pipeline(config, options, agent_factory, meta_learner, proxies)
-
-    control_path = hitl_dir / CONTROL_NAME
-    if not control_path.exists():
-        write_control(control_path, ControlState(mode=str(options.initial_control_mode)))
-
-    post_fold_hook = None
-    if bool(options.analysis_enabled):
-        from autotrade.environment.llm import DeepSeekProxy
-
-        from .fold_analysis import analyze_fold
-
-        analysis_proxy = DeepSeekProxy.from_env(
-            model=str(options.analysis_model),
-            thinking_enabled=not bool(options.no_thinking),
-            reasoning_effort="high",
+    try:
+        config = build_config_from_options(options, repo_root=repo_root)
+        proxies = build_proxies(options)
+        web_search_providers = build_web_search_providers(options)
+        agent_factory, meta_learner = build_session_builders(
+            config=config,
+            proxies=proxies,
+            web_search_providers=web_search_providers,
         )
+        pipeline = build_pipeline(config, options, agent_factory, meta_learner, proxies)
 
-        def post_fold_hook(record: dict[str, object], outcome) -> None:  # noqa: F811 - deliberate rebind
-            analyze_fold(
-                analysis_proxy,
-                ledger_record=record,
-                strategy_dir=Path(outcome.frozen.path),
-                model_dir=Path(outcome.frozen.model_path) if outcome.frozen.model_path else None,
-                out_dir=hitl_dir / ANALYSIS_DIR_NAME,
-                max_tokens=int(options.analysis_max_tokens),
+        control_path = hitl_dir / CONTROL_NAME
+        if not control_path.exists():
+            write_control(control_path, ControlState(mode=str(options.initial_control_mode)))
+
+        post_fold_hook = None
+        if bool(options.analysis_enabled):
+            from autotrade.environment.llm import DeepSeekProxy
+
+            from .fold_analysis import analyze_fold
+
+            analysis_proxy = DeepSeekProxy.from_env(
+                model=str(options.analysis_model),
+                thinking_enabled=not bool(options.no_thinking),
+                reasoning_effort="high",
             )
 
-    status = StatusReporter(
-        hitl_dir / STATUS_NAME,
-        work_root=Path(config.work_root),
-        on_state_change=_decision_alert_hook(config.experiment_id),
-    )
-    # Long-lived worker: code is imported NOW. The console flags this stamp
-    # against the repo's current HEAD so stale workers are visible.
-    status.set(code_version=repo_code_version())
-    status.start()
-    runner = InteractiveExperimentRunner(
-        pipeline,
-        hitl_dir=hitl_dir,
-        poll_seconds=poll_seconds,
-        post_fold_hook=post_fold_hook,
-        status=status,
-    )
-    try:
-        result = runner.run(load_sse_trading_days(pipeline.raw_dir))
-        return {"status": "completed", **result}
-    except ExperimentStopped as exc:
-        status.set(state="stopped", error=None, phase=None)
-        return {"status": "stopped", "reason": str(exc)}
-    except SystemExit:
-        status.set(state="stopped", error="terminated_by_signal", phase=None)
-        raise
-    except BaseException as exc:
-        status.set(state="failed", error=f"{type(exc).__name__}: {exc}")
-        raise
+            def post_fold_hook(record: dict[str, object], outcome) -> None:  # noqa: F811 - deliberate rebind
+                analyze_fold(
+                    analysis_proxy,
+                    ledger_record=record,
+                    strategy_dir=Path(outcome.frozen.path),
+                    model_dir=Path(outcome.frozen.model_path) if outcome.frozen.model_path else None,
+                    out_dir=hitl_dir / ANALYSIS_DIR_NAME,
+                    max_tokens=int(options.analysis_max_tokens),
+                )
+
+        status = StatusReporter(
+            hitl_dir / STATUS_NAME,
+            work_root=Path(config.work_root),
+            on_state_change=_decision_alert_hook(config.experiment_id),
+        )
+        # Long-lived worker: code is imported NOW. The console flags this stamp
+        # against the repo's current HEAD so stale workers are visible.
+        status.set(code_version=repo_code_version())
+        status.start()
+        runner = InteractiveExperimentRunner(
+            pipeline,
+            hitl_dir=hitl_dir,
+            poll_seconds=poll_seconds,
+            post_fold_hook=post_fold_hook,
+            status=status,
+        )
+        try:
+            result = runner.run(load_sse_trading_days(pipeline.raw_dir))
+            return {"status": "completed", **result}
+        except ExperimentStopped as exc:
+            status.set(state="stopped", error=None, phase=None)
+            return {"status": "stopped", "reason": str(exc)}
+        except SystemExit:
+            status.set(state="stopped", error="terminated_by_signal", phase=None)
+            raise
+        except BaseException as exc:
+            status.set(state="failed", error=f"{type(exc).__name__}: {exc}")
+            raise
     finally:
-        status.stop()
+        if status is not None:
+            status.stop()
+        os.chdir(previous_cwd)

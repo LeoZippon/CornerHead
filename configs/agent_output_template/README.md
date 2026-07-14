@@ -162,14 +162,14 @@ therefore do not appear in `pending()` before submission.
 | `ctx.broker` | Broker queries, order/cancel verbs, and margin primitives; order/cancel calls must be inside `ctx.substep`; see the broker quick reference above |
 | `ctx.substep(name, budget_minutes=B)` | Strategy-step budget context; declares compute time, state `ready_at`, and broker action submit timing |
 | `ctx.nl(ts_code?, prompt="...")` | Point-in-time NL Sub Agent for single-stock or event/theme/sector/macro text analysis; must run inside `ctx.substep` and follows sim-clock text visibility |
-| `ctx.asof_dir` | Per-tick PIT view: dataset directories such as `daily`, plus the single file `universe.parquet` and `text_library` |
+| `ctx.asof_dir` | Path string for the per-tick PIT view: dataset directories such as `daily`, plus the single file `universe.parquet` and `text_library`; wrap with `Path(str(...))` before `/` joins |
 | `ctx.asof_version` | Changes only when Timeview actually rolls; cache as-of reads by this value |
-| `ctx.snapshot_dir` | Frozen research baseline snapshot; does not roll during replay |
+| `ctx.snapshot_dir` | Path string for the frozen research baseline snapshot; does not roll during replay |
 | `ctx.state_dir` | Managed cross-tick state directory; only available inside `ctx.substep`; first access copies visible state, then writes stage until `ready_at` |
-| `ctx.model_dir` | Read-only persisted model artifact directory; data that must persist across backtests belongs in `models/` before replay |
+| `ctx.model_dir` | Path string for the read-only persisted model artifact directory; data that must persist across backtests belongs in `models/` before replay |
 
 For direct text processing, read `pd.read_parquet(Path(str(ctx.asof_dir)) / "text_index")`
-and join rows to `ctx.asof_dir / "text_library"` via each row's `library_file` and `text_id`.
+and join rows to `Path(str(ctx.asof_dir)) / "text_library"` via each row's `library_file` and `text_id`.
 
 `amount` is a share count (SH/SZ main board and ChiNext: multiples of 100; STAR:
 200 minimum then 1-share steps; BSE: 100 minimum then 1-share steps). The Broker

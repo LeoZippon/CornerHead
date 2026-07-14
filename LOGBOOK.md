@@ -1547,3 +1547,10 @@
 
 - `lap-test15` 的 Q1 在审批后仍准备 6分39秒；Decision 与 Replay 分别完成于11:55:51和11:58:45，分钟 Replay 临时缓存约2.0 GiB，进程平均约1.2核且主机仍有432 GiB可用内存。
 - 复用现有单线程预取 Future，取消仅 `auto` 模式可在 Meta Agent 就绪后启动的限制；逐 Step/手动模式也与 Meta 推理及研究者审批重叠，正式 Fold 前仍强制等待完成。Interactive Runner 27 tests 通过。
+
+2026-07-14 ctx 路径字符串合同修复
+
+- `lap-test15` Q1 按 Prompt 示例直接执行 `asof_dir / "daily"`，第二次 Probe 因 `ctx.asof_dir` 实际为字符串而失败；该实验随后正常停止，无残留进程。
+- Prompt、模板和文档统一要求 `Path(str(ctx.asof_dir))`；Probe 只对策略栈内精确的路径变量字符串 `/` 错误返回固定提示，其他字符串错误仍保持通用脱敏反馈。
+- 组合回归同时修复交互 worker 结束后未恢复调用方工作目录的问题；独立 worker 运行期目录不变，退出后不再污染同进程调用方。
+- 全量 802 tests、真实 Docker E2E 2 tests 通过；新镜像 `e3efc73818c9` 的内置 driver 与源码 hash 均为 `3fd10ad5e74b`。

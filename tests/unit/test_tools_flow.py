@@ -227,6 +227,20 @@ def main(ctx):
         "plain string".isoformat()
 '''
 
+PROBE_CONTEXT_PATH_STRING_MAIN = '''
+def main(ctx):
+    with ctx.substep("bad_context_path", budget_minutes=0.5):
+        asof_dir = ctx.asof_dir
+        _ = asof_dir / "daily"
+'''
+
+PROBE_OTHER_STRING_DIVISION_MAIN = '''
+def main(ctx):
+    with ctx.substep("unrelated_strings", budget_minutes=0.5):
+        left = "plain"
+        _ = left / "string"
+'''
+
 PROBE_UNIVERSE_PATH_MAIN = '''
 from pathlib import Path
 
@@ -1445,6 +1459,11 @@ def main(ctx):
                 "already an ISO-8601 string",
             ),
             (
+                PROBE_CONTEXT_PATH_STRING_MAIN,
+                "context_path_string_contract",
+                "Path(str(...))",
+            ),
+            (
                 PROBE_UNIVERSE_PATH_MAIN,
                 "universe_path_mismatch",
                 "universe.parquet",
@@ -1516,6 +1535,20 @@ def main(ctx):
             _, ctx = build_sandbox(Path(tmp))
             (ctx.paths.agent_output / "main.py").write_text(
                 PROBE_OTHER_STRING_ISOFORMAT_MAIN,
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ToolError, "raw strategy/runtime error text is host-only") as raised:
+                BacktestTool(ctx).run(mode="valid", replay_window=2)
+
+            self.assertEqual(raised.exception.error_type, "probe_runtime_error")
+            self.assertIsNone(raised.exception.reason)
+
+    def test_probe_path_classifier_does_not_cover_unrelated_strings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(
+                PROBE_OTHER_STRING_DIVISION_MAIN,
                 encoding="utf-8",
             )
 

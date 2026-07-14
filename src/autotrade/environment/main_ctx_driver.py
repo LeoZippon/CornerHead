@@ -68,6 +68,25 @@ def _public_strategy_error(exc, *, main_path, request, snapshot_dir):
                         "or call datetime.fromisoformat(ctx.cur_datetime) when a datetime object is required."
                     ),
                 }
+    if isinstance(exc, TypeError) and message == "unsupported operand type(s) for /: 'str' and 'str'":
+        strategy_root = Path(main_path).parent
+        for frame in traceback.extract_tb(exc.__traceback__):
+            try:
+                in_strategy = _is_under(_normalize_path(frame.filename), _normalize_path(strategy_root))
+            except (OSError, TypeError):
+                in_strategy = False
+            if in_strategy and re.search(
+                r"(?:\bctx\s*\.\s*)?\b(?:asof_dir|snapshot_dir|model_dir)\s*/",
+                frame.line or "",
+            ):
+                return {
+                    "public_error_type": "strategy_contract_error",
+                    "public_reason": "context_path_string_contract",
+                    "public_retry_hint": (
+                        "ctx.asof_dir, ctx.snapshot_dir, and ctx.model_dir are path strings; "
+                        "wrap them with Path(str(...)) before using the / path operator."
+                    ),
+                }
     state = request.get("state") or {}
     rolling_asof_dir = state.get("asof_dir") if isinstance(state, dict) else None
     asof_dir = rolling_asof_dir or snapshot_dir

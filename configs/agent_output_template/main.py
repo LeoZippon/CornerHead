@@ -24,7 +24,8 @@ Key ``ctx`` surface (advanced helpers in ``candidate.py`` / ``trading.py`` + ``R
 ``ctx.asof_dir`` holds directories for ``daily``, ``events``, ``macro``,
 ``fundamentals``, ``intraday_1min`` and ``text_index``, plus the ``universe.parquet``
 file and ``text_library`` body shards.
-Read parquet domains with ``pd.read_parquet(ctx.asof_dir / "daily")``.
+The context directories are path strings. Read parquet domains with
+``pd.read_parquet(Path(str(ctx.asof_dir)) / "daily")``.
 The view rolls forward as each dataset's real refresh job completes, so during a
 trading session it is frozen and ``ctx.asof_version`` is stable — cache a read by
 that version and recompute only when it changes (the daily cross-section is only

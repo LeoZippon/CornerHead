@@ -89,9 +89,30 @@ class WorkerEntrypointTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "already has a live worker"):
                     interactive.run_interactive_worker(experiment_dir, repo_root=root)
 
+    def test_runtime_setup_failure_restores_callers_working_directory(self) -> None:
+        from autotrade.pipelines import interactive
+
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            experiment_dir = root / "experiments" / "exp"
+            hitl_dir = experiment_dir / "hitl"
+            hitl_dir.mkdir(parents=True)
+            (hitl_dir / "params.json").write_text('{"experiment_id": "exp"}', encoding="utf-8")
+            options = SimpleNamespace(experiments_root=root / "experiments", experiment_id="exp")
+            with (
+                patch.object(interactive, "resolve_options", return_value=options),
+                patch.object(interactive, "read_status", return_value={}),
+                patch.object(interactive, "build_config_from_options", side_effect=RuntimeError("setup failed")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "setup failed"):
+                    interactive.run_interactive_worker(experiment_dir, repo_root=root)
+        self.assertEqual(Path.cwd(), original_cwd)
+
     def test_loads_the_trading_calendar_from_the_pinned_release(self) -> None:
         from autotrade.pipelines import assembly, folds, interactive
 
+        original_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             experiment_dir = root / "experiments" / "exp"
@@ -135,6 +156,7 @@ class WorkerEntrypointTest(unittest.TestCase):
             runner.run.assert_called_once_with(trading_days)
             self.assertEqual(result["status"], "completed")
             status.stop.assert_called_once()
+        self.assertEqual(Path.cwd(), original_cwd)
 
 
 class FakePipeline:
