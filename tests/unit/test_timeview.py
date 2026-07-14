@@ -303,7 +303,27 @@ class TimeviewTest(unittest.TestCase):
 
     def test_auction_rolls_at_observed_row_time_not_evening_node(self):
         with tempfile.TemporaryDirectory() as tmp:
+            import duckdb
+
+            from autotrade.environment.snapshot import SnapshotBuilder
+
             root = Path(tmp)
+            snapshot = _frozen_snapshot(root)
+            _write(
+                snapshot / "auction.parquet",
+                pd.DataFrame(
+                    {
+                        column: pd.Series(
+                            dtype=(
+                                "string"
+                                if column in SnapshotBuilder._AUCTION_STRING_COLUMNS
+                                else "float64"
+                            )
+                        )
+                        for column in SnapshotBuilder._AUCTION_COLUMNS
+                    }
+                ),
+            )
             frames = _replay_frames()
             frames["auction"] = pd.DataFrame(
                 [{
@@ -311,18 +331,33 @@ class TimeviewTest(unittest.TestCase):
                     "session": "open",
                     "ts_code": TS,
                     "price": 10.0,
+                    "vol": 100.0,
+                    "amount": 1000.0,
+                    "pre_close": 9.5,
+                    "turnover_rate": 0.1,
+                    "volume_ratio": 1.2,
+                    "float_share": 10000.0,
                     "available_at": "2022-01-04T09:28:36+08:00",
+                    "available_at_rule": "observed",
                 }]
             )
             tv = Timeview(
                 host_dir=root / "asof",
                 executor=FakeExecutor(),
-                snapshot_dir=_frozen_snapshot(root),
+                snapshot_dir=snapshot,
                 replay_frames=frames,
             )
 
             asof, before = tv.refresh(_when("2022-01-04 09:28:30"))
-            self.assertEqual(list((Path(asof) / "auction").glob("*.parquet")), [])
+            part0 = Path(asof) / "auction" / "part_0000.parquet"
+            self.assertTrue(part0.exists())
+            self.assertEqual(part0.stat().st_ino, (snapshot / "auction.parquet").stat().st_ino)
+            self.assertTrue(pd.read_parquet(Path(asof) / "auction").empty)
+            duck_empty = duckdb.execute(
+                "SELECT * FROM read_parquet(?)", [str(Path(asof) / "auction" / "*.parquet")]
+            ).fetchdf()
+            self.assertTrue(duck_empty.empty)
+            self.assertEqual(str(duck_empty["ts_code"].dtype), "object")
             # The observed boundary is second-precision; crossing it within the
             # same minute must not be hidden by a minute-rounded signature.
             _, still_before = tv.refresh(_when("2022-01-04 09:28:35"))

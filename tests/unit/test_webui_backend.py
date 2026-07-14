@@ -1043,6 +1043,9 @@ class WebuiBackendTest(unittest.TestCase):
                 {"event_type": "backtest_progress", "day_index": 30, "total_days": 61,
                  "percent": 49.2, "trade_date": "20241112", "elapsed_seconds": 400.0,
                  "orders_so_far": 2},
+                {"event_type": "backtest_activity", "ts": "2026-07-06T00:07:00+00:00",
+                 "activity": "nl", "activity_status": "running", "nl_call_index": 3,
+                 "activity_elapsed_seconds": 0.0},
                 {"event_type": "ask_user", "waited_seconds": 12.5},
             ]
             path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
@@ -1050,6 +1053,12 @@ class WebuiBackendTest(unittest.TestCase):
             running = trace_stats(path)
             self.assertTrue(running["in_backtest"])
             self.assertEqual(running["backtest_progress"]["day_index"], 30)
+            self.assertEqual(running["backtest_progress"]["activity"], "nl")
+            self.assertEqual(running["backtest_progress"]["activity_status"], "running")
+            self.assertEqual(running["backtest_progress"]["nl_call_index"], 3)
+            self.assertEqual(
+                running["backtest_progress"]["activity_started_at"], "2026-07-06T00:07:00+00:00"
+            )
             self.assertAlmostEqual(running["backtest_wall_seconds"], 12.5)
 
             with path.open("a", encoding="utf-8") as handle:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import Callable
 
 from autotrade.environment.main_ctx_engine import BacktestError
 from autotrade.environment.nl.context import CompanyContextStore
@@ -32,6 +33,7 @@ class StrategyNLService:
         max_calls: int | None = None,
         replay_dir: Path | None = None,
         withhold_response: bool = False,
+        activity_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self.proxy = proxy
         self.snapshot_dir = snapshot_dir
@@ -43,6 +45,7 @@ class StrategyNLService:
         self.nl_wall_seconds = 0.0  # cumulative LLM-service wall, reported as a replay phase
         self.outcome_counts: dict[str, int] = {}
         self.withhold_response = bool(withhold_response)
+        self.activity_callback = activity_callback
         # Set per tick by the replay engine; rolls ctx.nl() text on the same nodes as
         # the Timeview. None (Timeview off / no replay) keeps the frozen PIT corpus.
         self.current_when = None
@@ -130,8 +133,13 @@ class StrategyNLService:
             deadline_at=self.deadline_at,
         )
         _nl_t0 = time.monotonic()
-        result = engine.run(ts_code=ts_code, prompt=prompt, request_kwargs=kwargs, config=config)
-        self.nl_wall_seconds += time.monotonic() - _nl_t0
+        self._emit_activity("running", call_index=self.calls, elapsed_seconds=0.0)
+        try:
+            result = engine.run(ts_code=ts_code, prompt=prompt, request_kwargs=kwargs, config=config)
+        finally:
+            elapsed = time.monotonic() - _nl_t0
+            self.nl_wall_seconds += elapsed
+            self._emit_activity("finished", call_index=self.calls, elapsed_seconds=elapsed)
         record = result.to_record()
         if record.get("status") == "error":
             record["feedback"] = failure_feedback(str(record.get("state")), str(record.get("error") or ""))
@@ -148,6 +156,22 @@ class StrategyNLService:
         if result.state in {"failed", "timeout"} and self.failure_policy == "fail":
             raise BacktestError(f"nl() failed for {ts_code}: {result.error}")
         return record
+
+    def _emit_activity(self, status: str, *, call_index: int, elapsed_seconds: float) -> None:
+        if self.activity_callback is None:
+            return
+        try:
+            self.activity_callback(
+                {
+                    "activity": "nl",
+                    "activity_status": status,
+                    "nl_call_index": int(call_index),
+                    "activity_elapsed_seconds": round(float(elapsed_seconds), 3),
+                }
+            )
+        except Exception:
+            # Progress reporting must never alter strategy/replay semantics.
+            pass
 
     def _write_result(
         self,

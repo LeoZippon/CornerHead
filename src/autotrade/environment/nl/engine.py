@@ -190,6 +190,7 @@ class TextRetrieveTool:
                 },
                 [],
             )
+        search_started = time.monotonic()
         try:
             evidence = self.retriever.search(
                 pattern,
@@ -214,6 +215,7 @@ class TextRetrieveTool:
                     "error": str(exc),
                     "hits": 0,
                     "result_ids": [],
+                    "duration_seconds": round(time.monotonic() - search_started, 6),
                 },
                 [],
             )
@@ -227,6 +229,7 @@ class TextRetrieveTool:
             },
             "hits": len(evidence),
             "result_ids": [item.get("text_id") for item in evidence],
+            "duration_seconds": round(time.monotonic() - search_started, 6),
         }
         return record, evidence
 

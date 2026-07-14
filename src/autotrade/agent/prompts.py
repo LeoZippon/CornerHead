@@ -91,11 +91,11 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - Broker 约束：策略只表达意图。每次实验同时运行普通+信用两个独立账户（现金、持仓、T+1 各自独立、互不担保），Broker 强制各账户现金与保证金可用余额、T+1 可卖余额、手数、涨跌停、停牌、融资融券标的与授信额度、融券限价规则、维保比例强平（只清信用账户）、账户间划转提取线和回放末日强制清仓。最大持仓数、单票权重和集中度默认由你控制。
 - `ctx.account`、`ctx.positions`、`ctx.broker.stock/credit` 是 tick 入口快照；同 tick 新 action 只进入 action 队列（已提交的轻量单也进入 `pending()`），不回写账户视图。批量下单从入口快照读取一次总预算，在本地逐笔递减并为费用/滑点留缓冲，不要在循环中反复读取静态 `available_cash` 当作剩余预算。
 - 子步骤预算：所有会访问 `ctx.state_dir`、调用 `ctx.broker`、调用 `ctx.nl()`、读写策略状态或做实质筛选/推理的策略步骤，都必须放进 `ctx.substep(name, budget_minutes=B)`；`B>0`、tick 内 name 唯一、低报会 fail-fast。`ctx.broker` 原语和 `ctx.state_dir` 在子步骤外会被拒绝；宿主还会用 `main(ctx)` 总耗时减去 substep 耗时，拒绝实质未包裹计算。`B<1` 的轻量块在回测中视为本决策分钟内完成（仍统计/限时并带 `ready_at` 元数据）；`B>=1` 的 broker action 只有在生成 tick、`ready_at` 和释放 tick 都处于交易所接受申报窗口内才提交，否则记录未提交/未成交，不会自动排到下一交易时段。未 ready 的跨分钟 broker 动作还不是委托，不会出现在 `pending()`；`pending()` 只展示已提交但未成交/可撤的在途单。
-- 回测成本：`backtest` 独立计时，不计入 Fold 推理 deadline，但单 Fold 次数受 `max_backtests_per_fold` 限制；单 tick 与单交易日真实墙钟硬上限由 run manifest 给出。小 `replay_window` 只能估计无 NL 退化路径的成本；NL 策略的行为和耗时必须用完整 Valid 验证并留足余量。
+- 回测成本：`backtest` 独立计时，不计入 Fold 推理 deadline，但单 Fold 次数受 `max_backtests_per_fold` 限制；单 tick 与单交易日真实墙钟硬上限由 run manifest 给出。小 `replay_window` 中 NL 内容会被 withheld；只要 `runtime_representative=false`，其耗时就不能外推完整 Valid。NL 策略必须用完整 Valid 验证并留足余量。
 - 回测归因：验证回测的返回附带 `benchmark` 诊断块（同窗沪深300收益、超额、β、市值风格倾斜；完整版含 PB/换手倾斜与申万行业净权重，在结果目录 `style_analysis.json`）。用它解读收益来源——绝对收益要对照基准看，超额为负的"正收益"不是证据，β 高说明在赌方向而非选股。这些是**描述性归因，不是优化目标**：不要为追求特定 β 或风格倾斜数值而改策略。
 - 跨周期生命周期：计划必须携带调仓周期键，每个新周期重新生成，并显式对比 Broker 真相源（持仓与在途单）执行卖出与再平衡；区间末宿主强制平仓只是安全网——回测结果中 `host_exit_liquidation_count` > 0 表示这些持仓从未被策略自己退出，买入后放任持有衡量的不是可持续策略。
 - 跨 tick 状态：`ctx.state_dir` 只存你的规则、计划和轻量状态，不是持仓/委托账本；Broker 才是真相源。它只能在 `ctx.substep` 内访问，首次访问才复制可见状态（纯 Broker block 不创建副本），单个暂存文件不超过64 MiB；访问后的旧值读取与 `ready_at` 延迟合并合同不变。每次回测重置，需继承的参数在回测前写入 `models/`。
-- NL 与做空：`ctx.nl(ts_code, prompt=...)` 用于单股文本分析，`ctx.nl(prompt=...)` 用于事件/主题/行业/宏观文本检索；文本按数据节点 PIT 滚动且受配额限制，证据必须降权使用。nl() 失败时返回 `status="error"` 且带 `feedback`（失败原因与退化建议：配额耗尽/未配置代理不要重试，超时/偶发失败可在后续 tick 重试一次）；策略必须按 status 分支降级，不得因 NL 失败崩溃。默认做空券源由成交当日 `margin_secs` 校验，当日集合缺失时按数据缺口拒单（`margin_secs_data_missing`），不可融券会拒单。
+- NL 与做空：`ctx.nl(ts_code, prompt=...)` 用于单股文本分析（正文只检索 PIT 索引已关联该公司的材料），`ctx.nl(prompt=...)` 用于事件/主题/行业/宏观背景检索；一次调用可包含多轮检索与模型调用，优先在固定调仓时点合并问题并缓存结论，不要逐股逐 tick 重复调用。文本按数据节点 PIT 滚动且受配额限制，证据必须降权使用。nl() 失败时返回 `status="error"` 且带 `feedback`（失败原因与退化建议：配额耗尽/未配置代理不要重试，超时/偶发失败可在后续 tick 重试一次）；策略必须按 status 分支降级，不得因 NL 失败崩溃。默认做空券源由成交当日 `margin_secs` 校验，当日集合缺失时按数据缺口拒单（`margin_secs_data_missing`），不可融券会拒单。
 
 ## 数据可见性（逐 tick 时序视图）
 `ctx.asof_dir` 是逐 tick 滚动的时点视图：某行数据只有在“把它写入本地库的定时任务在仿真时钟下已完成”后才可见，严格复刻实盘本地库的刷新节奏。parquet 域与文本视图各按其落库节点滚动；`ctx.nl()` 复用同一时钟门控文本证据：
@@ -111,7 +111,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 
 打板/热榜/游资类字段（events 域 `dataset` 列区分）是**情绪与题材的描述性弱信号**：日终榜单、排名与席位映射存在空值和口径变动，只用于次日及以后的情绪延续判断与复盘，绝不作为成交、可交易性、资金或风控的真相源。指数序列（`macro` 域 `dataset=index_daily`，七只核心宽基）用于市场择时、β 管理与相对强弱基准。
 
-`ctx.asof_dir` 用 `pd.read_parquet(ctx.asof_dir / "daily")` 读取 parquet parts 域（域名 `daily`/`events`/`macro`/`fundamentals`/`intraday_1min`/`text_index`）；文本正文在 `ctx.asof_dir / "text_library"`，只包含已可见 `text_index` 行引用的 body shard。盘中无刷新节点跨越，视图冻结、`ctx.asof_version` 不变——按它缓存读取、变化时再重算。`ctx.snapshot_dir` 是 Fold 决策时点（区间前一交易日收盘）冻结的研究基准快照。
+`ctx.asof_dir` 的 parquet parts 域名为 `daily`/`events`/`macro`/`fundamentals`/`intraday_1min`/`text_index`：Pandas 用 `pd.read_parquet(ctx.asof_dir / "daily")` 读取目录，DuckDB 必须用 `read_parquet('.../daily/*.parquet')`；若当前没有 part，就表示该时点无可见行。文本正文位于 `ctx.asof_dir / "text_library"`，只包含已可见 `text_index` 行引用的 body shard。盘中无刷新节点跨越，视图冻结、`ctx.asof_version` 不变——按它缓存读取、变化时再重算。`ctx.snapshot_dir` 是 Fold 决策时点（区间前一交易日收盘）冻结的研究基准快照。
 
 """
 

@@ -252,6 +252,20 @@ def main(ctx):
         raise IOException('IO Error: No files found that match the pattern "' + str(wrong) + '"')
 '''
 
+PROBE_DUCKDB_ASOF_DIR_MAIN = '''
+from pathlib import Path
+
+
+class IOException(Exception):
+    pass
+
+
+def main(ctx):
+    with ctx.substep("bad_duckdb_asof_dir", budget_minutes=0.5):
+        wrong = Path(str(ctx.asof_dir)) / "events"
+        raise IOException('IO Error: No files found that match the pattern "' + str(wrong) + '"')
+'''
+
 PROBE_IMPORT_ERROR_MAIN = '''
 raise RuntimeError("import fixture failure")
 
@@ -986,6 +1000,15 @@ def main(ctx):
             self.assertEqual(summary["status"], "ok")
             nl_calls = ctx.paths.results / "valid_000" / "nl_tool" / "nl_llm_calls.jsonl"
             self.assertTrue(nl_calls.exists())
+            activity = [
+                event
+                for event in ctx.trace.read_events()
+                if event.get("event_type") == "backtest_activity"
+            ]
+            self.assertEqual([event["activity_status"] for event in activity], ["running", "finished"])
+            self.assertEqual([event["nl_call_index"] for event in activity], [1, 1])
+            self.assertNotIn("prompt", activity[0])
+            self.assertNotIn("ts_code", activity[0])
 
     def test_general_nl_call_uses_runtime_rpc_and_cleans_it(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1303,6 +1326,8 @@ def main(ctx):
 
             self.assertEqual(summary["nl_calls"], 1)
             self.assertEqual(summary["nl_outcome_counts"], {"withheld_probe": 1})
+            self.assertFalse(summary["runtime_representative"])
+            self.assertTrue(any("不可外推完整 Valid" in warning for warning in summary["diagnostic_warnings"]))
             self.assertNotIn("nl_tool_dir", summary)
             public = json.dumps(
                 {
@@ -1414,6 +1439,11 @@ def main(ctx):
                 PROBE_ASOF_DATASET_PATH_MAIN,
                 "asof_path_mismatch",
                 "without a .parquet suffix",
+            ),
+            (
+                PROBE_DUCKDB_ASOF_DIR_MAIN,
+                "duckdb_asof_glob_required",
+                "*.parquet",
             ),
             (
                 PROBE_IMPORT_ERROR_MAIN,

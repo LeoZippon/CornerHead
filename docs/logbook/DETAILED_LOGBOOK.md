@@ -17571,3 +17571,27 @@ Case Study and cost:
 Validation/resources:
 - Targeted release/Snapshot/pipeline suite: 95 passed. Full suite: 771 passed in 109.761 s. Three experiment CLI helps, `node --check` and `git diff --check` passed.
 - During validation the host retained about 424 GiB available RAM; load was low on 192 logical CPUs. Seven L20 GPUs were idle and GPU 7 had an unrelated 26.98 GiB allocation.
+
+
+## 2026-07-14 lzp-test15 NL runtime diagnosis and remediation
+
+Observed experiment:
+- `lzp-test15` used generation `941d89e6afaf4cfdbfa295e139fb4a64` and image `6af1d9b40c27`. Q1 eventually completed and froze `valid_018`; its earlier failures were Agent-authored path, schema, merge, boolean, substep, plan and Broker-use mistakes that the existing feedback loop allowed the Agent to repair.
+- Q2's full Valid attempts failed after 1890.15 s (one `main(ctx)` exceeded 1800 s), 64 s (0.294 s outside substep exceeded 0.25 s), 1011 s (research took 918.7 s against a declared 4 minutes), and 3765.17 s (research took 1314.2 s against a declared 20 minutes after 12/57 days).
+- The Q2 strategy issued four real `ctx.nl()` calls roughly every five trading days and allowed up to three retrieval/model rounds per call. Its earlier three-day Probe completed in 52.27 s only because all 30 NL responses were intentionally `withheld_probe`; no real retrieval or model work ran. The Agent treated that non-representative fallback timing as a full-run estimate and increased declarations instead of reducing/caching calls.
+- Worker heartbeats, Formal containers, pinned data, typed-empty auction, PIT visibility and update/release state remained healthy. The stopped Q2 had completed 11 real NL calls and had one pending; no Q2 artifact froze. The worker was terminated gracefully and all artifacts were retained.
+
+Implementation:
+- Probe summaries now expose `runtime_representative=false`, `nl_outcome_counts.withheld_probe`, and a concise warning that replay wall time cannot be extrapolated. Agent prompts and design docs repeat this contract.
+- Full Valid emits content-free `backtest_activity` events around real NL calls. The WebUI shows the current NL call index and elapsed time; prompts, stock codes and NL text remain private.
+- Text retrieval memoizes the latest PIT-visible index slice. Stock-scoped body search only scans text IDs already associated with the candidate by code/name/title; general market body search remains available through `ctx.nl(prompt=...)`. Each retrieve-tool record includes its own duration.
+- Timeview hardlinks a zero-row frozen Parquet only when every field has a concrete Arrow type. DuckDB's exact "No files found" failure for a Timeview dataset directory is safely classified with a fixed `dir/*.parquet` hint; an empty glob means zero visible rows.
+
+Evidence and decision:
+- Real read-only benchmark on the Q2 current snapshot loaded 3,788,575 text-index rows in 10.324 s. A forced no-hit `600519.SH` body search (1,212 candidate-linked rows) took 11.590 s initially and 9.319 s for a second search at the same visibility boundary, versus the pre-change real baseline of 15.772 s. The gain is useful but cannot make an NL-heavy per-date strategy cheap enough by itself.
+- Before the benchmark the host had 444 GiB available RAM, swap was essentially unused, and all eight L20 GPUs were idle. The benchmark was CPU/read-only and did not mutate experiment data.
+- The Environment now reports cost truthfully and removes redundant scans without constraining strategy. The strategy should combine questions into one NL call per rebalance and cache the result; no automatic frequency fence or declaration inflation was added.
+- A new Meta/Q1 run is unnecessary because those artifacts are complete and the change does not affect accepted trading semantics. If an end-to-end outcome is required, resume/re-run only the unfinished Q2 after the new code/image is deployed.
+- Full regression: 797 tests passed in 96.254 s. Real Docker lifecycle/fold E2E: 2 tests passed in 10.528 s. Prompt export was idempotent, JavaScript syntax and `git diff --check` passed.
+- Rebuilt `autotrade-sandbox:latest` as `sha256:a11c20f242dadf8b8e007112d43343863e84837cf16c06f72f227c8aeced42d8`; source and baked `main_ctx_driver.py` SHA-256 both equal `ad343183a9cfc7f0991f76a8dbe68142d178cfa13b886299430b3d486d8f3ce9`.
+- Final resource check: 445 GiB RAM available, swap essentially unused, and all eight L20 GPUs idle.

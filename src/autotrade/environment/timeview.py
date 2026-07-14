@@ -32,6 +32,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from autotrade.environment.data.contracts import (
@@ -287,10 +288,10 @@ class _DomainView:
         """Seed part 0 from the frozen snapshot domain and fix the canonical schema.
 
         A non-empty frozen file is hardlinked unchanged and its columns become the
-        canonical schema. An empty/absent frozen writes NO part: an empty parquet
-        always lands null-typed columns that can no longer unify with the typed
-        replay parts appended later, whereas an empty directory simply reads back as
-        an empty frame. The domain stays empty until its first replay part rolls in.
+        canonical schema. A zero-row file is also hardlinked when its footer already
+        owns a concrete, non-null Arrow schema (for example canonical empty auction).
+        Legacy zero-column/null-typed files write no part because they cannot unify
+        safely with typed replay parts appended later.
 
         Emptiness and schema come from the parquet FOOTER (num_rows + arrow
         schema): the frozen daily/minute domains run to gigabytes and reading
@@ -299,7 +300,13 @@ class _DomainView:
         if frozen_file.exists():
             footer = pq.ParquetFile(frozen_file)
             frozen_columns = list(footer.schema_arrow.names)
-            if footer.metadata.num_rows > 0:
+            schema = footer.schema_arrow
+            typed_empty = (
+                footer.metadata.num_rows == 0
+                and len(schema) > 0
+                and all(field.type != pa.null() for field in schema)
+            )
+            if footer.metadata.num_rows > 0 or typed_empty:
                 _link_or_copy(frozen_file, self.out_dir / "part_0000.parquet")
                 self._part_seq = 1
                 return frozen_columns

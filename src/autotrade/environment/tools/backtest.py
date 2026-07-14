@@ -118,7 +118,8 @@ class BacktestTool:
             "replay_window passes are debug-only (complete_validation=false): freezing and finish_fold "
             "both require a successful full-window run of the current artifacts. Probes return ONLY "
             "runtime/lifecycle statistics - no returns, fills or attribution are produced (the probed "
-            "window is the strategy's future); use them purely to budget the full run."
+            "window is the strategy's future). Probe NL content is withheld, so its wall time is NOT "
+            "representative when nl_outcome_counts contains withheld_probe."
         ),
         fields=(
             ActionField(
@@ -130,7 +131,8 @@ class BacktestTool:
                     "Optional: replay the first N strategy trade days plus one separate liquidation day "
                     "for a fast debug check "
                     "(non-accept-eligible). Use it to measure runtime (replay_wall_seconds / "
-                    "replayed_trade_days) and extrapolate the full run's cost before launching it. The "
+                    "replayed_trade_days) only when runtime_representative=true; NL-withheld Probe "
+                    "timing cannot be extrapolated. The "
                     "default full run is the only result eligible for acceptance/freeze."
                 ),
             ),
@@ -397,6 +399,20 @@ class BacktestTool:
                 step_id=self.ctx.current_step_id,
             )
 
+        def _on_nl_activity(activity: dict[str, object]) -> None:
+            if probe or mode != "valid":
+                return
+            self.ctx.trace.emit(
+                "backtest_activity",
+                {
+                    "tool": self.name,
+                    "mode": mode,
+                    "result_name": result_dir.name,
+                    **activity,
+                },
+                step_id=self.ctx.current_step_id,
+            )
+
         # The per-decision wall cap bounds one main(ctx) tick (its compute AND any nl()
         # calls within it); the per-trading-day cap bounds a day's cumulative compute.
         # These are real wall-clock, hence load-dependent, so the TIGHT iteration caps
@@ -452,6 +468,7 @@ class BacktestTool:
                         # When the Timeview is on, ctx.nl() text rolls on the same nodes as the view.
                         replay_dir=replay_dir if timeview_enabled else None,
                         withhold_response=probe,
+                        activity_callback=_on_nl_activity if public_nl_audit else None,
                     )
                     try:
                         profile = BrokerProfile(**_profile_kwargs(dict(manifest.require("broker_profile"))))
@@ -586,6 +603,16 @@ class BacktestTool:
             )
 
         strategy_reject_category_counts = _strategy_reject_category_counts(stats["reject_counts"])
+        nl_outcome_counts = dict(sorted(nl_service.outcome_counts.items()))
+        withheld_probe_nl = int(nl_outcome_counts.get("withheld_probe", 0)) if probe else 0
+        runtime_representative = withheld_probe_nl == 0
+        diagnostic_warnings = _diagnostic_warnings(stats)
+        if withheld_probe_nl:
+            diagnostic_warnings.insert(
+                0,
+                f"本次 Probe 的 {withheld_probe_nl} 次 ctx.nl() 均未执行真实文本检索/模型调用；"
+                "replay_wall_seconds 只代表无 NL 退化路径，不可外推完整 Valid 耗时。",
+            )
         summary = {
             "tool": self.name,
             "tool_spec": self.spec.to_record(),
@@ -606,7 +633,7 @@ class BacktestTool:
             "replay_granularity": replay.granularity,
             "order_count": int(stats["order_count"]),
             "nl_calls": int(nl_service.calls),
-            "nl_outcome_counts": dict(sorted(nl_service.outcome_counts.items())),
+            "nl_outcome_counts": nl_outcome_counts,
             "nl_max_calls_per_backtest": nl_service.max_calls,
             "trade_count": int(stats["trade_count"]),
             "unsubmitted_action_count": int(stats["unsubmitted_action_count"]),
@@ -625,9 +652,11 @@ class BacktestTool:
             "probe_note": (
                 "replay_window 前 N 个策略交易日 + 1 个独立退出日探针："
                 "只返回运行成本与订单生命周期统计，"
-                "收益指标与成交明细不生成（对未来窗口的 P&L 属于前视信息）"
+                "收益指标与成交明细不生成（对未来窗口的 P&L 属于前视信息）；"
+                "ctx.nl() 内容被 withheld 时，探针耗时不可外推完整 Valid"
                 if probe else None
             ),
+            "runtime_representative": runtime_representative,
             "started_at": started_at,
             "finished_at": utc_now_iso(),
             "replay_wall_seconds": stats.get("replay_wall_seconds"),
@@ -657,7 +686,7 @@ class BacktestTool:
             "state_unmerged_writes": unmerged,
             # Advisory only: strategy defects remain Agent-owned and never
             # affect validation completeness, acceptance or freeze eligibility.
-            "diagnostic_warnings": _diagnostic_warnings(stats),
+            "diagnostic_warnings": diagnostic_warnings,
         }
         if nl_tool_dir is not None:
             summary.update(

@@ -1617,6 +1617,9 @@ function statsChipsRow(stats) {
     row.append(el("span", { class: "stat-chip" }, total && done
       ? `⏳ 回测已完成 ${done}/${total} 日（${Number(progress.percent || 0).toFixed(1)}%）`
       : "⏳ 回测初始化 / 首个交易日处理中"));
+    if (progress.activity === "nl" && progress.activity_status === "running") {
+      row.append(el("span", { class: "stat-chip" }, `🧠 NL 分析中（第 ${Number(progress.nl_call_index) || 1} 次）`));
+    }
   }
   if (stats.llm_prompt_tokens || stats.llm_completion_tokens) {
     row.append(
@@ -1853,7 +1856,12 @@ function liveTracePanel(detail, session) {
         const progressText = total && done
           ? `已完成 ${done}/${total} 日，${Number((backtestProgress || {}).percent || 0).toFixed(1)}%`
           : "初始化 / 首个交易日处理中";
-        countdown.textContent = `回测执行中（${progressText}；本次 ${fmtDuration(activeSeconds)}，结束后回补）`;
+        const activity = backtestProgress || {};
+        const activityStartedMs = activity.activity_started_at ? Date.parse(activity.activity_started_at) : null;
+        const nlText = activity.activity === "nl" && activity.activity_status === "running"
+          ? `；NL 第 ${Number(activity.nl_call_index) || 1} 次分析中 ${fmtDuration(activityStartedMs ? Math.max(0, (Date.now() - activityStartedMs) / 1000) : 0)}`
+          : "";
+        countdown.textContent = `回测执行中（${progressText}${nlText}；本次 ${fmtDuration(activeSeconds)}，结束后回补）`;
       } else {
         const remain = (deadlineMs + creditSeconds * 1000 - Date.now()) / 1000;
         countdown.textContent = remain >= 0
@@ -1994,7 +2002,8 @@ const TOOL_BRIEF_KEYS = [
   "action", "tool", "cmd", "command", "pattern", "path", "query", "engine", "perspective",
   "mode", "result_name", "replay_window", "exit_code", "duration_seconds", "replay_wall_seconds",
   "reason", "error_type", "name", "trade_date", "day_index", "total_days", "percent",
-  "elapsed_seconds", "orders_so_far",
+  "elapsed_seconds", "orders_so_far", "activity", "activity_status", "nl_call_index",
+  "activity_elapsed_seconds",
 ];
 
 function traceEventNode(event) {

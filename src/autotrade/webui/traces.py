@@ -188,6 +188,9 @@ def _trace_stats_locked(path: Path) -> dict[str, object]:
                 "trade_date": None,
                 "elapsed_seconds": 0.0,
                 "orders_so_far": 0,
+                "activity": None,
+                "activity_status": None,
+                "activity_started_at": None,
             }
         elif kind == "backtest_progress":
             previous = active_backtest_progress if isinstance(active_backtest_progress, dict) else {}
@@ -202,6 +205,17 @@ def _trace_stats_locked(path: Path) -> dict[str, object]:
                     )
                     if field in event
                 },
+            }
+        elif kind == "backtest_activity":
+            previous = active_backtest_progress if isinstance(active_backtest_progress, dict) else {}
+            running = event.get("activity_status") == "running"
+            active_backtest_progress = {
+                **previous,
+                "activity": event.get("activity"),
+                "activity_status": event.get("activity_status"),
+                "activity_started_at": str(event.get("ts") or "") if running else None,
+                "activity_elapsed_seconds": event.get("activity_elapsed_seconds"),
+                "nl_call_index": event.get("nl_call_index"),
             }
         elif kind == "backtest":
             try:

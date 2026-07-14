@@ -113,6 +113,20 @@ def _public_strategy_error(exc, *, main_path, request, snapshot_dir):
                         "it is a partitioned dataset directory without a .parquet suffix."
                     ) % domain,
                 }
+            domain_dir = Path(str(asof_dir)) / domain
+            if (
+                "No files found that match the pattern" in message
+                and matches_known_path(domain_dir)
+            ):
+                return {
+                    "public_error_type": "strategy_contract_error",
+                    "public_reason": "duckdb_asof_glob_required",
+                    "public_retry_hint": (
+                        "DuckDB must read rolling Timeview parts with a wildcard such as "
+                        "str(Path(ctx.asof_dir) / %r / '*.parquet'); if the glob is empty, "
+                        "treat that domain as having no currently visible rows."
+                    ) % domain,
+                }
     return {}
 
 

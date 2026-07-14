@@ -1521,3 +1521,10 @@
 - `auto` 首 Fold 的现有四项宿主缓存改在 Meta Agent 就绪后预取；不创建/预启动容器，不挂载隐藏数据，进入 Fold 或 Held-out 前等待。rerun、动态 skip 和未使用预取失败均有回归。
 - 真实调度/SSE 日历 Case Study 覆盖周二、周三、周六、周日：02:30 与 09:20 边界互补且周日重复审计可跳过；281,115 个 raw、754 个 PIT 文件及 release/pin/质量 hash 一致。当前 event-flow 的 2 个 error 是旧调度留下的当日两融误报，待下一次 cron 重写。
 - 全量 794 tests、真实 Docker E2E 2 tests 通过；镜像 `sha256:6af1d9b40c27` 的 driver/source hash 均为 `bbbd8160a31b`。结束时 452 GiB 可用内存、8 张 L20 空闲、load 约 3/192 核。
+
+2026-07-14 lzp-test15 NL 回测诊断与合同修复
+
+- Q1 最终完成并冻结 `valid_018`；Q2 四次完整 Valid 分别因 30 分钟决策上限、substep 外计算上限、4 分钟和 20 分钟 research 声明上限失败。根因是策略每约 5 个交易日执行 4 次真实 `ctx.nl()`，Probe 的 30 次 NL 均被 withheld，52 秒结果只测到了退化路径，误导 Agent 外推正式耗时；数据、PIT、Docker 和 generation 均正常。
+- Probe 新增 `runtime_representative=false` 和固定警告；正式 Valid Trace 显示当前 NL 序号与耗时。个股正文检索限定到候选关联文档，同一 PIT 时点复用可见索引；真实 378.9 万行文本基准的无命中个股检索由旧基线 15.77 秒降至首次 11.59 秒、同一时点后续 9.32 秒。
+- Timeview 接受带明确 Arrow 类型的零行 Parquet，DuckDB 误读数据集目录时给出 `*.parquet` 安全提示。Q2 已优雅终止且产物保留；修复后无需重跑 Meta/Q1，只需按需续跑未冻结的 Q2。
+- 全量 797 tests、真实 Docker E2E 2 tests 通过；新镜像 `a11c20f242da` 与源码 driver hash 均为 `ad343183a9cf`，结束时 445 GiB 内存可用、8 张 L20 空闲。

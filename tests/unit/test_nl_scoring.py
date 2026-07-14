@@ -116,6 +116,7 @@ class NLSubAgentEngineTest(unittest.TestCase):
             self.assertEqual(result.state, "completed")
             self.assertEqual(result.rounds, 2)
             self.assertEqual(result.tool_calls[0]["arguments"]["pattern"], "平安银行|公告")
+            self.assertGreaterEqual(result.tool_calls[0]["duration_seconds"], 0.0)
             self.assertEqual(result.evidence[0]["text_id"], "t1")
             self.assertIn("重大负面", result.content)
 
@@ -319,6 +320,32 @@ class NLSubAgentEngineTest(unittest.TestCase):
             self.assertEqual([hit["text_id"] for hit in hits], ["own", "other"])
             self.assertEqual([hit["relevance"] for hit in hits], ["candidate", "background"])
 
+    def test_stock_body_search_excludes_unrelated_background_bodies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            index = pd.DataFrame(
+                [
+                    {"text_id": "own", "dataset": "anns_d", "ts_codes": "000001.SZ",
+                     "title": "company note", "available_at": "2021-10-02T18:00:00+08:00"},
+                    {"text_id": "other", "dataset": "anns_d", "ts_codes": "000002.SZ",
+                     "title": "other note", "available_at": "2021-10-02T18:00:00+08:00"},
+                ]
+            )
+            index_path = tmp / "text_index.parquet"
+            index.to_parquet(index_path, index=False)
+            library = tmp / "text_library"
+            library.mkdir()
+            pd.DataFrame(
+                {"text_id": ["own", "other"], "body": ["rare body signal", "rare body signal"]}
+            ).to_parquet(library / "anns_d.parquet", index=False)
+            retriever = TextRetriever(index_path, library)
+
+            stock_hits = retriever.search("rare body", ts_code="000001.SZ", max_results=5)
+            general_hits = retriever.search("rare body", max_results=5)
+
+            self.assertEqual([hit["text_id"] for hit in stock_hits], ["own"])
+            self.assertEqual({hit["text_id"] for hit in general_hits}, {"own", "other"})
+
     def test_legacy_keyword_requests_map_to_patterns(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, _ = self.make_engine(
@@ -339,6 +366,9 @@ class NLBudgetTest(unittest.TestCase):
         pd.DataFrame(
             columns=["text_id", "dataset", "ts_codes", "title", "available_at", "source_hash", "library_file"]
         ).to_parquet(snap / "text_index.parquet", index=False)
+        pd.DataFrame({"ts_code": pd.Series(dtype="string")}).to_parquet(
+            snap / "universe.parquet", index=False
+        )
         (snap / "text_library").mkdir()
         return snap
 
@@ -384,6 +414,28 @@ class NLBudgetTest(unittest.TestCase):
 
             self.assertEqual(first["state"], "withheld_probe")
             self.assertEqual(second["state"], "budget_exhausted")
+
+    def test_full_nl_reports_start_and_finish_activity(self):
+        from autotrade.environment.nl.service import StrategyNLService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snap = self._make_snapshot(Path(tmp))
+            activity = []
+            service = StrategyNLService(
+                proxy=ScriptedLLM(["结论保持中性。"]),
+                snapshot_dir=snap,
+                log_dir=Path(tmp) / "log",
+                failure_policy="return_error_with_audit",
+                per_call_timeout_seconds=30.0,
+                activity_callback=activity.append,
+            )
+
+            result = service.run("000001.SZ", prompt="x", kwargs={}, request={"request_id": "1"})
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual([item["activity_status"] for item in activity], ["running", "finished"])
+            self.assertEqual([item["nl_call_index"] for item in activity], [1, 1])
+            self.assertGreaterEqual(activity[-1]["activity_elapsed_seconds"], 0.0)
 
 
 class CompanyContextStoreTest(unittest.TestCase):
@@ -480,6 +532,18 @@ class TextRetrieverRollingTest(unittest.TestCase):
             retriever = self._retriever(Path(tmp))
             retriever.as_of = datetime(2022, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
             self.assertEqual(self._ids(retriever), {"f1", "r1"})
+
+    def test_visible_index_is_reused_within_one_simulated_tick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            retriever = self._retriever(Path(tmp))
+            retriever.as_of = datetime(2022, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            first = retriever._visible_index()
+            self.assertIs(retriever._visible_index(), first)
+
+            retriever.as_of = datetime(2022, 1, 6, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            self.assertIsNot(retriever._visible_index(), first)
 
 
 if __name__ == "__main__":

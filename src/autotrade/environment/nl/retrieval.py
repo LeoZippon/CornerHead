@@ -71,6 +71,14 @@ class TextRetriever:
             if not self.index.empty and "available_at" in self.index.columns
             else pd.Series([], dtype="datetime64[ns, Asia/Shanghai]")
         )
+        self._datasets = self.index.get("dataset", pd.Series("", index=self.index.index)).astype(str)
+        self._frozen_mask = (
+            self.index["_source"].astype(str) == "frozen"
+            if not self.index.empty and "_source" in self.index.columns
+            else pd.Series(True, index=self.index.index)
+        )
+        self._visible_cache_key: str | None = None
+        self._visible_cache: pd.DataFrame | None = None
         self._snippets: dict[tuple[str, str], str] = {}
         self._query_lock = threading.Lock()  # DuckDB default connection is not thread-safe
 
@@ -79,14 +87,23 @@ class TextRetriever:
         once their dataset's refresh node has completed (None = frozen-only view)."""
         if self.index.empty or "_source" not in self.index.columns:
             return self.index
-        frozen_mask = self.index["_source"].astype(str) == "frozen"
+        cache_key = "frozen" if self.as_of is None else pd.Timestamp(self.as_of).isoformat()
+        if cache_key == self._visible_cache_key and self._visible_cache is not None:
+            return self._visible_cache
         if self.as_of is None:
-            return self.index[frozen_mask]
-        datasets = self.index.get("dataset", pd.Series("", index=self.index.index)).astype(str)
-        cmap = {d: text_dataset_visible_cutoff(d, self.as_of) for d in datasets.unique()}
-        cutoff = datasets.map(lambda d: pd.Timestamp(cmap[d]) if cmap[d] is not None else pd.NaT)
-        replay_visible = (~frozen_mask) & (self._available_at <= cutoff)
-        return self.index[frozen_mask | replay_visible]
+            visible = self.index[self._frozen_mask]
+        else:
+            cmap = {d: text_dataset_visible_cutoff(d, self.as_of) for d in self._datasets.unique()}
+            cutoff = self._datasets.map(lambda d: pd.Timestamp(cmap[d]) if cmap[d] is not None else pd.NaT)
+            replay_visible = (~self._frozen_mask) & (self._available_at <= cutoff)
+            visible = self.index[self._frozen_mask | replay_visible]
+        # One research tick commonly issues several nl() calls and each NL task
+        # may search three rounds. The PIT boundary is identical across them, so
+        # retain only the latest materialized visibility slice instead of
+        # rebuilding a multi-million-row mask for every tool call.
+        self._visible_cache_key = cache_key
+        self._visible_cache = visible
+        return visible
 
     def search(
         self,
@@ -110,18 +127,22 @@ class TextRetriever:
         hits.loc[own_hit[own_hit].index.intersection(hits.index), "_rank"] = 40
         hits.loc[own_hit[own_hit].index.intersection(hits.index), "_relevance"] = "candidate"
         if search_bodies and len(hits) < max_results:
-            body_idx = self._grep_bodies(index, regex, exclude=set(hits["text_id"].astype(str)), limit=max_results * 3)
+            # A stock-scoped NL request searches bodies only for rows already
+            # linked to that company by the PIT index (code/name/title). Broad
+            # title hits remain available, while market/theme body searches use
+            # ctx.nl(prompt=...) without a ts_code. This avoids repeatedly
+            # scanning unrelated multi-GB body shards for every candidate.
+            body_scope = index[own_hit] if bool(_candidate_terms(ts_code, company_terms)) else index
+            body_idx = self._grep_bodies(
+                body_scope,
+                regex,
+                exclude=set(hits["text_id"].astype(str)),
+                limit=max_results * 3,
+                restrict_to_index=body_scope is not index,
+            )
             if body_idx:
                 body_rows = index[index["text_id"].astype(str).isin(body_idx)].copy()
                 body_own = self._candidate_mask(body_rows, ts_code=ts_code, company_terms=company_terms)
-                for idx, row in body_rows.loc[~body_own].iterrows():
-                    if self._body_has_candidate_term(
-                        str(row.get("dataset", "")),
-                        str(row.get("text_id", "")),
-                        ts_code=ts_code,
-                        company_terms=company_terms,
-                    ):
-                        body_own.loc[idx] = True
                 body_rows["_relevance"] = "background"
                 body_rows["_rank"] = 10
                 body_rows.loc[body_own[body_own].index.intersection(body_rows.index), "_rank"] = 30
@@ -166,16 +187,6 @@ class TextRetriever:
             mask = mask | titles.str.contains(escaped, case=False, regex=True, na=False)
         return mask
 
-    def _body_has_candidate_term(
-        self, dataset: str, text_id: str, *, ts_code: str, company_terms: list[str] | None = None
-    ) -> bool:
-        body = self._snippet(dataset, text_id)
-        if not body:
-            return False
-        lowered = body.lower()
-        terms = _candidate_terms(ts_code, company_terms)
-        return bool(terms) and any(term.lower() in lowered for term in terms)
-
     def _shards(self, dataset: str) -> list[str]:
         return [str(d / f"{dataset}.parquet") for d in self.library_dirs if (d / f"{dataset}.parquet").exists()]
 
@@ -204,7 +215,15 @@ class TextRetriever:
         matched = {row[0] for row in rows}
         return pd.Series([idx in matched for idx in index.index], index=index.index)
 
-    def _grep_bodies(self, index: pd.DataFrame, regex: str, *, exclude: set[str], limit: int) -> set[str]:
+    def _grep_bodies(
+        self,
+        index: pd.DataFrame,
+        regex: str,
+        *,
+        exclude: set[str],
+        limit: int,
+        restrict_to_index: bool = False,
+    ) -> set[str]:
         """Linear-time full-body grep with column projection and a result cap;
         matched snippets are cached so ranking never re-reads the shards."""
         found: set[str] = set()
@@ -215,11 +234,27 @@ class TextRetriever:
             shards = self._shards(dataset)
             if not shards:
                 continue
-            rows = self._body_query(
-                "SELECT text_id, substr(body, 1, ?) FROM read_parquet(?) "
-                "WHERE regexp_matches(body, ?, 'i') LIMIT ?",
-                [self.snippet_chars, shards, regex, limit + len(exclude)],
+            allowed = (
+                index.loc[datasets.astype(str) == dataset, "text_id"].astype(str).drop_duplicates().tolist()
+                if restrict_to_index
+                else []
             )
+            if restrict_to_index and not allowed:
+                continue
+            if allowed:
+                placeholders = ",".join("?" for _ in allowed)
+                rows = self._body_query(
+                    "SELECT text_id, substr(body, 1, ?) FROM read_parquet(?) "
+                    f"WHERE CAST(text_id AS VARCHAR) IN ({placeholders}) "
+                    "AND regexp_matches(body, ?, 'i') LIMIT ?",
+                    [self.snippet_chars, shards, *allowed, regex, limit + len(exclude)],
+                )
+            else:
+                rows = self._body_query(
+                    "SELECT text_id, substr(body, 1, ?) FROM read_parquet(?) "
+                    "WHERE regexp_matches(body, ?, 'i') LIMIT ?",
+                    [self.snippet_chars, shards, regex, limit + len(exclude)],
+                )
             for text_id, snippet in rows:
                 tid = str(text_id)
                 self._snippets.setdefault((dataset, tid), str(snippet or ""))
@@ -298,4 +333,3 @@ def _candidate_terms(ts_code: str, company_terms: list[str] | None = None) -> li
             seen.add(term)
             ordered.append(term)
     return ordered
-
