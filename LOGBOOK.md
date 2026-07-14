@@ -1536,4 +1536,4 @@
 
 2026-07-14 准备阶段 Trace 状态修复
 
-- `lap-test15` 首个 Meta 数据构建期间，心跳提前发布尚不存在的 Trace 路径，前端误显示“正在加载 Agent Trace”。改为文件实际出现前保持 `trace_path=null`，复用现有“沙箱与数据快照准备中”显示；不新增状态或中断当前实验。Interactive/WebUI 83 tests 通过。
+- `lap-test15` 首个 Meta 数据构建期间，心跳提前发布尚不存在的 Trace 路径，前端误显示“正在加载 Agent Trace”。后端改为文件实际出现前保持 `trace_path=null`；前端同时以 Trace 路径和 deadline 共同确认就绪，可覆盖已启动的旧 worker。复用现有准备文案，不新增状态或中断实验。Interactive/WebUI 83 tests 通过。

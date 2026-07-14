@@ -1792,7 +1792,7 @@ function liveTracePanel(detail, session) {
   const prep = el("div", { class: "prep-indicator" }, el("span", { class: "spinner" }), prepText);
   panel.append(tools, statsHost, prep, box);
   let sawEvent = false;
-  let traceKnown = Boolean(status.trace_path);
+  let traceKnown = Boolean(status.trace_path && status.fold_deadline_at);
   let source = null;
   const runQuery = runId ? `run_id=${encodeURIComponent(runId)}&` : "";
   const appendEvents = (events) => {
@@ -1875,7 +1875,6 @@ function liveTracePanel(detail, session) {
   const pollStats = async () => {
     try {
       const stats = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stats?${runQuery}`);
-      traceKnown = true;
       creditSeconds = Number(stats.backtest_wall_seconds) || 0;
       inBacktest = Boolean(stats.in_backtest);
       activeBacktestStartedMs = stats.active_backtest_started_at ? Date.parse(stats.active_backtest_started_at) : null;
@@ -1898,7 +1897,7 @@ function liveTracePanel(detail, session) {
         sessionState = fresh.state;
         deadlineMs = raw.fold_deadline_at ? Date.parse(raw.fold_deadline_at) : null;
         if (raw.session_started_at) startedMs = Date.parse(raw.session_started_at);
-        if (raw.trace_path) traceKnown = true;
+        traceKnown = Boolean(raw.trace_path && raw.fold_deadline_at);
       }
     } catch { /* transient */ }
   };
@@ -1917,7 +1916,7 @@ function liveTracePanel(detail, session) {
       const rawStatus = freshDetail.status || {};
       sessionState = freshDetail.state;
       deadlineMs = rawStatus.fold_deadline_at ? Date.parse(rawStatus.fold_deadline_at) : null;
-      if (rawStatus.trace_path) traceKnown = true;
+      traceKnown = Boolean(rawStatus.trace_path && rawStatus.fold_deadline_at);
     },
   };
   (async () => {
