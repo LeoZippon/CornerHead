@@ -479,8 +479,10 @@ class StatusReporter:
             # particular, never retain the previous Meta/Fold deadline after a
             # newer run directory appears.
             self._data["fold_deadline_at"] = None
+            self._data["trace_path"] = None
         self._data["run_id"] = live.name
-        self._data["trace_path"] = str(live / "artifacts" / "agent_trace.jsonl")
+        trace_path = live / "artifacts" / "agent_trace.jsonl"
+        self._data["trace_path"] = str(trace_path) if trace_path.is_file() else None
         if not self._data.get("fold_deadline_at"):
             manifest_path = live / "artifacts" / "run_manifest.json"
             try:

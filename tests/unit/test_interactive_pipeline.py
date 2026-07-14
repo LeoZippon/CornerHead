@@ -811,6 +811,7 @@ class InteractiveRunnerTest(unittest.TestCase):
         (run_artifacts / "run_manifest.json").write_text(
             json.dumps({"fold_deadline_at": "2026-07-07T12:00:00+00:00"}), encoding="utf-8"
         )
+        (run_artifacts / "agent_trace.jsonl").write_text("", encoding="utf-8")
         status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=work_root, interval_seconds=60.0)
         status.set(state="running_session")
         with status._lock:
@@ -820,6 +821,23 @@ class InteractiveRunnerTest(unittest.TestCase):
         self.assertEqual(data["run_id"], "run_live")
         self.assertEqual(data["fold_deadline_at"], "2026-07-07T12:00:00+00:00")
         self.assertTrue(str(data["trace_path"]).endswith("agent_trace.jsonl"))
+
+    def test_status_reporter_keeps_preparing_until_trace_exists(self) -> None:
+        work_root = Path(self.config.work_root)
+        run_artifacts = work_root / "run_preparing" / "artifacts"
+        run_artifacts.mkdir(parents=True)
+        status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=work_root, interval_seconds=60.0)
+        status.set(state="running_session")
+
+        with status._lock:
+            status._refresh_live_run_locked()
+        self.assertEqual(status._data["run_id"], "run_preparing")
+        self.assertIsNone(status._data["trace_path"])
+
+        (run_artifacts / "agent_trace.jsonl").write_text("", encoding="utf-8")
+        with status._lock:
+            status._refresh_live_run_locked()
+        self.assertTrue(str(status._data["trace_path"]).endswith("agent_trace.jsonl"))
 
     def test_status_reporter_does_not_attach_previous_session_run(self) -> None:
         work_root = Path(self.config.work_root)
@@ -863,6 +881,7 @@ class InteractiveRunnerTest(unittest.TestCase):
         (run_artifacts / "run_manifest.json").write_text(
             json.dumps({"created_at": utc_now_iso()}), encoding="utf-8"
         )
+        (run_artifacts / "agent_trace.jsonl").write_text("", encoding="utf-8")
         status._stop = SimpleNamespace(wait=Mock(side_effect=[False, True]))
 
         status._heartbeat_loop()

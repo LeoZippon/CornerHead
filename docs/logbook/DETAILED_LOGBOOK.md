@@ -17603,3 +17603,11 @@ Evidence and decision:
 - A zero-order result now counts existing `suppressed_broad_exception` advisories and emits one linked Chinese diagnostic. The result remains successful and acceptance/freeze behavior is unchanged.
 - The Fold workflow replaces one generic small-step sentence with a minimal vertical slice: confirmed read, small candidate set, order, next-day T+1 exit; then add one major component at a time, surface broad exceptions during debugging, reserve a full Valid plus necessary recheck, and preserve a successful full-Valid Step before further exploration.
 - Validation: four focused regressions passed; combined tool-flow and sandbox-isolation suites passed 161 tests in 33.844 s; full discovery passed 799 tests in 97.499 s. Prompt export was idempotent and `git diff --check` passed. One earlier aggregate command was invalid because it named a nonexistent `tests.unit.test_prompt_audit` module and hid stderr; it was discarded and rerun without output suppression.
+
+
+## 2026-07-14 `lap-test15` preparation-status display fix
+
+- The new experiment started at commit `45a99e3`, pinned generation `2f92ea4283d646ebbdce0b28bedc7b48`, and entered epoch-1 Meta preparation. During the first three minutes the worker was healthy at about 1.7 CPU cores and 8.9–12.1 GiB RSS with over 435 GiB RAM available; no trace or run manifest existed yet.
+- `StatusReporter` discovered the new run directory and unconditionally published its future `agent_trace.jsonl` path. The frontend therefore selected “正在加载 Agent Trace” instead of its existing Snapshot/Sandbox preparation message.
+- The reporter now publishes `run_id` immediately but keeps `trace_path=None` until the file exists. On a new run it also clears any previous trace path together with the deadline. No new state, API field, polling loop, or frontend branch was added.
+- Four focused status tests and the combined Interactive/WebUI suites passed 83 tests in 3.171 s; `git diff --check` passed. The already-running worker retains the old in-memory reporter until its trace appears, so it was deliberately not restarted.
