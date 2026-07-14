@@ -15,8 +15,9 @@ that ``pandas.read_parquet`` concatenates into one table:
 Visibility only grows forward in time, so each replay row is written exactly once
 and unchanged domains cost nothing. Between the next pending refresh or row-level
 boundary (including observed auction availability), ``refresh`` is an O(1) no-op.
-``ctx.asof_version`` bumps whenever a new part lands, so strategy code can cache a
-read and re-run only when the view actually rolls.
+``ctx.asof_version`` bumps whenever any new part lands. It identifies the global
+view, not an individual domain; heavy single-domain strategy features should use a
+narrower dependency key so minute updates do not invalidate unrelated work.
 
 Text bodies live under ``ctx.asof_dir/text_library``. Frozen snapshot body shards
 are hardlinked at start; replay body shards are copied only for newly visible

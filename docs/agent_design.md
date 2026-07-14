@@ -103,7 +103,7 @@ def main(ctx) -> None:
 - `main(ctx)` 每个决策 tick 被调用一次，一次覆盖全市场；非决策 Bar 上市场和 Broker 仍继续推进。策略自己决定何时筛选、调仓、撤单和调用 NL。
 - 所有实质步骤都包进 `with ctx.substep(name, budget_minutes=B):`，包括状态读写、持仓/在途管理、横截面筛选、模型推理、NL、批量下单计划、broker action、撤单扫描等。
 - 普通 off-session tick 只做研究、状态更新和计划交接；报单/撤单只在 Environment 定义的可报单 tick 内由策略显式触发。
-- 重操作只在少数选定时点执行；模型、as-of 数据和特征读取应按 `ctx.asof_version` 或策略自定义 key 缓存，避免每 tick 重算。
+- 重操作只在少数选定时点执行；冻结 `snapshot_dir` 特征每次回放只计算一次。`ctx.asof_version` 是含分钟域的全局版本，滚动日线/事件特征应在固定研究时点按实际日期或策略 key 缓存，避免无关分钟更新触发重算。
 - 跨 tick 暂存写 `ctx.state_dir`（单个文件不超过64 MiB）；它在 substep 内首次访问时才复制可见状态，纯 Broker block 不创建副本，访问后的延迟可见性不变。Broker 是现金、持仓、负债和在途订单的真相源，`state_dir` 只保存策略自己的目标、计划和轻量状态。
 - `ctx.account`、`ctx.positions`、`ctx.broker.stock/credit` 是 tick 入口快照；同 tick action 只进入 action 队列（已提交的轻量单也进入 `pending()`），不会回写这些视图。批量 sizing 应读取一次总预算、本地逐笔递减并预留费用/滑点；Broker 不接受 `weight`，也不会替策略压量或取整。
 - Broker 在同一 Bar 内按 FIFO 撮合；已成交/拒绝订单立即释放占用，只有更早仍挂单的订单继续冻结。

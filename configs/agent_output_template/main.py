@@ -2,8 +2,8 @@
 
 The Environment calls ``main(ctx)`` once per replay tick (a market-level ``ctx``).
 This default is intentionally small but complete: while flat it buys an
-equal-weight basket from the visible cross-section (screened once per as-of
-version) and holds it to the mandatory final-day liquidation. Replace the
+equal-weight basket from the frozen research baseline (screened once per
+backtest) and holds it to the mandatory final-day liquidation. Replace the
 placeholder screen in ``_screen`` with your own signal.
 
 Key ``ctx`` surface (advanced helpers in ``candidate.py`` / ``trading.py`` + ``README.md``):
@@ -26,10 +26,12 @@ Key ``ctx`` surface (advanced helpers in ``candidate.py`` / ``trading.py`` + ``R
 file and ``text_library`` body shards.
 The context directories are path strings. Read parquet domains with
 ``pd.read_parquet(Path(str(ctx.asof_dir)) / "daily")``.
-The view rolls forward as each dataset's real refresh job completes, so during a
-trading session it is frozen and ``ctx.asof_version`` is stable — cache a read by
-that version and recompute only when it changes (the daily cross-section is only
-through the prior trading day intraday; the live bar is ``ctx.bars`` / ``ctx.price``).
+The view rolls forward as each dataset's real refresh job completes.
+``ctx.asof_version`` covers the whole view, so the minute domain can change it every
+minute; do not use that global version to invalidate unrelated heavy daily features.
+Run rolling research at a fixed time and cache by the date/data node it actually
+depends on. ``ctx.snapshot_dir`` never rolls, so frozen features should be computed
+once per backtest (the live bar is always ``ctx.bars`` / ``ctx.price``).
 
 Orders fill a LATER bar (``execution_lag_bars`` ahead), never within the decision
 bar. Broker actions and ``ctx.state_dir`` access must run inside a positive-budget
@@ -50,22 +52,22 @@ import pandas as pd
 
 TOP_N = 10
 
-# ``ctx.asof_version`` changes only when the rolling view actually rolls (a dataset's
-# refresh node is crossed), so caching the screen by it reads daily once per version
-# rather than once per tick. The driver imports this module once and calls ``main``
-# every tick, so module-level state persists across the replay (and resets per backtest).
+# The driver imports this module once and calls ``main`` every tick, so module-level
+# state persists across the replay and resets for the next backtest. ``snapshot_dir``
+# is immutable within one replay: cache its heavy features by path and never reread
+# the same wide table on every tick/day.
 _SCREEN_CACHE: dict[str, list[str]] = {}
 
 
 def _screen(ctx) -> list[str]:
-    """The day's target basket. Cached by ``ctx.asof_version`` to avoid re-reading
-    the table every tick. Replace the body with your own cross-sectional signal."""
-    cached = _SCREEN_CACHE.get(ctx.asof_version)
+    """Frozen target basket, computed once per backtest."""
+    snapshot = str(ctx.snapshot_dir)
+    cached = _SCREEN_CACHE.get(snapshot)
     if cached is not None:
         return cached
-    daily = pd.read_parquet(Path(str(ctx.asof_dir)) / "daily")
+    daily = pd.read_parquet(Path(snapshot) / "daily.parquet", columns=["ts_code"])
     codes = sorted(daily["ts_code"].astype(str).unique())[:TOP_N]
-    _SCREEN_CACHE[ctx.asof_version] = codes
+    _SCREEN_CACHE[snapshot] = codes
     return codes
 
 

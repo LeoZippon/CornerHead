@@ -1569,3 +1569,9 @@
 
 - Meta 准备约6分57秒、Agent约7分24秒；Q1 Decision/Replay全程与Meta Agent重叠，Meta完成后仅等约31秒。
 - 相比 `lap-test15` 进入Q1后等待6分39秒，减少约6分08秒（约92%）；不增加容器、缓存层或加载并行度。
+
+2026-07-14 策略冻结特征复用
+
+- `lap-test16` 完整 Valid 的策略计算占 473.9 秒；默认模板现对冻结 `snapshot_dir` 只读一次、只投影需要列。
+- Prompt 明确全局 `asof_version` 会被分钟域推进；滚动重型特征应在固定研究时点按实际日期或策略 key 缓存，避免无关分钟更新反复重算。
+- 不新增 Environment 缓存、接口或硬围栏；模板与工具流 119 tests 通过，提示词导出、Python 编译和 `git diff --check` 通过。

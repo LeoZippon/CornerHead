@@ -63,7 +63,7 @@ def research(ctx, *, budget_minutes: float = 5.0, screen_time: str = "08:00") ->
     with ctx.substep("research", budget_minutes=budget_minutes):
         if _plan_path(ctx).exists():  # already have a live plan; manage it instead
             return
-        daily = pd.read_parquet(Path(str(ctx.asof_dir)) / "daily")
+        daily = pd.read_parquet(Path(str(ctx.asof_dir)) / "daily", columns=["ts_code"])
         codes = sorted(daily["ts_code"].astype(str).unique())[:TOP_N]
         plan = {code: {"status": "pending", "cash_fraction": 1.0 / TOP_N} for code in codes}
         # Inside the sub-step ctx.state_dir is the staging dir, so this write is held

@@ -17659,3 +17659,12 @@ Evidence and decision:
 - Acceptance warnings are generated as percentage/two-decimal strings; the browser also formats old raw numeric warning strings without mutating historical ledgers.
 - Modification-check AST now emits a non-blocking `blind_auction_price_lookup` advisory when a 09:15/09:25 `ctx.cur_time` branch directly reads `ctx.price()` or calls a helper that does. A zero-order replay links it to a fixed repair hint; acceptance remains unchanged.
 - Validation: 113 Pipeline config, ToolFlow and WebUI backend tests passed in 25.0s; JS syntax, Python compilation and `git diff --check` passed. The live UDS serves the updated JS. The `quant` environment currently has no pytest module, so validation used the repository's unittest-compatible test suite without installing dependencies.
+
+
+## 2026-07-14 Strategy-owned frozen-feature reuse
+
+- `lap-test16` spent 473.9 of 1230.1 seconds in strategy compute. The accepted strategy repeatedly processed a large event history even though its frozen research baseline did not change; minute prefetch wait remained about 0.001 seconds, so loader concurrency was not the target.
+- The default strategy now reads `snapshot_dir/daily.parquet` once per replay, keys the module cache by the immutable snapshot path, and projects only `ts_code`. The advanced rolling example also projects its required column.
+- Prompt, template README and living Agent/Environment docs now state that `ctx.asof_version` is global and can advance with minute data. Heavy rolling daily/event work should run at a fixed research time and cache by the date/data node or another strategy-owned dependency key, rather than invalidating on every global version bump.
+- This is guidance plus a reusable example, not an Environment cache, decision-frequency fence or new API. Agent-authored strategy semantics remain under Agent control.
+- Validation: Artifact and ToolFlow suites passed 119 tests in 29.642 seconds. Prompt export was regenerated and idempotent; Python compilation and `git diff --check` passed. A regression test verifies two frozen screens cause one projected parquet read.

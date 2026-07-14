@@ -77,7 +77,9 @@ def main(ctx):
     with ctx.substep("main_tick", budget_minutes=0.5):
         if ctx.positions:             # already holding — hold to final-day liquidation
             return
-        daily = pd.read_parquet(Path(str(ctx.asof_dir)) / "daily")  # a domain is a directory
+        # snapshot_dir is frozen for this replay: put this read/rank behind a
+        # module-level cache in real code (see the shipped main.py).
+        daily = pd.read_parquet(Path(str(ctx.snapshot_dir)) / "daily.parquet", columns=["ts_code"])
         codes = sorted(daily["ts_code"].astype(str).unique())[:10]  # placeholder signal
         remaining_budget = float(ctx.broker.stock["available_cash"]) * 0.95
         for index, code in enumerate(codes):
@@ -163,7 +165,7 @@ therefore do not appear in `pending()` before submission.
 | `ctx.substep(name, budget_minutes=B)` | Strategy-step budget context; declares compute time, state `ready_at`, and broker action submit timing |
 | `ctx.nl(ts_code?, prompt="...")` | Point-in-time NL Sub Agent for single-stock or event/theme/sector/macro text analysis; must run inside `ctx.substep` and follows sim-clock text visibility |
 | `ctx.asof_dir` | Path string for the per-tick PIT view: dataset directories such as `daily`, plus the single file `universe.parquet` and `text_library`; wrap with `Path(str(...))` before `/` joins |
-| `ctx.asof_version` | Changes only when Timeview actually rolls; cache as-of reads by this value |
+| `ctx.asof_version` | Global version that changes when any Timeview domain rolls, including minute data; use a narrower key for heavy single-domain features |
 | `ctx.snapshot_dir` | Path string for the frozen research baseline snapshot; does not roll during replay |
 | `ctx.state_dir` | Managed cross-tick state directory; only available inside `ctx.substep`; first access copies visible state, then writes stage until `ready_at` |
 | `ctx.model_dir` | Path string for the read-only persisted model artifact directory; data that must persist across backtests belongs in `models/` before replay |
@@ -214,6 +216,14 @@ inference, and `ctx.nl()` — should run only on the few ticks you choose (e.g.
 pre-open or near close), never every tick, or API cost and wall-clock blow up.
 Load or cache model parameters from `ctx.model_dir` once; do not write or
 retrain into `ctx.model_dir` during replay.
+
+Use the narrowest cache key that matches the data dependency: frozen
+`ctx.snapshot_dir` features are computed once per backtest; rolling daily/event
+features run at one fixed research time and cache by their effective date or another
+strategy-owned key. Do not invalidate heavy daily features on every
+`ctx.asof_version` change because that global version also tracks minute data. Always
+project required columns and filter large `events`/minute domains before converting
+them to pandas.
 
 Formal strategy processes use a fixed Python hash seed for repeatable unordered
 container iteration across runs. Still sort candidates explicitly whenever order

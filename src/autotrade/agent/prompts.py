@@ -111,7 +111,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 
 打板/热榜/游资类字段（events 域 `dataset` 列区分）是**情绪与题材的描述性弱信号**：日终榜单、排名与席位映射存在空值和口径变动，只用于次日及以后的情绪延续判断与复盘，绝不作为成交、可交易性、资金或风控的真相源。指数序列（`macro` 域 `dataset=index_daily`，七只核心宽基）用于市场择时、β 管理与相对强弱基准。
 
-`ctx.asof_dir`、`ctx.snapshot_dir` 和 `ctx.model_dir` 是路径字符串，使用 `/` 拼接前先转成 `Path(str(...))`。`ctx.asof_dir` 的 parquet parts 域名为 `daily`/`events`/`macro`/`fundamentals`/`intraday_1min`/`text_index`：Pandas 用 `pd.read_parquet(Path(str(ctx.asof_dir)) / "daily")` 读取目录，DuckDB 必须用 `read_parquet('.../daily/*.parquet')`；若当前没有 part，就表示该时点无可见行。文本正文位于 `Path(str(ctx.asof_dir)) / "text_library"`，只包含已可见 `text_index` 行引用的 body shard。盘中无刷新节点跨越，视图冻结、`ctx.asof_version` 不变——按它缓存读取、变化时再重算。`ctx.snapshot_dir` 是 Fold 决策时点（区间前一交易日收盘）冻结的研究基准快照。
+`ctx.asof_dir`、`ctx.snapshot_dir` 和 `ctx.model_dir` 是路径字符串，使用 `/` 拼接前先转成 `Path(str(...))`。`ctx.asof_dir` 的 parquet parts 域名为 `daily`/`events`/`macro`/`fundamentals`/`intraday_1min`/`text_index`：Pandas 用 `pd.read_parquet(Path(str(ctx.asof_dir)) / "daily")` 读取目录，DuckDB 必须用 `read_parquet('.../daily/*.parquet')`；若当前没有 part，就表示该时点无可见行。文本正文位于 `Path(str(ctx.asof_dir)) / "text_library"`，只包含已可见 `text_index` 行引用的 body shard。`ctx.asof_version` 是整个视图的版本，分钟域可使它逐分钟变化；重型日线/事件信号应放在固定研究时点，并按实际依赖的日期或策略 key 缓存，不能因全局版本变化就盲目全量重算。`ctx.snapshot_dir` 是整个回放不变的冻结研究基准，同一数据只在模块内读取和计算一次。
 
 """
 
@@ -221,7 +221,7 @@ FOLD_PROHIBITIONS = """\
 - 在 `output/` 写入缓存、日志、数据 dump、notebook、密钥或模型权重（权重只进 `models/`）。
 - 修改只读 `README.md`、父产物、结果目录或 Step 树。
 - 用验证或测试收益硬编码具体股票、月份、题材或行情事件。
-- 在每个 tick 的热路径里反复调用 `nl`、重读 `model_dir` 或全量重算大表；NL、模型加载和横截面筛选只放在少数选定决策时点并缓存结果。\
+- 在每个 tick 的热路径里反复调用 `nl`、重读 `model_dir` 或全量重算大表；冻结 `snapshot_dir` 只计算一次，滚动信号按固定研究时点和实际数据依赖 key 缓存。\
 """
 
 PROTOCOL_INSTRUCTION = "\n\n".join(

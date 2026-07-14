@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from autotrade.environment.artifacts import (
@@ -48,6 +49,19 @@ def legacy_aggregate_hash(root: Path, relpaths: set[str]) -> str:
 
 
 class ArtifactContractTest(unittest.TestCase):
+    def test_default_template_caches_frozen_screen_once(self):
+        module = ModuleType("agent_output_template_main")
+        source = (TEMPLATE_DIR / "main.py").read_text(encoding="utf-8")
+        exec(compile(source, str(TEMPLATE_DIR / "main.py"), "exec"), module.__dict__)
+        ctx = SimpleNamespace(snapshot_dir="/mnt/snapshot")
+        daily = module.pd.DataFrame({"ts_code": ["000002.SZ", "000001.SZ", "000001.SZ"]})
+
+        with patch.object(module.pd, "read_parquet", return_value=daily) as read_parquet:
+            self.assertEqual(module._screen(ctx), ["000001.SZ", "000002.SZ"])
+            self.assertEqual(module._screen(ctx), ["000001.SZ", "000002.SZ"])
+
+        read_parquet.assert_called_once_with(Path("/mnt/snapshot/daily.parquet"), columns=["ts_code"])
+
     def test_loads_valid_artifact_directory_and_hashes_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = write_artifact(Path(tmp))
