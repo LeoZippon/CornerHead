@@ -17620,3 +17620,12 @@ Evidence and decision:
 - The active `lap-test15` worker predates this code and was not interrupted; its current Agent deadline remains correctly credited, but its old final wall-time record cannot be retroactively separated.
 - The default `max_fold_minutes` is now 20 instead of 60 across `ExperimentConfig`, interactive `PARAM_DEFAULTS`, `run_experiment.py`, and `run_audit_session.py`; explicit values remain supported and the active `lap-test15` was already configured for 20 minutes.
 - Validation: Pipeline config, interactive orchestration, Agent tool flow, pipeline E2E and WebUI backend passed 257 tests in 72.158 s; JavaScript syntax and `git diff --check` passed.
+
+
+## 2026-07-14 `lap-test15` gated first-Fold prefetch measurement
+
+- Epoch-1 Meta finished at 11:51:13 CST. The Q1 session was approved at 11:52:06, but the Agent Trace and 20-minute deadline did not start until 11:58:45: 6m39s of visible preparation remained after approval.
+- Q1 Decision cache `decision_77d3e69f3f399f4e` completed at 11:55:51 and Replay cache `replay_369f641c1be2583c` at 11:58:45. The Replay temporary tree was about 2.0 GiB, dominated by a 1.57 GiB minute Parquet. The worker averaged about 1.2 CPU cores while the host retained about 432 GiB available RAM, so allocating more global CPU or memory would not directly remove this serial critical path.
+- The existing Meta `agent_ready_hook` already safely starts one host-only first-Fold cache Future, but was restricted to auto mode. The restriction was removed: step/manual runs now begin the same Future after Meta's container and ToolContext are ready and join it before `run_fold`. No Docker, cache format, state, worker, configuration or concurrent formal replay was added.
+- Before: a short researcher approval wait exposed most of the 6m39s build. After: Meta reasoning and the approval gate can hide that build; if the researcher never continues, only reusable host cache work is spent. The active worker started from `45a99e3`, so this change applies to the next experiment.
+- Validation: all 27 `InteractiveRunnerTest` cases passed in 0.561 s, including the new step-mode overlap case.

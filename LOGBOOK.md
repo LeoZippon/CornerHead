@@ -1542,3 +1542,8 @@
 
 - Step 门控与 ask_user 等待除继续回补 Agent deadline 外，现单列 `researcher_wait_seconds`；实时 Fold 耗时暂停，完成记录的 `run_wall_seconds` 扣除等待。回测、数据准备与 Environment 验收仍计入有效耗时。
 - 新实验的 Fold/Meta 推理默认值在配置、交互创建和两个 CLI 入口统一由 60 改为 20 分钟，显式参数仍可覆盖。相关 Pipeline/Runner/WebUI 257 tests 通过。
+
+2026-07-14 逐 Step 首 Fold 提前预取
+
+- `lap-test15` 的 Q1 在审批后仍准备 6分39秒；Decision 与 Replay 分别完成于11:55:51和11:58:45，分钟 Replay 临时缓存约2.0 GiB，进程平均约1.2核且主机仍有432 GiB可用内存。
+- 复用现有单线程预取 Future，取消仅 `auto` 模式可在 Meta Agent 就绪后启动的限制；逐 Step/手动模式也与 Meta 推理及研究者审批重叠，正式 Fold 前仍强制等待完成。Interactive Runner 27 tests 通过。

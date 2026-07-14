@@ -266,11 +266,12 @@ class InteractiveExperimentRunner:
                     if prefetch_pool is not None:
 
                         def agent_ready_hook() -> None:
-                            # Auto mode has no researcher gate to overlap. Start
-                            # only after the Meta container and ToolContext are
-                            # ready, so its visible snapshot remains unchanged.
+                            # Start only after the Meta container and ToolContext
+                            # are ready, so its visible snapshot remains unchanged.
+                            # In gated modes this also hides preparation behind
+                            # Meta reasoning and the later researcher decision.
                             live_control = read_control(self.control_path)
-                            if live_control.mode != "auto" or live_control.request is not None:
+                            if live_control.request is not None:
                                 return
 
                             def needs_run(fold) -> bool:

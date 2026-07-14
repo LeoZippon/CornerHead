@@ -334,7 +334,7 @@ class InteractiveRunnerTest(unittest.TestCase):
             ],
         )
 
-    def test_auto_first_fold_prefetch_overlaps_meta_agent(self) -> None:
+    def test_first_fold_prefetch_overlaps_meta_agent_in_step_mode(self) -> None:
         pipeline = FakePipeline(self.config)
         meta_active = threading.Event()
         prefetch_started = threading.Event()
@@ -360,7 +360,15 @@ class InteractiveRunnerTest(unittest.TestCase):
 
         pipeline.run_meta_learning = slow_meta
         pipeline.prefetch_fold_data = prefetch_fold_data
-        self._control(mode="auto")
+        self._control(
+            mode="step",
+            approved_sessions=(
+                meta_session_key("epoch_001"),
+                fold_session_key("epoch_001", "fold_2022Q1"),
+                fold_session_key("epoch_001", "fold_2022Q2"),
+                HELDOUT_SESSION_KEY,
+            ),
+        )
 
         self._runner(pipeline).run(TRADING_DAYS)
 
