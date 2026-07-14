@@ -1016,6 +1016,14 @@ def _diagnostic_warnings(
             "with zero orders. This is not rejected; inspect empty/date-stale plans and exceptions caught "
             "by strategy code before accepting the result."
         )
+        if any(
+            advisory.get("kind") == "blind_auction_price_lookup"
+            for advisory in strategy_advisories or []
+        ):
+            warnings.append(
+                "策略在 09:15/09:25 盲竞价分支读取 ctx.price()；这两个 Tick 不暴露价格，"
+                "None 检查可能跳过全部下单。请用更早的参考价估算数量，或等 09:30 真实行情后再读取价格。"
+            )
         broad_count = sum(
             1
             for advisory in strategy_advisories or []

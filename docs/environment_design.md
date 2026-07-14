@@ -889,7 +889,7 @@ substep 的声明预算 `B` 同时定义三件事：
 - 开始时记录 `backtest_start`。
 - 回放期间按交易日边界节流记录 `backtest_progress`，包含进度、已用时和累计订单数；控制台保存最新进度，在首条进度前也用 `backtest_start` 本地计时显示“初始化/首日处理中”。
 - 完整 Valid 进入/离开 `ctx.nl()` 时记录不含文本内容的 `backtest_activity`；控制台显示 NL 调用序号和当前等待时间，长研究日不再表现为无状态卡死。
-- Agent 观察中的每次回测成功或失败都附带 `backtests_used`、`backtests_limit`、`backtests_remaining`；零订单与静态发现的吞宽泛异常分支会合并成非阻断诊断。
+- Agent 观察中的每次回测成功或失败都附带 `backtests_used`、`backtests_limit`、`backtests_remaining`；零订单会与静态发现的吞宽泛异常、盲竞价分支读取 `ctx.price()` 合并成非阻断诊断。
 - 结束或中止保证有一条终止 `backtest` 事件；外部中止记录 `status="aborted"`。
 - Runner 另记完整工具墙钟的 `budget_exclusion`，使控制台显示的活跃会话预算与真实回补一致；Step/ask_user 等待同样回补，并单列 `researcher_wait_seconds`，不进入实时或账本 `run_wall_seconds`。
 - 结果目录结构集中列在 §2.1。
@@ -915,7 +915,7 @@ substep 的声明预算 `B` 同时定义三件事：
 | 状态写入 | `state_staged_writes` / `state_unmerged_writes` |
 | substep 统计 | `substep_runtime`，含 count、total_real_wall_s、max_real_wall_s |
 | 阶段耗时 | `phase_seconds`，含 Agent `strategy_compute`、`strategy_ipc`、`nl_service`、Timeview、state、Broker 与 `host_replay_overhead`；各项合计覆盖回放墙钟 |
-| 软诊断 | formal Agent 与宿主回放进程峰值 RSS、分钟读取/归一化/预取等待耗时、修改检查的宽 Parquet 读取/吞异常 advisory、零订单诊断；均不改变验收和冻结资格 |
+| 软诊断 | formal Agent 与宿主回放进程峰值 RSS、分钟读取/归一化/预取等待耗时、修改检查的宽 Parquet 读取/吞异常/盲竞价取价 advisory、零订单诊断；均不改变验收和冻结资格 |
 
 **逐窗口归因（Barra-lite，全部回放模式）**
 

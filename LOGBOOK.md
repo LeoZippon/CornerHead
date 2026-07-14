@@ -1,3 +1,9 @@
+2026-07-14 Fold 结果过渡布局与策略软诊断（fix/auction-pit-performance）
+
+- 修复 Fold 账本已写、后分析未结束时实时 Trace 与结果卡无间距；验收警告按收益百分比/Sharpe 两位小数显示，旧账本由前端只读格式化。
+- 修改检查识别 09:15/09:25 分支直接或经一层 helper 调用 `ctx.price()`；零订单时返回针对性 advisory，仍不影响回测、验收或冻结。
+- Pipeline config、ToolFlow 与 WebUI backend 相关 113 tests 通过；前端语法和 `git diff --check` 通过。
+
 2026-07-14 数据更新与实验输入解耦（fix/auction-pit-performance）
 
 - 新实验按需把 committed raw/PIT 发布为共享 hardlink research release，并保存实验 pin；更新锁忙时立即复用上一完整版本，所有 Fold、恢复和交易日历保持同一 generation。

@@ -611,6 +611,34 @@ class ToolFlowTest(unittest.TestCase):
             self.assertTrue(any("1 处吞掉宽泛异常" in item for item in summary["diagnostic_warnings"]))
             self.assertTrue(ModificationCheckTool(ctx).run()["allowed_to_backtest"])
 
+    def test_zero_order_links_blind_auction_price_advisory(self):
+        from autotrade.environment.tools.backtest import _diagnostic_warnings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(
+                """def _submit(ctx):
+    price = ctx.price('000001.SZ')
+    if price:
+        ctx.broker.buy('000001.SZ', amount=100)
+
+def main(ctx):
+    if ctx.cur_time == '09:25':
+        _submit(ctx)
+""",
+                encoding="utf-8",
+            )
+
+            check = ModificationCheckTool(ctx).run()
+            blind = [item for item in check["advisories"] if item["kind"] == "blind_auction_price_lookup"]
+            self.assertEqual(len(blind), 1)
+            warnings = _diagnostic_warnings(
+                {"order_count": 0, "decision_calls": 3, "strategy_action_count": 0},
+                strategy_advisories=check["advisories"],
+            )
+            self.assertTrue(any("09:15/09:25 盲竞价" in item for item in warnings))
+            self.assertTrue(check["allowed_to_backtest"])
+
     def test_memory_diagnostic_is_a_neutral_chinese_performance_note(self):
         from autotrade.environment.tools.backtest import _diagnostic_warnings
 

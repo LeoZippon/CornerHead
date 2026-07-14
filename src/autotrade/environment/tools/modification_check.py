@@ -138,6 +138,12 @@ def _strategy_advisories(root: Path) -> list[dict[str, object]]:
         except (OSError, UnicodeError, SyntaxError):
             continue
         relative = path.relative_to(root).as_posix()
+        price_functions = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and _contains_ctx_price(node)
+        }
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "read_parquet":
                 columns = next((keyword.value for keyword in node.keywords if keyword.arg == "columns"), None)
@@ -163,7 +169,54 @@ def _strategy_advisories(root: Path) -> list[dict[str, object]]:
                             "message": "broad exception is not re-raised; preserve enough signal to diagnose empty fallbacks",
                         }
                     )
+            elif isinstance(node, ast.If) and _is_blind_auction_time_test(node.test):
+                body = ast.Module(body=node.body, type_ignores=[])
+                direct_price = _contains_ctx_price(body)
+                calls_price_helper = any(
+                    isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Name)
+                    and child.func.id in price_functions
+                    for child in ast.walk(body)
+                )
+                if direct_price or calls_price_helper:
+                    advisories.append(
+                        {
+                            "kind": "blind_auction_price_lookup",
+                            "path": relative,
+                            "line": node.lineno,
+                            "message": (
+                                "09:15/09:25 are blind auction ticks: ctx.price() returns None; "
+                                "size from an earlier reference price or wait for a real 09:30 bar"
+                            ),
+                        }
+                    )
     return advisories
+
+
+def _contains_ctx_price(node: ast.AST) -> bool:
+    return any(
+        isinstance(child, ast.Call)
+        and isinstance(child.func, ast.Attribute)
+        and child.func.attr == "price"
+        and isinstance(child.func.value, ast.Name)
+        and child.func.value.id == "ctx"
+        for child in ast.walk(node)
+    )
+
+
+def _is_blind_auction_time_test(node: ast.AST) -> bool:
+    has_cur_time = any(
+        isinstance(child, ast.Attribute)
+        and child.attr == "cur_time"
+        and isinstance(child.value, ast.Name)
+        and child.value.id == "ctx"
+        for child in ast.walk(node)
+    )
+    has_blind_time = any(
+        isinstance(child, ast.Constant) and child.value in {"09:15", "09:25"}
+        for child in ast.walk(node)
+    )
+    return has_cur_time and has_blind_time
 
 
 def _is_broad_exception(node: ast.expr | None) -> bool:

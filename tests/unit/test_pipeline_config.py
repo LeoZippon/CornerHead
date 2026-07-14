@@ -108,7 +108,10 @@ class AcceptanceRulesTest(unittest.TestCase):
         weak = {"total_return": -0.01, "sharpe": -0.2, "max_drawdown": 0.1, "complete_validation": True}
         reasons, warnings = rules.evaluate(weak)
         self.assertEqual(reasons, [])
-        self.assertEqual(len(warnings), 2)
+        self.assertEqual(
+            warnings,
+            ["validation return -1.00% < 0.00%", "sharpe -0.20 < 0.00"],
+        )
 
     def test_rule_values_must_be_finite_and_ranged(self):
         with self.assertRaises(ValueError):

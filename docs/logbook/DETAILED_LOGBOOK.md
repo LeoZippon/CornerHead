@@ -17649,3 +17649,13 @@ Evidence and decision:
 - Meta Decision completed at 12:26:19 CST after about 4m42s; Replay completed at 12:28:54 after about 2m35s. Trace appeared only with the first Agent event and the deadline was exactly 20 minutes later.
 - The new all-mode Meta ready hook started Q1 Decision at 12:28:55. Decision completed at 12:33:43 and Q1 Replay at 12:36:51, while Meta Agent ran until 12:36:19. Q1 Agent started at 12:36:51: only about 31s remained on the serial path after Meta, versus 6m39s after entry in `lap-test15` (about 6m08s / 92% less visible wait).
 - Peak observed worker RSS during the overlapping Decision build was about 32 GiB; CPU averaged about 1.6–1.7 cores and the shared host retained ample memory. No data, PIT, Docker, Trace, deadline or cache error occurred; more loader concurrency is not justified.
+
+
+## 2026-07-14 `lap-test16` Q1 completion and focused UI/diagnostic follow-up
+
+- Q1 full Valid completed 60 strategy days in 1230.1s with 377 orders / 156 fills / zero strategy rejects. Phase split: strategy compute 473.9s, IPC 284.7s, Timeview 161.6s, host replay overhead 277.9s, Broker 31.4s. Minute prefetch wait was 0.001s.
+- Frozen Q1 test returned +1.93%, Sharpe 0.85, max drawdown 2.90%, and +3.14% excess versus CSI 300, with 276 orders and no state mutation during test. The pending stop request took effect after the advisory Fold analysis; Meta + Q1 are recorded and Q2 did not start.
+- UI transition root cause: the Fold ledger appears before post-Fold analysis finishes, so `running=true` and `done=true` briefly render live Trace immediately above the result card. The result gets `section-gap` only when a previous sibling exists; the settled first-card layout is unchanged.
+- Acceptance warnings are generated as percentage/two-decimal strings; the browser also formats old raw numeric warning strings without mutating historical ledgers.
+- Modification-check AST now emits a non-blocking `blind_auction_price_lookup` advisory when a 09:15/09:25 `ctx.cur_time` branch directly reads `ctx.price()` or calls a helper that does. A zero-order replay links it to a fixed repair hint; acceptance remains unchanged.
+- Validation: 113 Pipeline config, ToolFlow and WebUI backend tests passed in 25.0s; JS syntax, Python compilation and `git diff --check` passed. The live UDS serves the updated JS. The `quant` environment currently has no pytest module, so validation used the repository's unittest-compatible test suite without installing dependencies.

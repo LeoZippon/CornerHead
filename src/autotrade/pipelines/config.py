@@ -226,9 +226,9 @@ class AcceptanceRules:
             reasons.append(f"non-finite validation metrics: {non_finite}")
         else:
             if total_return < self.min_return:
-                warnings.append(f"validation return {summary.get('total_return')} < {self.min_return}")
+                warnings.append(f"validation return {total_return:.2%} < {self.min_return:.2%}")
             if sharpe < self.min_sharpe:
-                warnings.append(f"sharpe {summary.get('sharpe')} < {self.min_sharpe}")
+                warnings.append(f"sharpe {sharpe:.2f} < {self.min_sharpe:.2f}")
             if max_drawdown > self.max_drawdown:
                 reasons.append(f"max drawdown {summary.get('max_drawdown')} > {self.max_drawdown}")
         if self.require_complete_validation and not summary.get("complete_validation"):

@@ -90,6 +90,17 @@ function fmtDate(value) {
   return match ? `${match[1]}-${match[2]}-${match[3]}` : String(value || "—");
 }
 
+/* Acceptance warnings are durable ledger text. Keep old records readable while
+   new records already arrive pre-formatted from the pipeline. */
+function fmtAcceptanceWarning(value) {
+  const text = String(value || "");
+  let match = /^validation return\s+([-+0-9.eE]+)\s+<\s+([-+0-9.eE]+)$/.exec(text);
+  if (match) return `validation return ${fmtPct(Number(match[1]))} < ${fmtPct(Number(match[2]))}`;
+  match = /^sharpe\s+([-+0-9.eE]+)\s+<\s+([-+0-9.eE]+)$/.exec(text);
+  if (match) return `sharpe ${Number(match[1]).toFixed(2)} < ${Number(match[2]).toFixed(2)}`;
+  return text;
+}
+
 /* All backend timestamps are ISO-UTC; the console displays UTC+8 (Asia/Shanghai)
    regardless of the browser's locale. */
 const TS_FMT = new Intl.DateTimeFormat("zh-CN", {
@@ -1337,7 +1348,12 @@ function sessionDetailPanel(detail, selectedKey) {
   }
   if (running) panel.append(askUserPanel(detail, session), stepGatePanel(detail, session), liveTracePanel(detail, session));
   if (session.kind === "fold" && done) {
-    panel.append(foldResultPanel(detail, session));
+    const resultPanel = foldResultPanel(detail, session);
+    // The ledger can appear while post-Fold analysis is still running, briefly
+    // leaving the live Trace card above the result card. Space that transition
+    // exactly like the settled layout.
+    if (panel.children.length) resultPanel.classList.add("section-gap");
+    panel.append(resultPanel);
     // The LLM strategy review gets its own card, peer to the fold result.
     panel.append(analysisPanel(detail.experiment_id, session.epoch_id, session.fold_id || (session.record || {}).fold_id));
     const recordedFolds = (detail.sessions || []).filter((s) => s.kind === "fold" && s.record);
@@ -2448,7 +2464,7 @@ function foldResultPanel(detail, session) {
     kvRow("冻结产物", record.frozen_strategy_artifact_id || "—"),
     (record.accept_reasons || []).length ? kvRow("未接受原因", (record.accept_reasons || []).join("；")) : null,
     (record.accept_warnings || []).length
-      ? kvRow("验收警告", el("span", { class: "num neg" }, record.accept_warnings.join("；")))
+      ? kvRow("验收警告", el("span", { class: "num neg" }, record.accept_warnings.map(fmtAcceptanceWarning).join("；")))
       : null,
   );
   panel.append(meta);
