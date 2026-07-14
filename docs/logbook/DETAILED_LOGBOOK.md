@@ -17641,3 +17641,11 @@ Evidence and decision:
 - Validation so far: full tool-flow suite 107 tests passed in 29.720 s; combined main-context replay, Sandbox isolation, pipeline config and interactive orchestration 178 tests passed in 15.340 s. Prompt export is current.
 - Full discovery passed 802 tests in 97.018 s. Real Docker fold/lifecycle E2E passed 2 tests in 10.782 s. Rebuilt `autotrade-sandbox:latest` as `sha256:e3efc73818c9d51b2e848b5f464599e6bcfb90cca9bb952f00abc41f7da467b6`; source and image `/opt/at_runtime/main_ctx_driver.py` SHA-256 both equal `3fd10ad5e74b2fb668a1615d97d57d68a4a5f717b6ba2ad903396cd092230e0b`.
 - Deployment check found the 06:53 CST WebUI process still held the pre-change `PARAM_DEFAULTS`: `/api/parameter-schema` returned 60 while the checked-in source returned 20. `ops/webui/webui_stack.sh stop/start/status` restarted the console and autossh tunnel without any running experiment. The live API now returns `max_fold_minutes.default=20`; local UDS and frontend nginx→tunnel→API health checks both pass.
+
+
+## 2026-07-14 `lap-test16` first-Fold prefetch validation
+
+- Started at code `a01d080`, image `e3efc73818c9`, generation `2f92ea4283d646ebbdce0b28bedc7b48`, auto mode, and effective `max_fold_minutes=20` recorded in the run manifest.
+- Meta Decision completed at 12:26:19 CST after about 4m42s; Replay completed at 12:28:54 after about 2m35s. Trace appeared only with the first Agent event and the deadline was exactly 20 minutes later.
+- The new all-mode Meta ready hook started Q1 Decision at 12:28:55. Decision completed at 12:33:43 and Q1 Replay at 12:36:51, while Meta Agent ran until 12:36:19. Q1 Agent started at 12:36:51: only about 31s remained on the serial path after Meta, versus 6m39s after entry in `lap-test15` (about 6m08s / 92% less visible wait).
+- Peak observed worker RSS during the overlapping Decision build was about 32 GiB; CPU averaged about 1.6–1.7 cores and the shared host retained ample memory. No data, PIT, Docker, Trace, deadline or cache error occurred; more loader concurrency is not justified.
