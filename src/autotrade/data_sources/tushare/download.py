@@ -1806,6 +1806,7 @@ def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dic
     if existing_key_columns and not union.empty:
         union = union.drop_duplicates(existing_key_columns).reset_index(drop=True)
     allow_shrink = bool(getattr(args, "allow_union_shrink", False))
+    existing_rows = parquet_rows(output) if output.exists() else None
     if output.exists() and existing_key_columns and not allow_shrink:
         # Guard business-key coverage, not raw row count: value-revision dedup may
         # legitimately drop rows, but the distinct declared keys must not shrink.

@@ -452,6 +452,22 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 download.write_share_float_union(self.raw_dir, args, {})
         self.assertEqual(common.parquet_rows(output), 2)
 
+        # The non-shrinking success path must complete and report (a stale
+        # previous-rows reference once raised NameError right after the write).
+        source = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
+        rows = pd.DataFrame([
+            {"ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102",
+             "holder_name": "h1", "share_type": "t"},
+            {"ts_code": "000002.SZ", "ann_date": "20200101", "float_date": "20200102",
+             "holder_name": "h2", "share_type": "t"},
+        ])
+        common.write_parquet(source, rows, api_name="share_float", params={}, fields=list(rows.columns), source_hash="src")
+        report = {}
+        with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
+            download.write_share_float_union(self.raw_dir, args, report)
+        self.assertEqual(report["union"]["previous_rows"], 2)
+        self.assertEqual(report["union"]["rows_after_dedup"], 2)
+
     def test_share_float_empty_refresh_keeps_existing_cap_risk_signal(self):
         path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
         fields = common.SHARE_FLOAT_FIELDS.split(",")

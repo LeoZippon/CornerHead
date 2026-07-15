@@ -1582,3 +1582,11 @@
 - 文档同步：环境/管线/数据/部署/参数六文档与提示词全部对齐现行为；QMT §4.2–4.3 改写为已实现 schema v2 三重闸门；PROMPTS.md 两次重导出。
 - 三个切片显式缓行并记录触发条件（见 check.md 状态注记）：质量报告 changed_datasets 精确门禁、Timeview SSE 节假日日历、params.json 完整 resolved config 持久化。
 - Validation: 全量 `~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests` -> 826 OK（新增约 21 项回归）；真实 Docker E2E 2 tests OK；沙箱镜像重建且内置 driver 与源码 md5 一致；`git diff --check` clean。
+
+2026-07-15 lap-test17 竞价无观测行崩溃修复与合规复审
+
+- `lap-test17` 在 Q3 test_replay 预取构建时因 `stk_auction` 全 NaN 行触发 `invalid quantity combinations` 崩溃。根因：2025-08-18~20 北交所换号窗口，源端把停牌股、退役旧代码别名与正常交易的 920 新码统一以价量额全 NaN 列出（全库仅 4 个分区共 821 行，另 0908 一行停牌股）。定性为源端「无竞价观测」形态而非数据损坏。
+- 修复：`_build_auction` 将三项全 NaN 行按缺行剔除并计入 `price_quality.unobserved_rows_dropped`（Broker 沿用带标记 09:30 代理），部分 NaN/负值等真不一致组合仍 fail-fast；raw 分区不改写。真实湖 20250815–20250910 重建通过（103,554 行保留、剔除 821）。实验可直接按账本续跑（Meta/Q1/Q2 已冻结，缓存完好，仅重建 Q3 test_replay）。
+- Opus 合规复审（10 个提交 × 三原则 + 数据/文档扫描）：整体合规；修正其发现的 3 项——share_float union 成功路径 NameError（补 `existing_rows` 绑定 + 成功路径回归）、QMT 桥 `processed_payloads` 补按日键控与剪枝、部署文档 §2.2/§3「双确认」措辞统一为三重闸门。Timeview 新 schema 告警改为每域一次并豁免 `available_at_rule` 注记列（消除 469 次噪声）。
+- lap-test17 案例复盘：trim 修复实测有效（Q1/Q2 缓存命中 91.9%/84.2%，未复现 lap-test16 的 31.2% 崩塌）；预取按新门控时点触发；崩溃前 Meta+Q1+Q2 均正常冻结。
+- Validation: 全量 unittest -> 830 OK；`ast.parse(3.6)` 与 ASCII 校验通过；`git diff --check` clean。

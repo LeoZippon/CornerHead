@@ -148,6 +148,10 @@ def _save_state(state):
         (key, value) for key, value in state["order_fingerprints"].items()
         if _keep_state_key(key, min_day)
     )
+    state["processed_payloads"] = dict(
+        (key, value) for key, value in state["processed_payloads"].items()
+        if _keep_state_key(key, min_day)
+    )
     state["seen_deal_ids"] = set(
         key for key in state["seen_deal_ids"] if _keep_state_key(key, min_day)
     )
@@ -453,7 +457,7 @@ def _process_payload(path, config, state, ContextInfo):
         "mode": "dry_run",
         "orders": [],
     }
-    if payload_id in state["processed_payloads"]:
+    if ("%s:%s" % (_today(), payload_id)) in state["processed_payloads"]:
         result["error"] = "payload already processed"
         return result
     errors = _validate_payload(payload, config)
@@ -519,7 +523,7 @@ def _process_payload(path, config, state, ContextInfo):
         result["orders"].append(row)
     result["ok"] = True
     result["submitted_count"] = submitted
-    state["processed_payloads"][payload_id] = {
+    state["processed_payloads"]["%s:%s" % (_today(), payload_id)] = {
         "processed_at": _now_text(), "mode": result["mode"], "submitted_count": submitted,
     }
     return result

@@ -799,7 +799,12 @@ class SnapshotBuilder:
     def _build_auction(self, start_key: str, end_key: str) -> tuple[pd.DataFrame, dict[str, object]]:
         """Exact opening call-auction results available from 2025-01-16."""
         frame = self.store.read_trade_range("stk_auction", start_key, end_key)
-        price_quality = {"source_price_rows": 0, "derived_price_rows": 0, "no_trade_rows": 0}
+        price_quality = {
+            "source_price_rows": 0,
+            "derived_price_rows": 0,
+            "no_trade_rows": 0,
+            "unobserved_rows_dropped": 0,
+        }
         if frame.empty:
             # Object-typed empty columns serialize as Arrow ``null``. A later
             # string trade-date predicate then fails before the backtest can
@@ -818,6 +823,22 @@ class SnapshotBuilder:
             price = pd.to_numeric(auction["price"], errors="coerce")
             volume = pd.to_numeric(auction["vol"], errors="coerce")
             amount = pd.to_numeric(auction["amount"], errors="coerce")
+            # Rows with price, vol AND amount all missing carry no auction
+            # observation: the source lists suspended codes this way, and around
+            # the 2025-08 BSE renumbering it published three whole days of BJ
+            # rows (retired 43/83/87xxxx aliases AND trading 920xxx codes) as
+            # all-NaN. Such rows are equivalent to a missing row (the Broker
+            # already falls back to the labelled 09:30 proxy), so they are
+            # dropped and counted; genuinely inconsistent combinations below
+            # still fail the build.
+            unobserved = price.isna() & volume.isna() & amount.isna()
+            if unobserved.any():
+                price_quality["unobserved_rows_dropped"] = int(unobserved.sum())
+                keep = ~unobserved
+                auction = auction.loc[keep]
+                price = price.loc[keep]
+                volume = volume.loc[keep]
+                amount = amount.loc[keep]
             valid_quantities = (
                 pd.Series(np.isfinite(volume), index=auction.index)
                 & pd.Series(np.isfinite(amount), index=auction.index)
@@ -861,11 +882,11 @@ class SnapshotBuilder:
             # A source price without matched quantity must never become a hidden
             # Broker fill. Preserve the row but normalize it to the no-trade sentinel.
             auction.loc[no_trade, "price"] = float("nan")
-            price_quality = {
-                "source_price_rows": int(valid_price.sum()),
-                "derived_price_rows": int(derived_price.sum()),
-                "no_trade_rows": int(no_trade.sum()),
-            }
+            price_quality.update(
+                source_price_rows=int(valid_price.sum()),
+                derived_price_rows=int(derived_price.sum()),
+                no_trade_rows=int(no_trade.sum()),
+            )
             auction["session"] = "open"
             availability = {
                 trade_date: self._auction_partition_availability(trade_date)

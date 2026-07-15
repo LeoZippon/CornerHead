@@ -496,7 +496,7 @@ class QmtClientBridgeTest(unittest.TestCase):
             result = bridge._process_payload(str(path), config, state, None)
             self.assertTrue(result["ok"])
             self.assertEqual(result["submitted_count"], 1)
-            self.assertIn("p2", state["processed_payloads"])
+            self.assertIn("%s:p2" % bridge._today(), state["processed_payloads"])  # day-scoped key
             events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
             self.assertEqual([e["event"] for e in events[-2:]], ["intent", "submitted"])
             self.assertEqual(events[-1]["remark"], "MQ:p2:r1")

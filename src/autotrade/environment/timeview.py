@@ -299,8 +299,17 @@ class _DomainView:
         failing, but never drops silently."""
         if replay is None or replay.empty or not self._columns:
             return
-        extra = sorted(set(replay.columns) - set(self._columns) - {"available_at"})
+        # available_at / available_at_rule are gating annotations, not strategy
+        # data — the frozen schema drops them by design (intraday replay rows
+        # carry the rule tag from the auction correction, 469 warnings/replay
+        # otherwise). Warn once per domain: the schema cannot change mid-replay.
+        if getattr(self, "_schema_drop_warned", False):
+            return
+        extra = sorted(
+            set(replay.columns) - set(self._columns) - {"available_at", "available_at_rule"}
+        )
         if extra:
+            self._schema_drop_warned = True
             warnings.warn(
                 f"Timeview domain {self.name!r}: replay columns {extra} are absent from the "
                 "frozen snapshot schema and will not appear in the rolling view; rebuild the "

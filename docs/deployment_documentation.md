@@ -184,7 +184,7 @@ Host cornerhead
 - 研究侧的数据、PIT、WFO/held-out 和审计链路已实现；尚无冻结可交易模型。
 - 当前仓库没有实盘调度入口、订单生成器或本地 tick 执行器，回放是唯一可运行的策略执行路径；客户端内文件桥（`ops/qmt/qmt_client_bridge.py`）已部署但订单执行默认关闭、未经交易日验收。历史 xtquant/miniQMT 方案已废弃，`C:\xquant` 下相关文件仅作遗留归档。
 - 下文的逐 tick 环路和客户端执行器均为目标合同，不得据此认定实盘链路可用。
-- 任何 QMT 操作默认只读或 dry-run。真实委托必须等到模型、策略、订单合约、风控和对账流程全部冻结后，才允许人工双确认执行。
+- 任何 QMT 操作默认只读或 dry-run。真实委托必须等到模型、策略、订单合约、风控和对账流程全部冻结后，由人工构造满足三重闸门（配置 `execution.enabled` ∧ payload `execute` ∧ `confirm==payload_id`）的 payload 才会执行。
 
 **SSH 运维接入**
 
@@ -371,7 +371,7 @@ ssh qmt-node "C:\\xquant\\Python38\\python.exe C:\\xquant\\qmt_executor.py recon
 4. 上传远端并先 dry-run。
    - 检查预算、股数、涨跌停/停牌、可用持仓、重复 payload、账户 ID。
 5. 人工确认后才允许真实执行。
-   - 实盘命令必须带双确认参数。
+   - 实盘 payload 必须满足三重闸门：桥配置 `execution.enabled`、payload `execute:true` 与 `confirm==payload_id`（见 §4.3）。
    - 下单后必须运行对账，不能把委托号当成成交。
 
 **实盘下单前重校验**

@@ -414,6 +414,62 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(meta["price_quality"]["derived_price_rows"], 1)
             self.assertEqual(meta["price_quality"]["no_trade_rows"], 1)
 
+    def test_auction_builder_drops_unobserved_rows_and_counts_them(self):
+        # Suspended codes — and the retired BSE aliases around the 2025-08
+        # renumbering — are listed by the source with price/vol/amount all NaN.
+        # They carry no auction observation: equivalent to a missing row, so the
+        # build drops and counts them instead of failing (lap-test17 crash).
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            path = raw / "stk_auction" / "trade_date=20250818.parquet"
+            write(
+                path,
+                pd.DataFrame(
+                    [
+                        {"trade_date": "20250818", "ts_code": "832491.BJ", "price": None,
+                         "vol": None, "amount": None, "pre_close": 9.8,
+                         "turnover_rate": None, "volume_ratio": None, "float_share": 100000},
+                        {"trade_date": "20250818", "ts_code": "000001.SZ", "price": 10.0,
+                         "vol": 1000, "amount": 10000, "pre_close": 9.8,
+                         "turnover_rate": 0.1, "volume_ratio": 1.2, "float_share": 100000},
+                    ]
+                ),
+            )
+            path.with_suffix(".parquet.meta.json").write_text(
+                json.dumps({"availability": {
+                    "available_at": "2025-08-18T09:28:00+08:00",
+                    "rule": "observed:test_capture",
+                }}),
+                encoding="utf-8",
+            )
+            auction, meta = SnapshotBuilder(raw, Path(tmp) / "missing_events")._build_auction(
+                "20250818", "20250818"
+            )
+            self.assertEqual(auction["ts_code"].tolist(), ["000001.SZ"])
+            self.assertEqual(meta["price_quality"]["unobserved_rows_dropped"], 1)
+            self.assertEqual(meta["price_quality"]["source_price_rows"], 1)
+
+    def test_auction_builder_still_rejects_partial_nan_quantities(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            path = raw / "stk_auction" / "trade_date=20250818.parquet"
+            write(path, pd.DataFrame([{
+                "trade_date": "20250818", "ts_code": "000001.SZ", "price": 10.0,
+                "vol": 1000, "amount": None, "pre_close": 9.8,
+                "turnover_rate": 0.1, "volume_ratio": 1.2, "float_share": 100000,
+            }]))
+            path.with_suffix(".parquet.meta.json").write_text(
+                json.dumps({"availability": {
+                    "available_at": "2025-08-18T09:28:00+08:00",
+                    "rule": "observed:test_capture",
+                }}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "invalid quantity combinations"):
+                SnapshotBuilder(raw, Path(tmp) / "missing_events")._build_auction(
+                    "20250818", "20250818"
+                )
+
     def test_auction_builder_rejects_price_quantity_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"
