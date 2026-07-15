@@ -2789,6 +2789,31 @@ function analysisNode(base, title, { standalone = true } = {}) {
   return panel;
 }
 
+/* Docker BuildKit reports normal build progress on stderr, so a successful
+   sandbox_image_update still carries a wall of text in stderr_tail; dumping the
+   raw record reads like an error. Summarize the outcome and show the log tail
+   only when the build did not succeed. */
+function sandboxImageNode(update) {
+  const status = String(update.status || "unknown");
+  if (status === "ok") {
+    const digest = String(update.image_id || "").replace(/^sha256:/, "").slice(0, 12);
+    const secs = (Date.parse(update.finished_at || "") - Date.parse(update.started_at || "")) / 1000;
+    const pruned = Array.isArray(update.pruned_images) ? update.pruned_images.length : 0;
+    return ["构建成功", update.image, digest, Number.isFinite(secs) ? `${secs.toFixed(1)}s` : null,
+      pruned ? `清理旧镜像 ${pruned} 个` : null].filter(Boolean).join(" ｜ ");
+  }
+  const notes = {
+    skipped_empty: "请求为空，未构建（沿用基础镜像）",
+    skipped_local_dev: "local_dev 运行，未构建（沿用基础镜像）",
+    disabled: "派生镜像构建已禁用（沿用基础镜像）",
+  };
+  if (notes[status]) return notes[status];
+  const tail = String(update.reason || update.stderr_tail || update.stdout_tail || "").trim();
+  return el("div", {},
+    el("div", { class: "form-error" }, `构建未成功（${status}）${update.image ? `：${update.image}` : ""}`),
+    tail ? el("pre", { class: "code-view" }, tail.slice(-2000)) : null);
+}
+
 function metaResultPanel(detail, session) {
   const record = session.record || {};
   const panel = el("div", { class: "panel section-gap" }, el("h4", {}, `元学习结果 — ${session.epoch_id}`));
@@ -2796,7 +2821,7 @@ function metaResultPanel(detail, session) {
     kvRow("状态", record.status || "—"),
     kvRow("总耗时", foldDurationNode(detail, session)),
     record.meta_learning_directive ? kvRow("注入指令", record.meta_learning_directive) : null,
-    record.sandbox_image_update ? kvRow("沙箱镜像", JSON.stringify(record.sandbox_image_update)) : null,
+    record.sandbox_image_update ? kvRow("沙箱镜像", sandboxImageNode(record.sandbox_image_update)) : null,
   ));
   if (record.taste) {
     panel.append(el("h4", { class: "section-gap" }, "Taste（注入本 Epoch 全部 Fold）"), renderMarkdown(record.taste));

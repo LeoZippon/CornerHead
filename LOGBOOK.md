@@ -1590,3 +1590,9 @@
 - Opus 合规复审（10 个提交 × 三原则 + 数据/文档扫描）：整体合规；修正其发现的 3 项——share_float union 成功路径 NameError（补 `existing_rows` 绑定 + 成功路径回归）、QMT 桥 `processed_payloads` 补按日键控与剪枝、部署文档 §2.2/§3「双确认」措辞统一为三重闸门。Timeview 新 schema 告警改为每域一次并豁免 `available_at_rule` 注记列（消除 469 次噪声）。
 - lap-test17 案例复盘：trim 修复实测有效（Q1/Q2 缓存命中 91.9%/84.2%，未复现 lap-test16 的 31.2% 崩塌）；预取按新门控时点触发；崩溃前 Meta+Q1+Q2 均正常冻结。
 - Validation: 全量 unittest -> 830 OK；`ast.parse(3.6)` 与 ASCII 校验通过；`git diff --check` clean。
+
+2026-07-15 控制台「沙箱镜像」误报排查
+
+- lzp-test18 详情页元学习面板下的 `沙箱镜像` 行貌似报错，实为成功构建：BuildKit 把正常构建进度写到 stderr，而前端将整条 `sandbox_image_update` 记录 `JSON.stringify` 原样倾倒，4KB 的 `stderr_tail` 日志墙读起来像错误。账本与实验状态核实无任何故障（status=ok、returncode=0、派生镜像已被 Q1 使用、worker error=null）。
+- 修复：`app.js` 新增状态感知渲染——成功仅显示镜像 tag、短 digest、耗时、GC 数；skip/disabled 显示一句话说明；failed/timeout/rejected 才显示红色错误块 + 日志尾部。数据层不动（宿主侧审计记录合理，Agent 可见投影本就剔除 stderr_tail）。
+- Validation: `node --check` OK；DOM shim 下对真实账本记录及 4 类失败态渲染断言通过；静态资源 no-store 即刷即生效。
