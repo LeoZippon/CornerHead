@@ -93,8 +93,13 @@ class TextRetriever:
         if self.as_of is None:
             visible = self.index[self._frozen_mask]
         else:
+            # Convert each dataset's cutoff once, then broadcast by a vectorized
+            # dict map. A per-row ``pd.Timestamp()`` lambda over the multi-million
+            # row index dominated NL retrieval (tens of seconds rebuilt on every
+            # decision tick); mapping the handful of unique datasets is ~150x cheaper.
             cmap = {d: text_dataset_visible_cutoff(d, self.as_of) for d in self._datasets.unique()}
-            cutoff = self._datasets.map(lambda d: pd.Timestamp(cmap[d]) if cmap[d] is not None else pd.NaT)
+            cutoff_by_dataset = {d: (pd.Timestamp(c) if c is not None else pd.NaT) for d, c in cmap.items()}
+            cutoff = self._datasets.map(cutoff_by_dataset)
             replay_visible = (~self._frozen_mask) & (self._available_at <= cutoff)
             visible = self.index[self._frozen_mask | replay_visible]
         # One research tick commonly issues several nl() calls and each NL task

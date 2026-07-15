@@ -1603,3 +1603,11 @@
 - lcd-test1_ 的 Step 分析（deepseek-v4-pro）把 `ctx.snapshot_dir` 误判为前视泄露：审阅人只拿到策略代码+验证结果，没有 ctx 数据面契约，于是臆测冻结快照可能含未来数据。经核实该 Fold 决策锚点 2025-12-31 23:59:59 早于验证期 20260101–20260131，快照物理上看不到未来，属误诊；真正可疑处是近乎空仓致夏普虚高（其自身假设 #2）。
 - 修复：在 `fold_analysis.py` 抽出共享常量 `_ENV_DATA_INVARIANTS`（snapshot_dir 冻结基线 / asof_dir 逐 tick 滚动 PIT / 实时走 bars·price / PIT·T+1·substep·筛选由环境强制），注入 STEP 与 FOLD 两个系统提示，并把审阅重心从「指控环境泄露」转向「策略是否误用接口、收益是过拟合还是结构性」。仅提示词接地、无新围栏、无契约变更。
 - Validation: 导入与两提示均含该块、无 f-string 花括号泄漏；test_interactive_pipeline 44 OK；export_prompts OK。
+
+2026-07-16 NL 检索可见性掩码向量化（lzp-test18 回测提速）
+
+- lzp-test18 的 valid_002 回测耗时异常（~54min），逐层剖析：Q2 策略改用大量「泛市场」`ctx.nl()`（无 ts_code，~21 次/回测，每次~163s）。非 LLM 部分（~128s/次）主由 `TextRetriever._visible_index()` 主导：用 per-row `pd.Timestamp()` lambda 在 465 万行文本索引上重建可见性掩码 ~48s，且每个决策 tick（as_of 变化）都重算。
+- 修复：把每个数据集的 cutoff 只转换一次，再用向量化 dict `.map` 广播，替换 per-row lambda。真实语料实测 47.9s→0.86s（~53x），可见行集合逐位相同（2,982,163 行，多个 as_of 验证）。单次 ctx.nl() ~163s→~70s，回测墙钟约减半。
+- 过程更正：先试过用 semi-join 跳过 PIT 不可见 body 行，实测 0 收益（asof 语料已按 tick 裁剪，无未来行可跳）、且 Opus 交叉审计判定为回退（DuckDB 1.1.3 不把 semi-join 下推到 regex 之下，反而拖慢按股 IN-list 热路径）——已整体回退，仅保留向量化。补 PIT 不可见 replay 行排除回归测试。
+- 合规：3 行改动、无新子系统/缓存（极简）；证据与 PIT 门控完全不变（贴近真实）；不动 NL 预算/接口，Agent 自主性不变。运行中的 worker 仍是旧码，重启后生效；未重启在跑实验。
+- Validation: 全量 unittest 831 OK；Opus xhigh 审计判定「exactly semantics-preserving and safe」。

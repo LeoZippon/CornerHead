@@ -346,6 +346,38 @@ class NLSubAgentEngineTest(unittest.TestCase):
             self.assertEqual([hit["text_id"] for hit in stock_hits], ["own"])
             self.assertEqual({hit["text_id"] for hit in general_hits}, {"own", "other"})
 
+    def test_general_body_search_excludes_pit_invisible_replay_rows(self):
+        # A general (unscoped) body search must never surface a replay body whose
+        # dataset has not been released by as_of: _visible_index() drops the
+        # not-yet-visible row, and search() keeps only body matches that are in
+        # that visible index, while the frozen row (always visible) still returns.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            frozen = pd.DataFrame(
+                [{"text_id": "fz", "dataset": "news", "ts_codes": "000001.SZ",
+                  "title": "frozen note", "available_at": "2025-03-01T18:00:00+08:00"}]
+            )
+            replay = pd.DataFrame(
+                [{"text_id": "rp", "dataset": "news", "ts_codes": "000002.SZ",
+                  "title": "future note", "available_at": "2099-01-01T18:00:00+08:00"}]
+            )
+            fz_idx = tmp / "text_index.parquet"; frozen.to_parquet(fz_idx, index=False)
+            fz_lib = tmp / "text_library"; fz_lib.mkdir()
+            pd.DataFrame({"text_id": ["fz"], "body": ["shared rare signal"]}).to_parquet(
+                fz_lib / "news.parquet", index=False
+            )
+            rp_idx = tmp / "replay_index.parquet"; replay.to_parquet(rp_idx, index=False)
+            rp_lib = tmp / "replay_library"; rp_lib.mkdir()
+            pd.DataFrame({"text_id": ["rp"], "body": ["shared rare signal"]}).to_parquet(
+                rp_lib / "news.parquet", index=False
+            )
+            retriever = TextRetriever(
+                fz_idx, fz_lib, replay_index_path=rp_idx, replay_library_dir=rp_lib,
+                as_of=pd.Timestamp("2025-05-01T09:30:00+08:00").to_pydatetime(),
+            )
+            hits = retriever.search("shared rare signal", max_results=5)
+            self.assertEqual({hit["text_id"] for hit in hits}, {"fz"})
+
     def test_legacy_keyword_requests_map_to_patterns(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, _ = self.make_engine(
