@@ -431,22 +431,25 @@ content = result.get("content", "")
 Sandbox 内的 `nl()` 只提交请求并等待响应。宿主按以下顺序处理：
 
 1. 校验请求、仿真时间、配额和决策截止时间。
-2. 只检索当前时点可见的文本；单股请求可附加当时可见的公司上下文。
-3. 启动有界的文本分析会话，允许继续调用只读文本检索。
-4. 返回自由文本、证据引用、工具摘要和错误状态，并写入本次回测审计目录。
+2. 单股请求先检查同一代码、Prompt、参数和公司上下文的成功历史结果；若此前 Sub Agent 的实质检索模式在当前 PIT 候选语料上没有新增匹配证据，则直接复用。
+3. 未命中复用时，只检索当前时点可见的文本，并启动有界分析会话；单股请求可附加公司上下文。
+4. 返回自由文本、证据引用、工具摘要、复用状态和错误状态，并写入本次回测审计目录。
 
 NL 最终回答是自由文本：
 
-- 证券代码可选；传入时正文只检索 PIT 索引已关联该公司的材料，背景标题仍可命中；不传代码时执行事件、主题、行业、宏观或市场级检索。
+- 证券代码可选；传入时标题与正文均严格限定到 PIT 索引按代码或公司名关联的候选材料；不传代码时才执行事件、主题、行业、宏观或市场级检索。
 - 返回状态、范围、正文、工具摘要、证据和错误等字段。
 - 策略若需要分数、标签或过滤条件，必须自行解析正文并处理失败。
 
-文本检索采用 DuckDB/RE2 原地扫描、列裁剪和 LIMIT；同一仿真时点的可见索引只构建一次，供该 tick 的多轮/多次 NL 复用：
+文本检索采用 DuckDB/RE2、列裁剪和 LIMIT。代码行映射与持久标题视图用于定位候选；最近候选的索引范围和当前 PIT 可见正文子集由有界 LRU 复用，并随回放时钟增量补入新可见正文，因此一个候选在证据不变时的后续正则轮次不再重扫全索引或正文分片：
 
 - pattern 最长 256 字符，不支持反向引用和环视。
 - 不支持或超长模式返回可修复错误。
-- 大语料不整体载入内存，只缓存返回片段。
+- 单股正文按候选关联 `text_id` 一次批量读取；全市场请求仍按可见语料执行广域检索。
+- 大语料正文不整体载入内存，只缓存有界的候选正文子集和返回片段。
 - 每次工具检索记录独立耗时，便于区分索引、正文检索和模型延迟。
+
+单股结果复用以此前 Sub Agent 自主形成的实质检索模式为事件过滤器；纯代码/名称发现模式不作为事件，常见的前置候选限定只在可安全分离时转成事件部分。无法安全分离或校验的正则保守退回整个候选语料 revision。新增匹配标题或正文会改变 revision 并重新分析；没有实质模式时同样使用整个候选语料 revision。失败结果不缓存，全市场请求不复用。`nl_requests.jsonl` 每次调用均保留记录；复用调用不伪造新的检索、证据或 provider 日志。
 
 NL 共享当前决策的绝对墙钟截止时间：
 
@@ -890,7 +893,7 @@ substep 的声明预算 `B` 同时定义三件事：
 
 - 开始时记录 `backtest_start`。
 - 回放期间按交易日边界节流记录 `backtest_progress`，包含进度、已用时和累计订单数；控制台保存最新进度，在首条进度前也用 `backtest_start` 本地计时显示“初始化/首日处理中”。
-- 完整 Valid 进入/离开 `ctx.nl()` 时记录不含文本内容的 `backtest_activity`；控制台显示 NL 调用序号和当前等待时间，长研究日不再表现为无状态卡死。
+- 完整 Valid 进入/离开 `ctx.nl()` 时记录不含文本内容的 `backtest_activity`，并标明 cache checking/hit/miss/bypass；控制台显示 NL 调用序号和当前等待时间，长研究日不再表现为无状态卡死。
 - Agent 观察中的每次回测成功或失败都附带 `backtests_used`、`backtests_limit`、`backtests_remaining`；零订单会与静态发现的吞宽泛异常、盲竞价分支读取 `ctx.price()` 合并成非阻断诊断。
 - 结束或中止保证有一条终止 `backtest` 事件；外部中止记录 `status="aborted"`。
 - Runner 另记完整工具墙钟的 `budget_exclusion`，使控制台显示的活跃会话预算与真实回补一致；Step/ask_user 等待同样回补，并单列 `researcher_wait_seconds`，不进入实时或账本 `run_wall_seconds`。
@@ -917,6 +920,7 @@ substep 的声明预算 `B` 同时定义三件事：
 | 状态写入 | `state_staged_writes` / `state_unmerged_writes` |
 | substep 统计 | `substep_runtime`，含 count、total_real_wall_s、max_real_wall_s |
 | 阶段耗时 | `phase_seconds`，含 Agent `strategy_compute`、`strategy_ipc`、`nl_service`、Timeview、state、Broker 与 `host_replay_overhead`；各项合计覆盖回放墙钟 |
+| NL 调用 | `nl_calls`、实际执行 `nl_executed_calls`、`nl_cache_hits`、`nl_cache_misses` 与 `nl_outcome_counts` |
 | 软诊断 | formal Agent 与宿主回放进程峰值 RSS、分钟读取/归一化/预取等待耗时、修改检查的宽 Parquet 读取/吞异常/盲竞价取价 advisory、零订单诊断；均不改变验收和冻结资格 |
 
 **逐窗口归因（Barra-lite，全部回放模式）**

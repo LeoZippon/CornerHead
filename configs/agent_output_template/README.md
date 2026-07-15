@@ -233,9 +233,12 @@ expresses investment priority; reproducibility is not a substitute for intent.
 host-side NL Sub Agent. Passing `ts_code` requests single-stock PIT text analysis;
 `ctx.nl(prompt="...")`
 uses the same service for event, theme, sector, macro, or market-wide PIT text
-retrieval. `ts_code` is a context/ranking hint, not a hard filter. The final
-`content` is unconstrained; parse whatever score, label, or decision you need in
-`main`/`candidate`/helpers. Request, retrieval, evidence, result, and
+retrieval. `ts_code` strictly bounds title and body retrieval to evidence linked
+by that code or company name; omit it when broad context is required. Repeated
+single-stock requests with the same prompt/arguments can reuse a completed result
+until newly visible evidence matches that analysis's substantive search patterns.
+The final `content` is unconstrained; parse whatever score, label, or decision
+you need in `main`/`candidate`/helpers. Request, retrieval, evidence, result, and
 provider-call logs are written under the backtest result directory.
 NL carries publish/ingest-time, recall, model-prior, free-text-parsing, and
 look-ahead risks: down-weight or drop low-evidence conclusions, and never let NL

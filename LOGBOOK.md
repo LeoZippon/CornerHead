@@ -1617,3 +1617,13 @@
 - lzp-test18 的 worker 在 Q2 自行 terminated 后，前端无「恢复运行」按钮。根因：后端 `manager.py` 的 `_TERMINAL_RESUMABLE_STATES` 已含 `terminated`（control:resume 会按账本重启），但前端 `app.js` 两处按钮门控用的是漏了 `terminated` 的过期状态列表，与后端漂移。
 - 修复：抽出共享常量 `RESUMABLE_STATES`（镜像后端集合），列表页与详情页控制条统一引用；terminated 现可在 UI 恢复。已 `webui_stack.sh sync` 推送前端静态副本，浏览器刷新即见按钮。仅前端；无后端/环境/Agent 改动。
 - Validation: `node --check` OK；前端副本含 RESUMABLE_STATES；后端 resume 早已支持 terminated（无需改动）。
+
+2026-07-16 lzp-test18 NL 事件复用与候选检索缓存
+
+- 用户暂停后的最新 worker 已为 `terminated`；未重启、未改实验产物。保留的 Q2 审计 workload 为 25 次单股 NL、18 个代码、130 次检索（`.runtime/sandboxes/lzp-test18/run_4caab624069f/.../.nl_tool_52818ae56e5b`），旧检索合计 2309.140s。
+- 单股检索改为硬候选边界：精确代码行映射 + DuckDB 持久标题视图定位代码/名称关联材料；有界 LRU 缓存候选索引，并只批量读取当前 PIT 可见的候选正文，随回放时钟增量补入新行。后续模式不再扫描 454.3 万行索引或 1.6GB 正文；全市场无代码请求合同不变。
+- 同代码/Prompt/参数/公司上下文的成功分析按 PIT 事件 revision 复用；过滤器来自 Sub Agent 自主形成的实质检索模式。纯代码/名称发现查询忽略，只有可安全分离的前置候选限定才转成事件部分，其余正则保守退回全候选 revision；新增匹配标题/正文即重跑。失败和 general 结果不缓存，summary 新增 executed/hit/miss 计数。
+- 合规收口：单股任务强制沿用策略请求代码，Sub Agent 不能用工具参数跨候选；修复任意删实体可能生成非法 RE2 的问题；候选正文不预读未来行，避免答案虽过滤但耗时依赖未来候选量；持久 DuckDB 连接在回放后确定关闭。均无新 Agent 参数/服务/持久产物。
+- 最终真实 workload 重放：130 个原始工具参数、同一 frozen/replay 快照和逐日 08:00 PIT 时钟下，检索 2309.140s→118.808s（19.44x），初始化 15.928s；5 个原始非法模式和 1,172 个返回命中保持一致，重复候选完整多轮 0.178–0.618s。事件门控保守命中 3/25，省 62.314s provider；含 cache revision 的检索/控制 123.540s + 剩余 provider 426.914s，25 次 NL 任务估算 2778.870s→550.454s（5.05x），168 次季度调用约 62min NL，仍需正式重跑实测。
+- 剩余瓶颈为 provider 多轮（估算占 77.6%）。若重跑仍不满意，下一优先级为对回答质量做 A/B 后减少 provider 轮次；跨回测内容寻址缓存和正文 sidecar 的复杂度/收益比暂不成立。18 个候选缓存索引+正文仅约 12.9MiB，128 项 LRU 不构成当前内存压力。
+- Validation：`py_compile`；NL + tools-flow 152 OK；全量 unittest 841 OK（119.816s）；Prompt 重导出；`git diff --check` clean。全量测试前后可用内存均 314GiB；未启动 GPU 工作负载。

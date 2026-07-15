@@ -37,8 +37,8 @@ TEXT_RETRIEVE_SPEC = ActionSpec(
             "string",
             default="",
             description=(
-                "Optional stock code used only as retrieval context/ranking hint; leave empty for "
-                "event, sector, macro, or market-wide searches."
+                "Optional stock code that bounds retrieval to code/name-linked candidate evidence; "
+                "leave empty for event, sector, macro, or market-wide searches."
             ),
         ),
         ActionField("max_results", "integer", default=5, min_value=1, max_value=20),
@@ -72,10 +72,11 @@ Call the ``text_retrieve`` function tool (native function calling) to fetch text
 evidence. ``pattern`` uses case-insensitive grep/regex semantics (RE2 engine:
 backreferences and lookaround are unsupported; max 256 chars — an out-of-contract
 pattern returns a fixable tool error) over titles, codes, and optional full text
-bodies; prefer company/code/business-context patterns for single-stock requests,
-and broad event/sector/macro patterns for general requests. Optional arguments:
-``ts_code``, ``max_results`` (1-20), ``search_bodies``. ``ts_code`` is a
-context/ranking hint, not a hard filter.
+bodies. A single-stock request is already bounded to code/name-linked evidence,
+so search its event/risk concepts directly; use broad event/sector/macro patterns
+for general requests. Optional arguments:
+``ts_code``, ``max_results`` (1-20), ``search_bodies``. ``ts_code`` bounds a
+single-stock search to code/name-linked evidence; omit it for broad context.
 
 # Final Answer
 When you have enough information, answer in any format that is useful to the
@@ -170,7 +171,10 @@ class TextRetrieveTool:
             except ToolSchemaError as exc:
                 validated = {}
                 argument_error = str(exc)
-        ts_code = str(validated.get("ts_code") or default_ts_code or "").strip()
+        # A stock task is a hard evidence boundary: a model-supplied code must
+        # never widen or replace the strategy's requested candidate. General
+        # tasks have no default and may still opt into a stock scope.
+        ts_code = str(default_ts_code or validated.get("ts_code") or "").strip()
         max_results = int(validated.get("max_results", 5) or 5)
         search_bodies = bool(validated.get("search_bodies", True))
         if argument_error:
@@ -262,7 +266,7 @@ class NLSubAgentEngine:
         else:
             task.company_context = {"scope": "general", "context": "no_single_stock"}
         messages = self._initial_messages(task, prompt=prompt, request_kwargs=request_kwargs or {})
-        company_terms = _company_terms(task.company_context, ts_code)
+        candidate_terms = company_terms(task.company_context, ts_code)
         evidence_seen: set[str] = set()
         try:
             for round_index in range(1, config.max_tool_rounds + 1):
@@ -286,7 +290,7 @@ class NLSubAgentEngine:
                         }
                     else:
                         tool_record, evidence = self.text_tool.call(
-                            arguments, default_ts_code=ts_code, company_terms=company_terms
+                            arguments, default_ts_code=ts_code, company_terms=candidate_terms
                         )
                         tool_record["round"] = round_index
                         for item in evidence:
@@ -463,7 +467,7 @@ def _text_retrieve_argument_error(arguments: dict[str, object], pattern: str) ->
     return ""
 
 
-def _company_terms(context: dict[str, object], ts_code: str) -> list[str]:
+def company_terms(context: dict[str, object], ts_code: str) -> list[str]:
     code = str(ts_code or "").strip()
     terms: list[str] = [code] if code else []
     for key in ("name", "fullname", "company_name", "short_name"):

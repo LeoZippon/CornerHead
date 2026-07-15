@@ -1388,6 +1388,9 @@ def main(ctx):
             summary = BacktestTool(ctx).run(mode="valid", replay_window=2)
 
             self.assertEqual(summary["nl_calls"], 1)
+            self.assertEqual(summary["nl_executed_calls"], 0)
+            self.assertEqual(summary["nl_cache_hits"], 0)
+            self.assertEqual(summary["nl_cache_misses"], 0)
             self.assertEqual(summary["nl_outcome_counts"], {"withheld_probe": 1})
             self.assertFalse(summary["runtime_representative"])
             self.assertTrue(any("不可外推完整 Valid" in warning for warning in summary["diagnostic_warnings"]))

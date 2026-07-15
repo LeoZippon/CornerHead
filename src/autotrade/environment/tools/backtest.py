@@ -526,7 +526,10 @@ class BacktestTool:
                                     on_progress=_on_progress,
                                 )
                     finally:
-                        cleanup_nl_rpc_files(requests_host, responses_host)
+                        try:
+                            cleanup_nl_rpc_files(requests_host, responses_host)
+                        finally:
+                            nl_service.close()
             finally:
                 if minute_source is not None:
                     minute_source.close()
@@ -638,6 +641,9 @@ class BacktestTool:
             "replay_granularity": replay.granularity,
             "order_count": int(stats["order_count"]),
             "nl_calls": int(nl_service.calls),
+            "nl_executed_calls": int(nl_service.executed_calls),
+            "nl_cache_hits": int(nl_service.cache_hits),
+            "nl_cache_misses": int(nl_service.cache_misses),
             "nl_outcome_counts": nl_outcome_counts,
             "nl_max_calls_per_backtest": nl_service.max_calls,
             "trade_count": int(stats["trade_count"]),

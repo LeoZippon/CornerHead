@@ -120,6 +120,20 @@ class NLSubAgentEngineTest(unittest.TestCase):
             self.assertEqual(result.evidence[0]["text_id"], "t1")
             self.assertIn("重大负面", result.content)
 
+    def test_stock_task_cannot_override_its_candidate_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            request = make_tool_call(
+                "text_retrieve", pattern="公告", ts_code="000002.SZ"
+            )
+            engine, _ = self.make_engine(
+                [tool_call_response(request), "候选边界保持不变。"], Path(tmp)
+            )
+
+            result = self.run_agent(engine)
+
+            self.assertEqual(result.tool_calls[0]["arguments"]["ts_code"], "000001.SZ")
+            self.assertEqual([item["text_id"] for item in result.evidence], ["t1"])
+
     def test_general_nl_request_has_no_single_stock_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, _ = self.make_engine([tool_call("公告"), "全局文本检索完成。"], Path(tmp))
@@ -285,7 +299,7 @@ class NLSubAgentEngineTest(unittest.TestCase):
             self.assertIn("RE2", result.tool_calls[0]["error"])
             self.assertEqual(result.evidence, [])
 
-    def test_candidate_related_hits_rank_before_generic_hits(self):
+    def test_stock_search_stays_inside_candidate_linked_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             index = pd.DataFrame(
@@ -293,7 +307,7 @@ class NLSubAgentEngineTest(unittest.TestCase):
                     {
                         "text_id": "own",
                         "dataset": "anns_d",
-                        "ts_codes": "000001.SZ",
+                        "ts_codes": "",
                         "title": "平安银行 监管问询回复",
                         "available_at": "2021-10-02T18:00:00+08:00",
                         "source_hash": "h1",
@@ -316,9 +330,43 @@ class NLSubAgentEngineTest(unittest.TestCase):
                 library / "anns_d.parquet", index=False
             )
             retriever = TextRetriever(index_path, library)
-            hits = retriever.search("监管问询", ts_code="000001.SZ", max_results=2)
-            self.assertEqual([hit["text_id"] for hit in hits], ["own", "other"])
-            self.assertEqual([hit["relevance"] for hit in hits], ["candidate", "background"])
+            hits = retriever.search(
+                "监管问询", ts_code="000001.SZ", company_terms=["平安银行"], max_results=2
+            )
+            self.assertEqual([hit["text_id"] for hit in hits], ["own"])
+            self.assertEqual([hit["relevance"] for hit in hits], ["candidate"])
+
+    def test_candidate_body_subset_is_loaded_once_across_patterns(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            index = pd.DataFrame(
+                [
+                    {"text_id": "a", "dataset": "anns_d", "ts_codes": "000001.SZ",
+                     "title": "first note", "available_at": "2021-10-02T18:00:00+08:00"},
+                    {"text_id": "b", "dataset": "anns_d", "ts_codes": "000001.SZ",
+                     "title": "second note", "available_at": "2021-10-02T18:00:00+08:00"},
+                ]
+            )
+            index_path = tmp / "text_index.parquet"
+            index.to_parquet(index_path, index=False)
+            library = tmp / "text_library"
+            library.mkdir()
+            pd.DataFrame({"text_id": ["a", "b"], "body": ["alpha risk", "beta risk"]}).to_parquet(
+                library / "anns_d.parquet", index=False
+            )
+            retriever = TextRetriever(index_path, library)
+
+            with mock.patch.object(retriever, "_body_query", wraps=retriever._body_query) as query:
+                self.assertEqual([h["text_id"] for h in retriever.search(
+                    "alpha", ts_code="000001.SZ", max_results=5
+                )], ["a"])
+                self.assertEqual([h["text_id"] for h in retriever.search(
+                    "beta", ts_code="000001.SZ", max_results=5
+                )], ["b"])
+
+            self.assertEqual(query.call_count, 1)
 
     def test_stock_body_search_excludes_unrelated_background_bodies(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -447,6 +495,43 @@ class NLBudgetTest(unittest.TestCase):
             self.assertEqual(first["state"], "withheld_probe")
             self.assertEqual(second["state"], "budget_exhausted")
 
+    def test_event_filter_removes_candidate_qualifiers_but_keeps_risk_terms(self):
+        from autotrade.environment.nl.service import _event_patterns
+
+        calls = [
+            {"name": "text_retrieve", "arguments": {"pattern": "平安银行"}},
+            {"name": "text_retrieve", "arguments": {
+                "pattern": "平安银行.*(处罚|重大诉讼|退市)"
+            }},
+            {"name": "text_retrieve", "status": "error", "arguments": {"pattern": "*ST"}},
+        ]
+
+        self.assertEqual(
+            _event_patterns(calls, ["000001.SZ", "平安银行"]),
+            ("(处罚|重大诉讼|退市)",),
+        )
+
+    def test_event_filter_falls_back_for_unsafe_entity_regex(self):
+        from autotrade.environment.nl.service import _candidate_revision, _event_patterns
+
+        calls = [{
+            "name": "text_retrieve",
+            "arguments": {"pattern": "[平安银行]|处罚"},
+        }]
+
+        self.assertEqual(_event_patterns(calls, ["平安银行"]), ())
+
+        class Retriever:
+            def candidate_revision(self, _code, *, company_terms, patterns=()):
+                if patterns:
+                    raise ValueError("unsafe filter")
+                return "full"
+
+        self.assertEqual(
+            _candidate_revision(Retriever(), "000001.SZ", ["平安银行"], ("bad",)),
+            ("full", ()),
+        )
+
     def test_full_nl_reports_start_and_finish_activity(self):
         from autotrade.environment.nl.service import StrategyNLService
 
@@ -468,6 +553,151 @@ class NLBudgetTest(unittest.TestCase):
             self.assertEqual([item["activity_status"] for item in activity], ["running", "finished"])
             self.assertEqual([item["nl_call_index"] for item in activity], [1, 1])
             self.assertGreaterEqual(activity[-1]["activity_elapsed_seconds"], 0.0)
+
+    def test_completed_stock_analysis_reuses_until_candidate_evidence_changes(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from autotrade.environment.nl.service import StrategyNLService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snap, replay = root / "snap", root / "replay"
+            (snap / "text_library").mkdir(parents=True)
+            (replay / "text_library").mkdir(parents=True)
+            pd.DataFrame(
+                [{"text_id": "f1", "dataset": "anns_d", "ts_codes": "000001.SZ",
+                  "title": "Frozen note", "available_at": "2021-10-01T18:00:00+08:00", "source_hash": "h1"}]
+            ).to_parquet(snap / "text_index.parquet", index=False)
+            pd.DataFrame({"text_id": ["f1"], "body": ["frozen body"]}).to_parquet(
+                snap / "text_library" / "anns_d.parquet", index=False
+            )
+            pd.DataFrame(
+                [{"text_id": "r1", "dataset": "anns_d", "ts_codes": "000001.SZ",
+                  "title": "Replay note", "available_at": "2022-01-04T18:00:00+08:00", "source_hash": "h2"}]
+            ).to_parquet(replay / "text_index.parquet", index=False)
+            pd.DataFrame({"text_id": ["r1"], "body": ["replay body"]}).to_parquet(
+                replay / "text_library" / "anns_d.parquet", index=False
+            )
+            pd.DataFrame(
+                {"ts_code": ["000001.SZ"], "name": ["平安银行"], "exchange": ["SZSE"]}
+            ).to_parquet(snap / "universe.parquet", index=False)
+
+            proxy = ScriptedLLM(["first", "after-event"])
+            activity = []
+            service = StrategyNLService(
+                proxy=proxy,
+                snapshot_dir=snap,
+                replay_dir=replay,
+                log_dir=root / "log",
+                failure_policy="return_error_with_audit",
+                per_call_timeout_seconds=30.0,
+                activity_callback=activity.append,
+            )
+            service.current_when = datetime(2022, 1, 4, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            first = service.run("000001.SZ", prompt="risk", kwargs={}, request={"request_id": "1"})
+            service.current_when = datetime(2022, 1, 4, 13, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            reused = service.run("000001.SZ", prompt="risk", kwargs={}, request={"request_id": "2"})
+            service.current_when = datetime(2022, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            refreshed = service.run("000001.SZ", prompt="risk", kwargs={}, request={"request_id": "3"})
+
+            self.assertEqual([first["content"], reused["content"], refreshed["content"]],
+                             ["first", "first", "after-event"])
+            self.assertEqual([first["cache"]["status"], reused["cache"]["status"],
+                              refreshed["cache"]["status"]], ["miss", "hit", "miss"])
+            self.assertEqual((service.calls, service.executed_calls, service.cache_hits, service.cache_misses),
+                             (3, 2, 1, 2))
+            self.assertEqual(len(proxy.calls), 2)
+            self.assertEqual([a["nl_cache_status"] for a in activity if a["activity_status"] == "finished"],
+                             ["miss", "hit", "miss"])
+            self.assertEqual(len((root / "log" / "nl_requests.jsonl").read_text().splitlines()), 3)
+            self.assertEqual(len((root / "log" / "nl_llm_calls.jsonl").read_text().splitlines()), 2)
+
+    def test_failed_analysis_is_not_reused(self):
+        from autotrade.environment.nl.service import StrategyNLService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snap = self._make_snapshot(root)
+            proxy = ScriptedLLM([LLMProxyError("temporary", timeout=True), "recovered"])
+            service = StrategyNLService(
+                proxy=proxy,
+                snapshot_dir=snap,
+                log_dir=root / "log",
+                failure_policy="return_error_with_audit",
+                per_call_timeout_seconds=30.0,
+            )
+
+            first = service.run("000001.SZ", prompt="risk", kwargs={}, request={"request_id": "1"})
+            second = service.run("000001.SZ", prompt="risk", kwargs={}, request={"request_id": "2"})
+
+            self.assertEqual(first["status"], "error")
+            self.assertEqual(second["content"], "recovered")
+            self.assertEqual((service.executed_calls, service.cache_hits, service.cache_misses), (2, 0, 2))
+            self.assertEqual(len(proxy.calls), 2)
+
+    def test_subagent_event_patterns_ignore_unrelated_new_candidate_text(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from autotrade.environment.nl.service import StrategyNLService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snap, replay = root / "snap", root / "replay"
+            (snap / "text_library").mkdir(parents=True)
+            (replay / "text_library").mkdir(parents=True)
+            pd.DataFrame(
+                [{"text_id": "f1", "dataset": "anns_d", "ts_codes": "000001.SZ",
+                  "title": "Frozen note", "available_at": "2021-10-01T18:00:00+08:00",
+                  "source_hash": "h1"}]
+            ).to_parquet(snap / "text_index.parquet", index=False)
+            pd.DataFrame({"text_id": ["f1"], "body": ["ordinary body"]}).to_parquet(
+                snap / "text_library" / "anns_d.parquet", index=False
+            )
+            pd.DataFrame(
+                [
+                    {"text_id": "r1", "dataset": "anns_d", "ts_codes": "000001.SZ",
+                     "title": "Routine update", "available_at": "2022-01-04T18:00:00+08:00",
+                     "source_hash": "h2"},
+                    {"text_id": "r2", "dataset": "anns_d", "ts_codes": "000001.SZ",
+                     "title": "Risk update", "available_at": "2022-01-05T18:00:00+08:00",
+                     "source_hash": "h3"},
+                ]
+            ).to_parquet(replay / "text_index.parquet", index=False)
+            pd.DataFrame(
+                {"text_id": ["r1", "r2"], "body": ["routine operations", "重大诉讼"]}
+            ).to_parquet(replay / "text_library" / "anns_d.parquet", index=False)
+            pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]}).to_parquet(
+                snap / "universe.parquet", index=False
+            )
+
+            proxy = ScriptedLLM(
+                [tool_call("重大诉讼"), "PASS", tool_call("重大诉讼"), "DOWNGRADE"]
+            )
+            service = StrategyNLService(
+                proxy=proxy,
+                snapshot_dir=snap,
+                replay_dir=replay,
+                log_dir=root / "log",
+                failure_policy="return_error_with_audit",
+                per_call_timeout_seconds=30.0,
+            )
+            service.current_when = datetime(2022, 1, 4, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            first = service.run("000001.SZ", prompt="risk", kwargs={}, request={"request_id": "1"})
+            service.current_when = datetime(2022, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            reused = service.run("000001.SZ", prompt="risk", kwargs={}, request={"request_id": "2"})
+            service.current_when = datetime(2022, 1, 6, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            refreshed = service.run("000001.SZ", prompt="risk", kwargs={}, request={"request_id": "3"})
+
+            self.assertEqual([first["content"], reused["content"], refreshed["content"]],
+                             ["PASS", "PASS", "DOWNGRADE"])
+            self.assertEqual([first["cache"]["event_filter_count"],
+                              reused["cache"]["event_filter_count"],
+                              refreshed["cache"]["event_filter_count"]], [1, 1, 1])
+            self.assertEqual((service.executed_calls, service.cache_hits, service.cache_misses),
+                             (2, 1, 2))
+            self.assertEqual(len(proxy.calls), 4)
 
 
 class CompanyContextStoreTest(unittest.TestCase):
@@ -565,6 +795,21 @@ class TextRetrieverRollingTest(unittest.TestCase):
             retriever.as_of = datetime(2022, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
             self.assertEqual(self._ids(retriever), {"f1", "r1"})
 
+    def test_candidate_body_cache_loads_only_pit_visible_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            retriever = self._retriever(Path(tmp))
+            retriever.as_of = datetime(2022, 1, 4, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            retriever.search("body", ts_code="000001.SZ", max_results=10)
+            corpus = next(iter(retriever._candidate_cache.values()))
+            self.assertEqual(corpus.loaded_body_ids, {("anns_d", "f1")})
+
+            retriever.as_of = datetime(2022, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            retriever.search("body", ts_code="000001.SZ", max_results=10)
+            self.assertEqual(corpus.loaded_body_ids, {("anns_d", "f1"), ("anns_d", "r1")})
+
     def test_visible_index_is_reused_within_one_simulated_tick(self):
         with tempfile.TemporaryDirectory() as tmp:
             from datetime import datetime
@@ -576,6 +821,40 @@ class TextRetrieverRollingTest(unittest.TestCase):
 
             retriever.as_of = datetime(2022, 1, 6, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
             self.assertIsNot(retriever._visible_index(), first)
+
+    def test_candidate_revision_changes_only_when_linked_evidence_becomes_visible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            retriever = self._retriever(Path(tmp))
+            retriever.as_of = datetime(2022, 1, 4, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            before = retriever.candidate_revision("000001.SZ")
+            retriever.as_of = datetime(2022, 1, 4, 13, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            self.assertEqual(retriever.candidate_revision("000001.SZ"), before)
+            retriever.as_of = datetime(2022, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            self.assertNotEqual(retriever.candidate_revision("000001.SZ"), before)
+
+    def test_candidate_revision_can_follow_substantive_event_patterns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            retriever = self._retriever(Path(tmp))
+            retriever.as_of = datetime(2022, 1, 4, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            all_before = retriever.candidate_revision("000001.SZ")
+            risk_before = retriever.candidate_revision("000001.SZ", patterns=("replay body",))
+            other_before = retriever.candidate_revision("000001.SZ", patterns=("处罚",))
+
+            retriever.as_of = datetime(2022, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+            self.assertNotEqual(retriever.candidate_revision("000001.SZ"), all_before)
+            self.assertNotEqual(
+                retriever.candidate_revision("000001.SZ", patterns=("replay body",)),
+                risk_before,
+            )
+            self.assertEqual(
+                retriever.candidate_revision("000001.SZ", patterns=("处罚",)),
+                other_before,
+            )
 
 
 if __name__ == "__main__":
