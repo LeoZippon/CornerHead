@@ -2,8 +2,8 @@
 
 `qmt_client_bridge.py` 是唯一的客户端内策略脚本（全功能 QMT 内置 Python 3.6，仅标准库，不自建网络通道），在一个 5 秒定时回调里同时承担：
 
-1. **实时导出（恒开启）**：原子写 `C:\xquant\outbox\account_snapshot.json`（资产/持仓全量快照），并按增量追加 `orders_YYYYMMDD.jsonl`（新委托或状态/成交量变化）与 `deals_YYYYMMDD.jsonl`（新成交，traded_id 去重）；去重与幂等状态持久化在 `C:\xquant\state\bridge_state.json`，客户端重启不重发。
-2. **订单执行（配置闸门，默认关闭）**：轮询 `C:\xquant\inbox` 的信号 payload，校验后经 `passorder` 提交（幂等 remark，重复到达不重复下单），结果写 `outbox\execute_*.json` / `error_*.json`，payload 移入 `archive\`。**仓位测算属于决策侧**（本机持有同步回来的账户快照）；客户端侧只接受显式 code/side/volume/price。
+1. **实时导出（恒开启）**：原子写 `C:\xquant\outbox\account_snapshot.json`（资产/持仓全量快照），并按增量追加 `orders_YYYYMMDD.jsonl`（新委托或状态/成交量变化）与 `deals_YYYYMMDD.jsonl`（新成交去重）；去重键按交易日与账户隔离（`YYYYMMDD:账户类型:委托号/成交号`，柜台按日重置编号不会撞键），持久化在 `C:\xquant\state\bridge_state.json` 并在保存时剪除早于昨日的条目（客户端重启不重发，状态文件不无限增长）。升级自旧版时无日期前缀的旧去重条目会在首次保存被丢弃，当日已导出记录可能重复导出/通知一次。
+2. **订单执行（配置闸门，默认关闭）**：轮询 `C:\xquant\inbox` 的信号 payload，校验后经 `passorder` 提交（幂等 remark，重复到达不重复下单），结果写 `outbox\execute_*.json` / `error_*.json`，payload 移入 `archive\`。每笔实盘提交前后在 `C:\xquant\state\order_journal_YYYYMMDD.jsonl` 追加 intent 与 submitted/error 终态记录（fsync 落盘），payload 中途异常时已提交订单保有持久终态。**仓位测算属于决策侧**（本机持有同步回来的账户快照）；客户端侧只接受显式 code/side/volume/price。
 
 历史 xtquant/miniQMT 方案（qmt_executor.py 会话式执行、qmt_realtime_export.py 导出）已废弃；`C:\xquant` 下的遗留文件仅作归档。
 
@@ -67,9 +67,11 @@ ops/qmt/qmt_monitor.sh status     # 计算服务器守护：20 秒拉回 data/qm
 
 执行语义：
 
-- 三重独立闸门：配置 `execution.enabled` ∧ payload `execute` ∧ `confirm == payload_id`，全部为真才会 `passorder`；任一为假即 dry_run（校验+回写，不下单）。
+- 三重独立闸门：配置 `execution.enabled` ∧ payload `execute` ∧ `confirm == payload_id`，全部为真才会 `passorder`；任一为假即 dry_run（校验+回写，不下单）。`enabled` 与 `execute` 只接受 JSON 真布尔（字符串 `"false"` 直接拒绝，不再按真值解释）。
+- 严格解析：配置与 payload 的 JSON 拒绝 `NaN/Infinity` 常量；`volume` 必须是 JSON 整数、`price` 必须是有限数值、名义金额上限必须是有限正数。
 - 校验：schema/白名单 strategy_id/当日 trade_date/SH·SZ 代码/BUY 100 股整手/正数量价/单笔与整包名义金额上限/交易时段。
 - 幂等：每单 remark = `MQ:<payload_id>:<序号或自定义 remark>`；提交前对照柜台当日委托 remark 与本地已处理记录，重复到达不重复下单。同一 payload_id 永远只处理一次。
+- 逐单日志：每次 `passorder` 前写 intent、成功后写 submitted、异常写 error 终态到 `state\order_journal_YYYYMMDD.jsonl`；中途异常即中止剩余订单并回写 `error_*.json`（该 payload 不记为已处理，重投时靠 remark 幂等墙保护已提交订单），失败/重启后可按 remark 与柜台当日委托对账。
 - 结果：`outbox\execute_<时间戳>.json`（逐单 submitted/skipped/note）或 `error_<时间戳>.json`（校验失败原因）；原 payload 归档至 `archive\`。
 
 ## 5. 交易日测试建议顺序
@@ -88,4 +90,4 @@ ops/qmt/qmt_monitor.sh status     # 计算服务器守护：20 秒拉回 data/qm
 ops/qmt/qmt_monitor.sh start|stop|status
 ```
 
-每笔新成交推送一条群消息（代码/方向/量价/金额/委托号/时间/策略标记 + 账户总资产/可用/持仓市值/持仓数）；导出端异常按错误内容去重推送一次链路告警。同步产物落 `data/qmt_live/`，已通知状态在 `data/qmt_live/.monitor_state.json`。
+每笔新成交推送一条群消息（代码/方向/量价/金额/委托号/时间/策略标记 + 账户总资产/可用/持仓市值/持仓数），推送失败不标记已通知、下轮自动重试。链路健康按条件各推送一次告警：导出端异常（按错误内容去重）、快照 `generated_at` 超 180 秒未更新、连续 3 轮拉取快照失败；条件解除后推送一次恢复卡片。拉取先落临时文件、校验 scp 返回码（快照另校验 JSON 可解析）后才原子替换本地文件，单个 scp 挂起/超时只影响当轮。同步产物落 `data/qmt_live/`，已通知状态（按日隔离、自动清理早于昨日的条目）与告警锁存在 `data/qmt_live/.monitor_state.json`。

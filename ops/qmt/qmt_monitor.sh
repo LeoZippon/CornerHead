@@ -8,8 +8,12 @@ PYTHON="${QUANT_PYTHON:-$HOME/miniconda3/envs/quant/bin/python}"
 PID_FILE="$REPO_ROOT/.runtime/qmt/monitor.pid"
 LOG_FILE="$REPO_ROOT/logs/qmt_live_monitor.log"
 
+# The pid must exist AND its cmdline must match the monitor script, so a stale
+# pidfile whose pid number was recycled reads as DOWN (webui_stack.sh pattern).
 alive() {
-  [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+  local pid
+  [[ -f "$PID_FILE" ]] && pid="$(cat "$PID_FILE")" && [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null && grep -qa qmt_live_monitor "/proc/$pid/cmdline" 2>/dev/null
 }
 
 case "${1:-status}" in

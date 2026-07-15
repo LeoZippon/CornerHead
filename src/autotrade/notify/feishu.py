@@ -22,17 +22,24 @@ _BASE = "https://open.feishu.cn/open-apis"
 
 
 def load_dotenv_values(path: str | Path = ".env") -> dict[str, str]:
-    """Minimal KEY=VALUE .env reader (no quoting rules beyond strip)."""
+    """Minimal KEY=VALUE .env reader; strips one pair of surrounding quotes.
+
+    The single line-parsing contract for every .env consumer in this repo
+    (``pipelines.assembly.load_dotenv_into_environ`` reuses it), so a value
+    written as ``KEY="value"`` reads identically everywhere."""
     values: dict[str, str] = {}
     path = Path(path)
     if not path.exists():
         return values
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        values[key.strip()] = value.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        values[key.strip()] = value
     return values
 
 

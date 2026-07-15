@@ -16,6 +16,13 @@ in-client contract (docs/deployment_documentation.md):
 
 Config: C:\\xquant\\config\\qmt_bridge.json (see qmt_bridge_config.example.json).
 State:  C:\\xquant\\state\\bridge_state.json (processed payloads + export dedup).
+        Export dedup keys are day-scoped ("YYYYMMDD:account_type:id"); entries
+        older than the previous calendar day are pruned on save, so counters
+        that reset order/deal ids per day never collide and state stays small.
+Journal: C:\\xquant\\state\\order_journal_YYYYMMDD.jsonl gets one "intent"
+        record before every passorder call and one "submitted"/"error"
+        terminal record after it, so a payload that dies mid-loop leaves a
+        persisted terminal state for every order it already submitted.
 Inbox payloads must be published atomically (write tmp name, then rename).
 
 Payload schema (schema_version 2, frozen by this implementation):
@@ -42,6 +49,7 @@ from __future__ import print_function
 import datetime
 import io
 import json
+import math
 import os
 import traceback
 
@@ -99,6 +107,24 @@ def _append_jsonl(path, record):
         os.fsync(handle.fileno())
 
 
+def _reject_json_constant(value):
+    raise ValueError("non-standard JSON constant is not allowed: %s" % value)
+
+
+def _read_json_strict(path):
+    """Load config/payload JSON, rejecting NaN/Infinity/-Infinity tokens."""
+    with io.open(path, "r", encoding="utf-8-sig") as handle:
+        return json.load(handle, parse_constant=_reject_json_constant)
+
+
+def _keep_state_key(key, min_day):
+    """True for day-scoped keys ("YYYYMMDD:...") at or after min_day.
+
+    Legacy un-prefixed keys read False and are dropped on the first save."""
+    day = str(key).split(":", 1)[0]
+    return len(day) == 8 and day.isdigit() and day >= min_day
+
+
 def _load_state():
     global _STATE
     if _STATE is not None:
@@ -117,6 +143,14 @@ def _load_state():
 
 
 def _save_state(state):
+    min_day = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y%m%d")
+    state["order_fingerprints"] = dict(
+        (key, value) for key, value in state["order_fingerprints"].items()
+        if _keep_state_key(key, min_day)
+    )
+    state["seen_deal_ids"] = set(
+        key for key in state["seen_deal_ids"] if _keep_state_key(key, min_day)
+    )
     _atomic_write_json(STATE_PATH, {
         "processed_payloads": state["processed_payloads"],
         "order_fingerprints": state["order_fingerprints"],
@@ -127,9 +161,15 @@ def _save_state(state):
 # ---------------------------------------------------------------------------
 # config
 # ---------------------------------------------------------------------------
+def _finite_positive(value, name):
+    number = float(value)
+    if not (math.isfinite(number) and number > 0):
+        raise ValueError("%s must be a finite positive number" % name)
+    return number
+
+
 def _load_config():
-    with io.open(CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
-        config = json.load(handle)
+    config = _read_json_strict(CONFIG_PATH)
     accounts = config.get("accounts")
     if not isinstance(accounts, list) or not accounts:
         raise ValueError("config.accounts must be a non-empty list")
@@ -139,11 +179,16 @@ def _load_config():
         if not str(row.get("account_id", "")).strip():
             raise ValueError("account_id must not be empty")
     execution = config.get("execution") or {}
+    enabled = execution.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("execution.enabled must be a JSON boolean")
     config["execution"] = {
-        "enabled": bool(execution.get("enabled", False)),
+        "enabled": enabled,
         "allowed_strategy_ids": list(execution.get("allowed_strategy_ids", [])),
-        "max_order_notional": float(execution.get("max_order_notional", 50000)),
-        "max_payload_notional": float(execution.get("max_payload_notional", 100000)),
+        "max_order_notional": _finite_positive(
+            execution.get("max_order_notional", 50000), "execution.max_order_notional"),
+        "max_payload_notional": _finite_positive(
+            execution.get("max_payload_notional", 100000), "execution.max_payload_notional"),
         # Counter mappings are config, not code: doc open question #4 says the
         # exact opType/prType behavior must be verified on the live counter.
         "op_type_buy": int(execution.get("op_type_buy", 23)),
@@ -257,7 +302,9 @@ def _export_cycle(state, accounts):
             if not order_id:
                 continue
             fingerprint = "%s|%s" % (normalized.get("order_status"), normalized.get("traded_volume"))
-            key = "%s:%s" % (account_type, order_id)
+            # Day + account scoping: counters may reset order ids per day, and
+            # STOCK/CREDIT accounts may reuse the same id space.
+            key = "%s:%s:%s" % (day, account_type, order_id)
             if state["order_fingerprints"].get(key) == fingerprint:
                 continue
             state["order_fingerprints"][key] = fingerprint
@@ -267,9 +314,12 @@ def _export_cycle(state, accounts):
         for record in data["DEAL"]:
             normalized = _normalize_deal(record, account)
             traded_id = str(normalized.get("traded_id") or "")
-            if not traded_id or traded_id in state["seen_deal_ids"]:
+            if not traded_id:
                 continue
-            state["seen_deal_ids"].add(traded_id)
+            deal_key = "%s:%s:%s" % (day, account_type, traded_id)
+            if deal_key in state["seen_deal_ids"]:
+                continue
+            state["seen_deal_ids"].add(deal_key)
             _append_jsonl(os.path.join(OUTBOX_DIR, "deals_%s.jsonl" % day),
                           {"exported_at": _now_text(), "kind": "deal", "record": normalized})
             changed = True
@@ -308,6 +358,12 @@ def _validate_payload(payload, config):
         errors.append("strategy_id is not whitelisted in config")
     if str(payload.get("trade_date") or "") != _today():
         errors.append("trade_date must be the client's local date %s" % _today())
+    # Live gates must never depend on truthiness: "false" (string) is truthy.
+    if not isinstance(payload.get("execute"), bool):
+        errors.append("execute must be JSON true or false")
+    confirm = payload.get("confirm")
+    if confirm is not None and not isinstance(confirm, str):
+        errors.append("confirm must be a string when present")
     orders = payload.get("orders")
     if not isinstance(orders, list) or not orders:
         errors.append("orders must be a non-empty list")
@@ -325,12 +381,15 @@ def _validate_payload(payload, config):
             errors.append(prefix + ".code must be an SH/SZ code")
         if side not in ("BUY", "SELL"):
             errors.append(prefix + ".side must be BUY or SELL")
-        try:
-            volume = int(order.get("volume") or 0)
-            price = float(order.get("price") or 0.0)
-        except Exception:
-            errors.append(prefix + ".volume/price must be numeric")
+        volume = order.get("volume")
+        price = order.get("price")
+        if isinstance(volume, bool) or not isinstance(volume, int):
+            errors.append(prefix + ".volume must be a JSON integer")
             continue
+        if isinstance(price, bool) or not isinstance(price, (int, float)) or not math.isfinite(price):
+            errors.append(prefix + ".price must be a finite JSON number")
+            continue
+        price = float(price)
         if volume <= 0 or (side == "BUY" and volume % 100 != 0):
             errors.append(prefix + ".volume must be positive (BUY in 100-share lots)")
         if price <= 0:
@@ -365,10 +424,26 @@ def _existing_remarks(accounts):
     return remarks
 
 
+def _journal_order(event, payload_id, row, error=None):
+    """Persist one per-order journal record (fsynced before returning)."""
+    record = {
+        "logged_at": _now_text(),
+        "event": event,
+        "payload_id": payload_id,
+        "remark": row.get("remark"),
+        "code": row.get("code"),
+        "side": row.get("side"),
+        "volume": row.get("volume"),
+        "price": row.get("price"),
+    }
+    if error:
+        record["error"] = error
+    _append_jsonl(os.path.join(os.path.dirname(STATE_PATH), "order_journal_%s.jsonl" % _today()), record)
+
+
 def _process_payload(path, config, state, ContextInfo):
     execution = config["execution"]
-    with io.open(path, "r", encoding="utf-8-sig") as handle:
-        payload = json.load(handle)
+    payload = _read_json_strict(path)
     payload_id = str(payload.get("payload_id") or os.path.basename(path))
     result = {
         "ok": False,
@@ -386,7 +461,8 @@ def _process_payload(path, config, state, ContextInfo):
         result["error"] = "; ".join(errors)
         return result
 
-    live = bool(execution["enabled"]) and bool(payload.get("execute"))
+    # Both operands are validated JSON booleans by this point.
+    live = execution["enabled"] and payload["execute"]
     if live and str(payload.get("confirm") or "") != payload_id:
         result["error"] = "live execution requires confirm == payload_id"
         return result
@@ -414,14 +490,32 @@ def _process_payload(path, config, state, ContextInfo):
             row["note"] = "skipped: remark already on the counter"
         else:
             op_type = execution["op_type_buy"] if side == "BUY" else execution["op_type_sell"]
-            passorder(  # noqa: F821 - injected by QMT
-                op_type, execution["order_type"], account["account_id"],
-                str(order.get("code")), execution["pr_type_limit"], float(order.get("price")),
-                int(order.get("volume")), "qmt_client_bridge", execution["quick_trade"],
-                remark, ContextInfo,
-            )
+            _journal_order("intent", payload_id, row)
+            try:
+                passorder(  # noqa: F821 - injected by QMT
+                    op_type, execution["order_type"], account["account_id"],
+                    str(order.get("code")), execution["pr_type_limit"], float(order.get("price")),
+                    int(order.get("volume")), "qmt_client_bridge", execution["quick_trade"],
+                    remark, ContextInfo,
+                )
+            except Exception:
+                # Abort the payload: earlier submissions keep their persisted
+                # "submitted" journal records; this order gets an "error"
+                # terminal record. The payload is NOT marked processed, so a
+                # retry payload is possible and the remark idempotency wall
+                # protects the already-submitted orders from resubmission.
+                _journal_order("error", payload_id, row, error=traceback.format_exc())
+                row["note"] = "error: passorder raised"
+                result["orders"].append(row)
+                result["submitted_count"] = submitted
+                result["error"] = (
+                    "passorder failed at orders[%d]; earlier submitted orders stand "
+                    "(see state order journal)" % index
+                )
+                return result
             row["submitted"] = True
             submitted += 1
+            _journal_order("submitted", payload_id, row)
         result["orders"].append(row)
     result["ok"] = True
     result["submitted_count"] = submitted

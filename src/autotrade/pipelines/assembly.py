@@ -35,6 +35,7 @@ from autotrade.environment.sandbox import SandboxSpec
 from autotrade.environment.snapshot import SnapshotConfig
 from autotrade.environment.tools import ToolContext
 from autotrade.environment.web_search import SemanticScholarSearchProvider, TavilySearchProvider
+from autotrade.notify import load_dotenv_values
 
 from .config import ExperimentConfig, RawSnapshotProvider
 from .experiment import ExperimentPipeline
@@ -137,20 +138,18 @@ def _session_config_summary(config: AgentSessionConfig, *, compact_enabled: bool
 
 
 def load_dotenv_into_environ(path: Path, *, keys: tuple[str, ...]) -> tuple[str, ...]:
-    """Load selected .env keys into process env without logging values."""
+    """Load selected .env keys into process env without logging values.
+
+    Line parsing (quote handling included) is shared with every other .env
+    consumer via ``autotrade.notify.load_dotenv_values``."""
     wanted = {key for key in keys if key}
-    if not wanted or not path.exists():
+    if not wanted:
         return ()
     loaded: list[str] = []
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
+    for key, value in load_dotenv_values(path).items():
         if key not in wanted or key in os.environ:
             continue
-        os.environ[key] = value.strip().strip('"').strip("'")
+        os.environ[key] = value
         loaded.append(key)
     return tuple(loaded)
 
