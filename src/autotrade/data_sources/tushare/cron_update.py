@@ -638,6 +638,10 @@ def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path, *, lo
             src_path = str(ctx.repo_root / "src")
             env["PYTHONPATH"] = src_path if not env.get("PYTHONPATH") else f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
             env["PYTHONUNBUFFERED"] = "1"
+            if lock_fd is not None:
+                # The child inherits the held updater flock via pass_fds; the
+                # marker stops download.py from re-acquiring it (deadlock-safe).
+                env["TUSHARE_UPDATE_LOCK_HELD"] = "1"
             process = subprocess.run(
                 command,
                 cwd=ctx.repo_root,

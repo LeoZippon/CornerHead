@@ -746,6 +746,69 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertTrue(did_write)
         self.assertEqual(set(pd.read_parquet(path)["ts_code"]), {"000002.SZ", "000003.SZ"})
 
+    def test_revision_aware_writer_blocks_disproportionate_shrink(self):
+        path = self.raw_dir / "repurchase" / "month=202001.parquet"
+        original = pd.DataFrame([
+            {"ts_code": f"{index:06d}.SZ", "ann_date": "20200105", "amount": 1.0}
+            for index in range(120)
+        ])
+        common.write_parquet(path, original, api_name="repurchase", params={}, fields=list(original.columns), source_hash="old")
+        truncated = original.head(10)  # 110 keys removed: >20 keys and >20%
+        ledger = self.root / "shrink_revision_events.jsonl"
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            did_write = common.write_parquet_revision_aware(
+                path,
+                truncated,
+                api_name="repurchase",
+                params={},
+                fields=list(truncated.columns),
+                source_hash="new",
+                key_columns=["ts_code", "ann_date"],
+                revision_ledger=ledger,
+                allow_key_removal_overwrite=True,
+            )
+        self.assertFalse(did_write)
+        self.assertIn("blocked_shrink_overwrite", output.getvalue())
+        self.assertTrue(pd.read_parquet(path).equals(original))
+        event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(event["write_action"], "blocked_shrink_overwrite")
+
+        # A proportionate correction (a few keys) still overwrites.
+        small = original.head(115)
+        with redirect_stdout(io.StringIO()):
+            did_write = common.write_parquet_revision_aware(
+                path,
+                small,
+                api_name="repurchase",
+                params={},
+                fields=list(small.columns),
+                source_hash="new2",
+                key_columns=["ts_code", "ann_date"],
+                revision_ledger=ledger,
+                allow_key_removal_overwrite=True,
+            )
+        self.assertTrue(did_write)
+        self.assertEqual(len(pd.read_parquet(path)), 115)
+
+    def test_repair_text_available_at_refreshes_sidecar_hash(self):
+        from autotrade.data_sources.tushare.io import file_sha256
+
+        spec = common.TEXT_SPECS["anns_d"]
+        path = self.raw_dir / "anns_d" / "month=202001.parquet"
+        frame = pd.DataFrame([
+            {"ts_code": "000001.SZ", "ann_date": "20200105", "name": "平安银行",
+             "title": "t", "url": "u", "rec_time": "2025-06-01 10:00:00"},
+        ])
+        stamped = common.augment_text_frame(frame.copy(), spec)
+        stamped["available_at"] = "2031-01-01T00:00:00+08:00"  # wrong on purpose
+        common.write_parquet(path, stamped, api_name="anns_d", params={}, fields=list(stamped.columns), source_hash="old")
+        stats = common.repair_text_available_at(str(self.raw_dir), ["anns_d"])
+        self.assertEqual(stats["files_rewritten"], 1)
+        sidecar = json.loads(path.with_suffix(path.suffix + ".meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(sidecar["parquet_sha256"], file_sha256(path))
+
     def test_daily_audit_warns_on_exact_limit_without_pagination_probe(self):
         path = self.raw_dir / "daily" / "trade_date=20200102.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -1617,6 +1617,16 @@ def write_parquet_revision_aware(
         # partition file first or passing allow_key_removal_overwrite.
         if write_action == "overwrite" and event and event["removed_keys"] and not allow_key_removal_overwrite:
             write_action = "skipped_key_removal_overwrite"
+        if write_action == "overwrite" and event and event["removed_keys"] and allow_key_removal_overwrite:
+            # Full-partition pulls accept key removals as source corrections, but a
+            # transiently truncated (non-empty) response must not wipe a partition:
+            # a disproportionate shrink (>20 keys AND >20% of existing keys) blocks.
+            removed = event["removed_keys"]
+            removed_count = removed if isinstance(removed, int) else len(removed)
+            existing_cols = [col for col in key_columns if col in old_df.columns]
+            old_key_count = len(old_df.drop_duplicates(existing_cols)) if existing_cols else len(old_df)
+            if removed_count > 20 and old_key_count > 0 and removed_count > 0.2 * old_key_count:
+                write_action = "blocked_shrink_overwrite"
         if revision_ledger and event:
             event = finalize_revision_event(
                 event,
@@ -1634,6 +1644,12 @@ def write_parquet_revision_aware(
             print(
                 f"{api_name} {path} new pull removes {event['removed_keys']} existing keys; "
                 "skipped_key_removal_overwrite (delete the partition to accept a source retraction)"
+            )
+            return False
+        if write_action == "blocked_shrink_overwrite":
+            print(
+                f"{api_name} {path} new pull would remove a disproportionate share of existing keys; "
+                "blocked_shrink_overwrite (kept the old partition; delete it to accept a mass retraction)"
             )
             return False
     write_parquet(
@@ -2404,6 +2420,20 @@ def augment_text_frame(df: pd.DataFrame, spec: TextDataset) -> pd.DataFrame:
         )
     return df
 
+def _refresh_sidecar_parquet_hash(path: Path) -> None:
+    """Keep the sidecar's parquet_sha256 equal to the on-disk bytes after an
+    in-place repair rewrite, or the integrity audit reports the pair as a torn
+    write. Only the hash is touched; provenance fields stay as downloaded."""
+    sidecar = path.with_suffix(path.suffix + ".meta.json")
+    if not sidecar.exists():
+        return
+    meta = json.loads(sidecar.read_text(encoding="utf-8"))
+    meta["parquet_sha256"] = file_sha256(path)
+    tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
+    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(sidecar)
+
+
 def repair_text_available_at(raw_dir: str, datasets: list[str]) -> dict[str, Any]:
     """Re-derive available_at for existing text partitions under the current rule.
 
@@ -2434,6 +2464,7 @@ def repair_text_available_at(raw_dir: str, datasets: list[str]) -> dict[str, Any
                 tmp = path.with_suffix(path.suffix + ".tmp")
                 repaired.to_parquet(tmp, index=False)
                 tmp.replace(path)
+                _refresh_sidecar_parquet_hash(path)
                 files += 1
                 changed_rows += delta
         stats["datasets"][dataset] = {"files_rewritten": files, "rows_changed": changed_rows}

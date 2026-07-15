@@ -302,7 +302,7 @@ flowchart LR
 - 已存在且旁路元数据覆盖请求范围的分区跳过。
 - 开放月份、开放年份和近期交易日会按配置强制刷新。
 - 远端空响应不会覆盖本地非空分区，除非显式允许。
-- 重拉若会删除已有业务键，默认阻断覆盖并写修正账本；接受源端真实撤回需先删除对应分区文件。
+- 重拉若会删除已有业务键，默认阻断覆盖并写修正账本；接受源端真实撤回需先删除对应分区文件。事件/打板整分区拉取按源端修正接受删键（账本记录），但单次删除超过 20 个键且超过现有键 20% 时按截断风险阻断（`blocked_shrink_overwrite`）。
 - 公告月分区始终按完整自然月拉取；窗口起点截断到月中会在整月覆盖时删除早先公告。
 - 触发源端修正时写入修正账本。
 - 交易日历会向后补足，供次日盘前判断。
@@ -342,7 +342,7 @@ TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_sched
 
 回测的逐 tick 数据视图按真实落库任务的约定完成时间放行数据；纯审计任务不落新数据，也不能成为可见性节点。完整门禁语义见 §3.3。
 
-runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw/PIT，下载子进程继承同一 flock，避免 runner 异常退出后残留写进程失锁。任一 raw 或 PIT 落库任务在第一条写命令前把 `data/raw/.raw_generation.json` 标为 `updating`，全部成功后发布新的 `committed` 湖世代；失败为 `dirty`，只能由同 job、区间和命令精确重跑恢复。纯审计任务不改变世代。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
+runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw/PIT，下载子进程继承同一 flock（经 `TUSHARE_UPDATE_LOCK_HELD` 标记避免重复加锁），避免 runner 异常退出后残留写进程失锁。手工 `tushare_download.py` 对生产 `data/raw` 的写命令同样非阻塞获取该独占锁，锁忙时直接失败而不是与 cron 或发布竞态。任一 raw 或 PIT 落库任务在第一条写命令前把 `data/raw/.raw_generation.json` 标为 `updating`，全部成功后发布新的 `committed` 湖世代；失败为 `dirty`，只能由同 job、区间和命令精确重跑恢复。纯审计任务不改变世代。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
 
 实验不直接跟随 live 目录变化：首次启动在锁空闲且 generation committed 时按需发布 `data/research_releases/<generation_id>/`；更新锁忙或 generation 为 `updating` / `dirty` 时立即复用最近完整版本。raw Parquet、配对 sidecar 和 PIT Parquet 使用硬链接，其余小文件与质量状态使用副本，实时目录 `rt_min_live` 不进入版本。发布后所有 Fold、交易日历和恢复运行都读取同一个实验 pin，因此数据更新无需中断实验。部署后须先在 committed 世代完成一次 bootstrap；此前若更新锁正忙会立即失败而非等待。
 
@@ -511,7 +511,7 @@ runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw/P
 |---|---|---|
 | 深圳09:30分钟条与最终开盘竞价量额口径不一致 | 2025-01-16以前的竞价代理 | 原始数据不改写；环境层生成带规则标记的校正列，覆盖期内直接使用 `stk_auction` |
 | 日线和分钟线单位不同 | 横向校验和 snapshot 拼接 | `daily.vol=手`、`daily.amount=千元`；分钟 `vol=股`、`amount=元` |
-| `share_float_complete` 可能仍有触顶风险 | 解禁供给压力 | 专用入口补全并生成 union；exact-6000 标记 `source_cap_risk` |
+| `share_float_complete` 可能仍有触顶风险 | 解禁供给压力 | 专用入口补全并生成 union；exact-6000 标记 `source_cap_risk`；canonical 行按声明业务键去重（数值修订不再产生重复事件行），重建以业务键覆盖不缩水为门禁 |
 | 历史分钟线与日线股票池不完全一致 | 早期 NEEQ/BSE 迁移、停牌退市 | 正式分钟审计用本地分钟覆盖口径；daily 覆盖对比只做专项 |
 | 日频表覆盖口径不同 | `daily`、`daily_basic`、`stk_limit` 等 join | Environment snapshot 显式处理缺失，不默认全集一致 |
 | 当前公司简介缺少历史可见时间 | 历史文本 Prompt 可能泄露未来业务描述 | 历史回测不直接使用 `stock_company.introduction`；公司上下文由历史名称、行业、主营业务构成和 as-of 文本生成 |
@@ -521,6 +521,7 @@ runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw/P
 | 同一标的集合近似三类信用资格 | 担保品、融资和融券可执行性与成本 | 回放临时共用成交日标的集合并采用假设费率；真实名单、券源、费率和风控数据到位后再拆分 |
 | 财务多版本和公告日缺失 | 财务按时点可见 | 原始数据保留多版本；环境层构造 `fundamental_events` 后选择可见版本 |
 | 宏观发布时间不精确 | 月度/季度数据 | 当前按源时间或保守延后；发布日程尚未接入历史关联，可能过度延迟或不够精确 |
+| 宏观源端修订以原发布时间覆盖历史值 | range 文件整体替换、旧值不保留，修订会以历史 `available_at` 进入历史 PIT 快照 | 已知风险：修正账本仅记录发生过修订；旧值 vintage 保留机制待按实测修订频率评估 |
 | 文本重复推送和转载 | 大模型证据 | raw 保留；快照层按截断文本载荷和可见时间去重，前缀相同的不同载荷可能被合并 |
 | 质量报告未绑定新鲜度和数据摘要 | 旧报告可能为新快照放行 | 门禁只检查存在、解析和状态；运行前需人工确认报告覆盖当前数据，后续应增加绑定校验 |
 | `anns_d.rec_time` / `report_rc.create_time` 对回填历史是 TuShare 采集时间（如 2025），不是发布时间 | 若直接使用会让历史公告/盈利预测在时间墙下不可见 | 入库按 -1~+3 天合理性检查回退（见 §1.7）；存量分区必须满足该规则 |

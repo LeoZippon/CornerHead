@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import sys
 import time
 from datetime import date, datetime, timezone
@@ -1109,10 +1110,6 @@ def download_event_flow(args: argparse.Namespace) -> int:
             windows = month_windows(args.start_date, args.end_date)
             dataset_windows = [(s, e, m) for s, e, m in windows if e >= start_date]
             download_event_range_month(client, raw_dir, spec, dataset_windows, args.force, event_page_limit(spec, args.page_limit), revision_ledger, allow_empty_revision_overwrite)
-        elif spec.strategy == "day":
-            days = date_range_days(args.start_date, args.end_date)
-            dataset_days = [day for day in days if day >= start_date]
-            download_event_day_dataset(client, raw_dir, spec, dataset_days, args.force, revision_ledger, allow_empty_revision_overwrite)
         else:
             raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {dataset}")
     if required_zero_skipped:
@@ -1235,34 +1232,6 @@ def download_event_range_month(
         if index % 24 == 0:
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-
-def download_event_day_dataset(
-    client: TuShareClient,
-    raw_dir: Path,
-    spec: EventDataset,
-    days: list[str],
-    force: bool,
-    revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
-) -> None:
-    written = 0
-    skipped = 0
-    total_rows = 0
-    for index, day in enumerate(days, start=1):
-        path = raw_dir / spec.api_name / f"date={day}.parquet"
-        if path.exists() and not force:
-            skipped += 1
-            if index % 250 == 0:
-                print(f"{spec.api_name} days {index}/{len(days)} skipped={skipped} written={written} rows_written={total_rows}")
-            continue
-        params = {"start_date": day, "end_date": day}
-        result = client.query(spec.api_name, params, spec.fields)
-        rows = write_event_result(path, result, spec, params, revision_ledger, allow_empty_revision_overwrite)
-        total_rows += rows
-        written += 1 if rows or not (path.exists() and parquet_rows(path) > 0 and frame(result).empty) else 0
-        if index % 250 == 0:
-            print(f"{spec.api_name} days {index}/{len(days)} skipped={skipped} written={written} rows_written={total_rows}")
-    print(f"{spec.api_name} done days={len(days)} skipped={skipped} written={written} rows_written={total_rows}")
 
 def download_board_trading(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
@@ -1821,23 +1790,38 @@ def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dic
             continue
         df = pd.read_parquet(path)
         df["download_path"] = source
-        df["source_file"] = str(path)
+        # Repo-relative provenance: an absolute host path would flow into the
+        # Agent-visible events snapshot (isolation contract, env docs §2.2).
+        df["source_file"] = os.path.relpath(str(path), str(Path.cwd()))
         df["source_cap_risk"] = parquet_rows(path) >= SHARE_FLOAT_ROW_LIMIT
         frames.append(df)
     union = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=SHARE_FLOAT_FIELDS.split(","))
     before = len(union)
-    key_columns = ["ts_code", "ann_date", "float_date", "float_share", "float_ratio", "holder_name", "share_type"]
+    # Canonical rows dedup on the DECLARED business key only: float_share /
+    # float_ratio are source-revisable values, so keying on them kept every
+    # revision as a separate event row. Input-file order defines precedence
+    # (first occurrence wins); raw partitions keep all revisions.
+    key_columns = ["ts_code", "ann_date", "float_date", "holder_name", "share_type"]
     existing_key_columns = [col for col in key_columns if col in union.columns]
     if existing_key_columns and not union.empty:
         union = union.drop_duplicates(existing_key_columns).reset_index(drop=True)
-    existing_rows = parquet_rows(output) if output.exists() else None
     allow_shrink = bool(getattr(args, "allow_union_shrink", False))
-    if existing_rows is not None and len(union) < existing_rows and not allow_shrink:
-        raise RuntimeError(
-            "share_float_complete union rebuild would shrink "
-            f"{output} from {existing_rows} to {len(union)} rows using {len(files)} input files; "
-            "check active/archive process roots or pass --allow-union-shrink for an intentional rebuild."
-        )
+    if output.exists() and existing_key_columns and not allow_shrink:
+        # Guard business-key coverage, not raw row count: value-revision dedup may
+        # legitimately drop rows, but the distinct declared keys must not shrink.
+        old_key_cols = [
+            col for col in existing_key_columns
+            if col in set(pq.ParquetFile(output).schema_arrow.names)
+        ]
+        if old_key_cols:
+            existing_key_count = len(pd.read_parquet(output, columns=old_key_cols).drop_duplicates(old_key_cols))
+            new_key_count = len(union.drop_duplicates(old_key_cols)) if not union.empty else 0
+            if new_key_count < existing_key_count:
+                raise RuntimeError(
+                    "share_float_complete union rebuild would shrink distinct business keys of "
+                    f"{output} from {existing_key_count} to {new_key_count} using {len(files)} input files; "
+                    "check active/archive process roots or pass --allow-union-shrink for an intentional rebuild."
+                )
     union_source_hash = stable_hash({"input_files": [str(path) for path, _ in files], "rows": len(union), "columns": list(union.columns)})
     write_parquet_revision_aware(
         output,
@@ -2308,6 +2292,22 @@ def download_intraday(args: argparse.Namespace) -> int:
         except Exception as exc:
             raise RuntimeError(f"{STK_MINS_API_NAME} ts_code={ts_code} year={year} failed: {exc}") from exc
         df = augment_stk_mins_frame(frame(result))
+        if path.exists() and args.force:
+            # A partial-window --force must not replace the whole stock-year file:
+            # rows outside the requested window are kept, the window is replaced.
+            existing = pd.read_parquet(path)
+            if not existing.empty and "trade_date" in existing.columns:
+                dates = existing["trade_date"].astype(str)
+                outside = existing[(dates < str(year_start)) | (dates > str(year_end))]
+                if not outside.empty:
+                    df = pd.concat([outside, df], ignore_index=True, sort=False)
+                    dedup_cols = [c for c in ("ts_code", "trade_time") if c in df.columns]
+                    if dedup_cols:
+                        df = df.drop_duplicates(dedup_cols, keep="last")
+                    sort_cols = [c for c in ("trade_date", "trade_time") if c in df.columns]
+                    if sort_cols:
+                        df = df.sort_values(sort_cols, kind="stable")
+                    df = df.reset_index(drop=True)
         meta_params = dict(params)
         meta_params.update({
             "dataset": STK_MINS_DATASET,
@@ -2597,8 +2597,6 @@ def download_text(args: argparse.Namespace) -> int:
             download_text_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "time_range_month":
             download_text_time_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, args.major_news_src, revision_ledger, allow_empty_revision_overwrite)
-        elif spec.strategy == "news_src_month":
-            download_text_news_src_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, args.news_src, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "news_src_day":
             download_text_news_src_day(client, raw_dir, spec, dataset_days, args.force, page_limit, args.news_src, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "day":
@@ -2656,7 +2654,11 @@ def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: TextDa
             fields=list(df.columns),
             source_hash=result.source_hash,
             key_columns=list(spec.key_columns),
-            date_columns=[spec.time_column, spec.date_column, "available_at"],
+            # range_month queries window on the DATE column (ann_date/report_date);
+            # retention must match it — keying on the collection-time column keeps
+            # out-of-window rec_time rows forever, so source revisions/retractions
+            # of anns_d/report_rc could never be purged.
+            date_columns=[spec.date_column, spec.time_column, "available_at"],
             start_date=start_date,
             end_date=end_date,
             revision_ledger=revision_ledger,
@@ -2690,53 +2692,6 @@ def download_text_time_range_month(
             params = {"start_date": as_datetime_window(start_date), "end_date": as_datetime_window(end_date, end=True)}
             if source:
                 params["src"] = source
-            if should_skip_existing_partition(path, force=force, requested_params=params):
-                skipped += 1
-                continue
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            meta_params = dict(params)
-            meta_params["month"] = month
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            df = augment_text_frame(frame(result), spec)
-            rows = write_window_merged_partition(
-                path,
-                df,
-                api_name=spec.api_name,
-                params=meta_params,
-                fields=list(df.columns),
-                source_hash=result.source_hash,
-                key_columns=list(spec.key_columns),
-                date_columns=[spec.time_column, spec.date_column, "available_at"],
-                start_date=start_date,
-                end_date=end_date,
-                revision_ledger=revision_ledger,
-                allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-            )
-            written += 1
-            total_rows += rows
-            if index % 24 == 0:
-                print(f"{spec.api_name}/{source_suffix} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
-        print(f"{spec.api_name}/{source_suffix} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
-
-def download_text_news_src_month(
-    client: TuShareClient,
-    raw_dir: Path,
-    spec: TextDataset,
-    windows: list[tuple[str, str, str]],
-    force: bool,
-    page_limit: int,
-    sources: list[str],
-    revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
-) -> None:
-    for source in selected_news_sources(sources):
-        source_suffix = f"src={safe_partition_value(source)}"
-        written = 0
-        skipped = 0
-        total_rows = 0
-        for index, (start_date, end_date, month) in enumerate(windows, start=1):
-            path = raw_dir / spec.api_name / source_suffix / f"month={month}.parquet"
-            params = {"src": source, "start_date": as_datetime_window(start_date), "end_date": as_datetime_window(end_date, end=True)}
             if should_skip_existing_partition(path, force=force, requested_params=params):
                 skipped += 1
                 continue
@@ -3432,8 +3387,39 @@ def parse_args() -> argparse.Namespace:
     add_repair_text_parser(sub)
     return parser.parse_args()
 
+def _hold_production_update_lock(args: argparse.Namespace):
+    """Manual runs that mutate the production lake take the cron updater's
+    exclusive flock (data docs §2.2: 正式 raw/PIT 源写入必须取得独占锁), so they
+    cannot race a cron update or a research-release publish. Cron children
+    inherit the held lock and mark it via TUSHARE_UPDATE_LOCK_HELD=1."""
+    import fcntl
+
+    if os.environ.get("TUSHARE_UPDATE_LOCK_HELD") == "1":
+        return None
+    raw_dir = Path(str(getattr(args, "raw_dir", "") or "data/raw"))
+    try:
+        if raw_dir.resolve() != (Path.cwd() / "data" / "raw").resolve():
+            return None
+    except OSError:
+        return None
+    lock_path = Path(".runtime/tushare/locks/tushare_update.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        handle.close()
+        raise SystemExit(
+            "tushare updater lock is busy (a cron update or release publish is using data/raw); "
+            "retry after it finishes instead of racing the production lake"
+        )
+    return handle
+
+
 def main() -> int:
     args = parse_args()
+    # Held (not closed) for the process lifetime; the OS releases it on exit.
+    _production_lock = _hold_production_update_lock(args)  # noqa: F841
     if args.command == "download":
         return download_selected_tier(args)
     if args.command == "update":
