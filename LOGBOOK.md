@@ -1575,3 +1575,10 @@
 - `lap-test16` 完整 Valid 的策略计算占 473.9 秒；默认模板现对冻结 `snapshot_dir` 只读一次、只投影需要列。
 - Prompt 明确全局 `asof_version` 会被分钟域推进；滚动重型特征应在固定研究时点按实际日期或策略 key 缓存，避免无关分钟更新反复重算。
 - 不新增 Environment 缓存、接口或硬围栏；模板与工具流 119 tests 通过，提示词导出、Python 编译和 `git diff --check` 通过。
+
+2026-07-15 审计修复批次（check.md 全量落地）
+
+- 按三轮审计合并清单 `check.md` 实施修复，共 9 个本地提交（fix/audit-remediation 分支）：Broker 零股一次性卖出与盘后/现金操作路由、Probe `missing_key_in_strategy` 提示、筛选放行指数级 events 行、回放槽以决策锚点为可见下界（缓存格式 v3）、冻结前统一收口+双 hash 验收+完整性异常终止、恢复期镜像 fail-fast 与 digest 校验、控制台 API allowlist 与 test 揭示门禁、QMT 桥/监控按日去重+严格 JSON+逐单日志、trim 空改写修复与 Explore 用量入账、遗留别名/死代码清理、逐 tick 行情二进制打包（RPC 编解码 23.3ms→2.2ms/tick，约省 390s/61 日回放）。
+- 文档同步：环境/管线/数据/部署/参数六文档与提示词全部对齐现行为；QMT §4.2–4.3 改写为已实现 schema v2 三重闸门；PROMPTS.md 两次重导出。
+- 三个切片显式缓行并记录触发条件（见 check.md 状态注记）：质量报告 changed_datasets 精确门禁、Timeview SSE 节假日日历、params.json 完整 resolved config 持久化。
+- Validation: 全量 `~/miniconda3/envs/quant/bin/python -m unittest discover -t . -s tests` -> 826 OK（新增约 21 项回归）；真实 Docker E2E 2 tests OK；沙箱镜像重建且内置 driver 与源码 md5 一致；`git diff --check` clean。
