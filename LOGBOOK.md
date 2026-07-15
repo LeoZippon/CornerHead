@@ -1595,4 +1595,5 @@
 
 - lzp-test18 详情页元学习面板下的 `沙箱镜像` 行貌似报错，实为成功构建：BuildKit 把正常构建进度写到 stderr，而前端将整条 `sandbox_image_update` 记录 `JSON.stringify` 原样倾倒，4KB 的 `stderr_tail` 日志墙读起来像错误。账本与实验状态核实无任何故障（status=ok、returncode=0、派生镜像已被 Q1 使用、worker error=null）。
 - 修复：`app.js` 新增状态感知渲染——成功仅显示镜像 tag、短 digest、耗时、GC 数；skip/disabled 显示一句话说明；failed/timeout/rejected 才显示红色错误块 + 日志尾部。数据层不动（宿主侧审计记录合理，Agent 可见投影本就剔除 stderr_tail）。
-- Validation: `node --check` OK；DOM shim 下对真实账本记录及 4 类失败态渲染断言通过；静态资源 no-store 即刷即生效。
+- Validation: `node --check` OK；DOM shim 下对真实账本记录及 4 类失败态渲染断言通过。
+- 部署：生产页面的静态 SPA 由前端机 nginx 本地副本提供，须 `ops/webui/webui_stack.sh sync` 推送；已同步并重启 console（旧进程早于本批 server.py 变更，缺 no-store 中间件）。端到端健康 ok，lzp-test18 worker 不受影响（独立会话，心跳正常）。
