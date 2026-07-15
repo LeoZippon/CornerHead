@@ -1597,3 +1597,9 @@
 - 修复：`app.js` 新增状态感知渲染——成功仅显示镜像 tag、短 digest、耗时、GC 数；skip/disabled 显示一句话说明；failed/timeout/rejected 才显示红色错误块 + 日志尾部。数据层不动（宿主侧审计记录合理，Agent 可见投影本就剔除 stderr_tail）。
 - Validation: `node --check` OK；DOM shim 下对真实账本记录及 4 类失败态渲染断言通过。
 - 部署：生产页面的静态 SPA 由前端机 nginx 本地副本提供，须 `ops/webui/webui_stack.sh sync` 推送；已同步并重启 console（旧进程早于本批 server.py 变更，缺 no-store 中间件）。端到端健康 ok，lzp-test18 worker 不受影响（独立会话，心跳正常）。
+
+2026-07-15 策略分析审阅人 PIT 接地
+
+- lcd-test1_ 的 Step 分析（deepseek-v4-pro）把 `ctx.snapshot_dir` 误判为前视泄露：审阅人只拿到策略代码+验证结果，没有 ctx 数据面契约，于是臆测冻结快照可能含未来数据。经核实该 Fold 决策锚点 2025-12-31 23:59:59 早于验证期 20260101–20260131，快照物理上看不到未来，属误诊；真正可疑处是近乎空仓致夏普虚高（其自身假设 #2）。
+- 修复：在 `fold_analysis.py` 抽出共享常量 `_ENV_DATA_INVARIANTS`（snapshot_dir 冻结基线 / asof_dir 逐 tick 滚动 PIT / 实时走 bars·price / PIT·T+1·substep·筛选由环境强制），注入 STEP 与 FOLD 两个系统提示，并把审阅重心从「指控环境泄露」转向「策略是否误用接口、收益是过拟合还是结构性」。仅提示词接地、无新围栏、无契约变更。
+- Validation: 导入与两提示均含该块、无 f-string 花括号泄漏；test_interactive_pipeline 44 OK；export_prompts OK。

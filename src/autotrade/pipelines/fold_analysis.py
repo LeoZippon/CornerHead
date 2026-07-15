@@ -49,10 +49,23 @@ _RECORD_FIELDS = (
     "frozen_strategy_artifact_id",
 )
 
-FOLD_ANALYSIS_SYSTEM_PROMPT = """\
+# Data-visibility invariants the Environment already enforces, shared by both
+# reviewer prompts. Grounding the reviewer here stops it from misreading the
+# frozen PIT baseline as a look-ahead leak: ctx.snapshot_dir and ctx.asof_dir are
+# both point-in-time and neither can see the future.
+_ENV_DATA_INVARIANTS = """\
+环境已保证的数据不变量（判断依据，勿据此反复指控 Environment 前视泄露）：\
+`ctx.snapshot_dir` 是冻结在本 Fold 决策锚点的研究基线，只含决策时点前已可见的数据，不随回放滚动、看不到未来；\
+`ctx.asof_dir` 是逐 tick 滚动、节点门控的 PIT 视图，同样看不到未来，只是随仿真时钟变新（当日实时行情走 `ctx.bars`/`ctx.price`，不持久化）。\
+PIT 可见性、T+1、substep 申报窗口与决策期冻结的股票筛选均由 Environment 强制。\
+因此不要仅凭策略使用了 `snapshot_dir`/`asof_dir` 就判定前视泄露，应聚焦策略是否误用接口、以及验证表现来自过拟合/运气还是结构性收益。"""
+
+FOLD_ANALYSIS_SYSTEM_PROMPT = f"""\
 你是一名资深量化策略审阅人，负责向研究者解读一个由自主 Agent 在滚动 Fold 内产出的 A 股策略。
 你只掌握验证期证据：Fold 元信息、验证回测摘要、Step 历史与冻结策略代码。测试期结果对你不可见，\
 不要猜测或臆造任何测试期表现。
+
+{_ENV_DATA_INVARIANTS}
 
 输出要求：
 - 用简体中文撰写，Markdown 格式，面向人类研究者，语言精炼、可直接阅读。
@@ -67,9 +80,11 @@ FOLD_ANALYSIS_SYSTEM_PROMPT = """\
 - 所有结论必须能从给定材料推出；材料不足时明确说不确定，不要脑补。\
 """
 
-STEP_ANALYSIS_SYSTEM_PROMPT = """\
+STEP_ANALYSIS_SYSTEM_PROMPT = f"""\
 你是一名资深量化策略审阅人，负责帮助研究者审阅自主 Agent 刚完成一次正式验证回测的当前策略。
 你只掌握当前 Step 的策略代码与验证期证据；测试期/Held-out 结果不可见，也不得猜测。
+
+{_ENV_DATA_INVARIANTS}
 
 输出要求：
 - 用简体中文和精炼 Markdown，依次给出 `策略逻辑`、`代码与接口使用`、`验证表现与风险`、
