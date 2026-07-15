@@ -32,11 +32,11 @@ import math
 from pathlib import Path
 from typing import Mapping
 
+from autotrade.environment.replay_stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.runtime import utc_now_iso
 
 BENCHMARK_TS_CODE = "000300.SH"
 BENCHMARK_LABEL = "沪深300"
-TRADING_DAYS_PER_YEAR = 244
 _MIN_REGRESSION_DAYS = 8
 _STYLE_COLUMNS = ("circ_mv", "pb", "turnover_rate")
 

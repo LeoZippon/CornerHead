@@ -14,7 +14,9 @@ import pandas as pd
 
 from autotrade.environment.broker import SimBroker
 
-TRADING_DAYS_PER_YEAR = 252
+# A-share trading calendar (~244 sessions/year); style_analysis annualizes with
+# the same constant so detailed_return and the Barra-lite sidecar agree.
+TRADING_DAYS_PER_YEAR = 244
 
 
 @dataclass

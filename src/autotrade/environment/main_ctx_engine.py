@@ -1173,6 +1173,13 @@ def _release_delayed_actions(
     ready_ids: set[int] = set()
     releasable: list[_DelayedAction] = []
     for item in ready:
+        if _action_name(item.action) in ("transfer", "direct_repay"):
+            # Cash operations are not exchange orders: transfer is a pre-09:14
+            # request its queue gates itself, direct_repay settles immediately —
+            # neither needs an orderable window or a later fill bar.
+            releasable.append(item)
+            ready_ids.add(item.seq)
+            continue
         generated_at = _parse_datetime(item.generated_at)
         generated_window = _orderable_window_id(generated_at) if generated_at is not None else None
         ready_window = _orderable_window_id(item.ready_at)
@@ -1367,6 +1374,12 @@ def _place_actions_at_tick(
                 action=_jsonable(action), reason="not_orderable_tick",
             )
             continue
+        if name == "direct_repay":
+            # Immediate cash settlement (直接还款不经过撮合): needs an orderable
+            # tick like any counter instruction, but no activation/fill bar.
+            if _submit_order(broker, action, False):
+                placed_actions.append(dict(action))
+            continue
         fill_index = tick.activate_index
         if fill_index is None or fill_index >= n_real:
             broker.record_event(
@@ -1536,7 +1549,7 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
         _, op_type = broker.account_op_for_action(name)
     except ValueError:
         return False
-    shares, amount_reject = broker.validate_share_amount(action.get("amount"), ts_code)
+    shares, amount_reject = broker.validate_order_amount(name, ts_code, action.get("amount"))
     if amount_reject is not None:
         broker.reject_submission(
             ts_code=ts_code,
@@ -1624,11 +1637,13 @@ def _execute_afterhours_action(broker: SimBroker, action: dict[str, object], *, 
         broker.reject_submission(action=name, reason="invalid_limit_price", **reject_kwargs)
         return True
     amount = action.get("amount")
+    resolved_close = False
     if name == "close":
         resolved = _resolve_close(broker, action, ts_code)
         if resolved is None:
             return False
         name, amount = resolved
+        resolved_close = True
         reject_kwargs["amount"] = amount
     if not afterhours_available(ts_code, trade_date):
         broker.reject_submission(action=name, reason="afterhours_not_available", **reject_kwargs)
@@ -1636,6 +1651,16 @@ def _execute_afterhours_action(broker: SimBroker, action: dict[str, object], *, 
     if name in {"short", "fin_buy"}:
         broker.reject_submission(action=name, reason="afterhours_op_unsupported", **reject_kwargs)
         return True
+    if not resolved_close:
+        # Same amount contract as every other submission path: a missing/invalid
+        # amount is a reject, never an implicit full liquidation at the close.
+        # A broker-resolved close amount skips this gate so _reduce can report
+        # the precise blocker (e.g. t_plus_one_no_sellable) instead.
+        shares, amount_reject = broker.validate_order_amount(name, ts_code, amount)
+        if amount_reject is not None:
+            broker.reject_submission(action=name, reason=amount_reject, **reject_kwargs)
+            return True
+        amount = shares
     bar = broker.market.bar(trade_date, ts_code)
     close = None
     if bar is not None and pd.notna(bar.get("close")):

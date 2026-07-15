@@ -1028,7 +1028,7 @@ def _build_ctx(state, snapshot_dir, model_dir, state_dir, staging_root):
             budget = float(budget_minutes) if budget_minutes is not None else 0.0
         except (TypeError, ValueError):
             budget = 0.0
-        if budget <= 0:
+        if not math.isfinite(budget) or budget <= 0:
             raise ValueError(
                 "ctx.substep(name, budget_minutes=B) requires B > 0 minutes (the time this "
                 "block may take, which is also its real-time ceiling); use a small value such "

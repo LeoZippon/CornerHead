@@ -115,6 +115,16 @@ class BrokerPrimitiveTest(unittest.TestCase):
         fractional = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=100.5)
         self.assertEqual(fractional.reject_reason, "invalid_amount")
 
+    def test_validate_order_amount_is_direction_aware(self):
+        broker = self.make_broker()
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.roll_to_date("20220105")
+        self.assertEqual(broker.validate_order_amount("buy", "000001.SZ", 350), (0, "amount_not_lot_aligned"))
+        self.assertEqual(broker.validate_order_amount("sell", "000001.SZ", 1000), (1000, None))
+        # A missing amount rejects on the strategy path; it never means sell-all.
+        self.assertEqual(broker.validate_order_amount("sell", "000001.SZ", None)[1], "amount_below_lot_size")
+        self.assertEqual(broker.validate_order_amount("sell", "000001.SZ", 0)[1], "amount_below_lot_size")
+
     def test_working_orders_reserve_cash_and_sellable_shares(self):
         broker = self.make_broker()
         broker.roll_to_date("20220104")
@@ -841,6 +851,22 @@ class CorporateActionTest(unittest.TestCase):
         broker.roll_to_date("20220106")
         self.assertEqual(broker.sellable_quantity("stock", "000001.SZ"), 1500)
 
+    def test_odd_lot_position_from_bonus_can_exit_in_one_shot(self):
+        # 10送3.5 turns 1000 shares into 1350: whole lots plus the ENTIRE 50-share
+        # odd tail are declarable (零股必须一次性申报卖出); partial odd pieces reject.
+        actions = {"20220105": [self.action(cash_per_share=0.0, stock_per_share=0.35, div_listdate="20220105")]}
+        broker = self.make_broker(actions)
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.roll_to_date("20220105")
+        self.assertEqual(broker.stock.positions["000001.SZ"].quantity, 1350)
+        partial_odd = broker.execute("000001.SZ", "sell", trade_date="20220105", raw_price=10.0, amount=120)
+        self.assertEqual(partial_odd.reject_reason, "amount_not_lot_aligned")
+        lot_plus_tail = broker.execute("000001.SZ", "sell", trade_date="20220105", raw_price=10.0, amount=150)
+        self.assertEqual(lot_plus_tail.status, "filled")
+        remainder = broker.execute("000001.SZ", "sell", trade_date="20220105", raw_price=10.0, amount=1200)
+        self.assertEqual(remainder.status, "filled")
+        self.assertEqual(broker.position_quantity("000001.SZ"), 0)
+
     def test_share_bonus_listing_on_ex_date_is_sellable_immediately(self):
         actions = {"20220105": [self.action(cash_per_share=0.0, stock_per_share=0.5, div_listdate="20220105")]}
         broker = self.make_broker(actions)
@@ -1517,6 +1543,23 @@ class AfterhoursFixedPriceTest(unittest.TestCase):
         self.assertFalse(afterhours_available("600000.SH", "20251231"))
         self.assertTrue(afterhours_available("830799.BJ", "20260706"))
 
+    def test_missing_amount_rejects_instead_of_liquidating(self):
+        def flow(state):
+            if state["cur_date"] == "20260706" and state["cur_time"] == "15:05" and not _held(state, "000001.SZ"):
+                return [{"action": "buy", "ts_code": "000001.SZ", "amount": 1000}]
+            if state["cur_date"] == "20260707" and state["cur_time"] == "15:05" and _held(state, "000001.SZ"):
+                return [{"action": "sell", "ts_code": "000001.SZ"}]  # amount omitted
+            return []
+
+        replay = self._replay(flow)
+        rejected = [o for o in replay.broker.orders
+                    if o.action == "sell" and o.reject_reason == "amount_below_lot_size"]
+        self.assertEqual(len(rejected), 1)
+        afterhours_sells = [e for e in replay.broker.events
+                            if e["event_type"] == "order_filled" and e.get("price_label") == "afterhours_fixed"
+                            and e.get("action") == "sell"]
+        self.assertEqual(afterhours_sells, [])
+
     def test_fills_at_the_official_close_without_slippage(self):
         def at_afterhours(state):
             if state["cur_time"] == "15:05" and state["cur_date"] == "20260706" and not _held(state, "000001.SZ"):
@@ -1604,6 +1647,62 @@ class AfterhoursFixedPriceTest(unittest.TestCase):
         self.assertEqual(exit_fill["price"], 11.0)
         closed = next(e for e in replay.broker.events if e["event_type"] == "position_closed")
         self.assertEqual(closed["trade_date"], "20260707")
+
+
+class DelayedCashOpReleaseTest(unittest.TestCase):
+    """Cash operations are not exchange orders: a B>=1 substep transfer or
+    direct_repay must not be killed by the orderable-window triple check."""
+
+    def test_delayed_transfer_releases_into_the_preopen_queue(self) -> None:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from autotrade.environment.main_ctx_engine import _DelayedAction, _Tick, _release_delayed_actions
+
+        tz = ZoneInfo("Asia/Shanghai")
+        broker = SimBroker(BrokerProfile(), MarketData(REPLAY), shortable_codes=frozenset({"000001.SZ"}))
+        broker.roll_to_date("20220104")
+        preopen, incoming = [], {}
+        when = datetime(2022, 1, 4, 9, 5, tzinfo=tz)
+        tick = _Tick(minute_key="09:05", group=REPLAY.iloc[:0], activate_index=None,
+                     is_real=False, is_auction=False, is_offsession=True)
+        delayed = [_DelayedAction(
+            seq=0, ready_at=when,
+            action={"action": "transfer", "amount": 10_000, "from_account": "stock", "to_account": "credit"},
+            substep="plan", generated_at=datetime(2022, 1, 4, 9, 0, tzinfo=tz).isoformat(),
+        )]
+        _release_delayed_actions(delayed, broker=broker, incoming=incoming, preopen_transfers=preopen,
+                                 tick=tick, trade_date="20220104", when=when, n_real=0)
+        self.assertEqual(len(preopen), 1)
+        self.assertFalse([e for e in broker.events if e["event_type"] == "main_actions_unfilled"])
+
+    def test_delayed_direct_repay_settles_without_a_fill_bar(self) -> None:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from autotrade.environment.main_ctx_engine import _DelayedAction, _Tick, _release_delayed_actions
+
+        tz = ZoneInfo("Asia/Shanghai")
+        broker = SimBroker(BrokerProfile(), MarketData(REPLAY), shortable_codes=frozenset({"000001.SZ"}))
+        broker.roll_to_date("20220104")
+        fin = broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        self.assertEqual(fin.status, "filled")
+        when = datetime(2022, 1, 4, 10, 0, tzinfo=tz)
+        tick = _Tick(minute_key="10:00", group=REPLAY.iloc[:0], activate_index=None,
+                     is_real=True, is_auction=False)
+        delayed = [_DelayedAction(
+            seq=0, ready_at=when, action={"action": "direct_repay", "amount": 500.0},
+            substep="plan", generated_at=datetime(2022, 1, 4, 9, 0, tzinfo=tz).isoformat(),
+        )]
+        _release_delayed_actions(delayed, broker=broker, incoming=incoming_map(), preopen_transfers=[],
+                                 tick=tick, trade_date="20220104", when=when, n_real=0)
+        repay = [o for o in broker.orders if o.action == "direct_repay"][-1]
+        self.assertEqual(repay.status, "filled")
+        self.assertFalse([e for e in broker.events if e["event_type"] == "main_actions_unfilled"])
+
+
+def incoming_map():
+    return {}
 
 
 class ReplayIntegrationTest(unittest.TestCase):
@@ -1895,6 +1994,19 @@ class BrokerCoreTest(unittest.TestCase):
         self.assertAlmostEqual(
             profile.stamp_duty_on_sale(100_000.0, "20230827"), self.cost.stamp_duty_on_sale(100_000.0, "20230827")
         )
+
+    def test_reduce_amount_reject_allows_the_one_shot_odd_tail(self):
+        reject = self.core.reduce_amount_reject
+        self.assertIsNone(reject(1300, 1350, "000001.SZ"))  # whole lots
+        self.assertIsNone(reject(1350, 1350, "000001.SZ"))  # full position
+        self.assertIsNone(reject(150, 1350, "000001.SZ"))   # one lot + the entire odd tail
+        self.assertIsNone(reject(50, 1350, "000001.SZ"))    # the odd tail alone
+        self.assertEqual(reject(120, 1350, "000001.SZ"), "amount_not_lot_aligned")  # partial odd piece
+        self.assertEqual(reject(30, 1350, "000001.SZ"), "amount_below_lot_size")
+        self.assertEqual(reject(150, 1000, "000001.SZ"), "amount_not_lot_aligned")  # no odd tail held
+        self.assertIsNone(reject(150, 150, "688001.SH"))    # STAR below minimum: full exit only
+        self.assertEqual(reject(150, 350, "688001.SH"), "amount_below_lot_size")
+        self.assertIsNone(reject(50, 50, "830799.BJ"))
 
     def test_project_open_long_is_notional_plus_fee(self):
         fill = self.core.project_open(self.cost, side="long", raw_price=10.0, shares=1000, trade_date="20220104")

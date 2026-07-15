@@ -66,6 +66,7 @@ from autotrade.environment.broker_core import (
     is_star_market,
     project_open,
     project_reduce,
+    reduce_amount_reject,
     release_fin_shares,
     repay_fin,
     repay_slo,
@@ -119,8 +120,9 @@ class BrokerProfile:
     # Shorts always compensate the lender the gross amount.
     dividend_tax_rate: float = 0.0
     maintenance_closeout_ratio: float = 1.30
-    # Reference lines recorded for audit only; the engine enforces just
-    # maintenance_closeout_ratio (forced close), not these two.
+    # warning_ratio only emits an audit event; withdraw_ratio actively gates
+    # outbound credit transfers while debt is outstanding (see transfer());
+    # only closeout_ratio triggers a forced close.
     maintenance_warning_ratio: float = 1.40
     maintenance_withdraw_ratio: float = 3.00
     debt_contract_term_days: int = 180
@@ -419,6 +421,10 @@ _ACTION_TO_ACCOUNT_OP = {
 }
 _OP_TO_ACTION = {op: action for action, (_, op) in _ACTION_TO_ACCOUNT_OP.items()}
 _OP_TO_ACCOUNT = {op: account for _, (account, op) in _ACTION_TO_ACCOUNT_OP.items()}
+# Verbs that reduce an existing position: their amount check must allow the
+# one-shot odd-tail declaration (broker_core.reduce_amount_reject), because the
+# strict buy ladder would strand corporate-action odd lots until forced exit.
+_REDUCE_ACTIONS = frozenset({"sell", "credit_sell", "cover", "sell_repay"})
 
 
 @dataclass
@@ -445,8 +451,9 @@ class WorkingOrder:
     is_auction: bool
     reason: str
     submitted_at: str = ""
-    # A close (15:00) call-auction order fills at the activation bar's CLOSE; an
-    # open (09:25) auction or a continuous order fills at its bar OPEN.
+    # A close (14:57 entry, 15:00) call-auction order fills at the activation bar's
+    # CLOSE; an open auction order (09:15 entry, cleared at the 09:30 auction print)
+    # or a continuous order fills at its bar OPEN (09:25 is a blind non-auction tick).
     auction_close: bool = False
     uptick_checked: bool = False
     # Decision-time price estimate for a MARKET order so it keeps reserving cash /
@@ -784,7 +791,7 @@ class SimBroker:
                 order_id=order_id,
             )
             return order_id
-        shares, amount_reject = self.validate_share_amount(volume, str(order_code))
+        shares, amount_reject = self.validate_order_amount(action, str(order_code), volume)
         if amount_reject is not None:
             self.reject_submission(
                 ts_code=str(order_code),
@@ -1011,8 +1018,9 @@ class SimBroker:
                     time=minute_key,
                     reason=order.reason,
                     price_label="auction" if order.is_auction else f"{granularity}:{minute_key}",
-                    # A call auction (open 09:25 / close 15:00) clears every order at one
-                    # uniform price, so it carries no taker spread; only continuous-session
+                    # A call auction (open: 09:15 orders at the 09:30 print / close: 14:57
+                    # orders at 15:00) clears at one uniform price, so it carries no
+                    # taker spread; only continuous-session
                     # market orders take slippage. Limit orders never take slippage.
                     apply_slippage=not order.is_limit and not order.is_auction,
                     order_id=order.order_id,
@@ -1286,7 +1294,7 @@ class SimBroker:
         return self._reduce(order, state, bar, raw_price, amount=amount, apply_slippage=apply_slippage)
 
     def _open(self, order: Order, state: AccountState, bar: pd.Series, raw_price: float, *, amount, apply_slippage: bool = True) -> Order:
-        shares, amount_reject = self._strict_lot_amount(amount, order.ts_code)
+        shares, amount_reject = self.validate_share_amount(amount, order.ts_code)
         if amount_reject is not None:
             return self._reject(order, amount_reject)
         pos = state.positions.get(order.ts_code)
@@ -1411,13 +1419,16 @@ class SimBroker:
         if sellable <= 0:
             return self._reject(order, "t_plus_one_no_sellable")
         if amount is None:
-            shares = sellable
+            shares = sellable  # host-side liquidation paths only; strategy input rejects None upstream
         else:
-            shares, amount_reject = self._strict_lot_amount(amount, order.ts_code)
+            shares, amount_reject = self._coerce_positive_shares(amount)
             if amount_reject is not None:
                 return self._reject(order, amount_reject)
             if shares > sellable:
                 return self._reject(order, "amount_exceeds_sellable")
+            amount_reject = reduce_amount_reject(shares, sellable, order.ts_code)
+            if amount_reject is not None:
+                return self._reject(order, amount_reject)
         is_buy = pos.side == "short"  # covering a short is a buy
         if pos.side == "long" and MarketData.limit_down_blocked_at_price(bar, raw_price):
             return self._reject(order, "limit_down_blocked_sell")
@@ -1872,7 +1883,9 @@ class SimBroker:
         return None
 
     @staticmethod
-    def validate_share_amount(amount: object, ts_code: str = "") -> tuple[int, str | None]:
+    def _coerce_positive_shares(amount: object) -> tuple[int, str | None]:
+        """A share amount must be a positive finite integer; None/blank means the
+        strategy forgot the argument and is rejected, never expanded to sell-all."""
         if amount is None or str(amount).strip() == "":
             return 0, "amount_below_lot_size"
         try:
@@ -1885,6 +1898,15 @@ class SimBroker:
         if abs(value - rounded) > 1e-9:
             return 0, "invalid_amount"
         shares = int(rounded)
+        if shares <= 0:
+            return 0, "amount_below_lot_size"
+        return shares, None
+
+    @staticmethod
+    def validate_share_amount(amount: object, ts_code: str = "") -> tuple[int, str | None]:
+        shares, reject = SimBroker._coerce_positive_shares(amount)
+        if reject is not None:
+            return 0, reject
         if is_star_market(ts_code):
             if shares < STAR_MIN_LOT_SIZE:
                 return 0, "amount_below_lot_size"
@@ -1900,9 +1922,21 @@ class SimBroker:
             return 0, "amount_not_lot_aligned"
         return shares, None
 
-    @staticmethod
-    def _strict_lot_amount(amount: object, ts_code: str = "") -> tuple[int, str | None]:
-        return SimBroker.validate_share_amount(amount, ts_code)
+    def validate_order_amount(self, action: str, ts_code: str, amount: object) -> tuple[int, str | None]:
+        """Direction-aware share validation shared by the engine and ``passorder``.
+
+        Buys keep the strict board ladder; reduce verbs allow whole lots or the
+        one-shot odd-tail declaration against the account's current sellable
+        quantity (交易规则: 零股必须一次性申报卖出). ``_reduce`` re-applies the
+        same rule at match time against the reservation-aware sellable."""
+        if str(action) in _REDUCE_ACTIONS:
+            shares, reject = self._coerce_positive_shares(amount)
+            if reject is not None:
+                return 0, reject
+            account, _ = self.account_op_for_action(str(action))
+            sellable = self.sellable_quantity(account, str(ts_code))
+            return shares, reduce_amount_reject(shares, sellable, str(ts_code))
+        return self.validate_share_amount(amount, ts_code)
 
     def _short_proceeds_locked(self) -> float:
         """Net short-sale proceeds held as locked collateral (融券卖出所得资金) in

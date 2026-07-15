@@ -60,6 +60,26 @@ def is_bse_market(ts_code: str) -> bool:
     return str(ts_code).upper().endswith(".BJ")
 
 
+def reduce_amount_reject(shares: int, sellable: int, ts_code: str) -> str | None:
+    """Sell-side lot rule for a positive ``shares`` request against ``sellable``.
+
+    Exchange rules let a holder declare whole lots, or one declaration that carries
+    the ENTIRE sub-lot odd tail (零股必须一次性申报卖出) — corporate actions (送转)
+    legitimately create odd positions, so reduces cannot reuse the strict buy
+    ladder. STAR/BSE positions below their minimum declaration are likewise
+    exitable only in full."""
+    if is_star_market(ts_code):
+        return None if shares >= STAR_MIN_LOT_SIZE or shares == sellable else "amount_below_lot_size"
+    if is_bse_market(ts_code):
+        return None if shares >= LOT_SIZE or shares == sellable else "amount_below_lot_size"
+    if shares % LOT_SIZE == 0:
+        return None
+    odd = sellable % LOT_SIZE
+    if odd and shares % LOT_SIZE == odd and shares <= sellable:
+        return None
+    return "amount_not_lot_aligned" if shares >= LOT_SIZE else "amount_below_lot_size"
+
+
 def afterhours_available(ts_code: str, trade_date: str) -> bool:
     """Whether the code's board offers after-hours fixed-price trading on this date."""
     date = str(trade_date)
