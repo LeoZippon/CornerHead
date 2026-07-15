@@ -302,9 +302,16 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             "corporate_actions": profile.get("corporate_actions"),
             "dividend_tax_rate": profile.get("dividend_tax_rate"),
             "execution_lag_bars": manifest.get("execution_lag_bars"),
+            # The prompt points the Agent at these facts for its daily schedule;
+            # every knob that changes which ticks decide/are orderable belongs here.
+            "intraday_decision_minutes": manifest.get("intraday_decision_minutes"),
+            "auction_enabled": manifest.get("auction_enabled"),
+            "auction_preopen_time": manifest.get("auction_preopen_time"),
+            "auction_decision_time": manifest.get("auction_decision_time"),
             "auction_close_time": manifest.get("auction_close_time"),
             "afterhours_decision_time": manifest.get("afterhours_decision_time"),
             "offsession_tick_minutes": manifest.get("offsession_tick_minutes"),
+            "timeview_enabled": manifest.get("timeview_enabled"),
             "decision_max_sim_minutes": manifest.get("decision_max_sim_minutes"),
             "backtest_max_seconds_per_decision": manifest.get("backtest_max_seconds_per_decision"),
             "backtest_max_seconds_per_trading_day": manifest.get("backtest_max_seconds_per_trading_day"),

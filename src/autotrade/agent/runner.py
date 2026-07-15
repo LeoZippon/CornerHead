@@ -98,6 +98,17 @@ class AgentSessionConfig:
     context_compaction: ContextCompactionConfig = field(default_factory=ContextCompactionConfig)
 
 
+def _llm_observation(record: dict[str, object]) -> dict[str, object]:
+    """Project a tool summary for the LLM message: host coordinates are removed
+    (same rule as the trace projection) and the static ``tool_spec`` echo is
+    dropped — identical native tool definitions already ride on every provider
+    call, so re-embedding ~2KB per observation only burns Agent context. The
+    trace event keeps the full record including ``tool_spec``."""
+    projected = dict(agent_visible_tool_result(record))
+    projected.pop("tool_spec", None)
+    return projected
+
+
 class AgentSessionRunner:
     """Drives one Agent session against the Environment tools.
 
@@ -331,6 +342,10 @@ class AgentSessionRunner:
             if terminal:
                 break
 
+        if finish_status == "deadline_timeout" and llm_calls >= self.config.max_llm_calls:
+            # The loop ran out of action turns, not wall clock; the ledger must
+            # not misdiagnose a call-budget exhaustion as a timeout.
+            finish_status = "llm_call_limit"
         summary = {
             "finish_status": finish_status,
             "llm_calls": llm_calls,
@@ -466,7 +481,7 @@ class AgentSessionRunner:
             max_output_chars=int(args["max_output_chars"]),
             timeout_seconds=int(args["timeout_seconds"]),
         )
-        return {"observation": "shell", **agent_visible_tool_result(result.to_record())}
+        return {"observation": "shell", **_llm_observation(result.to_record())}
 
     def _do_write_file(self, args: dict[str, object]) -> dict[str, object]:
         return {"observation": "write_file", **self.artifact_io.write_file(**args)}
@@ -475,21 +490,23 @@ class AgentSessionRunner:
         return {"observation": "edit_file", **self.artifact_io.edit_file(**args)}
 
     def _do_grep(self, args: dict[str, object]) -> dict[str, object]:
-        return {"observation": "grep", **agent_visible_tool_result(self.search.grep(**args))}
+        return {"observation": "grep", **_llm_observation(self.search.grep(**args))}
 
     def _do_glob(self, args: dict[str, object]) -> dict[str, object]:
-        return {"observation": "glob", **agent_visible_tool_result(self.search.glob(**args))}
+        return {"observation": "glob", **_llm_observation(self.search.glob(**args))}
 
     def _do_read(self, args: dict[str, object]) -> dict[str, object]:
-        return {"observation": "read", **agent_visible_tool_result(self.search.read(**args))}
+        return {"observation": "read", **_llm_observation(self.search.read(**args))}
 
     def _do_modification_check(self, args: dict[str, object]) -> dict[str, object]:
-        return {"observation": "modification_check", **self.modification_check.run()}
+        return {"observation": "modification_check", **_llm_observation(self.modification_check.run())}
 
     def _do_step_rollback(self, args: dict[str, object]) -> dict[str, object]:
         return {
             "observation": "step_rollback",
-            **self.step_rollback.run(str(args["node_id"]), include_models=bool(args["include_models"])),
+            **_llm_observation(
+                self.step_rollback.run(str(args["node_id"]), include_models=bool(args["include_models"]))
+            ),
         }
 
     def _backtest_budget(self) -> dict[str, int]:
@@ -532,9 +549,9 @@ class AgentSessionRunner:
         # reaches the model inside this tool observation, clearly labelled.
         hook = self.ctx.extra.get("step_gate_hook")
         if hook is not None and not (args or {}).get("replay_window"):
-            # Gate steps are numbered by SUCCESSFUL formal validations only, so
-            # the index the researcher approves matches the step-tree valid_NNN
-            # numbering (probes and failed attempts don't advance it).
+            # Gate steps count SUCCESSFUL formal validations only. This index
+            # does NOT match valid_NNN result names (successful probes also
+            # create valid_NNN dirs); correlate via the payload's result_name.
             self._gated_step_count = getattr(self, "_gated_step_count", 0) + 1
             gate_started = time.monotonic()
             directive = hook(self._gated_step_count, dict(result))
@@ -624,7 +641,7 @@ class AgentSessionRunner:
             max_chars=int(args["max_chars"]),
             use_proxy=bool(args["use_proxy"]),
         )
-        return {"observation": "web_fetch", **agent_visible_tool_result(result)}
+        return {"observation": "web_fetch", **_llm_observation(result)}
 
     def _do_explore(self, args: dict[str, object]) -> dict[str, object]:
         engine = ExploreSubAgentEngine(
@@ -636,7 +653,9 @@ class AgentSessionRunner:
             step_id=self.ctx.current_step_id,
             deadline_at=self._effective_deadline_at(),
         )
-        return {"observation": "explore", **engine.run(task=str(args["task"]), max_rounds=int(args.get("max_rounds") or 0))}
+        result = engine.run(task=str(args["task"]), max_rounds=int(args.get("max_rounds") or 0))
+        self._accumulate_explore_usage(result)
+        return {"observation": "explore", **result}
 
     def _do_done(self, args: dict[str, object]) -> dict[str, object]:
         if self.web_search is not None:
@@ -769,10 +788,32 @@ class AgentSessionRunner:
             if isinstance(reasoning, (int, float)) and not isinstance(reasoning, bool):
                 totals["reasoning_tokens"] += int(reasoning)
 
+    def _accumulate_explore_usage(self, result: dict[str, object]) -> None:
+        """Explore Sub Agent calls bill the same provider account but bypass
+        _accumulate_usage; without this the session summary understated real
+        cost by up to ~15% in observed sessions."""
+        totals = getattr(self, "_explore_totals", None)
+        if totals is None:
+            totals = {"llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            self._explore_totals = totals
+        calls = result.get("llm_calls")
+        if isinstance(calls, (int, float)) and not isinstance(calls, bool):
+            totals["llm_calls"] += int(calls)
+        usage = result.get("usage_totals")
+        if isinstance(usage, dict):
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                value = usage.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    totals[key] += int(value)
+
     def _token_usage_summary(self) -> dict[str, object]:
         totals = dict(self._token_totals)
         prompt = totals.get("prompt_tokens", 0)
         totals["cache_hit_ratio"] = round(totals["cache_hit_tokens"] / prompt, 4) if prompt else 0.0
+        explore = getattr(self, "_explore_totals", None)
+        if explore is not None:
+            totals["explore"] = dict(explore)
+            totals["total_tokens_including_explore"] = int(totals.get("total_tokens", 0)) + int(explore.get("total_tokens", 0))
         return totals
 
     def _parse_tool_arguments(
@@ -1012,6 +1053,14 @@ class AgentSessionRunner:
             tail = self._drop_leading_orphan_tools(messages[-keep:]) if keep else []
             return [messages[0], *tail]
         non_summary = [message for message in messages[1:] if not is_compaction_message(message)]
+        # Token-triggered entry with nothing to drop: rewriting index 1 with a
+        # fresh summary every turn would reset the provider prefix cache without
+        # shortening anything (the config comment's explicit non-goal). Let the
+        # semantic compactor handle real size pressure until messages overflow.
+        if len(messages) <= self.config.max_history_messages and len(non_summary) <= max(
+            self.config.max_history_messages - 3, 0
+        ):
+            return messages
         latest_llm_summary = next(
             (message for message in reversed(messages[1:]) if is_llm_compaction_message(message)),
             None,

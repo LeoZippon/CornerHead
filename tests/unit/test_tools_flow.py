@@ -2062,9 +2062,9 @@ class AgentSessionRunnerTest(unittest.TestCase):
 
     def test_context_compactor_reserves_time_for_next_main_call(self):
         compact_payload = {
-            "primary_request": "continue",
-            "current_state": "state",
-            "next_action": "next",
+            "goal": "continue",
+            "progress": {"in_progress": ["state"]},
+            "next_steps": ["next"],
         }
         compact_proxy = ScriptedLLM(
             [
@@ -2097,7 +2097,7 @@ class AgentSessionRunnerTest(unittest.TestCase):
         self.assertEqual(compact_proxy.calls[0]["timeout_seconds"], 10)
 
     def test_context_compactor_zero_call_limit_blocks_provider_call(self):
-        compact_proxy = ScriptedLLM([json.dumps({"primary_request": "should not run"})])
+        compact_proxy = ScriptedLLM([json.dumps({"goal": "should not run"})])
         compactor = ContextCompactor(
             compact_proxy,
             ContextCompactionConfig(
@@ -2831,15 +2831,14 @@ def main(ctx):
                 ]
             )
             compact_payload = {
-                "primary_request": "continue the fold",
-                "current_state": "large glob request was observed",
-                "user_constraints": ["preserve current strategy state"],
-                "files_and_artifacts": ["/mnt/agent/output/main.py"],
-                "decisions": ["use compact before the next main call"],
-                "validated_results": [],
+                "goal": "continue the fold",
+                "constraints_and_preferences": ["preserve current strategy state"],
+                "progress": {"in_progress": ["large glob request was observed"]},
+                "key_decisions": ["use compact before the next main call"],
                 "errors_and_fixes": [],
-                "pending_tasks": ["run modification_check"],
-                "next_action": "inspect current artifacts",
+                "next_steps": ["run modification_check", "inspect current artifacts"],
+                "critical_context": ["large glob request was observed"],
+                "relevant_files": ["/mnt/agent/output/main.py"],
             }
             compact_proxy = ScriptedLLM(
                 [
@@ -2900,7 +2899,7 @@ def main(ctx):
             compact_proxy = ScriptedLLM(
                 [
                     ProviderResponse(
-                        content=json.dumps({"primary_request": "continue", "current_state": "state"}),
+                        content=json.dumps({"goal": "continue", "critical_context": ["state"]}),
                         provider="scripted",
                         model="compact-model",
                     )

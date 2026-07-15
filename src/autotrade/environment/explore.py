@@ -82,6 +82,8 @@ class ExploreSubAgentEngine:
         digest = ""
         status = "completed"
         error = ""
+        self._llm_calls = 0
+        self._usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         try:
             while rounds < rounds_limit:
                 rounds += 1
@@ -140,6 +142,8 @@ class ExploreSubAgentEngine:
             "status": status,
             "rounds": rounds,
             "tool_calls": tool_calls_made,
+            "llm_calls": getattr(self, "_llm_calls", 0),
+            "usage_totals": dict(getattr(self, "_usage_totals", {}) or {}),
             "digest": digest,
             "model": self.proxy.model,
         }
@@ -195,6 +199,14 @@ class ExploreSubAgentEngine:
             usage=response.usage,
         )
         self.trace.emit("explore_llm_call", detail, step_id=self.step_id, parent_call_id=parent_call_id)
+        self._llm_calls = getattr(self, "_llm_calls", 0) + 1
+        if isinstance(response.usage, dict):
+            totals = getattr(self, "_usage_totals", None)
+            if totals is not None:
+                for key in totals:
+                    value = response.usage.get(key)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        totals[key] += int(value)
         return response
 
     def _parse_calls(

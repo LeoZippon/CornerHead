@@ -287,42 +287,26 @@ def _extract_summary_payload(response: ProviderResponse) -> dict[str, object]:
 
 
 def _normalize_summary_payload(payload: dict[str, Any]) -> dict[str, object]:
-    if any(field in payload for field in ("goal", "progress", "key_decisions", "next_steps", "critical_context")):
-        progress = payload.get("progress") if isinstance(payload.get("progress"), dict) else {}
-        return {
-            "goal": _as_text(payload.get("goal")),
-            "constraints_and_preferences": _as_list(payload.get("constraints_and_preferences")),
-            "progress": {
-                "done": _as_list(progress.get("done")),
-                "in_progress": _as_list(progress.get("in_progress")),
-                "blocked": _as_list(progress.get("blocked")),
-            },
-            "key_decisions": _as_list(payload.get("key_decisions")),
-            "errors_and_fixes": _as_list(payload.get("errors_and_fixes")),
-            "next_steps": _as_list(payload.get("next_steps")),
-            "critical_context": _as_list(payload.get("critical_context")),
-            "relevant_files": _as_list(payload.get("relevant_files")),
-            "recent_user_feedback": _as_list(payload.get("recent_user_feedback")),
-        }
-
-    current_state = _as_text(payload.get("current_state"))
-    pending_tasks = _as_list(payload.get("pending_tasks"))
-    next_action = _as_text(payload.get("next_action"))
-    next_steps = [*pending_tasks, *([next_action] if next_action else [])]
+    if not any(field in payload for field in ("goal", "progress", "key_decisions", "next_steps", "critical_context")):
+        # A response matching none of the requested schema keys must fail loudly:
+        # normalizing it to an all-empty summary would silently REPLACE real
+        # session history with nothing while bypassing the failure circuit.
+        raise ValueError("compaction response carries none of the requested summary fields")
+    progress = payload.get("progress") if isinstance(payload.get("progress"), dict) else {}
     return {
-        "goal": _as_text(payload.get("primary_request")),
-        "constraints_and_preferences": _as_list(payload.get("user_constraints")),
+        "goal": _as_text(payload.get("goal")),
+        "constraints_and_preferences": _as_list(payload.get("constraints_and_preferences")),
         "progress": {
-            "done": _as_list(payload.get("validated_results")),
-            "in_progress": [current_state] if current_state else [],
-            "blocked": [],
+            "done": _as_list(progress.get("done")),
+            "in_progress": _as_list(progress.get("in_progress")),
+            "blocked": _as_list(progress.get("blocked")),
         },
-        "key_decisions": _as_list(payload.get("decisions")),
+        "key_decisions": _as_list(payload.get("key_decisions")),
         "errors_and_fixes": _as_list(payload.get("errors_and_fixes")),
-        "next_steps": next_steps,
-        "critical_context": [current_state] if current_state else [],
-        "relevant_files": _as_list(payload.get("files_and_artifacts")),
-        "recent_user_feedback": [],
+        "next_steps": _as_list(payload.get("next_steps")),
+        "critical_context": _as_list(payload.get("critical_context")),
+        "relevant_files": _as_list(payload.get("relevant_files")),
+        "recent_user_feedback": _as_list(payload.get("recent_user_feedback")),
     }
 
 
