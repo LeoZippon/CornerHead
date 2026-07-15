@@ -51,7 +51,9 @@ from .hitl_state import (
     SCHEDULE_NAME,
     STATUS_NAME,
     StatusReporter,
+    _LIVE_RUN_STATES,
     _epoch_ids,
+    assert_node_not_from_later_fold,
     build_session_plan,
     fold_session_key,
     meta_session_key,
@@ -260,6 +262,41 @@ class InteractiveExperimentRunner:
                     skipping = True
                     break
                 else:
+                    # A killed meta run may have frozen its regularized artifact
+                    # before the ledger append; refuse to guess (docs §5.2).
+                    meta_candidate = (
+                        Path(self.config.experiment_dir) / "strategy_artifacts" / epoch_id
+                        / f"strategy_{epoch_id}_meta_learning"
+                    )
+                    if meta_candidate.exists():
+                        raise RuntimeError(
+                            f"orphan frozen meta-learning artifact without a ledger record: {meta_candidate}; "
+                            "inspect and remove it manually before resuming this epoch"
+                        )
+                    if prefetch_pool is not None:
+                        # The first fold's data-cache entries share keys with the
+                        # Meta build: warming them behind the researcher's approval
+                        # wait removes the serial ~7-minute prep observed after
+                        # approval (no sandbox/container is created here).
+                        pregate_control = read_control(self.control_path)
+                        first_fold = next(
+                            (
+                                candidate for candidate in folds
+                                if _fold_needs_run(
+                                    fold_records.get((epoch_id, candidate.fold_id)),
+                                    pregate_control.rerun_sessions.get(
+                                        fold_session_key(epoch_id, candidate.fold_id)
+                                    ),
+                                )
+                            ),
+                            None,
+                        )
+                        if first_fold is not None:
+                            job_key = (epoch_id, first_fold.fold_id)
+                            if job_key not in early_prefetches:
+                                early_prefetches[job_key] = prefetch_pool.submit(
+                                    prefetch_method, first_fold
+                                )
                     directive = self._gate(key, phase="meta_learning", epoch_id=epoch_id)
                     control = read_control(self.control_path)
                     agent_ready_hook = None
@@ -319,6 +356,16 @@ class InteractiveExperimentRunner:
                     and rerun_id is not None
                     and str(restored.get("rerun_id") or "") != rerun_id
                 )
+                if needs_rerun:
+                    recorded = [f.fold_id for f in folds if fold_records.get((epoch_id, f.fold_id)) is not None]
+                    if recorded and fold.fold_id != recorded[-1]:
+                        # Same wall the console enforces: rerunning a non-latest
+                        # fold would splice new content under later folds that
+                        # already consumed the old chain.
+                        raise RuntimeError(
+                            f"rerun requested for {fold.fold_id} but the latest recorded fold is "
+                            f"{recorded[-1]}; roll back to {fold.fold_id} first"
+                        )
                 if restored is not None and not needs_rerun:
                     parent = self._artifact_from_fold_record(restored)
                 else:
@@ -327,6 +374,12 @@ class InteractiveExperimentRunner:
                         break
                     if restored is None:
                         self._require_no_orphan_artifact(epoch_id, fold.fold_id)
+                    elif needs_rerun and rerun_id:
+                        # A killed re-run freezes under the tagged id; surface an
+                        # unrecorded leftover before burning a whole session.
+                        self._require_no_orphan_artifact(
+                            epoch_id, fold.fold_id, artifact_suffix=f"__r{rerun_id[:8]}"
+                        )
                     prefetch = early_prefetches.pop(
                         (epoch_id, fold.fold_id), None
                     )
@@ -337,7 +390,7 @@ class InteractiveExperimentRunner:
                     # User-side step rollback: a control-plane override replaces the
                     # inherited frozen chain with a validated step-tree node snapshot.
                     override_node = control.parent_overrides.get(key)
-                    session_parent = self._parent_from_step_node(override_node) if override_node else parent
+                    session_parent = self._parent_from_step_node(override_node, key) if override_node else parent
                     self.status.set(
                         state="running_session", phase="fold", session_key=key,
                         epoch_id=epoch_id, fold_id=fold.fold_id, run_id=None, trace_path=None,
@@ -589,12 +642,20 @@ class InteractiveExperimentRunner:
 
         return hook
 
-    def _parent_from_step_node(self, node_id: str) -> FrozenArtifact:
-        """Build the session parent from a validated step-tree node snapshot."""
+    def _parent_from_step_node(self, node_id: str, session_key: str) -> FrozenArtifact:
+        """Build the session parent from a validated step-tree node snapshot.
+
+        The worker re-validates chronology itself: control.json is a plain file,
+        so the console-side check alone would not stop a hand-edited override
+        from leaking a later fold's validated strategy backwards."""
         tree = StepTree(Path(self.config.experiment_dir) / "steps")
         node = tree.get_node(node_id)  # ValueError on unknown ids — fail fast
         if node.get("status") == "failed" or not node.get("complete_validation"):
             raise RuntimeError(f"parent override {node_id} is not a validated node with a snapshot")
+        schedule = read_json(Path(self.config.experiment_dir) / HITL_DIR_NAME / SCHEDULE_NAME)
+        sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
+        fold_keys = [str(s.get("key")) for s in sessions if s.get("kind") == "fold"]
+        assert_node_not_from_later_fold(node, session_key, fold_keys)
         model_hash = node.get("model_artifact_hash")
         if not model_hash:
             raise RuntimeError(f"parent override {node_id} carries no model artifact hash")
@@ -607,12 +668,13 @@ class InteractiveExperimentRunner:
             expected_model_hash=str(model_hash),
         )
 
-    def _require_no_orphan_artifact(self, epoch_id: str, fold_id: str) -> None:
+    def _require_no_orphan_artifact(self, epoch_id: str, fold_id: str, *, artifact_suffix: str = "") -> None:
         # A hard kill between _freeze and the ledger append leaves a frozen dir
-        # without a record; rerunning the fold would FileExistsError deep inside
-        # _freeze. Surface it clearly instead of half-running a session.
+        # without a record; rerunning the session would FileExistsError deep
+        # inside _freeze. Surface it clearly instead of half-running a session.
         candidate = (
-            Path(self.config.experiment_dir) / "strategy_artifacts" / epoch_id / f"strategy_{epoch_id}_{fold_id}"
+            Path(self.config.experiment_dir) / "strategy_artifacts" / epoch_id
+            / f"strategy_{epoch_id}_{fold_id}{artifact_suffix}"
         )
         if candidate.exists():
             raise RuntimeError(
@@ -634,6 +696,14 @@ class InteractiveExperimentRunner:
 # ---------------------------------------------------------------------------
 # worker entrypoint
 # ---------------------------------------------------------------------------
+def _fold_needs_run(record: dict[str, object] | None, rerun_id: str | None) -> bool:
+    """A fold session must (re)run when it has no ledger record, or a pending
+    rerun request whose id the latest record has not absorbed yet."""
+    return record is None or (
+        rerun_id is not None and str(record.get("rerun_id") or "") != rerun_id
+    )
+
+
 def _decision_alert_hook(experiment_id: str):
     """Feishu group alerts for states that need the researcher (docs §5.3 HITL).
 
@@ -721,7 +791,8 @@ def run_interactive_worker(experiment_dir: Path, *, repo_root: Path, poll_second
         )
 
     existing = read_status(hitl_dir / STATUS_NAME)
-    if existing and existing.get("state") in ("starting", "running_session", "waiting_user", "paused") and status_pid_alive(existing):
+    live_states = {"starting", "waiting_user", "paused", *_LIVE_RUN_STATES}
+    if existing and existing.get("state") in live_states and status_pid_alive(existing):
         raise RuntimeError(
             f"experiment {options.experiment_id} already has a live worker (pid {existing.get('pid')})"
         )

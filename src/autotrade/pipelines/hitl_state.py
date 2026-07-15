@@ -147,7 +147,6 @@ PARAM_DEFAULTS: dict[str, object] = {
     "meta_learning_network": "bridge",
     "meta_learning_env": (),
     "meta_learning_add_host_gateway": False,
-    "meta_learning_host_proxy": False,
     "disable_meta_learning_host_proxy": False,
     "disable_meta_learning_managed_proxy": False,
     "meta_learning_xray_bin": None,
@@ -357,18 +356,10 @@ def _int_map(value: object) -> dict[str, int]:
 
 
 def repo_code_version(repo_root: Path | None = None) -> str:
-    """Short git HEAD of the running code. Long-lived workers import code at
-    spawn: the console compares this stamp against the repo's current HEAD to
-    flag workers running stale code (restart to pick up fixes). Uncommitted
-    edits do not change the stamp — commit-level granularity only."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=repo_root or Path.cwd(), capture_output=True, text=True, timeout=10,
-        )
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except (OSError, subprocess.SubprocessError):
-        return ""
+    """Delegates to the shared environment.runtime stamp (single source)."""
+    from autotrade.environment.runtime import repo_code_version as _stamp
+
+    return _stamp(repo_root)
 
 
 def write_control(path: Path, state: ControlState) -> None:
@@ -573,6 +564,28 @@ def proc_start_ticks(pid: int) -> int | None:
         return int(stat.rpartition(")")[2].split()[19])
     except (OSError, IndexError, ValueError):
         return None
+
+
+def assert_node_not_from_later_fold(node: dict[str, object], session_key: str, fold_keys: list[str]) -> None:
+    """Reject a step-tree parent override recorded by a LATER fold session.
+
+    Shared by the console manager (at set time) and the worker (at consume
+    time): a node validated on a later period embodies future-fitted strategy
+    content, so both writers of the decision must enforce the same wall."""
+    from autotrade.environment.identity import agent_visible_ref
+
+    ref_to_fold = {
+        agent_visible_ref(key.partition("/")[2], prefix="fold_ref"): key.partition("/")[2]
+        for key in fold_keys
+    }
+    node_fold = ref_to_fold.get(str(node.get("fold_id")))
+    node_key = f"{node.get('epoch_id')}/{node_fold}" if node_fold else None
+    if node_key not in fold_keys:
+        raise ValueError(f"cannot locate the fold session of step node {node.get('node_id')!r}; refusing it as a parent")
+    if session_key not in fold_keys:
+        raise ValueError(f"{session_key!r} is not a fold session")
+    if fold_keys.index(node_key) > fold_keys.index(session_key):
+        raise ValueError("不能把更晚 Fold 会话的节点设为更早会话的起点（未来验证信息泄漏）")
 
 
 def status_pid_alive(status: Mapping[str, object]) -> bool:

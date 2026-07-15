@@ -239,6 +239,10 @@ class SnapshotConfig:
                 "text": list(self.text_datasets),
                 "fundamentals": list(self.fundamental_datasets),
             },
+            # Both change what gets built; leaving them out of the record left
+            # snapshots that could not prove which news slice they contained.
+            "news_sources": list(self.news_sources),
+            "news_window_months": self.news_window_months,
             "include_intraday": self.include_intraday,
             "include_industry": self.include_industry,
             "text_body_chars": self.text_body_chars,

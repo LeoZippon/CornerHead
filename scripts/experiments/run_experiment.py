@@ -43,7 +43,6 @@ from _cli import (
     resolve_meta_learning_directive,
 )
 # Re-exported for the pipeline e2e test, which imports it from this module.
-from _cli import _session_config_summary  # noqa: F401
 
 from autotrade.environment.sandbox import SandboxSpec
 from autotrade.pipelines import AcceptanceRules, ExperimentConfig, load_sse_trading_days

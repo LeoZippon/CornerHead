@@ -25,7 +25,7 @@ from autotrade.pipelines import (
     build_fold_schedule,
 )
 from autotrade.pipelines.folds import heldout_periods, period_bounds, quarter_bounds
-from scripts.experiments.run_experiment import _session_config_summary
+from autotrade.pipelines.assembly import _session_config_summary
 from scripts.experiments._cli import (
     EXPERIMENT_META_REBUILD_HELP,
     add_meta_sandbox_arguments,
@@ -226,7 +226,7 @@ class ExperimentCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("--meta-learning-network", result.stdout)
         self.assertIn("--meta-learning-env", result.stdout)
-        self.assertIn("--meta-learning-host-proxy", result.stdout)
+        self.assertNotIn("--meta-learning-host-proxy ", result.stdout)  # dead no-op key removed
         self.assertIn("--disable-meta-learning-host-proxy", result.stdout)
         self.assertIn("--disable-meta-learning-managed-proxy", result.stdout)
 
@@ -581,7 +581,7 @@ class PipelineEndToEndTest(unittest.TestCase):
                 decision_max_sim_minutes=17.0,
                 backtest_max_seconds_per_decision=99.0,
                 backtest_max_seconds_per_trading_day=123.0,
-                rolling_asof_enabled=False,
+                timeview_enabled=False,
                 nl_max_calls_per_decision_day=7,
                 nl_max_calls_per_backtest=19,
             )
@@ -632,7 +632,6 @@ class PipelineEndToEndTest(unittest.TestCase):
                 config.final_eval_max_seconds_per_trading_day(),
             )
             self.assertIs(captured["timeview_enabled"], False)
-            self.assertIs(captured["rolling_asof_enabled"], False)  # back-compat alias
             self.assertEqual(captured["nl_max_calls_per_decision_day"], 7)
             self.assertEqual(captured["nl_max_calls_per_backtest"], 19)
             self.assertEqual(captured["auction_decision_time"], config.auction_decision_time)

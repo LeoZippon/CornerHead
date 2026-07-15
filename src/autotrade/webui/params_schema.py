@@ -63,7 +63,6 @@ HIDDEN_KEYS = (
     "tavily_api_key_env",
     "semantic_scholar_api_key_env",
     "meta_learning_env",
-    "meta_learning_host_proxy",
     "meta_learning_xray_bin",
 )
 PERIOD_KEYS = ("first_test_period", "last_test_period", "heldout_first_period", "heldout_last_period")

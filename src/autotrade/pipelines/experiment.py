@@ -40,6 +40,7 @@ from autotrade.environment.sandbox_images import (
 from autotrade.environment.style_analysis import write_style_rollup
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import PHASE_FROZEN, BacktestTool, ModificationCheckTool, ToolContext
+from autotrade.environment.tools.finish_fold import cleanup_agent_processes
 
 from .config import (
     AgentFactory,
@@ -51,7 +52,15 @@ from .config import (
     SnapshotProvider,
 )
 from .folds import FoldSpec, build_fold_schedule, heldout_periods
-from .ledger import ExperimentLedger
+from .ledger import ExperimentLedger, latest_fold_records
+
+
+class FrozenArtifactMutatedError(RuntimeError):
+    """A frozen artifact's bytes changed where the contract requires identity.
+
+    Distinguished from ordinary diagnostic-eval failures so callers record the
+    truth (state_changed_during_test) and terminate after the ledger persists,
+    instead of swallowing an integrity breach as a finalize_error."""
 
 
 class ExperimentPipeline:
@@ -92,12 +101,34 @@ class ExperimentPipeline:
         inherit the extended sandbox instead of silently falling back to the base."""
         if base_spec is None:
             return base_spec
-        latest_image: str | None = None
+        latest_update: dict[str, object] | None = None
         for record in self.ledger.read("meta_learning"):
             update = record.get("sandbox_image_update")
-            if isinstance(update, dict) and update.get("status") == "ok" and update.get("image"):
-                latest_image = str(update["image"])
-        if latest_image and latest_image != base_spec.image:
+            if isinstance(update, dict) and update.get("status"):
+                latest_update = update
+        if latest_update is None:
+            return base_spec
+        if latest_update.get("status") != "ok" or not latest_update.get("image"):
+            # The docs promise "构建失败显式终止，不回退旧环境": resuming on the
+            # base image would silently drop meta-declared dependencies.
+            raise RuntimeError(
+                "the latest meta-learning sandbox image build did not succeed "
+                f"(status={latest_update.get('status')!r}); rebuild the derived image "
+                "or clear the declaration before resuming"
+            )
+        latest_image = str(latest_update["image"])
+        recorded_id = str(latest_update.get("image_id") or "")
+        if recorded_id:
+            from autotrade.environment.sandbox import resolve_image_identity
+
+            current_id, _ = resolve_image_identity(latest_image)
+            if current_id != recorded_id:
+                raise RuntimeError(
+                    f"derived sandbox tag {latest_image!r} now resolves to {current_id}, but the "
+                    f"ledger recorded {recorded_id}; the mutable tag drifted — rebuild or retag "
+                    "before resuming so later folds run the recorded environment"
+                )
+        if latest_image != base_spec.image:
             return replace(base_spec, image=latest_image)
         return base_spec
 
@@ -290,7 +321,6 @@ class ExperimentPipeline:
             "backtest_final_eval_max_seconds_per_decision": self.config.final_eval_max_seconds_per_decision(),
             "backtest_final_eval_max_seconds_per_trading_day": self.config.final_eval_max_seconds_per_trading_day(),
             "timeview_enabled": self.config.timeview_enabled,
-            "rolling_asof_enabled": self.config.timeview_enabled,
             "nl_max_calls_per_decision_day": self.config.nl_max_calls_per_decision_day,
             "nl_max_calls_per_backtest": self.config.nl_max_calls_per_backtest,
         }
@@ -494,6 +524,14 @@ class ExperimentPipeline:
             session_summary = agent.run()
             researcher_wait_seconds = _researcher_wait_seconds(session_summary)
 
+            if not ctx.write_locked:
+                # Deadline / call-limit exits skip finish_fold's quiesce: kill any
+                # agent background process and read-lock the artifacts BEFORE
+                # acceptance hashes them, or a surviving writer could mutate the
+                # working copy between verification and the freeze copy.
+                cleanup_agent_processes(ctx)
+                sandbox.lock_agent_output()
+                ctx.write_locked = True
             frozen, fold_status, accept_reasons, accept_warnings, selected = self._accept_or_fallback(
                 ctx, fold, epoch_id=epoch_id, run_id=run_id, parent=parent, is_initial=is_initial
             )
@@ -555,7 +593,7 @@ class ExperimentPipeline:
                     "frozen_model_artifact_path": str(frozen.model_path) if frozen.model_path else None,
                     "validation_result": _metrics(selected),
                     "test_result": _metrics(test_summary),
-                    "state_changed_during_test": False,
+                    "state_changed_during_test": isinstance(test_eval_error, FrozenArtifactMutatedError),
                     "run_manifest_ref": run_manifest_ref,
                     "snapshot_ids": {key: ref["snapshot_id"] for key, ref in manifest.data["snapshots"].items()},
                     "style_rollup_error": style_rollup_error,
@@ -565,6 +603,10 @@ class ExperimentPipeline:
             }
 
         self._finalize_run(sandbox, run_id, record_builder=fold_record)
+        if isinstance(test_eval_error, FrozenArtifactMutatedError):
+            # Integrity breach (docs §4.3 terminate class): the truth is on the
+            # ledger; do not continue the experiment on a mutated frozen artifact.
+            raise test_eval_error
         return FoldOutcome(
             fold_id=fold.fold_id,
             run_id=run_id,
@@ -900,7 +942,7 @@ class ExperimentPipeline:
             raise RuntimeError(f"meta-learning did not finish with done: {summary.get('finish_status')}")
 
     def _development_history(self, previous_taste: str) -> dict[str, object]:
-        folds = self.ledger.read("fold")
+        folds = list(latest_fold_records(self.ledger.read("fold")).values())
         return {
             "fold_backtest_summaries": [_compact_fold_history(record) for record in folds],
             "meta_learning": [_agent_visible_ledger_record(record) for record in self.ledger.read("meta_learning")],
@@ -1145,7 +1187,7 @@ class ExperimentPipeline:
         run_id: str,
         parent: FrozenArtifact | None,
         is_initial: bool,
-    ) -> tuple[FrozenArtifact, str, list[str], dict[str, object] | None]:
+    ) -> tuple[FrozenArtifact, str, list[str], list[str], dict[str, object] | None]:
         manifest = ctx.manifest
         accept_warnings: list[str] = []
         reasons: list[str] = []
@@ -1161,7 +1203,11 @@ class ExperimentPipeline:
         # step_rollback) back to an already-validated artifact freezes without
         # forcing a redundant full re-validation of identical content.
         selected = next(
-            (s for s in reversed(complete_runs) if str(s.get("artifact_hash")) == current_hash),
+            (
+                s for s in reversed(complete_runs)
+                if str(s.get("artifact_hash")) == current_hash
+                and str(s.get("model_artifact_hash")) == current_model_hash
+            ),
             complete_runs[-1] if complete_runs else None,
         )
 
@@ -1193,6 +1239,8 @@ class ExperimentPipeline:
                 parent=parent,
                 fold_id=fold.fold_id,
                 run_id=run_id,
+                expected_hash=current_hash,
+                expected_model_hash=current_model_hash,
                 step=self._step_id_for(manifest, selected),
             )
             return frozen, "frozen", [], accept_warnings, selected
@@ -1232,9 +1280,9 @@ class ExperimentPipeline:
         self._bind_formal_view(sandbox, docker, "test_decision_input")
         summary = BacktestTool(ctx).run(mode="frozen_eval", result_name=result_name)
         if artifact_hash(ctx.paths.agent_output) != frozen.artifact_hash:
-            raise RuntimeError("frozen test run modified the strategy artifact")
+            raise FrozenArtifactMutatedError("frozen test run modified the strategy artifact")
         if model_artifact_hash(ctx.paths.model_artifacts) != frozen.model_artifact_hash:
-            raise RuntimeError("frozen test run modified the model artifacts")
+            raise FrozenArtifactMutatedError("frozen test run modified the model artifacts")
         return summary
 
     def _freeze(
@@ -1248,6 +1296,8 @@ class ExperimentPipeline:
         fold_id: str,
         run_id: str,
         step: object,
+        expected_hash: str | None = None,
+        expected_model_hash: str | None = None,
     ) -> FrozenArtifact:
         dest = self.config.experiment_dir / "strategy_artifacts" / epoch_id / artifact_id
         model_dest = self.config.experiment_dir / "strategy_artifacts" / epoch_id / f"{artifact_id}.models"
@@ -1260,6 +1310,15 @@ class ExperimentPipeline:
         copy_model_artifacts(source_model_root, model_dest)
         digest = artifact_hash(dest)
         model_digest = model_artifact_hash(model_dest)
+        if expected_hash is not None and digest != expected_hash:
+            raise FrozenArtifactMutatedError(
+                f"frozen copy hash {digest} != validated hash {expected_hash} for {artifact_id}; "
+                "the working copy changed between acceptance and freeze"
+            )
+        if expected_model_hash is not None and model_digest != expected_model_hash:
+            raise FrozenArtifactMutatedError(
+                f"frozen model copy hash {model_digest} != validated hash {expected_model_hash} for {artifact_id}"
+            )
         manifest = {
             "experiment_id": self.config.experiment_id,
             "epoch_id": epoch_id,

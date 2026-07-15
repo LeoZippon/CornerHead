@@ -162,6 +162,14 @@ class ExperimentManager:
         merged["work_root"] = str(self.repo_root / ".runtime" / "sandboxes" / experiment_id)
         merged = {key: value for key, value in merged.items() if value is not None}
         options = resolve_options(merged, self.repo_root)  # fail-fast validation before any mkdir
+        try:
+            # Full-config construction: range/overlap/id invariants fail HERE as
+            # HTTP 400 instead of minutes later inside the spawned worker.
+            from autotrade.pipelines.interactive import build_config_from_options
+
+            build_config_from_options(options, repo_root=self.repo_root)
+        except ValueError as exc:
+            raise ManagerError(str(exc)) from exc
         if not bool(options.local_dev):
             from autotrade.environment.gpu import GpuUnavailableError, select_gpus
 
@@ -696,8 +704,8 @@ class ExperimentManager:
         may consume it is enforced where it matters: an already-run fold only
         picks the override up through rerun_fold (itself restricted to the
         latest fold), an unrun fold at its next start."""
-        from autotrade.environment.identity import agent_visible_ref
         from autotrade.environment.step_tree import StepTree
+        from autotrade.pipelines.hitl_state import assert_node_not_from_later_fold
 
         from .steps import node_export_dir, node_layout
 
@@ -713,13 +721,10 @@ class ExperimentManager:
         if node_layout(experiment_dir / "steps", node_id) != "split":
             raise ManagerError("旧格式节点仅支持查看与下载，无法设为父产物起点")
         node = StepTree(experiment_dir / "steps").get_node(node_id)
-        ref_to_fold = {agent_visible_ref(key.partition("/")[2], prefix="fold_ref"): key.partition("/")[2] for key in fold_keys}
-        node_fold = ref_to_fold.get(str(node.get("fold_id")))
-        node_key = f"{node.get('epoch_id')}/{node_fold}" if node_fold else None
-        if node_key not in fold_keys:
-            raise ManagerError(f"无法定位节点 {node_id} 所属的 Fold 会话，拒绝设为起点")
-        if fold_keys.index(node_key) > fold_keys.index(session_key):
-            raise ManagerError("不能把更晚 Fold 会话的节点设为更早会话的起点（未来验证信息泄漏）")
+        try:
+            assert_node_not_from_later_fold(node, session_key, fold_keys)
+        except ValueError as exc:
+            raise ManagerError(str(exc)) from exc
 
     # ---- deletion ------------------------------------------------------------
     def delete_experiment(self, experiment_id: str) -> dict[str, object]:

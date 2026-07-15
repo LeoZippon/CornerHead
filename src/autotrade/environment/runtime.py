@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -236,6 +237,39 @@ def sanitize_for_log(value: object) -> object:
     return value
 
 
+def repo_code_version(repo_root: Path | None = None) -> str:
+    """Short git HEAD of the running code (best-effort, '' outside a repo).
+
+    Stamped into every run manifest so a frozen result can be tied to the
+    implementation that produced it; long-lived workers import code at spawn,
+    so the console also compares this against the repo's current HEAD."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_root or Path.cwd(), capture_output=True, text=True, timeout=10,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def covering_complete_validation(manifest, artifact_hash: object, model_artifact_hash: object) -> str | None:
+    """result_name of the latest successful COMPLETE validation matching both
+    hashes, or None. The single filter finish_fold acceptance, the pipeline
+    freeze, and modification_check's coverage hint all reason with."""
+    for summary in reversed(list(manifest.get("backtest_summaries") or [])):
+        if (
+            isinstance(summary, dict)
+            and summary.get("mode") == "valid"
+            and summary.get("status") == "ok"
+            and summary.get("complete_validation")
+            and str(summary.get("artifact_hash")) == str(artifact_hash)
+            and str(summary.get("model_artifact_hash")) == str(model_artifact_hash)
+        ):
+            return str(summary.get("result_name") or "") or "(unnamed)"
+    return None
+
+
 @dataclass
 class RunManifest:
     """Per-run manifest with an Agent-visible public view and host audit view."""
@@ -250,6 +284,7 @@ class RunManifest:
         path = Path(path)
         manifest = cls(path=path, host_path=_default_host_manifest_path(path), data=dict(initial))
         manifest.data.setdefault("created_at", utc_now_iso())
+        manifest.data.setdefault("code_version", repo_code_version())
         manifest.data.setdefault("backtest_summaries", [])
         manifest.save()
         return manifest

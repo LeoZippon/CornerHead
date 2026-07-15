@@ -6,9 +6,10 @@ import fcntl
 import hashlib
 import json
 import math
+import re
 import shutil
 import uuid
-from dataclasses import InitVar, asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Protocol
@@ -268,12 +269,6 @@ class ExperimentConfig:
     last_test_period: str | None = None
     heldout_first_period: str | None = None
     heldout_last_period: str | None = None
-    first_test_quarter: InitVar[str | None] = None
-    last_test_quarter: InitVar[str | None] = None
-    heldout_first_quarter: InitVar[str | None] = None
-    heldout_last_quarter: InitVar[str | None] = None
-    # Deprecated alias for timeview_enabled, kept so older callers/manifests still work.
-    rolling_asof_enabled: InitVar[bool | None] = None
     fold_period: str = "quarter"
     epochs: int = 1
     window_months: int = 21
@@ -394,32 +389,17 @@ class ExperimentConfig:
     meta_sandbox_image_keep: int = 3
     use_docker: bool = True
 
-    def __post_init__(
-        self,
-        first_test_quarter: str | None,
-        last_test_quarter: str | None,
-        heldout_first_quarter: str | None,
-        heldout_last_quarter: str | None,
-        rolling_asof_enabled: bool | None,
-    ) -> None:
-        if rolling_asof_enabled is not None:
-            object.__setattr__(self, "timeview_enabled", bool(rolling_asof_enabled))
-        first_test_period = self.first_test_period or first_test_quarter
-        last_test_period = self.last_test_period or last_test_quarter
-        heldout_first_period = self.heldout_first_period or heldout_first_quarter
-        heldout_last_period = self.heldout_last_period or heldout_last_quarter
-        conflicts = [
-            name
-            for name, current, legacy in (
-                ("first_test_period", self.first_test_period, first_test_quarter),
-                ("last_test_period", self.last_test_period, last_test_quarter),
-                ("heldout_first_period", self.heldout_first_period, heldout_first_quarter),
-                ("heldout_last_period", self.heldout_last_period, heldout_last_quarter),
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", str(self.experiment_id or "")):
+            # The id becomes directory names everywhere; ../ or separators must
+            # fail at construction, not when the first path escapes the root.
+            raise ValueError(
+                f"experiment_id must match [A-Za-z0-9_-]+, got {self.experiment_id!r}"
             )
-            if current is not None and legacy is not None and str(current) != str(legacy)
-        ]
-        if conflicts:
-            raise ValueError(f"conflicting period aliases: {conflicts}")
+        first_test_period = self.first_test_period
+        last_test_period = self.last_test_period
+        heldout_first_period = self.heldout_first_period
+        heldout_last_period = self.heldout_last_period
         missing = [
             name
             for name, value in (

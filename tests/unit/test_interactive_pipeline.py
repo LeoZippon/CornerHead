@@ -356,29 +356,23 @@ class InteractiveRunnerTest(unittest.TestCase):
             ],
         )
 
-    def test_first_fold_prefetch_overlaps_meta_agent_in_step_mode(self) -> None:
+    def test_first_fold_prefetch_overlaps_meta_gate_and_agent_in_step_mode(self) -> None:
+        # The first-fold prefetch is now submitted BEFORE the meta gate, so it
+        # overlaps the researcher's approval wait as well as Meta reasoning.
         pipeline = FakePipeline(self.config)
-        meta_active = threading.Event()
         prefetch_started = threading.Event()
-        allow_prefetch_finish = threading.Event()
         original_meta = pipeline.run_meta_learning
 
         def slow_meta(**kwargs):
             hook = kwargs.pop("agent_ready_hook")
-            meta_active.set()
-            hook()
             self.assertTrue(prefetch_started.wait(timeout=1.0))
-            allow_prefetch_finish.set()
-            result = original_meta(agent_ready_hook=None, **kwargs)
-            meta_active.clear()
-            return result
+            hook()  # idempotent: the entry is already in early_prefetches
+            return original_meta(agent_ready_hook=None, **kwargs)
 
         def prefetch_fold_data(fold):
             pipeline.calls.append(("prefetch", fold.fold_id))
             if fold.fold_id == "fold_2022Q1":
-                self.assertTrue(meta_active.is_set())
                 prefetch_started.set()
-                self.assertTrue(allow_prefetch_finish.wait(timeout=1.0))
 
         pipeline.run_meta_learning = slow_meta
         pipeline.prefetch_fold_data = prefetch_fold_data
@@ -498,11 +492,13 @@ class InteractiveRunnerTest(unittest.TestCase):
 
         pipeline = FakePipeline(self.config)
         source = write_artifact(self.root / "node_artifact")
+        from autotrade.environment.identity import agent_visible_ref
+
         tree = StepTree(self.config.experiment_dir / "steps")
         node_id = tree.record_step(
             source,
             epoch_id="epoch_001",
-            fold_id="fold_ref_abc123",
+            fold_id=agent_visible_ref("fold_2022Q1", prefix="fold_ref"),
             result_name="valid_003",
             artifact_hash=artifact_hash(source),
             metrics={"total_return": 0.02},

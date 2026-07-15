@@ -23,8 +23,6 @@ from autotrade.pipelines.assembly import (  # noqa: F401
     DEFAULT_META_PROXY_ALIASES,
     DEFAULT_NL_MODEL,
     ProxyBundle,
-    _proxy_summary,
-    _session_config_summary,
     build_meta_learning_managed_proxy_spec,
     build_meta_learning_sandbox_spec,
     build_pipeline,
@@ -35,8 +33,6 @@ from autotrade.pipelines.assembly import (  # noqa: F401
     load_dotenv_into_environ,
 )
 
-# Backwards-compatible private alias (pre-assembly name).
-_load_dotenv_into_environ = load_dotenv_into_environ
 
 
 # --disable-meta-sandbox-rebuild help differs by entrypoint; keep both texts here
@@ -251,14 +247,6 @@ def add_meta_sandbox_arguments(
         action="store_true",
         help=_opt_help(
             "Add host.docker.internal -> host-gateway for bridge-mode access to managed XRay ports.",
-            verbose_help,
-        ),
-    )
-    parser.add_argument(
-        "--meta-learning-host-proxy",
-        action="store_true",
-        help=_opt_help(
-            "Compatibility flag retained for old scripts; proxy aliases now require managed XRay config.",
             verbose_help,
         ),
     )

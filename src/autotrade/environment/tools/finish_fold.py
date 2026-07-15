@@ -12,7 +12,7 @@ the deadline policy belongs to the Pipeline.
 from __future__ import annotations
 
 from autotrade.environment.artifacts import ArtifactError, artifact_hash, model_artifact_hash
-from autotrade.environment.runtime import utc_now_iso
+from autotrade.environment.runtime import covering_complete_validation, utc_now_iso
 
 from .backtest import BacktestTool, _make_formal_artifacts_readonly, _restore_formal_artifacts_writable
 from .base import ActionSpec, PHASE_TRAIN_VALID, ToolContext, ToolError
@@ -71,18 +71,7 @@ class FinishFoldTool:
             # Same filter the Pipeline freeze applies: without a complete validation of
             # exactly these artifacts the fold can only fall back to its parent, so
             # finishing now would silently waste the session.
-            summaries = self.ctx.manifest.get("backtest_summaries") or []
-            validated = [
-                s
-                for s in summaries
-                if isinstance(s, dict)
-                and s.get("mode") == "valid"
-                and s.get("status") == "ok"
-                and s.get("complete_validation")
-                and str(s.get("artifact_hash")) == current_hash
-                and str(s.get("model_artifact_hash")) == current_model_hash
-            ]
-            if not validated:
+            if covering_complete_validation(self.ctx.manifest, current_hash, current_model_hash) is None:
                 raise ToolError(
                     "finish_fold rejected: the current output/models hash has no successful complete "
                     "validation backtest (replay_window debug runs do not count). Run backtest without "
@@ -90,7 +79,7 @@ class FinishFoldTool:
                 )
 
             contract = BacktestTool(self.ctx).contract_check()
-            _cleanup_agent_processes(self.ctx)
+            cleanup_agent_processes(self.ctx)
             post_hash = artifact_hash(self.ctx.paths.agent_output)
             post_model_hash = model_artifact_hash(self.ctx.paths.model_artifacts)
             if post_hash != current_hash or post_model_hash != current_model_hash:
@@ -118,7 +107,7 @@ class FinishFoldTool:
             raise
 
 
-def _cleanup_agent_processes(ctx: ToolContext) -> None:
+def cleanup_agent_processes(ctx: ToolContext) -> None:
     cleanup = getattr(ctx.executor, "cleanup_user_processes", None)
     if callable(cleanup):
         cleanup(user="agent")

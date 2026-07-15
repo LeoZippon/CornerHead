@@ -22,7 +22,7 @@ from autotrade.environment.artifacts import (
     model_artifact_delta,
     model_artifact_hash,
 )
-from autotrade.environment.runtime import utc_now_iso
+from autotrade.environment.runtime import covering_complete_validation, utc_now_iso
 
 from .base import ActionSpec, ToolContext, ToolError
 
@@ -125,6 +125,12 @@ class ModificationCheckTool:
             # acceptance input; the Agent remains free to keep the code.
             "advisories": _strategy_advisories(work_root),
         }
+        # After edit-then-revert (or a step_rollback) the Agent cannot compare
+        # hashes across a compacted session; say outright whether these exact
+        # artifacts already carry a freezable complete validation.
+        covered_by = covering_complete_validation(manifest, current_hash, current_model_hash)
+        summary["complete_validation_covered"] = covered_by is not None
+        summary["covered_by"] = covered_by
         manifest.record_modification_check(summary)
         self.ctx.trace.emit("tool", {**summary}, step_id=self.ctx.current_step_id, phase=phase)
         return summary
