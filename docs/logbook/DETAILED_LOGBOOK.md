@@ -17723,3 +17723,11 @@ Evidence and decision:
 - **Known pre-existing latent edge (not introduced, not fixed)**: if EVERY unique dataset resolves to a None cutoff, `available_at <= cutoff` compares tz-aware vs an all-NaT tz-naive Series and raises TypeError. Identical in old and new code, and practically unreachable (a completed evening node almost always exists within the 10-day lookback). Recorded for awareness; out of scope for this change (no real trigger).
 - **Principles**: minimalist (a 3-line vectorization, no new subsystem/cache/interface); realism preserved (identical evidence set and PIT gating); Agent autonomy untouched (no NL budget or `ctx.nl()` interface change). The running worker still executes pre-fix code; the fix applies on the next worker (re)start — the live experiment was NOT restarted.
 - **Validation**: full `unittest discover` 831 OK; `test_nl_scoring` 34 OK; real-corpus mask equivalence verified at multiple as_of; Opus xhigh cross-audit verdict: exactly semantics-preserving and safe.
+
+
+## 2026-07-16 Console: resume button missing for `terminated` experiments
+
+- **Symptom**: after lzp-test18's worker self-terminated during Q2 (state=`terminated`), the console offered no 恢复运行 (resume) button, only 删除 (delete).
+- **Root cause**: a frontend/backend allowlist drift. Backend `webui/manager.py:43` `_TERMINAL_RESUMABLE_STATES = ("stopped","failed","interrupted","terminated","created")` and `control(action="resume")` relaunch a dead worker from a ledger resume for any of those. But `webui/static/app.js` gated both resume buttons (home list card and detail control bar) on a stale literal `["interrupted","stopped","failed","created"]` that omitted `terminated` — so a terminated (and backend-resumable) experiment had no resume button. The terminate dialog even promises "恢复时将重跑该 Fold", making the omission a clear bug.
+- **Fix**: extracted a single `RESUMABLE_STATES` constant in app.js mirroring the backend tuple, and pointed both button sites at it (prevents future drift). UI-only; the backend already supported the operation. Pushed via `ops/webui/webui_stack.sh sync`; a browser reload shows the button (static SPA is served from the frontend nginx copy).
+- **Validation**: `node --check` clean; frontend copy contains `RESUMABLE_STATES`; backend resume path unchanged and already accepts `terminated`.

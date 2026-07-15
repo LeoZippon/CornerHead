@@ -1611,3 +1611,9 @@
 - 过程更正：先试过用 semi-join 跳过 PIT 不可见 body 行，实测 0 收益（asof 语料已按 tick 裁剪，无未来行可跳）、且 Opus 交叉审计判定为回退（DuckDB 1.1.3 不把 semi-join 下推到 regex 之下，反而拖慢按股 IN-list 热路径）——已整体回退，仅保留向量化。补 PIT 不可见 replay 行排除回归测试。
 - 合规：3 行改动、无新子系统/缓存（极简）；证据与 PIT 门控完全不变（贴近真实）；不动 NL 预算/接口，Agent 自主性不变。运行中的 worker 仍是旧码，重启后生效；未重启在跑实验。
 - Validation: 全量 unittest 831 OK；Opus xhigh 审计判定「exactly semantics-preserving and safe」。
+
+2026-07-16 控制台：terminated 实验缺少「恢复运行」按钮
+
+- lzp-test18 的 worker 在 Q2 自行 terminated 后，前端无「恢复运行」按钮。根因：后端 `manager.py` 的 `_TERMINAL_RESUMABLE_STATES` 已含 `terminated`（control:resume 会按账本重启），但前端 `app.js` 两处按钮门控用的是漏了 `terminated` 的过期状态列表，与后端漂移。
+- 修复：抽出共享常量 `RESUMABLE_STATES`（镜像后端集合），列表页与详情页控制条统一引用；terminated 现可在 UI 恢复。已 `webui_stack.sh sync` 推送前端静态副本，浏览器刷新即见按钮。仅前端；无后端/环境/Agent 改动。
+- Validation: `node --check` OK；前端副本含 RESUMABLE_STATES；后端 resume 早已支持 terminated（无需改动）。

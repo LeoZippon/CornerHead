@@ -12,6 +12,10 @@ const STATE_LABELS = {
   created: "未启动", legacy: "历史实验", unreadable: "不可解析", unknown: "未知",
 };
 const KIND_LABELS = { fold: "Fold", meta_learning: "元学习", heldout: "Held-out" };
+// Dead-worker states the backend can relaunch from a ledger resume; mirrors
+// manager.py _TERMINAL_RESUMABLE_STATES. Keep in sync or the resume button
+// silently disappears for a resumable experiment (e.g. "terminated").
+const RESUMABLE_STATES = ["stopped", "failed", "interrupted", "terminated", "created"];
 
 let pollTimer = null;
 let liveTimers = [];
@@ -673,7 +677,7 @@ function experimentCard(item) {
     card.append(equityHost(item.experiment_id, equityFingerprint(item), { width: 400, height: 130, mini: true }));
   }
   const actions = el("div", { class: "actions" });
-  if (item.kind === "hitl" && ["interrupted", "stopped", "failed", "created"].includes(item.state)) {
+  if (item.kind === "hitl" && RESUMABLE_STATES.includes(item.state)) {
     actions.append(el("button", {
       class: "btn small primary",
       onclick: async (event) => {
@@ -1273,7 +1277,7 @@ function controlBar(detail) {
         ]);
       },
     }, "重启"));
-  } else if (["interrupted", "stopped", "failed", "created"].includes(state)) {
+  } else if (RESUMABLE_STATES.includes(state)) {
     bar.append(el("button", { class: "btn primary", onclick: () => send({ action: "resume" }, "已请求恢复运行") }, "恢复运行"));
   }
   return bar;
