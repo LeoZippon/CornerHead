@@ -167,7 +167,7 @@ therefore do not appear in `pending()` before submission.
 | `ctx.asof_dir` | Path string for the per-tick PIT view: dataset directories such as `daily`, plus the single file `universe.parquet` and `text_library`; wrap with `Path(str(...))` before `/` joins |
 | `ctx.asof_version` | Global version that changes when any Timeview domain rolls, including minute data; use a narrower key for heavy single-domain features |
 | `ctx.snapshot_dir` | Path string for the frozen research baseline snapshot; does not roll during replay |
-| `ctx.state_dir` | Managed cross-tick state directory; only available inside `ctx.substep`; first access copies visible state, then writes stage until `ready_at` |
+| `ctx.state_dir` | Path string for the managed cross-tick state directory (wrap with `Path(str(...))` before `/` joins); only available inside `ctx.substep`; first access copies visible state, then writes stage until `ready_at` |
 | `ctx.model_dir` | Path string for the read-only persisted model artifact directory; data that must persist across backtests belongs in `models/` before replay |
 
 For direct text processing, read `pd.read_parquet(Path(str(ctx.asof_dir)) / "text_index")`

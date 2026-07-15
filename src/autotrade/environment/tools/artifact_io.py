@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from autotrade.environment.runtime import AGENT_TOP_LEVEL
+from autotrade.environment.artifacts import READONLY_FILES
 
 from .base import ActionField, ActionSpec, ToolContext, ToolError
 
@@ -172,7 +173,11 @@ class ArtifactIOTool:
         base_resolved = base.resolve()
         if resolved != base_resolved and base_resolved not in resolved.parents:
             raise ToolError("path escapes the writable root", error_type="path_error", blocked_target=str(path))
-        if root == "output" and rel == "README.md":
+        if root == "output" and resolved != base_resolved and (
+            resolved.relative_to(base_resolved).as_posix() in READONLY_FILES
+        ):
+            # Compare the RESOLVED relative path: './README.md' and friends must
+            # get the documented typed error, not a raw PermissionError later.
             raise ToolError("output/README.md is read-only", error_type="readonly", blocked_target=str(path))
         return resolved
 

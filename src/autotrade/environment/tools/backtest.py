@@ -40,7 +40,7 @@ from autotrade.environment.main_ctx_engine import BacktestError, MainPolicyRunne
 from autotrade.environment.nl.service import StrategyNLService, cleanup_nl_rpc_files, prepare_nl_rpc_files
 from autotrade.environment.replay_market import ParquetMinuteReplaySource
 from autotrade.environment.identity import agent_visible_ref
-from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
+from autotrade.environment.runtime import chmod_tree, new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.snapshot import load_snapshot_manifest
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.style_analysis import replay_style_analysis
@@ -1066,18 +1066,6 @@ def _read_replay_daily(
     )
 
 
-def _read_replay_minutes(
-    replay_dir: Path,
-    *,
-    trade_dates: tuple[str, ...] | None = None,
-) -> pd.DataFrame | None:
-    path = replay_dir / "intraday_1min.parquet"
-    if not path.exists():
-        return None
-    minutes = pd.read_parquet(path, filters=_trade_date_filters(trade_dates))
-    return None if minutes.empty else minutes
-
-
 def _replay_minutes_available(path: Path) -> bool:
     return path.exists() and pq.ParquetFile(path).metadata.num_rows > 0
 
@@ -1183,25 +1171,17 @@ def _formal_artifacts_readonly(paths, *, restore_writable: bool):
 
 
 def _make_formal_artifacts_readonly(paths) -> None:
-    _chmod_tree(paths.agent_output, file_mode=0o444, dir_mode=0o555)
-    _chmod_tree(paths.model_artifacts, file_mode=0o444, dir_mode=0o555)
+    chmod_tree(paths.agent_output, file_mode=0o444, dir_mode=0o555)
+    chmod_tree(paths.model_artifacts, file_mode=0o444, dir_mode=0o555)
 
 
 def _restore_formal_artifacts_writable(paths) -> None:
-    _chmod_tree(paths.agent_output, file_mode=0o666, dir_mode=0o777)
-    _chmod_tree(paths.model_artifacts, file_mode=0o666, dir_mode=0o777)
+    chmod_tree(paths.agent_output, file_mode=0o666, dir_mode=0o777)
+    chmod_tree(paths.model_artifacts, file_mode=0o666, dir_mode=0o777)
     for relpath in READONLY_FILES:
         target = paths.agent_output / relpath
         if target.exists():
             target.chmod(0o444)
-
-
-def _chmod_tree(root: Path, *, file_mode: int, dir_mode: int) -> None:
-    if not root.exists():
-        return
-    for path in sorted(root.rglob("*"), reverse=True):
-        path.chmod(dir_mode if path.is_dir() else file_mode)
-    root.chmod(dir_mode if root.is_dir() else file_mode)
 
 
 def _nl_call_budget(manifest, replay_daily) -> int | None:

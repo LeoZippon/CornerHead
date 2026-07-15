@@ -159,7 +159,7 @@ Fold 周期支持周、月、季度和年，默认季度。每个测试周期使
 **执行流程**
 
 1. Fold 开始时，Pipeline 启动一个 Sandbox 和一个 Agent 会话。
-2. Runner 挂载 `train`、`valid`、`test` 三类数据槽；`test` 对 Agent 用户不可读。
+2. Runner 挂载 `train`、`valid` 两类数据槽；test/held-out 数据仅由宿主持有，从不进入开发容器 mount namespace。
 3. Pipeline 把父策略产物复制到 `/mnt/artifacts/parent_output/` 和 `/mnt/agent/output/`，把父模型参数复制到 `/mnt/artifacts/parent_models/` 和 `/mnt/agent/models/`。
 4. Runner 把本 Epoch 的 Taste 注入 Fold Agent Prompt；该 Taste 不写入正式策略产物 hash，但会指导 Agent 如何实现和取舍策略。
 5. Agent 在 `workspace/` 探索、读数据、复盘验证结果和调试。
@@ -448,7 +448,7 @@ experiments/<experiment_id>/
 - 缓存键另含显式格式版本；快照/PIT 磁盘合同变化时递增版本，无关代码提交不清空大缓存。
 - 同一内容键由跨进程 `flock` 合并为一次构建，加锁后复查命中并原子发布；发布异常直接报错。
 - 数据文件以硬链接挂入运行目录；本地 manifest 以新 inode 替换，不会改写缓存或其他运行的硬链接。
-- 交互式 worker 只预取将进入的 Fold 的四个宿主数据缓存项：`auto` 首 Fold 在 Meta Agent 就绪后与其推理重叠，其他 Fold 与门控重叠；不创建 Sandbox 或容器，并在进入 Fold 前等待完成，所以不与正式回测并行。
+- 交互式 worker 只预取将进入的 Fold 的四个宿主数据缓存项：首 Fold（任意运行模式）自 Meta 门控起即提交预取，与研究者审批和 Meta 推理重叠；其他 Fold 与各自门控重叠；不创建 Sandbox 或容器，并在进入 Fold 前等待完成，所以不与正式回测并行。
 - 每个 Fold/Meta/Held-out 的生产输入在启动 Agent 前校验 pinned generation 唯一；混代或部分缺失世代戳直接失败，本地合成输入可以全部无戳。
 
 **主账本**

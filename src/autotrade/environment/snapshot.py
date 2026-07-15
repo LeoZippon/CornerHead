@@ -1,9 +1,10 @@
 """PIT snapshot construction (docs/environment_design.md §1).
 
-Builds the six domain files plus universe and manifest for one decision time:
+Builds the seven domain files plus universe and manifest for one decision time:
 
-    manifest.json, daily.parquet, intraday_1min.parquet, fundamentals.parquet,
-    events.parquet, macro.parquet, text_index.parquet, text_library/, universe.parquet
+    manifest.json, daily.parquet, intraday_1min.parquet, auction.parquet,
+    fundamentals.parquet, events.parquet, macro.parquet, text_index.parquet,
+    text_library/, universe.parquet
 
 Every row satisfies ``available_at <= decision_time``. Datasets whose raw rows
 carry an ``available_at`` column (events/macro/text/minute) are filtered on it;

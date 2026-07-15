@@ -222,9 +222,17 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
             source_paths = df["source_path"].astype(str)
             blank_source_path += int(source_paths.str.strip().eq("").sum())
             wrong_source_path += int((~source_paths.map(lambda value: _source_path_matches_dataset(value, expected_dataset))).sum())
-            missing_source_path += int((~source_paths.map(lambda value: Path(value).exists())).sum())
+            path_exists = {value: Path(value).exists() for value in source_paths.unique()}
+            missing_source_path += int((~source_paths.map(path_exists)).sum())
             bad_source_row_id += int(pd.to_numeric(df["source_row_id"], errors="coerce").isna().sum())
-            sidecar_hash_mismatch += int(sum(_source_hash_mismatch(row["source_path"], row["source_hash"]) for row in df.to_dict("records")))
+            # Event partitions carry millions of rows referencing thousands of
+            # distinct raw files: read each sidecar once, then compare columns.
+            sidecar_hash = {value: _sidecar_source_hash(value) for value in source_paths.unique()}
+            expected_hash = source_paths.map(sidecar_hash)
+            actual_hash = df["source_hash"].astype(str).str.strip()
+            sidecar_hash_mismatch += int(
+                (expected_hash.ne("") & actual_hash.ne("") & expected_hash.ne(actual_hash)).sum()
+            )
             duplicate_keys += int(df.duplicated(["dataset", "business_key", "available_at"], keep=False).sum())
             if expected_dataset in {"forecast_vip", "express_vip"} and "ann_date" in df.columns:
                 ann = pd.to_datetime(df["ann_date"].astype(str).str.strip(), format="%Y%m%d", errors="coerce")
@@ -454,16 +462,16 @@ def _source_path_matches_dataset(source_path: str, dataset: str) -> bool:
     return dataset in parts
 
 
-def _source_hash_mismatch(source_path: object, source_hash: object) -> bool:
+def _sidecar_source_hash(source_path: object) -> str:
+    """The sidecar's recorded source_hash for one raw file ('' when the file or
+    sidecar is missing/unreadable — those states are counted elsewhere)."""
     path = Path(str(source_path))
     if not path.exists():
-        return False
+        return ""
     sidecar = path.with_suffix(path.suffix + ".meta.json")
     if not sidecar.exists():
-        return False
+        return ""
     try:
-        expected = str(json.loads(sidecar.read_text(encoding="utf-8")).get("source_hash", ""))
+        return str(json.loads(sidecar.read_text(encoding="utf-8")).get("source_hash", ""))
     except json.JSONDecodeError:
-        return False
-    actual = str(source_hash).strip()
-    return bool(expected and actual and expected != actual)
+        return ""

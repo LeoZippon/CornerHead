@@ -61,14 +61,23 @@ def research(ctx, *, budget_minutes: float = 5.0, screen_time: str = "08:00") ->
     if ctx.cur_time < screen_time or ctx.cur_time >= "09:15":
         return  # only screen in the fixed pre-open window [screen_time, 09:15)
     with ctx.substep("research", budget_minutes=budget_minutes):
-        if _plan_path(ctx).exists():  # already have a live plan; manage it instead
-            return
+        path = _plan_path(ctx)
+        if path.exists():
+            resident = json.loads(path.read_text(encoding="utf-8"))
+            if resident.get("plan_date") == ctx.cur_date:
+                return  # today's plan is already staged/live; manage() acts on it
+            # A plan carries its period key and EXPIRES with it: a stale plan must
+            # be regenerated, not silently trusted forever (see the prompt's
+            # cross-period lifecycle contract).
         daily = pd.read_parquet(Path(str(ctx.asof_dir)) / "daily", columns=["ts_code"])
         codes = sorted(daily["ts_code"].astype(str).unique())[:TOP_N]
-        plan = {code: {"status": "pending", "cash_fraction": 1.0 / TOP_N} for code in codes}
+        plan = {
+            "plan_date": ctx.cur_date,
+            "entries": {code: {"status": "pending", "cash_fraction": 1.0 / TOP_N} for code in codes},
+        }
         # Inside the sub-step ctx.state_dir is the staging dir, so this write is held
         # back until ready_at; a later tick's manage() sees it once it has merged.
-        _plan_path(ctx).write_text(json.dumps(plan), encoding="utf-8")
+        path.write_text(json.dumps(plan), encoding="utf-8")
 
 
 def manage(ctx) -> None:
@@ -80,10 +89,11 @@ def manage(ctx) -> None:
     if not path.exists():  # the staged plan has not become visible yet
         return
     plan = json.loads(path.read_text(encoding="utf-8"))
+    entries = plan.get("entries", {})
     changed = False
     cash_budget = float(ctx.broker.stock["available_cash"]) * 0.95
     remaining_budget = cash_budget
-    for code, entry in plan.items():
+    for code, entry in entries.items():
         if entry.get("status") != "pending":
             continue
         if ctx.broker.position(code) != 0:  # the broker confirms the fill

@@ -40,6 +40,7 @@
 - [3. QMT 运行流程与上线门槛](#3-qmt-运行流程与上线门槛)
 - [4. QMT 配置、协议与执行合同](#4-qmt-配置协议与执行合同)
 - [5. QMT 故障处理](#5-qmt-故障处理)
+- [6. 实时导出、同步与飞书通知](#6-实时导出同步与飞书通知)
 
 ## 1. 研究控制台部署
 
@@ -472,7 +473,7 @@ setx CQ_MAX_PRINCIPAL "100000"
 
 本节定义本机与 QMT 客户端之间订单 payload 的目标字段和执行语义。
 
-当前协议尚未冻结，以下示例只用于表达必要语义，不能作为已实现接口。正式接入时应由实现和自动化测试共同冻结精确 schema。
+协议 schema_version 2 已由 `ops/qmt/qmt_client_bridge.py` 实现并冻结；精确字段、严格类型校验（拒绝 NaN/Infinity、布尔必须为 JSON true/false）、逐单意图/终态日志与交易日测试流程见 [`ops/qmt/README.md`](../ops/qmt/README.md)。以下示例只作语义摘要。
 
 **必要语义**
 
@@ -486,7 +487,7 @@ setx CQ_MAX_PRINCIPAL "100000"
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "project_id": "macroquant",
   "strategy_id": "macroquant_hl_daily_rebalance",
   "payload_id": "macroquant_hl_daily_rebalance_20260601",
@@ -542,9 +543,7 @@ scp order.json qmt-node:C:/xquant/inbox/.order.json.tmp
 
 目标传输器必须在同目录完成临时文件校验和原子改名后，轮询器才能读取最终文件名；不能直接把网络传输写到最终名。
 
-**Dry-run 双闸**：①QMT 策略跑在运行（模拟）模式；②payload 携带 `"execute": false`。执行器只校验并写 ack，不调用交易接口。两闸独立。
-
-**真实下单双确认**：QMT 策略切换 实盘 模式（加入模型交易），且 payload 显式 `"execute": true` + `"confirm": "LIVE"` 字段；两者缺一执行器即拒绝。人工确认动作 = 生成并上传这样的 payload，本身必须由人完成。
+**三重闸门（已实现，见 §2.2）**：真实下单要求 ①桥配置 `execution.enabled` 为 JSON true；②payload `"execute": true`；③payload `"confirm"` 精确等于该 payload 的 `payload_id`。任一为假即 dry-run——执行器只校验、写 ack 与逐单日志，不调用交易接口。人工确认动作 = 生成并上传满足三闸的 payload，本身必须由人完成；QMT 客户端的运行/实盘模式只决定客户端行为，不构成网关闸门。
 
 **成交对账**
 

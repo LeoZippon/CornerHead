@@ -61,10 +61,12 @@ MODEL_ARTIFACT_ALLOWED_SUFFIXES = frozenset(
     }
 )
 # Mount paths a formal strategy must never hardcode. "/mnt/snapshots/" (plural,
-# the staged alias root) and "/mnt/runtime/" are not mounted into the formal run
-# and are kept here to fail fast if the agent copies them from prompts/docs. The
-# singular "/mnt/snapshot" is intentionally absent: it is the legitimate formal
-# read root (see sandbox.py formal_strategy_read_roots).
+# the staged alias root) is not mounted into the formal run. "/mnt/runtime/"
+# subpaths ARE mounted there (state/staging/asof/rpc — two of them writable),
+# but they are per-replay ephemeral driver-managed paths reachable only via the
+# ctx.* surfaces, so hardcoding them must fail fast just the same. The singular
+# "/mnt/snapshot" is intentionally absent: it is the legitimate formal read
+# root (see sandbox.py formal_strategy_read_roots).
 FORBIDDEN_CODE_REFERENCES = (
     "/mnt/snapshots/",
     "/mnt/runtime/",

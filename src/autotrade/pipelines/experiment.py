@@ -30,8 +30,8 @@ from autotrade.environment.executor import DockerExecutor
 from autotrade.environment.identity import agent_visible_ref as _agent_visible_ref
 from autotrade.environment.llm.proxy import LLMProxy
 from autotrade.environment.managed_proxy import ManagedProxySession
-from autotrade.environment.runtime import AgentTraceWriter, RunManifest, new_id, sanitize_for_log, utc_now_iso
-from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, _chmod_tree, link_copytree
+from autotrade.environment.runtime import chmod_tree, AgentTraceWriter, RunManifest, new_id, sanitize_for_log, utc_now_iso
+from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree
 from autotrade.environment.sandbox_images import (
     SANDBOX_ENVIRONMENT_REQUEST_NAME,
     maybe_rebuild_sandbox_image,
@@ -1250,8 +1250,8 @@ class ExperimentPipeline:
             # finish_fold read-locks output/ and models/ (and the Docker agent's
             # subuid may own files inside) — make them deletable again or the
             # restore below dies with PermissionError on unlink.
-            _chmod_tree(ctx.paths.agent_output, file_mode=0o666, dir_mode=0o777)
-            _chmod_tree(ctx.paths.model_artifacts, file_mode=0o666, dir_mode=0o777)
+            chmod_tree(ctx.paths.agent_output, file_mode=0o666, dir_mode=0o777)
+            chmod_tree(ctx.paths.model_artifacts, file_mode=0o666, dir_mode=0o777)
             # Distinguish "never validated anything" from "validated but not accepted" so
             # audits do not need to reverse-engineer the reason list.
             copy_artifact(parent.path, ctx.paths.agent_output)

@@ -48,11 +48,6 @@ class CompanyContextStore:
         return cached
 
 
-def build_company_contexts(snapshot_dir: str | Path, ts_codes: list[str]) -> dict[str, dict[str, object]]:
-    store = CompanyContextStore(snapshot_dir)
-    return {str(code): store.context(code) for code in ts_codes}
-
-
 def _build_one(
     code: str, universe: pd.DataFrame, mainbz: dict[str, list[str]]
 ) -> dict[str, object]:

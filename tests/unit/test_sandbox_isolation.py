@@ -349,7 +349,7 @@ class SandboxSpecTest(unittest.TestCase):
             self.assertNotIn("hf-secret-for-test", command)
             self.assertNotIn("gh-secret-for-test", command)
             allocation = docker.allocation_record()
-            self.assertEqual(allocation["env_passthrough"], ["HF_TOKEN", "GITHUB_TOKEN", "MISSING_SECRET"])
+            self.assertEqual(allocation["requested_env_passthrough"], ["HF_TOKEN", "GITHUB_TOKEN", "MISSING_SECRET"])
             self.assertEqual(allocation["requested_env_passthrough"], ["HF_TOKEN", "GITHUB_TOKEN", "MISSING_SECRET"])
             self.assertEqual(allocation["active_env_passthrough"], ["HF_TOKEN", "GITHUB_TOKEN"])
             self.assertTrue(allocation["add_host_gateway"])
@@ -411,7 +411,7 @@ class SandboxSpecTest(unittest.TestCase):
                     {"container_env": "AT_PROXY_ALL", "host_env": "ALL_PROXY"},
                 ],
             )
-            self.assertEqual(allocation["env_aliases"], allocation["requested_env_aliases"])
+            self.assertNotIn("env_aliases", allocation)  # requested_*/active_* are the meaningful pair
 
     def test_docker_sandbox_can_pin_host_gateway_ip(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -975,7 +975,7 @@ class MetaLearningSessionTest(unittest.TestCase):
             summary = runner.run()
 
             self.assertNotEqual(summary["finish_status"], "meta_learning_done")
-            self.assertEqual(summary["finish_status"], "deadline_timeout")
+            self.assertEqual(summary["finish_status"], "llm_call_limit")  # call budget, not wall clock
 
     def test_meta_learning_done_requires_all_search_perspectives(self):
         class FakeSearch(WebSearchProvider):
@@ -1010,7 +1010,7 @@ class MetaLearningSessionTest(unittest.TestCase):
             summary = runner.run()
 
             self.assertNotEqual(summary["finish_status"], "meta_learning_done")
-            self.assertEqual(summary["finish_status"], "deadline_timeout")
+            self.assertEqual(summary["finish_status"], "llm_call_limit")  # call budget, not wall clock
 
     def test_meta_learning_empty_web_search_result_does_not_satisfy_perspective(self):
         class EmptySearch(WebSearchProvider):

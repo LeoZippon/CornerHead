@@ -24,6 +24,7 @@ from typing import Sequence
 
 from autotrade.environment.artifacts import READONLY_FILES, copy_artifact, copy_model_artifacts, init_from_template
 from autotrade.environment.runtime import (
+    chmod_tree,
     AGENT_TOP_LEVEL,
     ARTIFACT_TOP_LEVEL,
     RUNTIME_CACHE_DIR_NAMES,
@@ -110,10 +111,6 @@ class SandboxSpec:
                 {"container_env": container_env, "host_env": host_env}
                 for container_env, host_env in self.env_aliases
             ],
-            "env_aliases": [
-                {"container_env": container_env, "host_env": host_env}
-                for container_env, host_env in self.env_aliases
-            ],
             "add_host_gateway": self.add_host_gateway,
             "host_gateway_ip": self.host_gateway_ip,
         }
@@ -193,16 +190,16 @@ class LocalSandbox:
             init_from_template(template_dir, self.paths.agent_output)
             copy_model_artifacts(None, self.paths.parent_model_artifacts)
             copy_model_artifacts(None, self.paths.model_artifacts)
-            _chmod_tree(self.paths.parent_output, file_mode=0o444, dir_mode=0o555)
-            _chmod_tree(self.paths.parent_model_artifacts, file_mode=0o444, dir_mode=0o555)
+            chmod_tree(self.paths.parent_output, file_mode=0o444, dir_mode=0o555)
+            chmod_tree(self.paths.parent_model_artifacts, file_mode=0o444, dir_mode=0o555)
             is_initial = True
         else:
             copy_artifact(source_root, self.paths.parent_output)
             copy_artifact(source_root, self.paths.agent_output)
             copy_model_artifacts(source_model_root, self.paths.parent_model_artifacts)
             copy_model_artifacts(source_model_root, self.paths.model_artifacts)
-            _chmod_tree(self.paths.parent_output, file_mode=0o444, dir_mode=0o555)
-            _chmod_tree(self.paths.parent_model_artifacts, file_mode=0o444, dir_mode=0o555)
+            chmod_tree(self.paths.parent_output, file_mode=0o444, dir_mode=0o555)
+            chmod_tree(self.paths.parent_model_artifacts, file_mode=0o444, dir_mode=0o555)
             is_initial = False
         self.unlock_agent_output()
         return is_initial
@@ -248,7 +245,7 @@ class LocalSandbox:
             raise ValueError(f"unknown snapshot slot: {slot}")
         target = getattr(self.paths, slot)
         if target.exists():
-            _chmod_tree(target, file_mode=0o644, dir_mode=0o755)
+            chmod_tree(target, file_mode=0o644, dir_mode=0o755)
             shutil.rmtree(target)
         shutil.copytree(source_dir, target, copy_function=_link_or_copy)
         if slot == "test":
@@ -257,14 +254,14 @@ class LocalSandbox:
 
     def lock_agent_output(self) -> None:
         """Filesystem write lock after finish_fold / during frozen phases."""
-        _chmod_tree(self.paths.agent_output, file_mode=0o444, dir_mode=0o555)
-        _chmod_tree(self.paths.model_artifacts, file_mode=0o444, dir_mode=0o555)
+        chmod_tree(self.paths.agent_output, file_mode=0o444, dir_mode=0o555)
+        chmod_tree(self.paths.model_artifacts, file_mode=0o444, dir_mode=0o555)
 
     def unlock_agent_output(self) -> None:
         # World-writable so the container agent (subuid in rootless Docker) can
         # edit the formal files; READMEs stay read-only.
-        _chmod_tree(self.paths.agent_output, file_mode=0o666, dir_mode=0o777)
-        _chmod_tree(self.paths.model_artifacts, file_mode=0o666, dir_mode=0o777)
+        chmod_tree(self.paths.agent_output, file_mode=0o666, dir_mode=0o777)
+        chmod_tree(self.paths.model_artifacts, file_mode=0o666, dir_mode=0o777)
         for relpath in READONLY_FILES:
             target = self.paths.agent_output / relpath
             if target.exists():
@@ -305,7 +302,7 @@ class LocalSandbox:
                 _copy_path(workspace_source, dest_dir / _AGENT_WORKSPACE)
             except (OSError, shutil.Error) as exc:
                 _record_collect_skip(dest_dir, _AGENT_WORKSPACE, exc)
-        _chmod_tree(dest_dir, file_mode=0o644, dir_mode=0o755)
+        chmod_tree(dest_dir, file_mode=0o644, dir_mode=0o755)
         return dest_dir
 
 
@@ -553,7 +550,7 @@ def link_copytree(source: str | Path, dest: str | Path) -> Path:
     """Replace ``dest`` with a hardlinked copy of ``source``."""
     source, dest = Path(source), Path(dest)
     if dest.exists():
-        _chmod_tree(dest, file_mode=0o644, dir_mode=0o755)
+        chmod_tree(dest, file_mode=0o644, dir_mode=0o755)
         shutil.rmtree(dest)
     shutil.copytree(source, dest, copy_function=_link_or_copy)
     return dest
@@ -566,7 +563,7 @@ def _replace_dir_contents(source: Path, dest: Path) -> None:
     if not source.is_dir():
         raise FileNotFoundError(f"snapshot view not found: {source}")
     dest.mkdir(parents=True, exist_ok=True)
-    _chmod_tree(dest, file_mode=0o644, dir_mode=0o755)
+    chmod_tree(dest, file_mode=0o644, dir_mode=0o755)
     for child in list(dest.iterdir()):
         if child.is_dir() and not child.is_symlink():
             shutil.rmtree(child)
@@ -578,18 +575,7 @@ def _replace_dir_contents(source: Path, dest: Path) -> None:
             shutil.copytree(child, target, copy_function=_link_or_copy)
         else:
             _link_or_copy(str(child), str(target))
-    _chmod_tree(dest, file_mode=0o644, dir_mode=0o755)
-
-
-def _chmod_tree(root: Path, *, file_mode: int, dir_mode: int) -> None:
-    if not root.exists():
-        return
-    for path in sorted(root.rglob("*"), reverse=True):
-        try:
-            path.chmod(dir_mode if path.is_dir() else file_mode)
-        except OSError:
-            pass
-    root.chmod(dir_mode if root.is_dir() else file_mode)
+    chmod_tree(dest, file_mode=0o644, dir_mode=0o755)
 
 
 @contextmanager
@@ -737,7 +723,6 @@ class DockerSandbox:
             "gpu_count": self.spec.gpu_count,
             "gpu_name_filter": self.spec.gpu_name_filter,
             "allocated_gpu_indices": list(self.gpu_indices),
-            "env_passthrough": list(self.spec.env_passthrough),
             "requested_env_passthrough": list(self.spec.env_passthrough),
             "active_env_passthrough": list(self.active_env_passthrough),
             "requested_env_aliases": [
@@ -745,10 +730,6 @@ class DockerSandbox:
                 for container_env, host_env in self.spec.env_aliases
             ],
             "active_env_aliases": list(self.active_env_aliases),
-            "env_aliases": [
-                {"container_env": container_env, "host_env": host_env}
-                for container_env, host_env in self.spec.env_aliases
-            ],
             "add_host_gateway": self.spec.add_host_gateway,
         }
 

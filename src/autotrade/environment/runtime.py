@@ -237,6 +237,25 @@ def sanitize_for_log(value: object) -> object:
     return value
 
 
+def chmod_tree(root: Path, *, file_mode: int, dir_mode: int) -> None:
+    """Recursive chmod with the tolerant per-path policy every lock/unlock
+    site needs: under rootless Docker the agent's subuid may own files the
+    host cannot chmod (EPERM) — skipping them beats crashing a freeze or a
+    parent-restore mid-flight. Single source: the sandbox lock/unlock pair,
+    the formal-replay readonly bracket, and the pipeline restore all share it."""
+    if not root.exists():
+        return
+    for path in sorted(root.rglob("*"), reverse=True):
+        try:
+            path.chmod(dir_mode if path.is_dir() else file_mode)
+        except OSError:
+            pass
+    try:
+        root.chmod(dir_mode if root.is_dir() else file_mode)
+    except OSError:
+        pass
+
+
 def repo_code_version(repo_root: Path | None = None) -> str:
     """Short git HEAD of the running code (best-effort, '' outside a repo).
 
