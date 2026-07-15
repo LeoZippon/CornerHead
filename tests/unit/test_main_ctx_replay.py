@@ -1859,6 +1859,71 @@ class MarketStateEncodingTest(unittest.TestCase):
                 self.assertEqual(_columnar_float_values(values), expected)
 
 
+class PackedBarsRoundTripTest(unittest.TestCase):
+    def test_market_state_packs_numeric_columns_and_driver_decodes_them(self) -> None:
+        import base64
+        import importlib.util
+        from pathlib import Path as _P
+
+        from autotrade.environment.broker import BrokerProfile, MarketData, SimBroker
+        from autotrade.environment.main_ctx_engine import _market_state
+
+        daily = pd.DataFrame(
+            [{"trade_date": "20220104", "ts_code": "000001.SZ", "open": 10.0, "close": 10.5,
+              "up_limit": 11.0, "down_limit": 9.0, "is_suspended": False}]
+        )
+        broker = SimBroker(BrokerProfile(), MarketData(daily), shortable_codes=frozenset())
+        group = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "open": 10.0, "high": 10.2, "low": 9.9,
+                 "close": float("nan"), "vol": 1000.0, "amount": 10_000.0},
+                {"ts_code": "600000.SH", "open": 5.0, "high": 5.1, "low": 4.9,
+                 "close": 5.05, "vol": 2000.0, "amount": 10_100.0},
+            ]
+        )
+        state = _market_state(broker, trade_date="20220104", minute_key="09:31", minute_group=group)
+        bars = state["bars"]
+        self.assertIn("packed_f64", bars)
+        self.assertNotIn("open", bars)  # numeric columns ship packed, not as JSON lists
+        # A JSON round trip mirrors the real stdin/stdout line protocol.
+        import json as _json
+
+        wire = _json.loads(_json.dumps(bars))
+
+        driver_path = _P(__file__).resolve().parents[2] / "src" / "autotrade" / "environment" / "main_ctx_driver.py"
+        spec = importlib.util.spec_from_file_location("_packed_driver", driver_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        lazy = module._LazyBars(wire)
+        first = lazy["000001.SZ"]
+        self.assertEqual(first["open"], 10.0)
+        self.assertIsNone(first["close"])  # NaN encodes None across the wire
+        self.assertEqual(lazy["600000.SH"]["close"], 5.05)
+        self.assertEqual(len(lazy), 2)
+
+    def test_market_state_missing_and_object_columns(self) -> None:
+        from autotrade.environment.broker import BrokerProfile, MarketData, SimBroker
+        from autotrade.environment.main_ctx_engine import _market_state
+
+        daily = pd.DataFrame(
+            [{"trade_date": "20220104", "ts_code": "000001.SZ", "open": 10.0, "close": 10.5,
+              "up_limit": 11.0, "down_limit": 9.0, "is_suspended": False}]
+        )
+        broker = SimBroker(BrokerProfile(), MarketData(daily), shortable_codes=frozenset())
+        group = pd.DataFrame(
+            [{"ts_code": "000001.SZ", "open": "10.0", "high": 10.2, "low": 9.9, "close": 10.1}]
+        )  # object-dtype open -> legacy list path; vol/amount absent -> packed NaN buffers
+        state = _market_state(broker, trade_date="20220104", minute_key="09:31", minute_group=group)
+        bars = state["bars"]
+        self.assertEqual(bars["open"], [10.0])
+        self.assertIn("vol", bars["packed_f64"])
+        import base64
+
+        import numpy as np
+        vol = np.frombuffer(base64.b64decode(bars["packed_f64"]["vol"]), dtype="<f8")
+        self.assertTrue(np.isnan(vol).all())
+
+
 class LazyBarsTest(unittest.TestCase):
     def _bars(self):
         import importlib.util

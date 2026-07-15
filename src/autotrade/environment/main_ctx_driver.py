@@ -12,7 +12,7 @@ This module imports only the Python standard library (no ``autotrade``, ``pandas
 ``broker_core`` import), so it runs unchanged in the dependency-light sandbox image.
 """
 
-import builtins, contextlib, filecmp, importlib.util, json, math, os, re, resource, shutil, sys, threading, time, traceback, types, uuid
+import array, base64, builtins, contextlib, filecmp, importlib.util, json, math, os, re, resource, shutil, sys, threading, time, traceback, types, uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -969,13 +969,28 @@ class _LazyBars(dict):
         super().__init__()
         self._codes = codes
         self._index = {code: i for i, code in enumerate(codes)}
-        self._cols = {str(k): v for k, v in columns.items() if k != "ts_code"}
+        cols = {
+            str(k): v for k, v in columns.items()
+            if k not in ("ts_code", "packed_f64")
+        }
+        for name, blob in (columns.get("packed_f64") or {}).items():
+            # One little-endian float64 buffer per column (NaN encodes None):
+            # decoding a buffer is ~3x cheaper than parsing per-value JSON.
+            values = array.array("d")
+            values.frombytes(base64.b64decode(blob))
+            if sys.byteorder != "little":
+                values.byteswap()
+            cols[str(name)] = values
+        self._cols = cols
 
     def _materialize(self, key):
         i = self._index[key]
         bar = {"ts_code": key}
         for name, values in self._cols.items():
-            bar[name] = values[i]
+            value = values[i]
+            if isinstance(value, float) and value != value:  # NaN encodes None
+                value = None
+            bar[name] = value
         super().__setitem__(key, bar)
         return bar
 

@@ -1754,13 +1754,24 @@ class ReplayIntegrationTest(unittest.TestCase):
         # Enter once on a real minute bar; on a later-day rally the swing reduces. Orders fill
         # on the next bar, so the entry/exit land one bar after each decision.
         def swing(state):
-            # state["bars"] is the columnar wire payload; the in-container driver
-            # wraps it into the dict-like ctx.bars for real strategies.
+            # state["bars"] is the columnar wire payload (numeric columns packed
+            # as base64 float64); the in-container driver wraps it into the
+            # dict-like ctx.bars for real strategies.
+            import array as _array
+            import base64 as _base64
+
             bars = state["bars"]
             codes = list(bars.get("ts_code") or [])
             if "000001.SZ" not in codes:
                 return []
-            close = (bars.get("close") or [])[codes.index("000001.SZ")]
+            packed = (bars.get("packed_f64") or {}).get("close")
+            if packed is not None:
+                values = _array.array("d")
+                values.frombytes(_base64.b64decode(packed))
+                close = values[codes.index("000001.SZ")]
+                close = None if close != close else close
+            else:
+                close = (bars.get("close") or [])[codes.index("000001.SZ")]
             if close is None:
                 return []
             price = float(close)

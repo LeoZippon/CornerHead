@@ -14,6 +14,7 @@ positions at any minute, not only at the fold decision time.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import select
@@ -27,6 +28,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 
@@ -1927,16 +1929,28 @@ def _market_state(
     # Columnar payload: full-universe list-of-dicts JSON dominated the per-tick
     # RPC cost (~1MB/tick at ~5.4k codes). The driver's _LazyBars keeps the
     # ctx.bars dict semantics while materializing only the codes a strategy
-    # actually touches.
+    # actually touches. Numeric columns ship as ONE little-endian float64
+    # buffer each (base64 inside the JSON line, NaN encodes None): json floats
+    # cost ~10ms/tick to serialize+parse at full universe, the packed buffer
+    # ~3.5ms — about two minutes per full-quarter replay on every surface.
     if minute_group.empty:
-        bars: dict[str, list[object]] = {"ts_code": []}
+        bars: dict[str, object] = {"ts_code": []}
     else:
-        bars = {"ts_code": [str(code) for code in minute_group["ts_code"].tolist()]}
+        codes = [str(code) for code in minute_group["ts_code"].tolist()]
+        bars = {"ts_code": codes}
+        packed: dict[str, str] = {}
         for column in ("open", "high", "low", "close", "vol", "amount"):
-            if column in minute_group.columns:
-                bars[column] = _columnar_float_values(minute_group[column])
+            if column not in minute_group.columns:
+                packed[column] = _PACKED_NAN_CACHE.buffer(len(codes))
+                continue
+            blob = _columnar_pack(minute_group[column])
+            if blob is not None:
+                packed[column] = blob
             else:
-                bars[column] = [None] * len(bars["ts_code"])
+                # Legacy object/string columns keep the per-value JSON path.
+                bars[column] = _columnar_float_values(minute_group[column])
+        if packed:
+            bars["packed_f64"] = packed
     return {
         "cur_date": str(trade_date),
         "cur_time": str(minute_key or ""),
@@ -1964,6 +1978,38 @@ def _market_state(
         "asof_version": asof_version,
         "pending": pending or {},
     }
+
+
+class _PackedNanCache:
+    """Base64 all-NaN float64 buffers by length (missing bar columns reuse one
+    encode per universe size instead of re-encoding every tick)."""
+
+    def __init__(self) -> None:
+        self._by_length: dict[int, str] = {}
+
+    def buffer(self, length: int) -> str:
+        cached = self._by_length.get(length)
+        if cached is None:
+            cached = base64.b64encode(np.full(length, np.nan, dtype="<f8").tobytes()).decode("ascii")
+            if len(self._by_length) > 8:
+                self._by_length.clear()
+            self._by_length[length] = cached
+        return cached
+
+
+_PACKED_NAN_CACHE = _PackedNanCache()
+
+
+def _columnar_pack(values: pd.Series) -> str | None:
+    """One bar column as a base64 little-endian float64 buffer (NaN = None),
+    or None when the column is not purely numeric (legacy fallback)."""
+    if (
+        pd.api.types.is_numeric_dtype(values.dtype)
+        and not pd.api.types.is_complex_dtype(values.dtype)
+    ):
+        numeric = values.to_numpy(dtype="float64", na_value=float("nan"), copy=False)
+        return base64.b64encode(numeric.astype("<f8", copy=False).tobytes()).decode("ascii")
+    return None
 
 
 def _columnar_float_values(values: pd.Series) -> list[float | None]:
