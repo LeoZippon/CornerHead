@@ -76,16 +76,42 @@ def _public_strategy_error(exc, *, main_path, request, snapshot_dir):
             except (OSError, TypeError):
                 in_strategy = False
             if in_strategy and re.search(
-                r"(?:\bctx\s*\.\s*)?\b(?:asof_dir|snapshot_dir|model_dir)\s*/",
+                r"(?:\bctx\s*\.\s*)?\b(?:asof_dir|snapshot_dir|model_dir|state_dir)\s*/",
                 frame.line or "",
             ):
                 return {
                     "public_error_type": "strategy_contract_error",
                     "public_reason": "context_path_string_contract",
                     "public_retry_hint": (
-                        "ctx.asof_dir, ctx.snapshot_dir, and ctx.model_dir are path strings; "
-                        "wrap them with Path(str(...)) before using the / path operator."
+                        "ctx.asof_dir, ctx.snapshot_dir, ctx.model_dir, and ctx.state_dir are "
+                        "path strings; wrap them with Path(str(...)) before using the / path operator."
                     ),
+                }
+    if isinstance(exc, KeyError) and exc.args and isinstance(exc.args[0], str):
+        # Echo the missing key ONLY when its literal is quoted in the agent's own
+        # source line, so the hint can never carry replay data — just the code the
+        # agent already wrote. Innermost strategy frame wins.
+        key = exc.args[0]
+        strategy_root = Path(main_path).parent
+        for frame in reversed(traceback.extract_tb(exc.__traceback__)):
+            try:
+                in_strategy = _is_under(_normalize_path(frame.filename), _normalize_path(strategy_root))
+            except (OSError, TypeError):
+                in_strategy = False
+            line = frame.line or ""
+            if in_strategy and (('"%s"' % key) in line or ("'%s'" % key) in line):
+                try:
+                    rel = str(Path(frame.filename).relative_to(strategy_root))
+                except ValueError:
+                    rel = Path(frame.filename).name
+                return {
+                    "public_error_type": "strategy_contract_error",
+                    "public_reason": "missing_key_in_strategy",
+                    "public_retry_hint": (
+                        "KeyError: %r at %s:%s — that key is absent from the mapping/frame "
+                        "being indexed; verify column and field names against the data "
+                        "manifest or Parquet metadata before indexing."
+                    ) % (key, rel, frame.lineno),
                 }
     state = request.get("state") or {}
     rolling_asof_dir = state.get("asof_dir") if isinstance(state, dict) else None

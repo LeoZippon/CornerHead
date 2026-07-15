@@ -280,7 +280,7 @@ class SnapshotBuilder:
         # (results/data_quality/); no status path disables the domain gates too.
         self.data_quality_dir = self.fundamental_events_status.parent if self.fundamental_events_status is not None else None
         self.contracts = default_tushare_contracts()
-        self.store = PITDataStore(self.raw_dir, self.contracts)
+        self.store = PITDataStore(self.raw_dir)
 
     @contextmanager
     def _raw_lake_guard(self):
@@ -590,13 +590,22 @@ class SnapshotBuilder:
         *,
         label: str,
         config: SnapshotConfig | None = None,
+        available_from: datetime | None = None,
     ) -> dict[str, object]:
         """Replay region data: daily bars plus the events/text/minutes/macro/
         fundamentals published inside the period, every domain carrying row-level
         ``available_at`` so the per-tick Timeview can roll each dataset in on its
-        refresh node. Read only by backtest_tool; never PIT-filtered up front."""
+        refresh node. Read only by backtest_tool; never PIT-filtered up front.
+
+        ``available_from`` is the fold's decision anchor (last trading day before
+        the period, 23:59:59). Rows published between that anchor and calendar
+        midnight of the period start — weekend/holiday news, events, macro —
+        belong to the replay's first pre-open refresh, so the availability floor
+        uses the anchor, not period-start midnight."""
         with self._raw_lake_guard() as raw_generation:
-            manifest = self._build_replay_slot_impl(start_date, end_date, output_dir, label, config, raw_generation)
+            manifest = self._build_replay_slot_impl(
+                start_date, end_date, output_dir, label, config, raw_generation, available_from
+            )
         return manifest
 
     def _build_replay_slot_impl(
@@ -607,6 +616,7 @@ class SnapshotBuilder:
         label: str,
         config: SnapshotConfig | None,
         raw_generation: dict[str, object] | None,
+        available_from: datetime | None = None,
     ) -> dict[str, object]:
         config = config or SnapshotConfig()
         output_dir = Path(output_dir)
@@ -614,15 +624,22 @@ class SnapshotBuilder:
         start_key, end_key = yyyymmdd(start_date), yyyymmdd(end_date)
         period_start = pd.Timestamp(start_key, tz=CN_TZ)
         period_end = pd.Timestamp(end_key, tz=CN_TZ) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        anchor = pd.Timestamp(available_from) if available_from is not None else None
+        if anchor is not None and anchor.tzinfo is None:
+            anchor = anchor.tz_localize(CN_TZ)
+        # Availability floor for the published-inside-the-period domains.
+        window_floor = anchor if anchor is not None and anchor < period_start else period_start
         domains: dict[str, dict[str, object]] = {}
         profiles: dict[str, dict[str, object]] = {}
         total_started = time.perf_counter()
 
         # Same screened set the agent's decision snapshot used: anchored strictly
         # BEFORE the period, frozen across it (no intra-period re-screening).
-        screened = self._screened_codes(
-            period_start.to_pydatetime() - timedelta(seconds=1), config
-        ) if config.screening_active() else None
+        screen_anchor = (
+            anchor.to_pydatetime() if anchor is not None
+            else period_start.to_pydatetime() - timedelta(seconds=1)
+        )
+        screened = self._screened_codes(screen_anchor, config) if config.screening_active() else None
 
         def build_daily(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
@@ -637,7 +654,7 @@ class SnapshotBuilder:
 
         def build_macro(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
-            macro, meta = self._build_available_at_domain(config.macro_datasets, period_end, period_start)
+            macro, meta = self._build_available_at_domain(config.macro_datasets, period_end, window_floor)
             profile = _write_with_profile(
                 output_dir / "macro.parquet", macro, build_seconds=time.perf_counter() - started
             )
@@ -652,7 +669,7 @@ class SnapshotBuilder:
                 self.fundamental_events_root,
                 period_end.isoformat(),
                 datasets=config.fundamental_datasets,
-                min_available_at=period_start.isoformat(),
+                min_available_at=window_floor.isoformat(),
                 require_partitions=False,
             )
             fundamentals = self._apply_screen(fundamentals, screened)
@@ -664,7 +681,7 @@ class SnapshotBuilder:
         def build_events(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
             events, meta = self._build_available_at_domain(
-                config.events_datasets, period_end, period_start
+                config.events_datasets, period_end, window_floor
             )
             events = self._apply_screen(events, screened)
             meta = {**meta, "rows": int(len(events))}
@@ -675,7 +692,7 @@ class SnapshotBuilder:
 
         def build_text(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
-            text_index, meta = self._build_text(config, period_end, period_start, output_dir)
+            text_index, meta = self._build_text(config, period_end, window_floor, output_dir)
             profile = _write_with_profile(
                 output_dir / "text_index.parquet", text_index, build_seconds=time.perf_counter() - started
             )
@@ -752,6 +769,7 @@ class SnapshotBuilder:
             "created_at": utc_now_iso(),
             "period_start": start_key,
             "period_end": end_key,
+            "available_from": anchor.isoformat() if anchor is not None else None,
             "domains": domains,
             "raw_generation": raw_generation,
             "build_profile": {
@@ -982,20 +1000,6 @@ class SnapshotBuilder:
         meta["rows"] = int(len(out))
         return out[list(self._CORPORATE_ACTION_COLUMNS)], meta
 
-    def _read_minutes_range(self, start_key: str, end_key: str) -> tuple[pd.DataFrame, dict[str, object]]:
-        paths = self._minute_partition_paths(start_key, end_key)
-        frames = [
-            pd.read_parquet(path)
-            for path in paths
-        ]
-        minutes = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        if not minutes.empty:
-            # Match the frozen intraday schema (_build_intraday) so the Timeview rolls
-            # replay rows into the same columns and never NaN-backfills the auction
-            # correction; available_at is kept here as the row-level Timeview gate.
-            minutes = apply_open_auction_correction(minutes)
-        return minutes, {"rows": int(len(minutes)), "datasets": ["stk_mins_1min_by_date"], "files": len(frames)}
-
     def _minute_partition_paths(self, start_key: str, end_key: str) -> list[Path]:
         dataset_dir = self.raw_dir / "stk_mins_1min_by_date"
         if not dataset_dir.exists():
@@ -1152,7 +1156,7 @@ class SnapshotBuilder:
             suspend = _filter_trade_dates(suspend, visible_dates_by_dataset.get("suspend_d", []))
             if daily.empty:
                 raise ValueError(f"daily raw data empty after PIT filter for {start}..{end}")
-        for name, frame in (("daily", daily), ("daily_basic", basic), ("stk_limit", limits)):
+        for name, frame in (("daily", daily), ("daily_basic", basic), ("stk_limit", limits), ("adj_factor", adj)):
             if frame.duplicated(["trade_date", "ts_code"]).any():
                 raise ValueError(f"{name} has duplicate (trade_date, ts_code) keys in {start}..{end}")
         out = daily.merge(basic, on=["trade_date", "ts_code"], how="left", suffixes=("", "_basic"))
@@ -1207,11 +1211,12 @@ class SnapshotBuilder:
         frames: list[pd.DataFrame] = []
         rules: dict[str, str] = {}
         duplicate_rows_dropped: dict[str, int] = {}
+        nat_counts: dict[str, int] = {}
         for dataset in datasets:
             dataset_dir = self.raw_dir / dataset
             if not dataset_dir.exists():
                 raise FileNotFoundError(f"missing configured dataset directory: {dataset_dir}")
-            rows = self._read_dataset_window(dataset_dir, decision_time, window_start)
+            rows = self._read_dataset_window(dataset_dir, decision_time, window_start, nat_counts)
             rules[dataset] = "raw available_at column"
             if rows.empty:
                 continue
@@ -1231,14 +1236,21 @@ class SnapshotBuilder:
         meta = {"rows": int(len(merged)), "datasets": list(datasets), "units": "source", "availability_rules": rules}
         if duplicate_rows_dropped:
             meta["duplicate_rows_dropped"] = duplicate_rows_dropped
+        if nat_counts:
+            meta["unparseable_available_at_dropped"] = nat_counts
         return merged, meta
 
     def _read_dataset_window(
-        self, dataset_dir: Path, decision_time: datetime, window_start: pd.Timestamp
+        self,
+        dataset_dir: Path,
+        decision_time: datetime,
+        window_start: pd.Timestamp,
+        nat_counts: dict[str, int] | None = None,
     ) -> pd.DataFrame:
         start_day = window_start.strftime("%Y%m%d")
         end_day = decision_time.strftime("%Y%m%d")
         frames = []
+        nat_dropped = 0
         for path in sorted(dataset_dir.rglob("*.parquet")):
             if not _partition_overlaps(path.stem, start_day, end_day):
                 continue
@@ -1248,9 +1260,15 @@ class SnapshotBuilder:
             if "available_at" not in frame.columns:
                 raise ValueError(f"{path} has no available_at column; cannot enforce the PIT wall")
             available = to_cn_timestamps(frame["available_at"])
+            # Unparseable timestamps become NaT and fail both bounds: dropped in
+            # the conservative direction (hidden, never leaked), but counted so
+            # an ingestion defect surfaces in the manifest instead of silently.
+            nat_dropped += int(available.isna().sum())
             keep = frame[(available <= decision_time) & (available >= window_start)]
             if not keep.empty:
                 frames.append(keep)
+        if nat_counts is not None and nat_dropped:
+            nat_counts[dataset_dir.name] = nat_counts.get(dataset_dir.name, 0) + nat_dropped
         return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
 
     def _build_text(
@@ -1416,12 +1434,18 @@ class SnapshotBuilder:
 
     @staticmethod
     def _apply_screen(frame: pd.DataFrame, allowed: frozenset[str] | None) -> pd.DataFrame:
-        """Restrict per-stock rows to the screened set; market-level rows
-        (no ts_code column or null ts_code) always pass."""
+        """Restrict per-stock rows to the screened set.
+
+        Only A-share-coded rows (``\\d{6}.SH/.SZ/.BJ``) are subject to the screen:
+        concept/industry/index rows (``881xxx.TI``, ``BKxxxx.DC``, ``000242.KP``,
+        null ts_code, ...) are market-level context that no stock screen can
+        legitimately empty — screening them against a stock universe silently
+        deleted whole sentiment datasets."""
         if allowed is None or frame.empty or "ts_code" not in frame.columns:
             return frame
         codes = frame["ts_code"].astype(str)
-        return frame[frame["ts_code"].isna() | codes.isin(allowed)].reset_index(drop=True)
+        is_stock = codes.str.match(r"\d{6}\.(?:SH|SZ|BJ)$")
+        return frame[~is_stock | codes.isin(allowed)].reset_index(drop=True)
 
     def _build_universe(self, decision_time: datetime, config: SnapshotConfig) -> pd.DataFrame:
         """Stocks listed as of the decision day (delistings after it included).

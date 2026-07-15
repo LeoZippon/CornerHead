@@ -57,12 +57,6 @@ def default_tushare_contracts() -> dict[str, DatasetContract]:
             available_time=time(8, 45),
             pit_notes="Use as a trading constraint; zero rows mean no suspended names for that partition.",
         ),
-        "limit_list_d": DatasetContract(
-            dataset="limit_list_d",
-            partition_key="trade_date",
-            available_time=time(17, 30),
-            pit_notes="Event table starts in 2020 locally; use as next-day event evidence unless source timing is proven earlier.",
-        ),
     }
 
 

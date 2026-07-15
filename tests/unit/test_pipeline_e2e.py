@@ -83,7 +83,7 @@ class SwitchingGenerationProvider(FakeSnapshotProvider):
     def decision_snapshot(self, decision_time, out_dir):
         return self._stamp(super().decision_snapshot(decision_time, out_dir))
 
-    def replay_slot(self, start, end, out_dir, *, label):
+    def replay_slot(self, start, end, out_dir, *, label, available_from=None):
         return self._stamp(super().replay_slot(start, end, out_dir, label=label))
 
 
@@ -933,9 +933,9 @@ class PipelineEndToEndTest(unittest.TestCase):
                 calls["decision"] += 1
                 return super().decision_snapshot(decision_time, out_dir)
 
-            def replay_slot(self, start, end, out_dir, *, label):
+            def replay_slot(self, start, end, out_dir, *, label, available_from=None):
                 calls["replay"] += 1
-                return super().replay_slot(start, end, out_dir, label=label)
+                return super().replay_slot(start, end, out_dir, label=label, available_from=available_from)
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

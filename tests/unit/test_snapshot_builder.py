@@ -601,6 +601,58 @@ class SnapshotBuilderTest(unittest.TestCase):
             slot_daily = pd.read_parquet(slot / "daily.parquet")
             self.assertTrue(set(slot_daily["ts_code"].astype(str)) <= {"000001.SZ"})
 
+    def test_apply_screen_passes_index_level_rows(self):
+        from autotrade.environment.snapshot import SnapshotBuilder
+
+        frame = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "v": 1},   # screened stock, allowed
+                {"ts_code": "000002.SZ", "v": 2},   # screened stock, excluded
+                {"ts_code": "881141.TI", "v": 3},   # THS industry index
+                {"ts_code": "BK1752.DC", "v": 4},   # DC board index
+                {"ts_code": "000242.KP", "v": 5},   # KPL concept
+                {"ts_code": None, "v": 6},           # market-level row
+            ]
+        )
+        kept = SnapshotBuilder._apply_screen(frame, frozenset({"000001.SZ"}))
+        self.assertEqual(set(kept["v"]), {1, 3, 4, 5, 6})
+
+    def test_replay_slot_available_from_floors_pre_period_rows(self):
+        # A row published on the weekend between the decision anchor (Friday
+        # 23:59:59) and the Monday period start must enter the replay slot.
+        from datetime import datetime as dt
+        from zoneinfo import ZoneInfo
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            events_root = Path(tmp) / "fund_events"
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            write_fundamental_status(status_path)
+            weekend = pd.DataFrame([
+                {"trade_date": "20211007", "ts_code": "000001.SZ", "net_mf_amount": 9.0,
+                 "available_at": "2021-10-07T23:59:59+08:00", "available_at_rule": "same_day_evening"},
+            ])
+            (raw / "moneyflow").mkdir(parents=True, exist_ok=True)
+            weekend.to_parquet(raw / "moneyflow" / "trade_date=20211007.parquet", index=False)
+            builder = SnapshotBuilder(raw, events_root, status_path)
+            anchor = dt(2021, 10, 7, 23, 59, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+            floored = builder.build_replay_slot(
+                "20211008", "20211011", Path(tmp) / "with_anchor", label="valid",
+                config=CONFIG, available_from=anchor,
+            )
+            events = pd.read_parquet(Path(tmp) / "with_anchor" / "events.parquet")
+            self.assertIn(9.0, set(events.get("net_mf_amount", pd.Series(dtype=float)).dropna()))
+            self.assertEqual(floored["available_from"], anchor.isoformat())
+
+            builder.build_replay_slot(
+                "20211008", "20211011", Path(tmp) / "no_anchor", label="valid", config=CONFIG,
+            )
+            events_plain = pd.read_parquet(Path(tmp) / "no_anchor" / "events.parquet")
+            self.assertNotIn(9.0, set(events_plain.get("net_mf_amount", pd.Series(dtype=float)).dropna()))
+
     def test_decision_windows_are_configurable_by_domain(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"

@@ -44,7 +44,7 @@ class _FileCountingReplayProvider:
         self.call_log = call_log
         self.delay_seconds = delay_seconds
 
-    def replay_slot(self, start: str, end: str, view: Path, *, label: str) -> dict[str, object]:
+    def replay_slot(self, start: str, end: str, view: Path, *, label: str, available_from=None) -> dict[str, object]:
         fd = os.open(self.call_log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
         try:
             os.write(fd, f"{os.getpid()}:{label}\n".encode("utf-8"))
@@ -140,7 +140,7 @@ class CachingSnapshotProviderGenerationTest(unittest.TestCase):
                 (Path(view) / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
                 return manifest
 
-            def replay_slot(self, start, end, view, *, label):
+            def replay_slot(self, start, end, view, *, label, available_from=None):
                 self.replay_builds += 1
                 Path(view).mkdir(parents=True)
                 (Path(view) / "daily.parquet").write_bytes(f"{start}:{end}".encode())
@@ -176,9 +176,13 @@ class CachingSnapshotProviderGenerationTest(unittest.TestCase):
             caching.decision_snapshot(fold.valid_decision_time, root / "run" / "valid_view")
             caching.decision_snapshot(fold.test_decision_time, root / "run" / "test_view")
             caching.replay_slot(
-                fold.validation_start, fold.validation_end, root / "run" / "valid", label="valid"
+                fold.validation_start, fold.validation_end, root / "run" / "valid", label="valid",
+                available_from=fold.valid_decision_time,
             )
-            caching.replay_slot(fold.test_start, fold.test_end, root / "run" / "test", label="test")
+            caching.replay_slot(
+                fold.test_start, fold.test_end, root / "run" / "test", label="test",
+                available_from=fold.test_decision_time,
+            )
             self.assertEqual((provider.decision_builds, provider.replay_builds), (2, 2))
             self.assertEqual(
                 json.loads((root / "run" / "valid" / "manifest.json").read_text(encoding="utf-8"))["label"],
@@ -196,7 +200,7 @@ class CachingSnapshotProviderGenerationTest(unittest.TestCase):
                 self.config = None
                 self.builds = 0
 
-            def replay_slot(self, start, end, view, *, label):
+            def replay_slot(self, start, end, view, *, label, available_from=None):
                 self.builds += 1
                 Path(view).mkdir(parents=True, exist_ok=True)
                 (Path(view) / "daily.parquet").write_bytes(b"x")
@@ -230,7 +234,7 @@ class CachingSnapshotProviderGenerationTest(unittest.TestCase):
             caching = CachingSnapshotProvider(provider, root / "cache")
 
             caching.replay_slot("20220101", "20220131", root / "out_v1", label="valid")
-            with mock.patch("autotrade.pipelines.config.SNAPSHOT_CACHE_FORMAT_VERSION", 3):
+            with mock.patch("autotrade.pipelines.config.SNAPSHOT_CACHE_FORMAT_VERSION", 99):
                 caching.replay_slot("20220101", "20220131", root / "out_v2", label="valid")
 
             self.assertEqual(len(call_log.read_text(encoding="utf-8").splitlines()), 2)

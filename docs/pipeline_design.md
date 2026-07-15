@@ -444,7 +444,7 @@ experiments/<experiment_id>/
 - 新实验先固定一个 research release：live 可读时按需发布当前 committed generation，更新期立即使用最近完整版本；部署后的首个版本须在 committed 空窗 bootstrap，已有账本但缺少 pin 时拒绝混用数据恢复。
 - 相邻 Fold 可以共享相同决策锚点，多 Epoch 的同一视图也可复用。
 - 同区间回放数据跨 valid/test 标签复用；label 不进入内容键，只原子写入本次运行目录的独立 manifest。
-- 缓存键包含实验固定的 committed generation；live 更新不会令同一实验跨 Fold 换代，也不会读取部分更新。
+- 缓存键包含实验固定的 committed generation；live 更新不会令同一实验跨 Fold 换代，也不会读取部分更新。回放槽的键与内容另含 Fold 决策锚点（`available_from`）：锚点与期初日历日之间（周末/节假日）发布的事件、宏观和文本行以锚点为可见下界进入回放槽，首个盘前刷新节点即可放行。
 - 缓存键另含显式格式版本；快照/PIT 磁盘合同变化时递增版本，无关代码提交不清空大缓存。
 - 同一内容键由跨进程 `flock` 合并为一次构建，加锁后复查命中并原子发布；发布异常直接报错。
 - 数据文件以硬链接挂入运行目录；本地 manifest 以新 inode 替换，不会改写缓存或其他运行的硬链接。

@@ -26,7 +26,7 @@ FINAL_EVAL_WALL_CAP_MULTIPLIER = 3.0
 # Increment only when the cached snapshot/replay on-disk contract changes.
 # Source revisions (including Git HEAD) are intentionally not cache inputs:
 # harmless code changes should not invalidate every expensive data view.
-SNAPSHOT_CACHE_FORMAT_VERSION = 2
+SNAPSHOT_CACHE_FORMAT_VERSION = 3
 
 
 class SnapshotProvider(Protocol):
@@ -34,7 +34,9 @@ class SnapshotProvider(Protocol):
 
     def decision_snapshot(self, decision_time: datetime, out_dir: Path) -> dict[str, object]: ...
 
-    def replay_slot(self, start: str, end: str, out_dir: Path, *, label: str) -> dict[str, object]: ...
+    def replay_slot(
+        self, start: str, end: str, out_dir: Path, *, label: str, available_from: datetime | None = None
+    ) -> dict[str, object]: ...
 
 
 class RawSnapshotProvider:
@@ -54,8 +56,12 @@ class RawSnapshotProvider:
     def decision_snapshot(self, decision_time: datetime, out_dir: Path) -> dict[str, object]:
         return self.builder.build_decision_snapshot(decision_time, out_dir, self.config)
 
-    def replay_slot(self, start: str, end: str, out_dir: Path, *, label: str) -> dict[str, object]:
-        return self.builder.build_replay_slot(start, end, out_dir, label=label, config=self.config)
+    def replay_slot(
+        self, start: str, end: str, out_dir: Path, *, label: str, available_from: datetime | None = None
+    ) -> dict[str, object]:
+        return self.builder.build_replay_slot(
+            start, end, out_dir, label=label, config=self.config, available_from=available_from
+        )
 
 
 class CachingSnapshotProvider:
@@ -87,13 +93,17 @@ class CachingSnapshotProvider:
             out_dir,
         )
 
-    def replay_slot(self, start: str, end: str, out_dir: Path, *, label: str) -> dict[str, object]:
+    def replay_slot(
+        self, start: str, end: str, out_dir: Path, *, label: str, available_from: datetime | None = None
+    ) -> dict[str, object]:
         manifest = self._cached(
-            ("replay", start, end),
+            # available_from is derived from the range's preceding trading day, so
+            # folds sharing a range still share one entry; it is keyed defensively.
+            ("replay", start, end, available_from.isoformat() if available_from else ""),
             # SnapshotBuilder uses label only as manifest metadata. Keep the
             # cached content label-neutral, then bind the requested role to the
             # run-local output manifest below.
-            lambda view: self._provider.replay_slot(start, end, view, label=""),
+            lambda view: self._provider.replay_slot(start, end, view, label="", available_from=available_from),
             out_dir,
         )
         manifest = {**manifest, "label": label}
@@ -114,15 +124,19 @@ class CachingSnapshotProvider:
                 None,
             ),
             "valid_replay": self._cached(
-                ("replay", fold.validation_start, fold.validation_end),
+                ("replay", fold.validation_start, fold.validation_end, fold.valid_decision_time.isoformat()),
                 lambda view: self._provider.replay_slot(
-                    fold.validation_start, fold.validation_end, view, label=""
+                    fold.validation_start, fold.validation_end, view, label="",
+                    available_from=fold.valid_decision_time,
                 ),
                 None,
             ),
             "test_replay": self._cached(
-                ("replay", fold.test_start, fold.test_end),
-                lambda view: self._provider.replay_slot(fold.test_start, fold.test_end, view, label=""),
+                ("replay", fold.test_start, fold.test_end, fold.test_decision_time.isoformat()),
+                lambda view: self._provider.replay_slot(
+                    fold.test_start, fold.test_end, view, label="",
+                    available_from=fold.test_decision_time,
+                ),
                 None,
             ),
         }

@@ -359,9 +359,13 @@ class ExperimentPipeline:
         test_snapshot = self.snapshots.decision_snapshot(fold.test_decision_time, test_view)
         sandbox.install_replay_slot("train", valid_view)
         valid_replay = self.snapshots.replay_slot(
-            fold.validation_start, fold.validation_end, paths.valid, label="valid"
+            fold.validation_start, fold.validation_end, paths.valid, label="valid",
+            available_from=fold.valid_decision_time,
         )
-        test_replay = self.snapshots.replay_slot(fold.test_start, fold.test_end, paths.test, label="test")
+        test_replay = self.snapshots.replay_slot(
+            fold.test_start, fold.test_end, paths.test, label="test",
+            available_from=fold.test_decision_time,
+        )
         _assert_single_raw_generation(
             valid_decision_input=valid_snapshot,
             test_decision_input=test_snapshot,
@@ -641,6 +645,7 @@ class ExperimentPipeline:
                 visible_fold.validation_end,
                 paths.valid,
                 label="valid",
+                available_from=visible_fold.valid_decision_time,
             )
             _assert_single_raw_generation(
                 valid_decision_input=visible_snapshot,
@@ -991,7 +996,8 @@ class ExperimentPipeline:
             decision_time = period["decision_time"]
             snapshot = self.snapshots.decision_snapshot(decision_time, test_view)
             replay = self.snapshots.replay_slot(
-                str(period["start"]), str(period["end"]), paths.test, label="heldout"
+                str(period["start"]), str(period["end"]), paths.test, label="heldout",
+                available_from=decision_time,
             )
             _assert_single_raw_generation(
                 test_decision_input=snapshot,

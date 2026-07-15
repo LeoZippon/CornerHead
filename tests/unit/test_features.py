@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from autotrade.environment.data import PITDataStore, default_tushare_contracts
+from autotrade.environment.data import PITDataStore
 from autotrade.environment.features import (
     FundamentalEventsBuilder,
     FundamentalEventsConfig,
@@ -106,7 +106,7 @@ class AuctionCorrectionTest(unittest.TestCase):
 class PITDataStoreTest(unittest.TestCase):
     def test_pit_store_handles_reversed_ranges_without_partition_reads(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = PITDataStore(Path(tmp), default_tushare_contracts())
+            store = PITDataStore(Path(tmp))
             frame = store.read_trade_range("daily", "20200103", "20200101", columns=["trade_date", "ts_code"])
             self.assertTrue(frame.empty)
             self.assertEqual(list(frame.columns), ["trade_date", "ts_code"])

@@ -398,8 +398,7 @@ class TimeviewIntradaySchemaTest(unittest.TestCase):
             _write(snap / "intraday_1min.parquet", self._minute("20211231", available_at=None))
             replay = {
                 "daily": _replay_frames()["daily"],
-                # Replay intraday keeps available_at as the Timeview gate (mirrors
-                # snapshot._read_minutes_range).
+                # Replay intraday keeps available_at as the row-level Timeview gate.
                 "intraday_1min": self._minute("20220104", available_at="2022-01-04T09:30:00+08:00"),
             }
             tv = Timeview(host_dir=root / "asof", executor=FakeExecutor(), snapshot_dir=snap, replay_frames=replay)

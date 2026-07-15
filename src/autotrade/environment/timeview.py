@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -255,6 +256,8 @@ class _DomainView:
                 self._cursors = _dataset_cursors(replay["dataset"].astype(str).to_numpy(), valid, keys)
         self._dataset_names: list[str] = sorted(self._cursors)
         self._columns = self._init_frozen_part(frozen_file)
+        if not self.incremental:
+            self._require_schema_covers(self.replay)
         if self.incremental and not replay.empty:
             self.append_replay_partition(replay)
 
@@ -282,8 +285,29 @@ class _DomainView:
             keys = keys_all
         if not self._columns:
             self._columns = [column for column in frame.columns if column != "available_at"]
+        self._require_schema_covers(frame)
         self._pending.append(_PendingReplayPartition(frame=frame, keys=keys))
         self._last_signature = object()
+
+    def _require_schema_covers(self, replay: pd.DataFrame) -> None:
+        """Surface replay columns the roll's ``reindex`` will drop.
+
+        The canonical schema is fixed by the frozen part (parts must share one
+        schema for the documented DuckDB ``dir/*.parquet`` read), and union
+        domains can legitimately carry replay-only columns when a dataset has
+        rows only inside the replay window — so this warns loudly instead of
+        failing, but never drops silently."""
+        if replay is None or replay.empty or not self._columns:
+            return
+        extra = sorted(set(replay.columns) - set(self._columns) - {"available_at"})
+        if extra:
+            warnings.warn(
+                f"Timeview domain {self.name!r}: replay columns {extra} are absent from the "
+                "frozen snapshot schema and will not appear in the rolling view; rebuild the "
+                "frozen snapshot if strategies need them",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     def _init_frozen_part(self, frozen_file: Path) -> list[str]:
         """Seed part 0 from the frozen snapshot domain and fix the canonical schema.

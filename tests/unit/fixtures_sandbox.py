@@ -106,5 +106,5 @@ class FakeSnapshotProvider:
     def decision_snapshot(self, decision_time: datetime, out_dir: Path) -> dict[str, object]:
         return make_snapshot_dir(Path(out_dir), decision_date=decision_time.strftime("%Y%m%d"), kind="decision_input")
 
-    def replay_slot(self, start: str, end: str, out_dir: Path, *, label: str) -> dict[str, object]:
+    def replay_slot(self, start: str, end: str, out_dir: Path, *, label: str, available_from=None) -> dict[str, object]:
         return make_replay_dir(Path(out_dir), start=start, end=end, label=label)

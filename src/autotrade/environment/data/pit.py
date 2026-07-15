@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from .contracts import DatasetContract
 
 
 def yyyymmdd(value: date | datetime | str) -> str:
@@ -31,7 +30,6 @@ def parse_partition_date(path: Path) -> str:
 @dataclass(frozen=True)
 class PITDataStore:
     raw_dir: Path
-    contracts: dict[str, DatasetContract]
 
     def dataset_dir(self, dataset: str) -> Path:
         path = self.raw_dir / dataset

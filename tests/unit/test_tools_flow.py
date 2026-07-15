@@ -241,6 +241,13 @@ def main(ctx):
         _ = left / "string"
 '''
 
+PROBE_MISSING_KEY_MAIN = '''
+def main(ctx):
+    with ctx.substep("bad_key", budget_minutes=0.5):
+        row = {"close": 1.0}
+        row["total_mv"]
+'''
+
 PROBE_UNIVERSE_PATH_MAIN = '''
 from pathlib import Path
 
@@ -1510,6 +1517,11 @@ def main(ctx):
                 PROBE_IMPORT_ERROR_MAIN,
                 "strategy_import_failed",
                 "module-level code",
+            ),
+            (
+                PROBE_MISSING_KEY_MAIN,
+                "missing_key_in_strategy",
+                "'total_mv'",
             ),
         )
         for strategy, reason, hint in cases:
