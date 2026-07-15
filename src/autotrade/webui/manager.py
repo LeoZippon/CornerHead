@@ -35,6 +35,7 @@ from autotrade.pipelines.hitl_state import (
     write_json_atomic,
 )
 
+from .params_schema import HIDDEN_KEYS
 from .registry import ACTIVE_STATES, experiment_state, resolve_experiment_dir
 
 MAX_RUNNING_EXPERIMENTS = 5
@@ -134,6 +135,15 @@ class ExperimentManager:
             return self._create_experiment(params)
 
     def _create_experiment(self, params: dict[str, object]) -> dict[str, object]:
+        # UI hiding is not a permission boundary: hidden keys grant host-side
+        # capabilities (local_dev host executor, source roots, credential env
+        # names, proxy binaries). All console creation goes through here, so
+        # reject them outright — operators set them in a worker-side params.json.
+        hidden = sorted(set(params) & set(HIDDEN_KEYS))
+        if hidden:
+            raise ManagerError(
+                f"operator-only parameters are not accepted by the console API: {', '.join(hidden)}"
+            )
         experiment_id = str(params.get("experiment_id") or "").strip()
         if not _ID_PATTERN.match(experiment_id):
             raise ManagerError(
@@ -144,10 +154,12 @@ class ExperimentManager:
             raise ManagerError(f"experiment {experiment_id!r} already exists")
         merged = dict(params)
         merged["experiment_id"] = experiment_id
-        merged.setdefault("experiments_root", str(self.experiments_root))
+        # Force (never setdefault): callers must not redirect where experiments
+        # or sandbox work trees land — the manager owns both roots.
+        merged["experiments_root"] = str(self.experiments_root)
         # Per-experiment sandbox work root so the live run dir (and its
         # agent_trace.jsonl) can be discovered without cross-experiment noise.
-        merged.setdefault("work_root", str(self.repo_root / ".runtime" / "sandboxes" / experiment_id))
+        merged["work_root"] = str(self.repo_root / ".runtime" / "sandboxes" / experiment_id)
         merged = {key: value for key, value in merged.items() if value is not None}
         options = resolve_options(merged, self.repo_root)  # fail-fast validation before any mkdir
         if not bool(options.local_dev):

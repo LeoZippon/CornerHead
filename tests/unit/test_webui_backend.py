@@ -392,6 +392,45 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(unknown.status_code, 400)
         self.assertIn("unknown experiment parameters", unknown.json()["detail"])
 
+    def test_create_experiment_rejects_hidden_params_and_forces_roots(self) -> None:
+        base = {
+            "experiment_id": "exp_sec",
+            "first_test_period": "2022Q1",
+            "last_test_period": "2022Q1",
+            "heldout_first_period": "2023Q1",
+            "heldout_last_period": "2023Q1",
+        }
+        # UI hiding is not a permission boundary: operator-only keys (host
+        # executor, source roots, credential env names, proxy binaries) must
+        # be rejected at the API even though a worker-side params.json may
+        # legitimately carry them.
+        for key, value in (
+            ("local_dev", True),
+            ("raw_dir", "/tmp/evil"),
+            ("template_dir", "/tmp/evil"),
+            ("tavily_api_key_env", "SOME_OTHER_SECRET"),
+            ("meta_learning_xray_bin", "/tmp/evil/xray"),
+        ):
+            refused = self.client.post("/api/experiments", json={"params": {**base, key: value}})
+            self.assertEqual(refused.status_code, 400, key)
+            self.assertIn(key, refused.json()["detail"])
+        self.assertFalse((self.experiments_root / "exp_sec").exists())
+        # Server-managed roots are forced (overwrite, not setdefault): a caller
+        # cannot redirect where experiment or sandbox work trees land.
+        with patch.object(ExperimentManager, "start_worker", return_value={"spawned_pid": 1}):
+            created = self.client.post(
+                "/api/experiments",
+                json={"params": {**base, "experiments_root": "/tmp/elsewhere",
+                                 "work_root": "/tmp/elsewhere/work"}},
+            )
+        self.assertEqual(created.status_code, 200, created.text)
+        params = json.loads(
+            (self.experiments_root / "exp_sec" / "hitl" / "params.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(params["experiments_root"], str(self.experiments_root.resolve()))
+        self.assertTrue(params["work_root"].endswith("/.runtime/sandboxes/exp_sec"))
+        self.assertNotIn("/tmp/elsewhere", params["work_root"])
+
     def test_running_cap_blocks_sixth_experiment(self) -> None:
         manager = ExperimentManager(self.repo_root, self.experiments_root)
         with patch.object(ExperimentManager, "running_experiments", return_value=["a", "b", "c", "d", "e"]):
@@ -1173,6 +1212,58 @@ class WebuiBackendTest(unittest.TestCase):
             "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/orders.csv", params={"result": "nope"}
         )
         self.assertEqual(missing.status_code, 404)
+
+    def test_style_route_gated_until_reveal(self) -> None:
+        results = self.experiments_root / "exp_hitl" / "artifacts" / "run_001" / "results"
+        results.mkdir(parents=True, exist_ok=True)
+        (results / "style_valid.json").write_text(json.dumps({"prefix": "valid"}), encoding="utf-8")
+        (results / "style_test.json").write_text(json.dumps({"prefix": "test"}), encoding="utf-8")
+        url = "/api/experiments/exp_hitl/style"
+        valid = self.client.get(url, params={"run_id": "run_001", "prefix": "valid"})
+        self.assertEqual(valid.status_code, 200, valid.text)
+        self.assertEqual(valid.json()["prefix"], "valid")
+        hidden = self.client.get(url, params={"run_id": "run_001", "prefix": "test"})
+        self.assertEqual(hidden.status_code, 404)
+        # Indistinguishable from a run without a rollup: existence must not leak.
+        absent = self.client.get(url, params={"run_id": "run_missing", "prefix": "valid"})
+        self.assertEqual(hidden.json()["detail"], absent.json()["detail"])
+        # Legacy read-only experiments (no control file) stay fully visible.
+        from autotrade.webui.registry import sealed_result_prefixes
+
+        self.assertEqual(sealed_result_prefixes(self.experiments_root / "exp_legacy"), ())
+        self._reveal()
+        revealed = self.client.get(url, params={"run_id": "run_001", "prefix": "test"})
+        self.assertEqual(revealed.status_code, 200, revealed.text)
+        self.assertEqual(revealed.json()["prefix"], "test")
+
+    def test_fold_orders_gated_until_reveal(self) -> None:
+        import pandas as pd
+
+        test_dir = self.experiments_root / "exp_hitl" / "artifacts" / "run_001" / "results" / "test_000"
+        test_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [{"order_id": "t1", "account": "stock", "ts_code": "000001.SZ", "action": "buy",
+              "requested_amount": 100, "filled_quantity": 100, "price": 9.0, "status": "filled",
+              "reject_reason": "", "decision_time": "09:31", "trade_date": "20220401"}]
+        ).to_parquet(test_dir / "orders.parquet", index=False)
+        url = "/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/orders"
+        hidden = self.client.get(url, params={"result": "test_000"})
+        self.assertEqual(hidden.status_code, 404)
+        # The error enumerates only visible results — test names must not leak.
+        self.assertIn("available: ['valid_000']", hidden.json()["detail"])
+        listing = self.client.get(url).json()
+        self.assertEqual(listing["result"], "valid_000")
+        self.assertEqual(listing["test_results"], [])
+        csv_hidden = self.client.get(url + ".csv", params={"result": "test_000"})
+        self.assertEqual(csv_hidden.status_code, 404)
+        self._reveal()
+        revealed = self.client.get(url, params={"result": "test_000"})
+        self.assertEqual(revealed.status_code, 200, revealed.text)
+        self.assertEqual(revealed.json()["result"], "test_000")
+        self.assertEqual(self.client.get(url).json()["test_results"], ["test_000"])
+        csv_ok = self.client.get(url + ".csv", params={"result": "test_000"})
+        self.assertEqual(csv_ok.status_code, 200)
+        self.assertEqual(len(csv_ok.text.strip().splitlines()), 2)  # header + 1 order
 
     def test_analysis_endpoint_serves_existing_markdown(self) -> None:
         payload = self.client.get("/api/experiments/exp_hitl/analysis/epoch_001/fold_2022Q1").json()

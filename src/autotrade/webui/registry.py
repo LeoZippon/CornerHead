@@ -96,6 +96,15 @@ def test_results_revealed(experiment_dir: Path) -> bool:
     return read_control(control_path).test_revealed
 
 
+def sealed_result_prefixes(experiment_dir: Path) -> tuple[str, ...]:
+    """Central reveal gate for artifact routes (style, orders, CSV, result-name
+    enumeration): result names / style prefixes starting with these carry
+    test-period evidence and must stay invisible pre-reveal — respond 404 and
+    filter listings, never confirm existence. Empty once revealed (and for
+    legacy experiments without a control file, mirroring test_results_revealed)."""
+    return () if test_results_revealed(experiment_dir) else ("test", "heldout")
+
+
 def read_ledger_records(experiment_dir: Path) -> list[dict[str, object]]:
     path = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
     if not path.exists():
@@ -417,10 +426,12 @@ def fold_orders(
     if record is None:
         raise KeyError(f"no fold record for {epoch_id}/{fold_id}")
     results_root = experiment_dir / "artifacts" / str(record.get("run_id")) / "results"
+    sealed = sealed_result_prefixes(experiment_dir)
     available = sorted(
         entry.name
         for entry in (results_root.iterdir() if results_root.is_dir() else [])
         if entry.is_dir() and (entry / "orders.parquet").exists()
+        and not entry.name.startswith(sealed)  # pre-reveal: invisible, not just unselectable
     )
     valid_results = [name for name in available if not name.startswith("test")]
     chosen = result or (valid_results[-1] if valid_results else None)
@@ -483,7 +494,8 @@ def fold_orders_csv(
     if not _RESULT_NAME.match(result or ""):
         raise KeyError(f"invalid result name: {result!r}")
     path = experiment_dir / "artifacts" / str(record.get("run_id")) / "results" / result / "orders.parquet"
-    if not path.exists():
+    # Sealed names answer exactly like missing ones: existence must not leak.
+    if result.startswith(sealed_result_prefixes(experiment_dir)) or not path.exists():
         raise KeyError(f"no orders for result {result!r}")
     df = pd.read_parquet(path)
     return f"{experiment_id}__{epoch_id}__{fold_id}__{result}_orders.csv", df.to_csv(index=False)

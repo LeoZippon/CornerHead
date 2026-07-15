@@ -347,6 +347,10 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             raise HTTPException(status_code=400, detail="prefix must be valid|test|heldout")
         if "/" in run_id or run_id.startswith("."):
             raise HTTPException(status_code=400, detail="invalid run_id")
+        # Reveal gate: pre-reveal, sealed prefixes answer exactly like a
+        # missing rollup so test/held-out existence never leaks.
+        if prefix in registry.sealed_result_prefixes(experiment_dir):
+            raise HTTPException(status_code=404, detail="该运行没有已落盘的风格归因结果")
         payload = read_json(experiment_dir / "artifacts" / run_id / "results" / f"style_{prefix}.json")
         if not payload:
             raise HTTPException(status_code=404, detail="该运行没有已落盘的风格归因结果")

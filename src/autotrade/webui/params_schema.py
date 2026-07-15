@@ -5,11 +5,10 @@ turn mirror the run_experiment.py CLI dests); defaults are read from there so
 this schema can never drift from the worker. Descriptions follow
 docs/parameters_reference.md.
 
-Deliberately NOT exposed in the form (server-managed or operator-only; the API
-still accepts them for headless use): ``experiments_root``, ``work_root``,
-``raw_dir``, ``fundamental_events_root``, ``fundamental_events_status``,
-``template_dir``, ``local_dev``, ``tavily_api_key_env``,
-``semantic_scholar_api_key_env``.
+Deliberately NOT exposed in the form: ``SERVER_MANAGED_KEYS`` are forced to
+manager-owned values on creation, and ``HIDDEN_KEYS`` (operator-only: source
+roots, ``local_dev``, credential env names, proxy paths) are rejected by the
+console API entirely — they can only be set in a worker-side ``params.json``.
 
 Period labels are error-prone to type, so the four period fields render as
 dropdowns whenever the server can enumerate valid labels from the SSE trading
