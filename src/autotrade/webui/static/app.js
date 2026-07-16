@@ -352,41 +352,41 @@ function epochShort(epochId) {
   return m ? `E${m[1]}` : String(epochId || "");
 }
 
-/* Full-cycle statistics table (server-computed in equity.py::_cycle_stats):
-   one column per chained series of the selected epoch. Pure rendering. */
-const CYCLE_STAT_ROWS = [
-  ["cum_return", "累计收益", (v) => fmtPct(v), true],
-  ["annualized_return", "年化收益", (v) => fmtPct(v), true],
-  ["annualized_vol", "年化波动", (v) => fmtPct(v), false],
-  ["sharpe", "Sharpe", (v) => Number(v).toFixed(2), true],
-  ["max_drawdown", "最大回撤", (v) => fmtPct(v), false],
-  ["daily_win_rate", "日胜率", (v) => fmtPct(v), false],
-  ["benchmark_return", "沪深300 同期", (v) => fmtPct(v), false],
-  ["excess_return", "超额收益", (v) => fmtPct(v), true],
-  ["beta", "β", (v) => Number(v).toFixed(2), false],
-  ["tracking_error", "跟踪误差（年化）", (v) => fmtPct(v), false],
-  ["information_ratio", "信息比率", (v) => Number(v).toFixed(2), true],
-  ["n_days", "交易日数", (v) => String(v), false],
+/* Full-cycle statistics (server-computed in equity.py::_cycle_stats), rendered
+   as ONE compact row per chained series (metrics as columns) so the block adds
+   a few text lines under the chart instead of a screen-tall table. Cumulative
+   return is omitted — the chart legend already shows each series' final. */
+const CYCLE_STAT_COLUMNS = [
+  ["annualized_return", "年化", "年化收益", (v) => fmtPct(v), true],
+  ["annualized_vol", "波动", "年化波动", (v) => fmtPct(v), false],
+  ["sharpe", "Sharpe", "年化 Sharpe", (v) => Number(v).toFixed(2), true],
+  ["max_drawdown", "回撤", "最大回撤", (v) => fmtPct(v), false],
+  ["daily_win_rate", "日胜率", "日度胜率", (v) => fmtPct(v), false],
+  ["benchmark_return", "基准", "沪深300 同期收益（按日期配对）", (v) => fmtPct(v), false],
+  ["excess_return", "超额", "相对沪深300 的超额收益", (v) => fmtPct(v), true],
+  ["beta", "β", "对沪深300 的日收益 β", (v) => Number(v).toFixed(2), false],
+  ["tracking_error", "跟踪误差", "年化跟踪误差", (v) => fmtPct(v), false],
+  ["information_ratio", "IR", "信息比率（年化）", (v) => Number(v).toFixed(2), true],
+  ["n_days", "天数", "交易日数", (v) => String(v), false],
 ];
+const CYCLE_SERIES_SHORT = { valid: "验证", test: "测试", heldout: "Held-out" };
 
 function cycleStatsTable(payload) {
   const stats = payload.stats || {};
-  const labels = Object.fromEntries((payload.series || []).map((s) => [s.key, s.label]));
   const keys = ["valid", "test", "heldout"].filter((k) => stats[k]);
   if (!keys.length) return null;
-  const rows = CYCLE_STAT_ROWS
-    .filter(([field]) => keys.some((k) => stats[k][field] !== null && stats[k][field] !== undefined))
-    .map(([field, label, fmt, signed]) => el("tr", {},
-      el("td", {}, label),
-      ...keys.map((k) => {
-        const v = stats[k][field];
-        return el("td", { class: signed ? signCls(v) : "" }, v === null || v === undefined ? "—" : fmt(v));
-      })));
-  return el("table", { class: "data section-gap" },
-    el("tr", {},
-      el("th", {}, `全周期统计（${epochShort(payload.epoch_id)}）`),
-      ...keys.map((k) => el("th", {}, labels[k] || k))),
-    ...rows);
+  const columns = CYCLE_STAT_COLUMNS.filter(([field]) =>
+    keys.some((k) => stats[k][field] !== null && stats[k][field] !== undefined));
+  const head = el("tr", {},
+    el("th", {}, `全周期（${epochShort(payload.epoch_id)}）`),
+    ...columns.map(([, label, full]) => el("th", { title: full }, label)));
+  const rows = keys.map((k) => el("tr", {},
+    el("td", {}, CYCLE_SERIES_SHORT[k] || k),
+    ...columns.map(([field, , , fmt, signed]) => {
+      const v = stats[k][field];
+      return el("td", { class: signed ? signCls(v) : "" }, v === null || v === undefined ? "—" : fmt(v));
+    })));
+  return el("table", { class: "data cycle-stats" }, head, ...rows);
 }
 
 /* Async host: renders the chart (plus, on full-size charts, the epoch switcher

@@ -252,6 +252,13 @@ table.kv td:first-child { color: var(--muted); white-space: nowrap; width: 10.5r
 table.data th, table.data td { padding: 0.42rem 0.6rem; border-bottom: 1px solid var(--row-border); text-align: right; font-variant-numeric: tabular-nums; }
 table.data th { color: var(--muted); font-weight: 600; }
 table.data th:first-child, table.data td:first-child { text-align: left; }
+/* full-cycle stats strip: one compact row per series under the equity chart */
+table.cycle-stats { width: auto; max-width: 100%; font-size: 0.8rem; margin-top: 0.45rem; color: var(--muted); }
+table.cycle-stats th, table.cycle-stats td { padding: 0.22rem 0.55rem; border-bottom: 1px solid var(--row-border); }
+table.cycle-stats th { font-weight: 500; white-space: nowrap; }
+table.cycle-stats td { color: var(--text); white-space: nowrap; }
+table.cycle-stats tr:last-child td, table.cycle-stats tr:last-child th { border-bottom: none; }
+table.cycle-stats th[title] { cursor: help; text-decoration: underline dotted var(--row-border); text-underline-offset: 3px; }
 .num.pos { color: var(--gain); }
 .num.neg { color: var(--loss); }
 
