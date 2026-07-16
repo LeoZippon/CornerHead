@@ -1653,3 +1653,9 @@
 - Step/Fold 分析标题统一为“策略分析（可选，仅基于验证期证据）”，移除 DeepSeek/LLM 品牌绑定；模型、推理模式、超时与上下文压缩帮助文案同步改为供应商中立术语。
 - 保留当前真实可选模型 ID，不改 API、分析执行、实验参数或运行中的 worker；新增 WebUI 回归检查，禁止标签/帮助文案重新出现供应商品牌或内部 `provider` 术语。
 - Validation：WebUI backend 44 passed；`node --check`、`py_compile`、`git diff --check` 通过。静态前端已同步并重启 console，端到端健康；lzp-test18 worker PID/run/session 均未改变。
+
+2026-07-16 控制台待批准 Fold 误计时修复
+
+- `lap-test19` 完成 Q2 后进入 Q3 人工批准门时，status 只切换 session key/state，仍携带 Q2 的 `session_started_at`/run/trace/deadline；前端又把任意存活 worker + 时间戳视为运行中，导致 Q3 从 Q2 起点持续计时。实际 Q3 尚未启动。
+- 前端统一复用 active-session/wait-state 集合，只有运行中、Step 等待和 Agent 提问等待才计算会话墙钟；普通待批准/暂停只显示状态。Pipeline gate 统一清空上一会话身份与时钟，恢复 session 边界不变量。静态页面已同步；当前旧 worker 无需重启，浏览器刷新即可停止误计时。
+- Validation：interactive pipeline 45 passed + 4 subtests；WebUI backend 44 passed；`node --check`、`git diff --check` 通过。实验 worker 未中断，仓库外实验状态未修改。

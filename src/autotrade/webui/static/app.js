@@ -25,6 +25,8 @@ const ENVIRONMENT_STAGE_LABELS = {
 // manager.py _TERMINAL_RESUMABLE_STATES. Keep in sync or the resume button
 // silently disappears for a resumable experiment (e.g. "terminated").
 const RESUMABLE_STATES = ["stopped", "failed", "interrupted", "terminated", "created"];
+const ACTIVE_SESSION_STATES = new Set(["running_session", "waiting_step_user", "waiting_user_reply"]);
+const RESEARCHER_WAIT_STATES = new Set(["waiting_step_user", "waiting_user_reply"]);
 
 let pollTimer = null;
 let liveTimers = [];
@@ -152,10 +154,11 @@ function foldDurationNode(detail, session, prefix = "", className = "") {
   const isFixed = fixedValue !== null && fixedValue !== undefined && Number.isFinite(fixed) && fixed >= 0;
   const status = detail.status || {};
   const startedAt = status.session_key === session.key ? Date.parse(status.session_started_at || "") : NaN;
-  const isLive = !isFixed && detail.worker_alive && Number.isFinite(startedAt);
+  const isLive = !isFixed && detail.worker_alive
+    && ACTIVE_SESSION_STATES.has(status.state) && Number.isFinite(startedAt);
   const update = () => {
     const completedWait = Number(status.researcher_wait_seconds) || 0;
-    const waitStartedAt = ["waiting_step_user", "waiting_user_reply"].includes(status.state)
+    const waitStartedAt = RESEARCHER_WAIT_STATES.has(status.state)
       ? Date.parse(status.wait_started_at || "") : NaN;
     const activeWait = Number.isFinite(waitStartedAt) ? Math.max(0, (Date.now() - waitStartedAt) / 1000) : 0;
     const seconds = isFixed ? fixed : isLive
@@ -1065,8 +1068,7 @@ async function renderDetailPage(experimentId, selectedKey) {
   const status = detail.status || {};
   const sessions = detail.sessions || [];
   if (livePanel && livePanel.expId === experimentId) {
-    const liveState = detail.worker_alive
-      && ["running_session", "waiting_step_user", "waiting_user_reply"].includes(detail.state);
+    const liveState = detail.worker_alive && ACTIVE_SESSION_STATES.has(detail.state);
     const currentRunId = String(status.run_id || "");
     if (!liveState || livePanel.key !== status.session_key || livePanel.runId !== currentRunId) {
       destroyLivePanel();
@@ -1349,8 +1351,7 @@ function sessionDetailPanel(detail, selectedKey) {
   }
   const status = detail.status || {};
   const isCurrent = status.session_key === session.key;
-  const running = isCurrent && detail.worker_alive
-    && ["running_session", "waiting_step_user", "waiting_user_reply"].includes(detail.state);
+  const running = isCurrent && detail.worker_alive && ACTIVE_SESSION_STATES.has(detail.state);
   const waiting = isCurrent && detail.state === "waiting_user";
   const done = Boolean(session.record || (session.records || []).length);
 

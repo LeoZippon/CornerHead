@@ -460,22 +460,29 @@ class InteractiveExperimentRunner:
 
     def _gate(self, key: str, *, phase: str, epoch_id: str, fold_id: str | None = None) -> str:
         announced_state: str | None = None
+
+        def announce(state: str) -> None:
+            nonlocal announced_state
+            if announced_state == state:
+                return
+            announced_state = state
+            # Gates are between sessions. Never carry the completed session's
+            # run identity or clock onto the next pending/paused session.
+            self.status.set(
+                state=state, phase=phase, session_key=key, epoch_id=epoch_id, fold_id=fold_id,
+                run_id=None, trace_path=None, session_started_at=None, fold_deadline_at=None,
+            )
+
         while True:
             control = read_control(self.control_path)
             if control.request == "stop":
                 raise ExperimentStopped(f"stop requested before session {key}")
             if control.request == "pause":
-                if announced_state != "paused":
-                    announced_state = "paused"
-                    self.status.set(state="paused", phase=phase, session_key=key, epoch_id=epoch_id, fold_id=fold_id)
+                announce("paused")
                 time.sleep(self.poll_seconds)
                 continue
             if control.mode in ("manual", "step") and key not in control.approved_sessions:
-                if announced_state != "waiting_user":
-                    announced_state = "waiting_user"
-                    self.status.set(
-                        state="waiting_user", phase=phase, session_key=key, epoch_id=epoch_id, fold_id=fold_id
-                    )
+                announce("waiting_user")
                 time.sleep(self.poll_seconds)
                 continue
             return control.directives.get(key, "")

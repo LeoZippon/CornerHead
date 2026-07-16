@@ -196,6 +196,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(script.headers["cache-control"], "no-store, max-age=0")
         self.assertIn("性能参考：本次回测策略进程峰值内存约", script.text)
         self.assertIn('kvRow("总耗时", foldDurationNode(detail, session))', script.text)
+        self.assertIn("ACTIVE_SESSION_STATES.has(status.state)", script.text)
         self.assertIn("当前 Step 策略分析（可选，仅基于验证期证据）", script.text)
         self.assertIn("Fold 策略分析（可选，仅基于验证期证据）", script.text)
         self.assertNotIn("DeepSeek 分析", script.text)

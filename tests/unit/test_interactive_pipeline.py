@@ -722,6 +722,10 @@ class InteractiveRunnerTest(unittest.TestCase):
             time.sleep(0.01)
         else:
             self.fail(f"first fold never reached waiting_user: {read_status(self.hitl_dir / STATUS_NAME)}")
+        self.assertIsNone(status.get("session_started_at"))
+        self.assertIsNone(status.get("run_id"))
+        self.assertIsNone(status.get("trace_path"))
+        self.assertIsNone(status.get("fold_deadline_at"))
         self.assertEqual([call[0] for call in pipeline.calls], ["meta"])
         self.assertEqual(pipeline.calls[0][3], "meta directive")
         self.assertEqual(pipeline.calls[0][4], "FULL META SYSTEM PROMPT")
