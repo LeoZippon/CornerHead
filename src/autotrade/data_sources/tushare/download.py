@@ -2233,6 +2233,12 @@ def download_fundamental_ann_month_dataset(
             key_columns=list(spec.key_columns),
             revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+            # Full-month re-pulls legitimately drop keys (forecast update_flag
+            # supersedes in place, retractions): same contract as every other
+            # whole-partition path, or the nightly 3-month refresh wedges on the
+            # first removed key. The disproportionate-shrink guard still blocks
+            # transient truncation.
+            allow_key_removal_overwrite=True,
         )
         if did_write:
             written += 1
