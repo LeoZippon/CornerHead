@@ -163,7 +163,7 @@ therefore do not appear in `pending()` before submission.
 | `ctx.bars` | Current tick-visible market bar list; contains only this tick, never future bars |
 | `ctx.broker` | Broker queries, order/cancel verbs, and margin primitives; order/cancel calls must be inside `ctx.substep`; see the broker quick reference above |
 | `ctx.substep(name, budget_minutes=B)` | Strategy-step budget context; declares compute time, state `ready_at`, and broker action submit timing |
-| `ctx.nl(ts_code?, prompt="...")` | Point-in-time NL Sub Agent for single-stock or event/theme/sector/macro text analysis; must run inside `ctx.substep` and follows sim-clock text visibility |
+| `ctx.nl(ts_code?, prompt="...", event_filter?=..., response_format?=...)` | Point-in-time NL Sub Agent; stock calls may declare a rolling event gate and enum output contract; must run inside `ctx.substep` and follows sim-clock text visibility |
 | `ctx.asof_dir` | Path string for the per-tick PIT view: dataset directories such as `daily`, plus the single file `universe.parquet` and `text_library`; wrap with `Path(str(...))` before `/` joins |
 | `ctx.asof_version` | Global version that changes when any Timeview domain rolls, including minute data; use a narrower key for heavy single-domain features |
 | `ctx.snapshot_dir` | Path string for the frozen research baseline snapshot; does not roll during replay |
@@ -224,22 +224,31 @@ strategy-owned key. Do not invalidate heavy daily features on every
 `ctx.asof_version` change because that global version also tracks minute data. Always
 project required columns and filter large `events`/minute domains before converting
 them to pandas.
+For repeated factor work on large PIT tables, take the exact per-symbol tail needed
+by the longest window before rolling/group operations and joins. Compare factors,
+ranks, candidates, and orders against the full-history implementation at `1e-12`
+tolerance; do not substitute sampling or approximate windows for speed.
 
 Formal strategy processes use a fixed Python hash seed for repeatable unordered
 container iteration across runs. Still sort candidates explicitly whenever order
 expresses investment priority; reproducibility is not a substitute for intent.
 
-`ctx.nl(ts_code?, prompt="...")` (equivalently `from at_tools import nl`) starts a
+`ctx.nl(ts_code?, prompt="...", event_filter?=..., response_format?=...)`
+(equivalently `from at_tools import nl`) starts a
 host-side NL Sub Agent. Passing `ts_code` requests single-stock PIT text analysis;
 `ctx.nl(prompt="...")`
 uses the same service for event, theme, sector, macro, or market-wide PIT text
 retrieval. `ts_code` strictly bounds title and body retrieval to evidence linked
-by that code or company name; omit it when broad context is required. Repeated
-single-stock requests with the same prompt/arguments can reuse a completed result
-until newly visible evidence matches that analysis's substantive search patterns.
-The final `content` is unconstrained; parse whatever score, label, or decision
-you need in `main`/`candidate`/helpers. Request, retrieval, evidence, result, and
-provider-call logs are written under the backtest result directory.
+by that code or company name; omit it when broad context is required. For a stock,
+declare `event_filter={"patterns": [...], "lookback_days": N}` to run only when
+matching evidence exists inside the rolling PIT window. No match is the successful
+state `no_matching_evidence` with empty content and no provider call; matching
+revisions also let completed results remain reusable until evidence enters or exits
+the window. Narrow labels should declare
+`response_format={"type": "enum", "values": [...]}` and use the returned canonical
+value directly. Without it, `content` remains free-form. Request, retrieval,
+evidence, result, and provider-call logs are written under the backtest result
+directory.
 NL carries publish/ingest-time, recall, model-prior, free-text-parsing, and
 look-ahead risks: down-weight or drop low-evidence conclusions, and never let NL
 override cash, tradability, cost, or replay constraints.

@@ -10,7 +10,8 @@ Shows the recommended cadence for a heavier strategy under the 24h tick model:
   output is usable. So research and execution are separate ticks — a later tick
   reads the plan once it has landed. Read the data domains from ``ctx.asof_dir``
   (rolling, point-in-time) and the frozen history from ``ctx.snapshot_dir``;
-  ``ctx.nl(code?, prompt=...)`` is optional and the main API cost — keep it rare.
+  ``ctx.nl(code?, prompt=..., event_filter?=..., response_format?=...)`` is optional
+  and the main API cost — gate it on explicit PIT events and keep it rare.
   Broker actions issued inside a sub-step are also delayed until ready_at, but this
   template still writes an explicit plan first so execution and reconciliation are
   easy to audit.

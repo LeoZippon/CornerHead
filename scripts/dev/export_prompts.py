@@ -287,7 +287,7 @@ def render() -> str:
         "- `src/autotrade/agent/prompts.py`",
         "- `src/autotrade/environment/nl/engine.py`",
         "",
-        "阅读说明：每个 Prompt 块都按模型实际接收的文本原样放入 `text` 代码块；为减少页面噪声，除第一节外默认折叠。NL Sub Agent 的用户消息为 JSON object：`{request: {ts_code?, prompt, kwargs}, company_context}`；最终回答不限定格式，只有 `text_retrieve` 工具调用使用内部工具 schema。",
+        "阅读说明：每个 Prompt 块都按模型实际接收的文本原样放入 `text` 代码块；为减少页面噪声，除第一节外默认折叠。NL Sub Agent 的用户消息为 JSON object：`{request: {ts_code?, prompt, kwargs}, company_context, decision_as_of, response_contract?}`；默认回答自由文本，存在 enum `response_contract` 时只返回一个允许值；只有 `text_retrieve` 工具调用使用内部工具 schema。",
         "",
         "## 导航",
         "",

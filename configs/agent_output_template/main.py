@@ -19,7 +19,7 @@ Key ``ctx`` surface (advanced helpers in ``candidate.py`` / ``trading.py`` + ``R
   ``ctx.snapshot_dir`` / ``ctx.model_dir``             frozen research snapshot / model artifacts
   ``ctx.state_dir``                                    managed cross-tick state (only available inside substep)
   ``ctx.substep(name, budget_minutes=B)``              required wrapper for broker/state actions; B<1 submits this tick, B>=1 after ready_at
-  ``ctx.nl(code?, prompt=...)``                        optional PIT text analysis
+  ``ctx.nl(code?, prompt=..., event_filter?=..., response_format?=...)``  optional PIT text analysis
 
 ``ctx.asof_dir`` holds directories for ``daily``, ``events``, ``macro``,
 ``fundamentals``, ``intraday_1min`` and ``text_index``, plus the ``universe.parquet``

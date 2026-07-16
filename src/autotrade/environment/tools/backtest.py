@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import shutil
 import threading
@@ -119,7 +120,8 @@ class BacktestTool:
             "both require a successful full-window run of the current artifacts. Probes return ONLY "
             "runtime/lifecycle statistics - no returns, fills or attribution are produced (the probed "
             "window is the strategy's future). Probe NL content is withheld, so its wall time is NOT "
-            "representative when nl_outcome_counts contains withheld_probe."
+            "representative when nl_outcome_counts contains withheld_probe; nl_cost still reports a "
+            "full-window logical-call projection and structural provider-call upper bound."
         ),
         fields=(
             ActionField(
@@ -132,7 +134,7 @@ class BacktestTool:
                     "for a fast debug check "
                     "(non-accept-eligible). Use it to measure runtime (replay_wall_seconds / "
                     "replayed_trade_days) only when runtime_representative=true; NL-withheld Probe "
-                    "timing cannot be extrapolated. The "
+                    "timing cannot be extrapolated, though nl_cost call-count projections remain usable. The "
                     "default full run is the only result eligible for acceptance/freeze."
                 ),
             ),
@@ -306,13 +308,13 @@ class BacktestTool:
         self._data_load = data_load
         timeview_enabled = bool(manifest.get("timeview_enabled", manifest.get("rolling_asof_enabled", True)))
         minute_source: ParquetMinuteReplaySource | None = None
+        full_strategy_trade_days: int | None = None
         if replay_window is not None:
             load_t0 = time.monotonic()
             requested_strategy_days = max(1, int(replay_window))
-            keep = _first_replay_trade_dates(
-                replay_dir / "daily.parquet",
-                requested_strategy_days + 1,
-            )
+            all_replay_dates = _replay_trade_dates(replay_dir / "daily.parquet")
+            full_strategy_trade_days = max(0, len(all_replay_dates) - 1)
+            keep = all_replay_dates[: requested_strategy_days + 1]
             if len(keep) < requested_strategy_days + 1:
                 raise ToolError(
                     f"replay_window={requested_strategy_days} requires "
@@ -367,6 +369,8 @@ class BacktestTool:
         started_at = utc_now_iso()
         total_trade_days = int(replay_daily["trade_date"].nunique())
         strategy_trade_days = max(0, total_trade_days - 1)
+        if full_strategy_trade_days is None:
+            full_strategy_trade_days = strategy_trade_days
         exit_trade_days = 1 if total_trade_days else 0
         # Open the Agent-visible Valid bracket before synchronous replay so a
         # long run is observable. Frozen evaluation stays on host-only surfaces.
@@ -607,8 +611,24 @@ class BacktestTool:
 
         strategy_reject_category_counts = _strategy_reject_category_counts(stats["reject_counts"])
         nl_outcome_counts = dict(sorted(nl_service.outcome_counts.items()))
+        nl_cost = nl_service.cost_summary()
         withheld_probe_nl = int(nl_outcome_counts.get("withheld_probe", 0)) if probe else 0
         runtime_representative = withheld_probe_nl == 0
+        if probe:
+            observed_days = max(1, int(stats.get("replayed_trade_days") or strategy_trade_days or 1))
+            projected_calls = math.ceil(
+                int(nl_service.calls) * int(full_strategy_trade_days) / observed_days
+            )
+            nl_cost.update(
+                {
+                    "probe_observed_strategy_days": observed_days,
+                    "probe_full_strategy_days": int(full_strategy_trade_days),
+                    "probe_projected_full_logical_calls": projected_calls,
+                    "probe_projected_full_provider_call_upper_bound": (
+                        projected_calls * int(nl_service.structural_provider_call_limit)
+                    ),
+                }
+            )
         strategy_advisories = (
             list(modification_check.get("advisories") or [])
             if isinstance(modification_check, dict)
@@ -619,7 +639,8 @@ class BacktestTool:
             diagnostic_warnings.insert(
                 0,
                 f"本次 Probe 的 {withheld_probe_nl} 次 ctx.nl() 均未执行真实文本检索/模型调用；"
-                "replay_wall_seconds 只代表无 NL 退化路径，不可外推完整 Valid 耗时。",
+                "replay_wall_seconds 只代表无 NL 退化路径，不可外推完整 Valid 耗时；"
+                "nl_cost 仅给出按调用密度推算的结构性调用上界。",
             )
         summary = {
             "tool": self.name,
@@ -646,6 +667,7 @@ class BacktestTool:
             "nl_cache_misses": int(nl_service.cache_misses),
             "nl_outcome_counts": nl_outcome_counts,
             "nl_max_calls_per_backtest": nl_service.max_calls,
+            "nl_cost": nl_cost,
             "trade_count": int(stats["trade_count"]),
             "unsubmitted_action_count": int(stats["unsubmitted_action_count"]),
             "unsubmitted_action_reason_counts": stats["unsubmitted_action_reason_counts"],
@@ -660,7 +682,8 @@ class BacktestTool:
                 "replay_window 前 N 个策略交易日 + 1 个独立退出日探针："
                 "只返回运行成本与订单生命周期统计，"
                 "收益指标与成交明细不生成（对未来窗口的 P&L 属于前视信息）；"
-                "ctx.nl() 内容被 withheld 时，探针耗时不可外推完整 Valid"
+                "ctx.nl() 内容被 withheld 时，探针耗时不可外推完整 Valid，"
+                "仅 nl_cost 的调用量结构投影可用于成本预检"
                 if probe else None
             ),
             "runtime_representative": runtime_representative,
@@ -917,11 +940,15 @@ def _profile_kwargs(record: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in record.items() if key in fields}
 
 
-def _first_replay_trade_dates(path: Path, count: int) -> tuple[str, ...]:
+def _replay_trade_dates(path: Path) -> tuple[str, ...]:
     dates = pd.read_parquet(path, columns=["trade_date"])
     if dates.empty:
         raise ToolError(f"replay daily data is empty: {path}")
-    return tuple(sorted(dates["trade_date"].astype(str).unique())[: max(1, int(count))])
+    return tuple(sorted(dates["trade_date"].astype(str).unique()))
+
+
+def _first_replay_trade_dates(path: Path, count: int) -> tuple[str, ...]:
+    return _replay_trade_dates(path)[: max(1, int(count))]
 
 
 def _trade_date_filters(trade_dates: tuple[str, ...] | None):

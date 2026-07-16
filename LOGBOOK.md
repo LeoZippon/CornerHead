@@ -1627,3 +1627,11 @@
 - 最终真实 workload 重放：130 个原始工具参数、同一 frozen/replay 快照和逐日 08:00 PIT 时钟下，检索 2309.140s→118.808s（19.44x），初始化 15.928s；5 个原始非法模式和 1,172 个返回命中保持一致，重复候选完整多轮 0.178–0.618s。事件门控保守命中 3/25，省 62.314s provider；含 cache revision 的检索/控制 123.540s + 剩余 provider 426.914s，25 次 NL 任务估算 2778.870s→550.454s（5.05x），168 次季度调用约 62min NL，仍需正式重跑实测。
 - 剩余瓶颈为 provider 多轮（估算占 77.6%）。若重跑仍不满意，下一优先级为对回答质量做 A/B 后减少 provider 轮次；跨回测内容寻址缓存和正文 sidecar 的复杂度/收益比暂不成立。18 个候选缓存索引+正文仅约 12.9MiB，128 项 LRU 不构成当前内存压力。
 - Validation：`py_compile`；NL + tools-flow 152 OK；全量 unittest 841 OK（119.816s）；Prompt 重导出；`git diff --check` clean。全量测试前后可用内存均 314GiB；未启动 GPU 工作负载。
+
+2026-07-16 lzp-test18 显式事件门控、enum 快路径与 Q4 性能收口
+
+- 以显式 `event_filter={patterns,lookback_days}` 取代从模型检索词猜事件：单股候选先做滚动 PIT 匹配，零证据直接返回 `no_matching_evidence` 且不调用 provider；匹配 revision 使成功/无证据结果在事件进入或移出窗口时精确失效。未声明过滤器的自由分析只复用到当前仿真日期结束。
+- `response_format={type:"enum",values:[...]}` 限制为 1 次检索轮 + 1 次强制最终回答（128 token、5 条、provider 片段 1,000 字符），返回首个独立允许值，修复 `DOWNGRADE ... REJECT` 子串误判；通用自由文本 3 轮合同不变。
+- Backtest `nl_cost` 细分 provider/检索/过滤墙钟、token、证据、缓存和零证据跳过；Probe 在继续 withholding 内容的同时给出完整窗口逻辑调用投影与 provider 结构上界，不把退化墙钟伪装成真实 NL 延迟。
+- Q4 `valid_006` 离线只读复算：基线 1693.590s（NL 763.858s，105 provider/112 retrieval）；五类 30 日事件过滤命中 4/30、跳过 26/30，冷过滤 51.523s，结构上限 8 provider/4 retrieval。结合策略 exact-tail 基准 7.119→1.608s/日（4.43x，因子最大误差 2.3e-16），预计完整 Valid 约 682s；不做付费 provider 重跑。
+- 不增加服务、数据库或跨回测缓存；正文 sidecar/持久缓存仅在正式复跑未达 `NL<=350s、总墙钟<=900s` 时再评估。最终 `tests/unit` 848 passed + 41 subtests，定向 158 passed；Prompt 重导出、`git diff --check` clean。全量测试前后可用内存 368/367GiB，GPU 未用于本任务。

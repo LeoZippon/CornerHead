@@ -8,6 +8,7 @@ import pandas as pd
 
 from autotrade.environment.llm.proxy import (
     LLMProxyError,
+    ProviderResponse,
     ScriptedLLM,
     tool_call as make_tool_call,
     tool_call_response,
@@ -100,6 +101,65 @@ class NLSubAgentEngineTest(unittest.TestCase):
             self.assertIn("中性", result.content)
             self.assertEqual(result.tool_calls, [])
             self.assertIn("tools", proxy.calls[0])
+
+    def test_enum_contract_bounds_provider_work_and_canonicalizes_first_value(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, proxy = self.make_engine(
+                [tool_call("公告", max_results=20), "**DOWNGRADE** because evidence; not REJECT"],
+                Path(tmp),
+            )
+            engine.retriever.as_of = datetime(
+                2021, 10, 2, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")
+            )
+            engine.retriever._snippets[("anns_d", "t1")] = "x" * 1500
+            result = engine.run(
+                ts_code="000001.SZ",
+                prompt="classify",
+                request_kwargs={},
+                config=NLSubAgentConfig(
+                    per_call_timeout_seconds=30,
+                    max_tokens=128,
+                    max_tool_rounds=1,
+                    response_choices=("PASS", "DOWNGRADE", "REJECT"),
+                    max_results_per_search=5,
+                    max_evidence_snippet_chars=1000,
+                ),
+            )
+
+            self.assertEqual(result.state, "completed")
+            self.assertEqual(result.content, "DOWNGRADE")
+            self.assertEqual(len(proxy.calls), 2)
+            self.assertEqual([call["max_tokens"] for call in proxy.calls], [128, 128])
+            self.assertEqual(proxy.calls[-1]["tool_choice"], "none")
+            self.assertEqual(result.tool_calls[0]["arguments"]["max_results"], 5)
+            self.assertEqual(len(result.evidence[0]["snippet"]), 1500)
+            tool_message = next(
+                message for message in proxy.calls[-1]["messages"] if message["role"] == "tool"
+            )
+            provider_payload = json.loads(tool_message["content"])
+            self.assertEqual(len(provider_payload["results"][0]["snippet"]), 1000)
+            initial = json.loads(proxy.calls[0]["messages"][1]["content"])
+            self.assertIn("2021-10-02", initial["decision_as_of"])
+            self.assertEqual(initial["response_contract"]["values"], ["PASS", "DOWNGRADE", "REJECT"])
+
+    def test_enum_contract_rejects_unrecognized_provider_answer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, _ = self.make_engine(["MAYBE"], Path(tmp))
+            result = engine.run(
+                ts_code="000001.SZ",
+                prompt="classify",
+                request_kwargs={},
+                config=NLSubAgentConfig(
+                    failure_policy="return_error_with_audit",
+                    response_choices=("PASS", "REJECT"),
+                ),
+            )
+            self.assertEqual(result.state, "failed_with_policy")
+            self.assertEqual(result.content, "")
+            self.assertEqual(result.llm_calls[0]["content"], "MAYBE")
 
     def test_text_retrieve_schema_is_generated_from_standard_spec(self):
         schema = TEXT_RETRIEVE_SCHEMA["function"]["parameters"]
@@ -495,42 +555,79 @@ class NLBudgetTest(unittest.TestCase):
             self.assertEqual(first["state"], "withheld_probe")
             self.assertEqual(second["state"], "budget_exhausted")
 
-    def test_event_filter_removes_candidate_qualifiers_but_keeps_risk_terms(self):
-        from autotrade.environment.nl.service import _event_patterns
+    def test_probe_reports_structural_provider_bounds_without_execution(self):
+        from autotrade.environment.nl.service import StrategyNLService
 
-        calls = [
-            {"name": "text_retrieve", "arguments": {"pattern": "平安银行"}},
-            {"name": "text_retrieve", "arguments": {
-                "pattern": "平安银行.*(处罚|重大诉讼|退市)"
-            }},
-            {"name": "text_retrieve", "status": "error", "arguments": {"pattern": "*ST"}},
+        with tempfile.TemporaryDirectory() as tmp:
+            service = StrategyNLService(
+                proxy=None,
+                snapshot_dir=Path(tmp) / "unused_snapshot",
+                log_dir=Path(tmp) / "log",
+                failure_policy="return_error_with_audit",
+                per_call_timeout_seconds=1.0,
+                withhold_response=True,
+            )
+            service.run(
+                "000001.SZ",
+                prompt="x",
+                kwargs={"response_format": {"type": "enum", "values": ["PASS", "REJECT"]}},
+                request={"request_id": "1"},
+            )
+            self.assertEqual(service.cost_summary()["max_provider_calls_per_logical_call"], 2)
+            service.run("000001.SZ", prompt="x", kwargs={}, request={"request_id": "2"})
+            summary = service.cost_summary()
+            self.assertEqual(summary["max_provider_calls_per_logical_call"], 4)
+            self.assertEqual((summary["provider_calls"], summary["retrieval_calls"]), (0, 0))
+
+    def test_explicit_nl_contract_validation_is_strict(self):
+        from autotrade.environment.nl.service import _parse_event_filter, _parse_response_format
+
+        event = _parse_event_filter(
+            {"patterns": ["处罚|重大诉讼"], "lookback_days": 30},
+            ts_code="000001.SZ",
+        )
+        self.assertEqual(event.patterns, ("处罚|重大诉讼",))
+        self.assertEqual(event.lookback_days, 30)
+        response = _parse_response_format(
+            {"type": "enum", "values": ["PASS", "DOWNGRADE", "REJECT"]}
+        )
+        self.assertEqual(response.choices, ("PASS", "DOWNGRADE", "REJECT"))
+
+        invalid_events = [
+            ({"patterns": ["处罚"], "lookback_days": 30}, ""),
+            ({"patterns": ["处罚"], "lookback_days": True}, "000001.SZ"),
+            ({"patterns": ["处罚"], "lookback_days": 0}, "000001.SZ"),
+            ({"patterns": [r"(处罚)\1"], "lookback_days": 30}, "000001.SZ"),
+            ({"patterns": ["x" * 250, "y"], "lookback_days": 30}, "000001.SZ"),
         ]
+        for raw, code in invalid_events:
+            with self.subTest(raw=raw, code=code), self.assertRaises(ValueError):
+                _parse_event_filter(raw, ts_code=code)
+        with self.assertRaisesRegex(ValueError, "unique"):
+            _parse_response_format({"type": "enum", "values": ["PASS", "pass"]})
 
-        self.assertEqual(
-            _event_patterns(calls, ["000001.SZ", "平安银行"]),
-            ("(处罚|重大诉讼|退市)",),
-        )
+    def test_invalid_contract_is_audited_without_provider_call(self):
+        from autotrade.environment.nl.service import StrategyNLService
 
-    def test_event_filter_falls_back_for_unsafe_entity_regex(self):
-        from autotrade.environment.nl.service import _candidate_revision, _event_patterns
-
-        calls = [{
-            "name": "text_retrieve",
-            "arguments": {"pattern": "[平安银行]|处罚"},
-        }]
-
-        self.assertEqual(_event_patterns(calls, ["平安银行"]), ())
-
-        class Retriever:
-            def candidate_revision(self, _code, *, company_terms, patterns=()):
-                if patterns:
-                    raise ValueError("unsafe filter")
-                return "full"
-
-        self.assertEqual(
-            _candidate_revision(Retriever(), "000001.SZ", ["平安银行"], ("bad",)),
-            ("full", ()),
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proxy = ScriptedLLM(["unused"])
+            service = StrategyNLService(
+                proxy=proxy,
+                snapshot_dir=self._make_snapshot(root),
+                log_dir=root / "log",
+                failure_policy="return_error_with_audit",
+                per_call_timeout_seconds=30.0,
+            )
+            result = service.run(
+                "000001.SZ",
+                prompt="risk",
+                kwargs={"response_format": {"type": "json", "values": ["PASS"]}},
+                request={"request_id": "1"},
+            )
+            self.assertEqual(result["state"], "invalid_request")
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(proxy.calls, [])
 
     def test_full_nl_reports_start_and_finish_activity(self):
         from autotrade.environment.nl.service import StrategyNLService
@@ -539,7 +636,16 @@ class NLBudgetTest(unittest.TestCase):
             snap = self._make_snapshot(Path(tmp))
             activity = []
             service = StrategyNLService(
-                proxy=ScriptedLLM(["结论保持中性。"]),
+                proxy=ScriptedLLM(
+                    [
+                        ProviderResponse(
+                            content="结论保持中性。",
+                            provider="scripted",
+                            model="scripted",
+                            usage={"input_tokens": 7, "output_tokens": 2},
+                        )
+                    ]
+                ),
                 snapshot_dir=snap,
                 log_dir=Path(tmp) / "log",
                 failure_policy="return_error_with_audit",
@@ -553,6 +659,9 @@ class NLBudgetTest(unittest.TestCase):
             self.assertEqual([item["activity_status"] for item in activity], ["running", "finished"])
             self.assertEqual([item["nl_call_index"] for item in activity], [1, 1])
             self.assertGreaterEqual(activity[-1]["activity_elapsed_seconds"], 0.0)
+            cost = service.cost_summary()
+            self.assertEqual((cost["provider_calls"], cost["retrieval_calls"]), (1, 0))
+            self.assertEqual((cost["provider_prompt_tokens"], cost["provider_completion_tokens"]), (7, 2))
 
     def test_completed_stock_analysis_reuses_until_candidate_evidence_changes(self):
         from datetime import datetime
@@ -636,7 +745,7 @@ class NLBudgetTest(unittest.TestCase):
             self.assertEqual((service.executed_calls, service.cache_hits, service.cache_misses), (2, 0, 2))
             self.assertEqual(len(proxy.calls), 2)
 
-    def test_subagent_event_patterns_ignore_unrelated_new_candidate_text(self):
+    def test_explicit_event_filter_skips_reuses_refreshes_and_expires(self):
         from datetime import datetime
         from zoneinfo import ZoneInfo
 
@@ -672,9 +781,7 @@ class NLBudgetTest(unittest.TestCase):
                 snap / "universe.parquet", index=False
             )
 
-            proxy = ScriptedLLM(
-                [tool_call("重大诉讼"), "PASS", tool_call("重大诉讼"), "DOWNGRADE"]
-            )
+            proxy = ScriptedLLM([tool_call("重大诉讼", max_results=20), "**DOWNGRADE** not REJECT"])
             service = StrategyNLService(
                 proxy=proxy,
                 snapshot_dir=snap,
@@ -683,21 +790,51 @@ class NLBudgetTest(unittest.TestCase):
                 failure_policy="return_error_with_audit",
                 per_call_timeout_seconds=30.0,
             )
+            kwargs = {
+                "event_filter": {"patterns": ["重大诉讼"], "lookback_days": 30},
+                "response_format": {
+                    "type": "enum",
+                    "values": ["PASS", "DOWNGRADE", "REJECT"],
+                },
+            }
             service.current_when = datetime(2022, 1, 4, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
-            first = service.run("000001.SZ", prompt="risk", kwargs={}, request={"request_id": "1"})
+            first = service.run("000001.SZ", prompt="risk", kwargs=kwargs, request={"request_id": "1"})
             service.current_when = datetime(2022, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
-            reused = service.run("000001.SZ", prompt="risk", kwargs={}, request={"request_id": "2"})
+            unrelated = service.run("000001.SZ", prompt="risk", kwargs=kwargs, request={"request_id": "2"})
             service.current_when = datetime(2022, 1, 6, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
-            refreshed = service.run("000001.SZ", prompt="risk", kwargs={}, request={"request_id": "3"})
+            refreshed = service.run("000001.SZ", prompt="risk", kwargs=kwargs, request={"request_id": "3"})
+            service.current_when = datetime(2022, 1, 6, 13, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            reused = service.run("000001.SZ", prompt="risk", kwargs=kwargs, request={"request_id": "4"})
+            service.current_when = datetime(2022, 2, 6, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            expired = service.run("000001.SZ", prompt="risk", kwargs=kwargs, request={"request_id": "5"})
 
-            self.assertEqual([first["content"], reused["content"], refreshed["content"]],
-                             ["PASS", "PASS", "DOWNGRADE"])
-            self.assertEqual([first["cache"]["event_filter_count"],
-                              reused["cache"]["event_filter_count"],
-                              refreshed["cache"]["event_filter_count"]], [1, 1, 1])
-            self.assertEqual((service.executed_calls, service.cache_hits, service.cache_misses),
-                             (2, 1, 2))
-            self.assertEqual(len(proxy.calls), 4)
+            self.assertEqual(
+                [first["state"], unrelated["state"], refreshed["state"], reused["state"], expired["state"]],
+                [
+                    "no_matching_evidence",
+                    "no_matching_evidence",
+                    "completed",
+                    "completed",
+                    "no_matching_evidence",
+                ],
+            )
+            self.assertEqual(
+                [first["content"], unrelated["content"], refreshed["content"], reused["content"], expired["content"]],
+                ["", "", "DOWNGRADE", "DOWNGRADE", ""],
+            )
+            self.assertEqual(
+                [item["cache"]["status"] for item in (first, unrelated, refreshed, reused, expired)],
+                ["miss", "hit", "miss", "hit", "miss"],
+            )
+            self.assertEqual((service.executed_calls, service.cache_hits, service.cache_misses), (1, 2, 3))
+            self.assertEqual((service.no_evidence_skips, service.provider_calls, service.retrieval_calls), (3, 2, 1))
+            self.assertEqual(len(proxy.calls), 2)
+            self.assertEqual([call["max_tokens"] for call in proxy.calls], [128, 128])
+            self.assertEqual(proxy.calls[-1]["tool_choice"], "none")
+            self.assertEqual(refreshed["tool_calls"][0]["arguments"]["max_results"], 5)
+            cost = service.cost_summary()
+            self.assertEqual((cost["event_filter_calls"], cost["evidence_items"]), (5, 1))
+            self.assertEqual(cost["max_provider_calls_per_logical_call"], 2)
 
 
 class CompanyContextStoreTest(unittest.TestCase):
@@ -855,6 +992,44 @@ class TextRetrieverRollingTest(unittest.TestCase):
                 retriever.candidate_revision("000001.SZ", patterns=("处罚",)),
                 other_before,
             )
+
+    def test_candidate_scope_uses_rolling_pit_window_and_expires(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        with tempfile.TemporaryDirectory() as tmp:
+            retriever = self._retriever(Path(tmp))
+            retriever.as_of = datetime(2022, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            active = retriever.candidate_evidence_state(
+                "000001.SZ", patterns=("body",), lookback_days=30
+            )
+            self.assertEqual(active.match_count, 1)
+            self.assertEqual(
+                [hit["text_id"] for hit in retriever.search(
+                    "body", ts_code="000001.SZ", max_results=10, lookback_days=30
+                )],
+                ["r1"],
+            )
+
+            retriever.as_of = datetime(2022, 2, 5, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            expired = retriever.candidate_evidence_state(
+                "000001.SZ", patterns=("body",), lookback_days=30
+            )
+            self.assertEqual(expired.match_count, 0)
+            self.assertNotEqual(expired.revision, active.revision)
+            self.assertEqual(
+                retriever.search("body", ts_code="000001.SZ", lookback_days=30),
+                [],
+            )
+
+    def test_candidate_lookback_rejects_invalid_values_even_for_empty_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            retriever = self._retriever(Path(tmp))
+            for value in (True, 1.5, 0):
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    retriever.candidate_evidence_state("999999.SZ", lookback_days=value)
+            with self.assertRaisesRegex(ValueError, "as_of"):
+                retriever.candidate_evidence_state("999999.SZ", lookback_days=30)
 
 
 if __name__ == "__main__":

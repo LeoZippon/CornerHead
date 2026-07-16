@@ -73,7 +73,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 
 ## 正式产物格式（modification_check 按此校验）
 - `main.py`：必须定义唯一正式入口 `main(ctx) -> None`，由 Environment 在每个计划决策 tick 调用一次（盘中间距见事实 `intraday_decision_minutes`，竞价/盘外 tick 恒为决策 tick；详见下方「回放与交易环境规则」）。
-- `candidate.py`：推荐用于横截面筛选与开仓逻辑，可读取 `ctx.asof_dir`（逐 tick 时点视图）和 `ctx.snapshot_dir`（冻结研究基准），可调用 `ctx.nl(code, prompt="...")` 做单股文本分析，或 `ctx.nl(prompt="...")` 做事件/主题/行业/宏观文本检索；由 `main` 在选定时点调用。
+- `candidate.py`：推荐用于横截面筛选与开仓逻辑，可读取 `ctx.asof_dir`（逐 tick 时点视图）和 `ctx.snapshot_dir`（冻结研究基准），可调用 `ctx.nl(code, prompt="...", event_filter=..., response_format=...)` 做事件驱动的单股文本分析，或 `ctx.nl(prompt="...")` 做事件/主题/行业/宏观文本检索；由 `main` 在选定时点调用。
 - `trading.py`：推荐用于按 `ts_code` 管理持仓的交易/做T/平仓函数（`def 名字(ctx, ts_code): ...`）；由 `main` 每个 tick 调用。Agent 可修改或新增。
 - `nl_prompt.md`：可选，保存策略复用的 NL 提示片段；也可以直接在 `main.py` 或 `candidate.py` 中传入 prompt。
 - `models/`：可选，保存需要跨 Fold 继承的模型参数、权重或轻量元数据；可按模型/组件分子目录。需要复用或继承的参数必须在 `backtest` 前由工具阶段写入 `models/`，正式 `main(ctx)` 回放中 `ctx.model_dir` 只读；回放中产生的临时中间产物留在内存或 `ctx.state_dir`。依赖包不写入 `models/`，应通过 Sandbox 镜像安装。
@@ -91,11 +91,11 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - Broker 约束：策略只表达意图。每次实验同时运行普通+信用两个独立账户（现金、持仓、T+1 各自独立、互不担保），Broker 强制各账户现金与保证金可用余额、T+1 可卖余额、手数、涨跌停、停牌、融资融券标的与授信额度、融券限价规则、维保比例强平（只清信用账户）、账户间划转提取线和回放末日强制清仓。最大持仓数、单票权重和集中度默认由你控制。
 - `ctx.account`、`ctx.positions`、`ctx.broker.stock/credit` 是 tick 入口快照；同 tick 新 action 只进入 action 队列（已提交的轻量单也进入 `pending()`），不回写账户视图。批量下单从入口快照读取一次总预算，在本地逐笔递减并为费用/滑点留缓冲，不要在循环中反复读取静态 `available_cash` 当作剩余预算。
 - 子步骤预算：所有会访问 `ctx.state_dir`、调用 `ctx.broker`、调用 `ctx.nl()`、读写策略状态或做实质筛选/推理的策略步骤，都必须放进 `ctx.substep(name, budget_minutes=B)`；`B>0`、tick 内 name 唯一、低报会 fail-fast。`ctx.broker` 原语和 `ctx.state_dir` 在子步骤外会被拒绝；宿主还会用 `main(ctx)` 总耗时减去 substep 耗时，拒绝实质未包裹计算。`B<1` 的轻量块在回测中视为本决策分钟内完成（仍统计/限时并带 `ready_at` 元数据）；`B>=1` 的 broker action 只有在生成 tick、`ready_at` 和释放 tick 都处于交易所接受申报窗口内才提交，否则记录未提交/未成交，不会自动排到下一交易时段。未 ready 的跨分钟 broker 动作还不是委托，不会出现在 `pending()`；`pending()` 只展示已提交但未成交/可撤的在途单。
-- 回测成本：`backtest` 独立计时，不计入 Fold 推理 deadline，但单 Fold 次数受 `max_backtests_per_fold` 限制；单 tick 与单交易日真实墙钟硬上限由 run manifest 给出。小 `replay_window` 中 NL 内容会被 withheld；只要 `runtime_representative=false`，其耗时就不能外推完整 Valid。NL 策略必须用完整 Valid 验证并留足余量。
+- 回测成本：`backtest` 独立计时，不计入 Fold 推理 deadline，但单 Fold 次数受 `max_backtests_per_fold` 限制；单 tick 与单交易日真实墙钟硬上限由 run manifest 给出。小 `replay_window` 中 NL 内容会被 withheld；`runtime_representative=false` 时墙钟不能外推完整 Valid，但 `nl_cost` 会按调用密度给出完整窗口逻辑调用投影和 provider 调用结构上界。NL 真实延迟仍须用完整 Valid 验证并留足余量。
 - 回测归因：验证回测的返回附带 `benchmark` 诊断块（同窗沪深300收益、超额、β、市值风格倾斜；完整版含 PB/换手倾斜与申万行业净权重，在结果目录 `style_analysis.json`）。用它解读收益来源——绝对收益要对照基准看，超额为负的"正收益"不是证据，β 高说明在赌方向而非选股。这些是**描述性归因，不是优化目标**：不要为追求特定 β 或风格倾斜数值而改策略。
 - 跨周期生命周期：计划必须携带调仓周期键，每个新周期重新生成，并显式对比 Broker 真相源（持仓与在途单）执行卖出与再平衡；区间末宿主强制平仓只是安全网——回测结果中 `host_exit_liquidation_count` > 0 表示这些持仓从未被策略自己退出，买入后放任持有衡量的不是可持续策略。
 - 跨 tick 状态：`ctx.state_dir` 只存你的规则、计划和轻量状态，不是持仓/委托账本；Broker 才是真相源。它只能在 `ctx.substep` 内访问，首次访问才复制可见状态（纯 Broker block 不创建副本），单个暂存文件不超过64 MiB；访问后的旧值读取与 `ready_at` 延迟合并合同不变。每次回测重置，需继承的参数在回测前写入 `models/`。
-- NL 与做空：`ctx.nl(ts_code, prompt=...)` 用于单股文本分析（正文只检索 PIT 索引已关联该公司的材料），`ctx.nl(prompt=...)` 用于事件/主题/行业/宏观背景检索；一次调用可包含多轮检索与模型调用，优先在固定调仓时点合并问题并缓存结论，不要逐股逐 tick 重复调用。文本按数据节点 PIT 滚动且受配额限制，证据必须降权使用。nl() 失败时返回 `status="error"` 且带 `feedback`（失败原因与退化建议：配额耗尽/未配置代理不要重试，超时/偶发失败可在后续 tick 重试一次）；策略必须按 status 分支降级，不得因 NL 失败崩溃。默认做空券源由成交当日 `margin_secs` 校验，当日集合缺失时按数据缺口拒单（`margin_secs_data_missing`），不可融券会拒单。
+- NL 与做空：`ctx.nl(ts_code, prompt=..., event_filter={"patterns": [...], "lookback_days": N})` 先在该公司 PIT 候选材料的滚动窗口内做事件门控；无匹配返回 `status="ok", state="no_matching_evidence", content=""`，不调用模型。窄标签任务加 `response_format={"type": "enum", "values": [...]}`，直接使用返回的规范标签，不做脆弱的子串解析；不传这些参数时仍是自由文本、多轮通用分析。`ctx.nl(prompt=...)` 用于事件/主题/行业/宏观背景检索。优先在固定调仓时点合并问题并复用仍有效的结果，不要逐股逐 tick 重复调用。文本按数据节点 PIT 滚动且受配额限制，证据必须降权使用。nl() 失败时返回 `status="error"` 且带 `feedback`；策略必须按 status/state 分支降级，不得因 NL 失败崩溃。默认做空券源由成交当日 `margin_secs` 校验，当日集合缺失时按数据缺口拒单（`margin_secs_data_missing`），不可融券会拒单。
 
 ## 数据可见性（逐 tick 时序视图）
 `ctx.asof_dir` 是逐 tick 滚动的时点视图：某行数据只有在“把它写入本地库的定时任务在仿真时钟下已完成”后才可见，严格复刻实盘本地库的刷新节奏。parquet 域与文本视图各按其落库节点滚动；`ctx.nl()` 复用同一时钟门控文本证据：
@@ -163,7 +163,7 @@ FOLD_ACTION_SECTION = """\
 
 公司行为（除权日盘前自动处理，见 facts `corporate_actions`）：多头持仓在除权日贷记现金红利（税前 × (1−`dividend_tax_rate`)）并按送转比例增股（成本连续，红股上市日晚于除权日时先锁定）；融券空头按税前全额补偿现金红利、应还股数按送转比例调增。持有跨除权日不再被记为纯亏损；配股未建模。
 
-`ctx` 其他字段：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO-8601 **字符串**，如 `"2025-01-02T09:25:00+08:00"`；直接使用，不调用 `.isoformat()`，需要对象时用 `datetime.fromisoformat(...)`）、`ctx.account`、`ctx.positions`、`ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`、`ctx.substep(name, budget_minutes=B)`、`ctx.asof_dir`、`ctx.asof_version`、`ctx.snapshot_dir`、`ctx.model_dir`、`ctx.state_dir`、`ctx.nl(ts_code?, prompt=...)`。
+`ctx` 其他字段：`ctx.cur_date`（"YYYYMMDD"）、`ctx.cur_time`（"HH:MM"）、`ctx.cur_datetime`（ISO-8601 **字符串**，如 `"2025-01-02T09:25:00+08:00"`；直接使用，不调用 `.isoformat()`，需要对象时用 `datetime.fromisoformat(...)`）、`ctx.account`、`ctx.positions`、`ctx.price(ts_code)`、`ctx.bar(ts_code)`、`ctx.bars`、`ctx.substep(name, budget_minutes=B)`、`ctx.asof_dir`、`ctx.asof_version`、`ctx.snapshot_dir`、`ctx.model_dir`、`ctx.state_dir`、`ctx.nl(ts_code?, prompt=..., event_filter?=..., response_format?=...)`。
 `ctx.asof_dir` 中常规数据域是目录（如 `daily`），冻结股票池是单文件 `universe.parquet`。
 
 轻量委托管理例子（每个 tick 可运行，用小预算子步骤统一统计耗时和撤单提交时点）：
@@ -184,7 +184,8 @@ def cancel_stale_pending(ctx, max_age_minutes=1.0):
 - 首个 Fold 的 `parent_output` 是初始模板、Step 树可能为空：不要追查不存在的历史，从模板和可见数据起步即可。
 - 先读 `/mnt/artifacts/data_summary.json`，再用 grep/glob 按模式检索 `/mnt/snapshots/train`、`/mnt/snapshots/valid`、父产物和历史验证结果；需要写临时代码或复杂数据探查时再用 shell。
 - 写策略逻辑前，先据 `data_summary.json` / snapshot `manifest.json` / `runtime_env.json` 明确一份**最小数据契约**：关键文件、核心列、日期字段、数据规模量级、可用 Python 包；之后筛选与特征只引用该契约内已确认的字段与包，减少反复试错。
-- 文本证据（`ctx.nl()`）是价格/基本面之外的独立信息面：在研究/筛选子步骤里对少数候选票做单股文本分析，或对事件、主题、行业、宏观线索做全局 PIT 文本检索，并按证据质量和置信度降权融入判断。是否使用由你权衡（配额有限、证据要可证伪），但这应当是明确的取舍而不是遗漏——若整个 Fold 不用 NL，应能说出价格/基本面信号为何已足够。
+- 文本证据（`ctx.nl()`）是价格/基本面之外的独立信息面：对少数候选票声明可证伪的 `event_filter`，窄决策优先声明 enum `response_format`；`no_matching_evidence` 只表示窗口内无匹配证据。全局事件/主题/行业/宏观检索仍可使用通用模式。按证据质量和置信度降权融入判断；若整个 Fold 不用 NL，应能说出价格/基本面信号为何已足够。
+- 重复读取大 PIT 表时，只投影所需列，并先按代码/日期截取能精确覆盖因子窗口的尾部再计算和合并；必须用全历史实现核对因子、排序、候选与订单完全等价（浮点容差不高于 `1e-12`），不能用近似采样换速度。
 - Shell 命令不要使用 `2>/dev/null` 等重定向隐藏错误；让 stderr 原样返回，便于 Environment 记录和审计。
 - 在 `/mnt/agent/workspace/` 写临时代码验证想法；确认可运行后再写入正式代码或模型参数产物。
 - 先验证最小垂直链路：读取已确认字段 → 选出少量代码 → 下单 → 下一交易日按 T+1 主动退出；通过后每次只增加一个主要信号或执行组件。调试阶段不要把宽泛异常吞成空 DataFrame/空计划；定位后才保留带明确状态的降级。每次 backtest 都检查 `backtests_remaining`，至少为最终完整 Valid 和一次必要复验留出额度；完整 Valid 成功后先保留该 Step，只有明确且高价值的问题才继续修改。

@@ -361,6 +361,26 @@ def main(ctx):
             ctx.broker.buy(code, amount=1000, reason="nl_buy")
 '''
 
+EVENT_FILTER_NL_CALL_MAIN = '''
+from at_tools import nl
+
+_DONE = False
+
+
+def main(ctx):
+    with ctx.substep("main_tick", budget_minutes=0.5):
+        global _DONE
+        if _DONE:
+            return
+        _DONE = True
+        nl(
+            "000001.SZ",
+            prompt="classify material litigation risk",
+            event_filter={"patterns": ["重大诉讼|仲裁"], "lookback_days": 30},
+            response_format={"type": "enum", "values": ["PASS", "DOWNGRADE", "REJECT"]},
+        )
+'''
+
 GENERAL_NL_CALL_MAIN = '''
 from at_tools import nl
 from pathlib import Path
@@ -1073,6 +1093,30 @@ def main(ctx):
             self.assertNotIn("prompt", activity[0])
             self.assertNotIn("ts_code", activity[0])
 
+    def test_event_filter_contract_crosses_runtime_rpc_and_skips_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(
+                EVENT_FILTER_NL_CALL_MAIN,
+                encoding="utf-8",
+            )
+            ctx.proxy = ScriptedLLM(["unused"])
+
+            summary = BacktestTool(ctx).run(mode="valid")
+
+            self.assertEqual(summary["nl_outcome_counts"], {"no_matching_evidence": 1})
+            self.assertEqual(summary["nl_executed_calls"], 0)
+            self.assertEqual(ctx.proxy.calls, [])
+            self.assertEqual(
+                (
+                    summary["nl_cost"]["no_evidence_skips"],
+                    summary["nl_cost"]["provider_calls"],
+                    summary["nl_cost"]["retrieval_calls"],
+                    summary["nl_cost"]["event_filter_calls"],
+                ),
+                (1, 0, 0, 1),
+            )
+
     def test_general_nl_call_uses_runtime_rpc_and_cleans_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
@@ -1392,9 +1436,19 @@ def main(ctx):
             self.assertEqual(summary["nl_cache_hits"], 0)
             self.assertEqual(summary["nl_cache_misses"], 0)
             self.assertEqual(summary["nl_outcome_counts"], {"withheld_probe": 1})
+            nl_cost = summary["nl_cost"]
+            self.assertEqual((nl_cost["logical_calls"], nl_cost["provider_calls"]), (1, 0))
+            self.assertEqual(nl_cost["max_provider_calls_per_logical_call"], 4)
+            self.assertEqual(
+                nl_cost["probe_projected_full_provider_call_upper_bound"],
+                nl_cost["probe_projected_full_logical_calls"] * 4,
+            )
             self.assertFalse(summary["runtime_representative"])
             self.assertTrue(any("不可外推完整 Valid" in warning for warning in summary["diagnostic_warnings"]))
             self.assertNotIn("nl_tool_dir", summary)
+            public_summary = ctx.manifest.data["backtest_summaries"][-1]
+            self.assertEqual(public_summary["nl_cost"], nl_cost)
+            self.assertFalse(public_summary["runtime_representative"])
             public = json.dumps(
                 {
                     "summary": summary,

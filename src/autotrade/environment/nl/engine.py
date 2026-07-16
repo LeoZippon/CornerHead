@@ -2,9 +2,9 @@
 
 ``at_tools.nl(...)`` starts one bounded host-side Sub Agent task. The Sub Agent
 may call the ``text_retrieve`` tool, which is backed by the snapshot
-``text_index.parquet`` and ``text_library/``. The final answer is intentionally
-free-form: strategy code receives the Sub Agent result and decides how to parse
-or use it.
+``text_index.parquet`` and ``text_library/``. Answers are free-form by default;
+an optional enum response contract gives narrow strategy decisions a cheaper,
+bounded path with a canonical result.
 """
 
 from __future__ import annotations
@@ -20,6 +20,9 @@ from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.tools.base import ActionField, ActionSpec, ToolSchemaError
 
 MAX_TOOL_ROUNDS = 3
+ENUM_MAX_TOKENS = 128
+ENUM_MAX_RESULTS = 5
+ENUM_SNIPPET_CHARS = 1000
 TEXT_RETRIEVE_TOOL = "text_retrieve"
 
 TEXT_RETRIEVE_SPEC = ActionSpec(
@@ -79,9 +82,10 @@ for general requests. Optional arguments:
 single-stock search to code/name-linked evidence; omit it for broad context.
 
 # Final Answer
-When you have enough information, answer in any format that is useful to the
-calling strategy: plain text, JSON, bullet points, a numeric rubric, or a short
-decision note are all allowed. Do not fabricate evidence identifiers.
+If the request includes ``response_contract``, return exactly one listed value
+and no other text. Otherwise answer in any format useful to the calling strategy:
+plain text, JSON, bullet points, a numeric rubric, or a short decision note are
+all allowed. Do not fabricate evidence identifiers.
 """
 
 FINAL_AFTER_TOOL_BUDGET = (
@@ -104,10 +108,24 @@ class NLSubAgentConfig:
     # disabled once clamped, so an in-flight NL task cannot stretch a decision
     # far past its wall cap (worst overrun = one bounded HTTP call).
     deadline_at: float | None = None
+    response_choices: tuple[str, ...] = ()
+    max_results_per_search: int | None = None
+    max_evidence_snippet_chars: int | None = None
+    lookback_days: int | None = None
 
     def __post_init__(self) -> None:
         if self.max_tool_rounds < 0:
             raise ValueError("max_tool_rounds must be non-negative")
+        if self.max_results_per_search is not None and self.max_results_per_search <= 0:
+            raise ValueError("max_results_per_search must be positive")
+        if self.max_evidence_snippet_chars is not None and self.max_evidence_snippet_chars <= 0:
+            raise ValueError("max_evidence_snippet_chars must be positive")
+        if self.lookback_days is not None and (
+            isinstance(self.lookback_days, bool)
+            or not isinstance(self.lookback_days, int)
+            or self.lookback_days <= 0
+        ):
+            raise ValueError("lookback_days must be a positive integer")
         if self.failure_policy not in {"fail", "return_error_with_audit"}:
             raise ValueError(f"unsupported failure_policy={self.failure_policy}")
 
@@ -157,6 +175,7 @@ class TextRetrieveTool:
         *,
         default_ts_code: str,
         company_terms: list[str],
+        config: NLSubAgentConfig,
     ) -> tuple[dict[str, object], list[dict[str, object]]]:
         pattern = _request_pattern(arguments)
         argument_error = _text_retrieve_argument_error(arguments, pattern)
@@ -176,6 +195,8 @@ class TextRetrieveTool:
         # tasks have no default and may still opt into a stock scope.
         ts_code = str(default_ts_code or validated.get("ts_code") or "").strip()
         max_results = int(validated.get("max_results", 5) or 5)
+        if config.max_results_per_search is not None:
+            max_results = min(max_results, config.max_results_per_search)
         search_bodies = bool(validated.get("search_bodies", True))
         if argument_error:
             return (
@@ -202,6 +223,7 @@ class TextRetrieveTool:
                 max_results=max_results,
                 search_bodies=search_bodies,
                 company_terms=company_terms,
+                lookback_days=config.lookback_days,
             )
         except ValueError as exc:
             # Pattern outside the RE2/grep contract: fixable tool error the
@@ -265,7 +287,12 @@ class NLSubAgentEngine:
             task.company_context = self.company_contexts.get(ts_code, {"ts_code": ts_code, "context": "unknown"})
         else:
             task.company_context = {"scope": "general", "context": "no_single_stock"}
-        messages = self._initial_messages(task, prompt=prompt, request_kwargs=request_kwargs or {})
+        messages = self._initial_messages(
+            task,
+            prompt=prompt,
+            request_kwargs=request_kwargs or {},
+            config=config,
+        )
         candidate_terms = company_terms(task.company_context, ts_code)
         evidence_seen: set[str] = set()
         try:
@@ -274,8 +301,7 @@ class NLSubAgentEngine:
                 response = self._call(task, messages, config, purpose=f"subagent_round_{round_index}")
                 calls = _parse_native_tool_calls(response.tool_calls)
                 if not calls:
-                    task.content = response.content
-                    task.state = "completed"
+                    self._finish(task, response.content, config)
                     return task
                 messages.append(assistant_tool_turn(response))
                 for tool_name, tool_call_id, arguments, call_error in calls:
@@ -290,7 +316,10 @@ class NLSubAgentEngine:
                         }
                     else:
                         tool_record, evidence = self.text_tool.call(
-                            arguments, default_ts_code=ts_code, company_terms=candidate_terms
+                            arguments,
+                            default_ts_code=ts_code,
+                            company_terms=candidate_terms,
+                            config=config,
                         )
                         tool_record["round"] = round_index
                         for item in evidence:
@@ -298,7 +327,9 @@ class NLSubAgentEngine:
                             if text_id and text_id not in evidence_seen:
                                 evidence_seen.add(text_id)
                                 task.evidence.append(item)
-                            new_evidence.append(item)
+                                new_evidence.append(
+                                    _provider_evidence(item, config.max_evidence_snippet_chars)
+                                )
                     task.tool_calls.append(tool_record)
                     messages.append(
                         {
@@ -310,13 +341,15 @@ class NLSubAgentEngine:
                         }
                     )
             task.rounds = max(task.rounds, config.max_tool_rounds)
-            messages.append({"role": "user", "content": FINAL_AFTER_TOOL_BUDGET})
+            final_instruction = FINAL_AFTER_TOOL_BUDGET
+            if config.response_choices:
+                final_instruction += " Answer with exactly one of: " + ", ".join(config.response_choices) + "."
+            messages.append({"role": "user", "content": final_instruction})
             # tool_choice="none" forces a final text answer instead of another tool call.
             response = self._call(
                 task, messages, config, purpose="subagent_final_after_tool_budget", tool_choice="none"
             )
-            task.content = response.content
-            task.state = "completed"
+            self._finish(task, response.content, config)
         except LLMProxyError as exc:
             task.state = "timeout" if exc.timeout else self._failure_state(config)
             task.error = str(sanitize_for_log(str(exc)))
@@ -343,6 +376,7 @@ class NLSubAgentEngine:
             if remaining < timeout:
                 timeout = remaining
                 deadline_clamped = True
+        call_started = time.monotonic()
         detail: dict[str, object] = {
             "task_id": task.task_id,
             "ts_code": task.ts_code,
@@ -363,7 +397,12 @@ class NLSubAgentEngine:
                 max_retries=0 if deadline_clamped else None,
             )
         except Exception as exc:
-            detail.update(status="error", error=sanitize_for_log(str(exc)), completed_at=utc_now_iso())
+            detail.update(
+                status="error",
+                error=sanitize_for_log(str(exc)),
+                completed_at=utc_now_iso(),
+                duration_seconds=round(time.monotonic() - call_started, 6),
+            )
             task.llm_calls.append(detail)
             raise
         detail.update(
@@ -373,6 +412,7 @@ class NLSubAgentEngine:
             reasoning_content=response.reasoning_content,
             tool_calls=sanitize_for_log([dict(tc) for tc in response.tool_calls]),
             usage=response.usage,
+            duration_seconds=round(time.monotonic() - call_started, 6),
         )
         task.llm_calls.append(detail)
         return response
@@ -383,6 +423,7 @@ class NLSubAgentEngine:
         *,
         prompt: str,
         request_kwargs: dict[str, object],
+        config: NLSubAgentConfig,
     ) -> list[dict[str, str]]:
         body = {
             "request": {
@@ -391,11 +432,31 @@ class NLSubAgentEngine:
                 "kwargs": request_kwargs,
             },
             "company_context": task.company_context,
+            "decision_as_of": str(self.retriever.as_of) if self.retriever.as_of is not None else "",
         }
+        if config.response_choices:
+            body["response_contract"] = {
+                "type": "enum",
+                "values": list(config.response_choices),
+                "instruction": "Return exactly one listed value and no explanation.",
+            }
         return [
             {"role": "system", "content": SUB_AGENT_SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(body, ensure_ascii=False, sort_keys=True)},
         ]
+
+    def _finish(self, task: NLSubAgentResult, content: str, config: NLSubAgentConfig) -> None:
+        if not config.response_choices:
+            task.content = content
+            task.state = "completed"
+            return
+        choice = _first_enum_value(content, config.response_choices)
+        if choice is None:
+            task.state = self._failure_state(config)
+            task.error = "structured NL response did not contain a permitted enum value"
+            return
+        task.content = choice
+        task.state = "completed"
 
     @staticmethod
     def _failure_state(config: NLSubAgentConfig) -> str:
@@ -465,6 +526,27 @@ def _text_retrieve_argument_error(arguments: dict[str, object], pattern: str) ->
     if not pattern:
         return "text_retrieve requires a non-empty pattern or keywords"
     return ""
+
+
+def _provider_evidence(item: dict[str, object], snippet_chars: int | None) -> dict[str, object]:
+    projected = dict(item)
+    if snippet_chars is not None:
+        projected["snippet"] = str(projected.get("snippet") or "")[:snippet_chars]
+    return projected
+
+
+def _first_enum_value(content: str, choices: tuple[str, ...]) -> str | None:
+    """Return the first standalone allowed token; raw content remains in the provider audit."""
+    if not choices:
+        return None
+    by_folded = {choice.casefold(): choice for choice in choices}
+    alternatives = "|".join(re.escape(choice) for choice in sorted(choices, key=len, reverse=True))
+    match = re.search(
+        rf"(?<![A-Za-z0-9_])(?:{alternatives})(?![A-Za-z0-9_])",
+        str(content or ""),
+        flags=re.IGNORECASE,
+    )
+    return by_folded.get(match.group(0).casefold()) if match is not None else None
 
 
 def company_terms(context: dict[str, object], ts_code: str) -> list[str]:

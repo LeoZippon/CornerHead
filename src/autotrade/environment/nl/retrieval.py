@@ -35,6 +35,14 @@ class _CandidateCorpus:
     loaded_body_ids: set[tuple[str, str]] = field(default_factory=set)
 
 
+@dataclass(frozen=True)
+class CandidateEvidenceState:
+    """Content identity and cardinality for one PIT candidate evidence scope."""
+
+    revision: str
+    match_count: int
+
+
 class TextRetriever:
     """Grep-style retrieval over the snapshot text index and as-of text library.
 
@@ -154,12 +162,17 @@ class TextRetriever:
         max_results: int = 5,
         search_bodies: bool = True,
         company_terms: list[str] | None = None,
+        lookback_days: int | None = None,
     ) -> list[dict[str, object]]:
         """Raises ValueError for patterns outside the RE2/grep contract."""
         regex = validate_pattern(pattern)
         candidate_key = self._candidate_key(ts_code, company_terms)
         corpus = self._candidate_corpus(candidate_key) if candidate_key else None
-        index = self._visible_candidate_index(corpus) if corpus is not None else self._visible_index()
+        index = (
+            self._visible_candidate_index(corpus, lookback_days=lookback_days)
+            if corpus is not None
+            else self._visible_index()
+        )
         if index.empty:
             return []
         pattern_hit = self._title_code_match(index, regex)
@@ -222,13 +235,30 @@ class TextRetriever:
         *,
         company_terms: list[str] | None = None,
         patterns: tuple[str, ...] = (),
+        lookback_days: int | None = None,
     ) -> str:
         """Hash visible candidate evidence, optionally limited to event patterns."""
+        return self.candidate_evidence_state(
+            ts_code,
+            company_terms=company_terms,
+            patterns=patterns,
+            lookback_days=lookback_days,
+        ).revision
+
+    def candidate_evidence_state(
+        self,
+        ts_code: str,
+        *,
+        company_terms: list[str] | None = None,
+        patterns: tuple[str, ...] = (),
+        lookback_days: int | None = None,
+    ) -> CandidateEvidenceState:
+        """Hash and count the matching evidence visible inside a rolling PIT window."""
         if not str(ts_code or "").strip():
-            raise ValueError("candidate_revision requires a non-empty ts_code")
+            raise ValueError("candidate_evidence_state requires a non-empty ts_code")
         key = self._candidate_key(ts_code, company_terms)
         corpus = self._candidate_corpus(key)
-        visible = self._visible_candidate_index(corpus)
+        visible = self._visible_candidate_index(corpus, lookback_days=lookback_days)
         if patterns and not visible.empty:
             visible = self._matching_candidate_rows(corpus, visible, patterns)
         columns = [c for c in ("dataset", "text_id", "source_hash", "available_at", "title") if c in visible]
@@ -238,7 +268,10 @@ class TextRetriever:
             for row in ordered.itertuples(index=False, name=None):
                 digest.update("\x1f".join(row).encode("utf-8"))
                 digest.update(b"\n")
-        return f"sha256:{digest.hexdigest()}"
+        return CandidateEvidenceState(
+            revision=f"sha256:{digest.hexdigest()}",
+            match_count=int(len(visible)),
+        )
 
     def _matching_candidate_rows(
         self,
@@ -306,23 +339,48 @@ class TextRetriever:
                     self._snippets.pop((str(row.dataset), str(row.text_id)), None)
         return corpus
 
-    def _visible_candidate_index(self, corpus: _CandidateCorpus) -> pd.DataFrame:
+    def _visible_candidate_index(
+        self,
+        corpus: _CandidateCorpus,
+        *,
+        lookback_days: int | None = None,
+    ) -> pd.DataFrame:
+        if lookback_days is not None:
+            if isinstance(lookback_days, bool) or not isinstance(lookback_days, int) or lookback_days <= 0:
+                raise ValueError("lookback_days must be a positive integer")
+            if self.as_of is None:
+                raise ValueError("lookback_days requires a simulated decision as_of time")
         index = corpus.index
         if index.empty or "_source" not in index.columns:
-            return index
-        frozen = self._frozen_mask.loc[index.index]
-        if self.as_of is None:
-            return index[frozen]
-        datasets = self._datasets.loc[index.index]
-        cutoffs = {
-            dataset: text_dataset_visible_cutoff(dataset, self.as_of)
-            for dataset in datasets.unique()
-        }
-        cutoff = datasets.map(
-            {dataset: (pd.Timestamp(value) if value is not None else pd.NaT) for dataset, value in cutoffs.items()}
+            visible = index
+        else:
+            frozen = self._frozen_mask.loc[index.index]
+            if self.as_of is None:
+                visible = index[frozen]
+            else:
+                datasets = self._datasets.loc[index.index]
+                cutoffs = {
+                    dataset: text_dataset_visible_cutoff(dataset, self.as_of)
+                    for dataset in datasets.unique()
+                }
+                cutoff = datasets.map(
+                    {
+                        dataset: (pd.Timestamp(value) if value is not None else pd.NaT)
+                        for dataset, value in cutoffs.items()
+                    }
+                )
+                available_at = self._available_at.loc[index.index]
+                visible = index[frozen | ((~frozen) & (available_at <= cutoff))]
+        if lookback_days is None or visible.empty:
+            return visible
+        anchor = pd.Timestamp(self.as_of)
+        anchor = (
+            anchor.tz_localize("Asia/Shanghai")
+            if anchor.tzinfo is None
+            else anchor.tz_convert("Asia/Shanghai")
         )
-        available_at = self._available_at.loc[index.index]
-        return index[frozen | ((~frozen) & (available_at <= cutoff))]
+        earliest = anchor - pd.Timedelta(days=lookback_days)
+        return visible[self._available_at.loc[visible.index] >= earliest]
 
     def _shards(self, dataset: str) -> list[str]:
         return [str(d / f"{dataset}.parquet") for d in self.library_dirs if (d / f"{dataset}.parquet").exists()]
