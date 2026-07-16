@@ -1668,3 +1668,11 @@
 - exact-tail 因子在 2025-07-01/08-01/09-30 三个真实 PIT 状态与旧实现的最大误差为 `2.47e-16`、候选顺序完全一致，单次 6.42–7.45s 降至 1.55–2.03s（3.66–4.14x）。完整 Q4 重放：1693.590→826.108s（2.05x，-51.2%）；NL 763.858→58.695s（-92.3%）；策略计算 538.606→248.938s（-53.8%）；provider 105→3、检索 112→0。28 次逻辑调用中 25 次无证据直接跳过，3 次均完成。
 - 达成 `NL<=350s`、完整重放 `<=900s` 等门槛。剩余主要成本为策略计算 248.9s、Timeview roll 165.6s、宿主开销 136.1s、IPC 120.0s；事件过滤仅 48.8s，再引入正文 sidecar/跨回测持久缓存最多节约约 6% 总墙钟且增加失效与复现复杂度，当前不值得。此复跑用于性能验证，因事件门控改变 NL 执行路径，不将其 5.19% 收益用于策略质量结论。
 - Validation：NL + DeepSeek 定向 69 passed + 10 subtests；tools-flow 109 passed + 9 subtests；全量 `tests/unit` 850 passed + 41 subtests（26 个既有 warning，112.07s）；`git diff --check` clean。基准显式 CPU-only；共享主机上的正式实验负载保留，未改动其 worker。
+
+2026-07-16 案例研究修复批次：数据 cron 不就绪契约、Agent 环境接口反馈、NL 正确性与控制台收益口径
+
+- 盘前两融空响应不再打脏湖世代：event_flow 新增 `--zero-rows-not-ready`（4 个盘前两融作业启用），零写入时按竞价捕获同款退出码 75（无变更可重试）恢复 committed 世代并记 `not_ready`，部分写入正常提交、空分区留给重试任务；历史回补保持 fail-fast。
+- Agent 环境接口（lap-test19/lzp-test18 案例研究定因的修复面）：模板 README 与系统提示词逐键列出 `ctx.positions` 行 schema（含 quantity 与 sellable_quantity 语义区分）；modification_check 新增 `unknown_position_row_key` advisory（对冻结的 lap `qty`、lzp `volume` 产物实测命中，模板与合法用法零误报）；回测 summary 新增 `order_lifecycle` 方向计数与 `strategy_exit_fill_count`（Probe 同样返回），全部平仓来自宿主强平或清算不完整时给 warn-only"退出路径检查"诊断；Probe 失败公开异常类名与策略文件行号（原始消息仍留宿主审计面）；Probe summary `result_path=null`；被拒 close() 保留策略自身 reason（不再被解析动词覆盖）；开发历史增记 trade_count/退出计数/liquidation_complete/benchmark 紧凑块；收尾提示改为先重读 steps/tree.txt，并按"本 run 内已完整验证才免重跑"的真实 finish_fold 契约表述。
+- NL 正确性：通用正文检索先按 PIT 可见 text_id 半连接再 LIMIT，未来行不再挤占结果配额（新增回归测试对旧实现失败）；enum 解析对含 CJK 的值要求独立成词，"不减持"不再解析为"减持"（ASCII 值边界维持原样，`结论PASS` 仍可解析）。
+- 控制台：/trace* 端点 run_id 单段校验堵住路径穿越（与 style 端点同款守卫 + 回归测试）；累计验证/测试收益只在单 Epoch 内复利（`metrics` 取最新 Epoch 并以 `epoch_id` 标注，`metrics_by_epoch` 逐 Epoch 并列），`/equity` 支持按 Epoch 切换并附服务端全周期统计（累计/年化收益、年化波动、Sharpe、最大回撤、日胜率、β、超额、跟踪误差、信息比率）；SIGCHLD 忽略导致 subprocess returncode 恒 0 已加显式注释；QMT README 三闸门失败语义（confirm 不匹配/时段外为 error 而非 dry_run）与幂等日界口径对齐代码；冻结评估进度负载只含运行时键的回归断言加固。
+- Validation：全量 tests/unit 860 passed + 41 subtests（114.63s）；`node --check`、`git diff --check` clean。运行中的实验 worker 未受影响（提示词/环境变更在其下次会话启动后生效）。
