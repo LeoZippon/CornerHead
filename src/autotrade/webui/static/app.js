@@ -1770,7 +1770,7 @@ function stepGatePanel(detail, session) {
       ...diagnostics.map((item) => el("div", { class: item.warning ? "hint warn" : "hint" }, item.message)),
       analysisNode(
         `/api/experiments/${encodeURIComponent(detail.experiment_id)}/current-step/analysis`,
-        "当前 Step DeepSeek 分析（可选，仅验证期证据）",
+        "当前 Step 策略分析（可选，仅基于验证期证据）",
         { standalone: false },
       ),
       textarea,
@@ -2782,10 +2782,10 @@ function ordersNode(experimentId, epochId, foldId) {
   return wrap;
 }
 
-/* Standalone LLM strategy-review card (peer of the fold-result panel). */
+/* Standalone strategy-review card (peer of the fold-result panel). */
 function analysisPanel(experimentId, epochId, foldId) {
   const base = `/api/experiments/${encodeURIComponent(experimentId)}/analysis/${encodeURIComponent(epochId)}/${encodeURIComponent(foldId)}`;
-  return analysisNode(base, "策略分析（LLM，仅验证期证据）");
+  return analysisNode(base, "Fold 策略分析（可选，仅基于验证期证据）");
 }
 
 function analysisNode(base, title, { standalone = true } = {}) {

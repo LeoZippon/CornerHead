@@ -196,6 +196,9 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(script.headers["cache-control"], "no-store, max-age=0")
         self.assertIn("性能参考：本次回测策略进程峰值内存约", script.text)
         self.assertIn('kvRow("总耗时", foldDurationNode(detail, session))', script.text)
+        self.assertIn("当前 Step 策略分析（可选，仅基于验证期证据）", script.text)
+        self.assertIn("Fold 策略分析（可选，仅基于验证期证据）", script.text)
+        self.assertNotIn("DeepSeek 分析", script.text)
 
     def test_parameter_schema_defaults_track_worker_defaults(self) -> None:
         schema = self.client.get("/api/parameter-schema").json()
@@ -215,6 +218,12 @@ class WebuiBackendTest(unittest.TestCase):
         for model_field in ("model", "nl_model", "compact_model", "analysis_model"):
             self.assertNotIn("deepseek-chat", fields[model_field]["choices"])
             self.assertNotIn("deepseek-reasoner", fields[model_field]["choices"])
+        visible_copy = "\n".join(
+            str(field.get(key, "")) for field in fields.values() for key in ("label", "help")
+        )
+        self.assertNotIn("DeepSeek", visible_copy)
+        self.assertNotIn("provider", visible_copy)
+        self.assertEqual(fields["no_thinking"]["label"], "禁用推理模式")
         # No trade calendar under the tmp repo root: period pickers degrade to text.
         self.assertEqual(schema["period_options"], {})
         self.assertEqual(fields["first_test_period"]["type"], "string")

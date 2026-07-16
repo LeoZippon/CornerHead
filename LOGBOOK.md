@@ -1647,3 +1647,9 @@
 - worker 现只在既有宿主 `status.json` 写 `environment_stage`、阶段开始时间和节流后的日序号/总日数；阶段覆盖验收冻结、冻结测试、落盘、分析、元学习收口/环境更新及 held-out。隐藏回放投影剔除日期、订单、NL 活动和结果，不进入 Prompt、Trace、Sandbox 或 Agent 预算。
 - 前端显示真实阶段、`day_index/total_days`、百分比和阶段墙钟；旧 worker 无新字段时仍显示 Session 后累计墙钟。复用现有 5 秒状态轮询和回放节流回调，不新增服务、线程、数据扫描或逐 tick 写入。
 - Validation：相关 Pipeline/WebUI/工具流 251 passed + 13 subtests；全量 `tests/unit` 849 passed + 41 subtests（26 个已知 warning，114.65s）；`py_compile`、`node --check`、`git diff --check` clean。测试前后可用内存 354/353GiB，GPU 未用于本任务。静态前端已同步，console/tunnel/API 端到端健康；当前 lzp-test18 worker 仍运行 `d2dba11`，旧字段兼容，详细宿主阶段在下次 worker 启动后生效。
+
+2026-07-16 控制台策略分析文案去供应商化
+
+- Step/Fold 分析标题统一为“策略分析（可选，仅基于验证期证据）”，移除 DeepSeek/LLM 品牌绑定；模型、推理模式、超时与上下文压缩帮助文案同步改为供应商中立术语。
+- 保留当前真实可选模型 ID，不改 API、分析执行、实验参数或运行中的 worker；新增 WebUI 回归检查，禁止标签/帮助文案重新出现供应商品牌或内部 `provider` 术语。
+- Validation：WebUI backend 44 passed；`node --check`、`py_compile`、`git diff --check` 通过。静态前端已同步并重启 console，端到端健康；lzp-test18 worker PID/run/session 均未改变。
