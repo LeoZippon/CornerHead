@@ -502,25 +502,42 @@ class TextRetriever:
         limit: int,
     ) -> set[str]:
         """Linear-time full-body grep with column projection and a result cap;
-        matched snippets are cached so ranking never re-reads the shards."""
+        matched snippets are cached so ranking never re-reads the shards.
+
+        Shards also hold rows outside the PIT boundary, so the scan semi-joins
+        the visible ids first: the LIMIT must count visible matches only, or a
+        burst of future-dated matches could crowd valid evidence out of the cap.
+        """
         found: set[str] = set()
         datasets = index.get("dataset")
         if datasets is None:
             return found
-        for dataset in datasets.astype(str).unique():
+        dataset_values = datasets.astype(str)
+        for dataset in dataset_values.unique():
             shards = self._shards(dataset)
             if not shards:
                 continue
-            rows = self._body_query(
-                "SELECT text_id, substr(body, 1, ?) FROM read_parquet(?) "
-                "WHERE regexp_matches(body, ?, 'i') LIMIT ?",
-                [self.snippet_chars, shards, regex, limit + len(exclude)],
-            )
+            ids = index.loc[dataset_values == dataset, "text_id"].astype(str).drop_duplicates()
+            ids = ids[~ids.isin(exclude)]
+            if ids.empty:
+                continue
+            with self._query_lock:
+                try:
+                    self._connection.register("visible_text_ids", ids.to_frame(name="text_id"))
+                    rows = self._connection.execute(
+                        "SELECT text_id, substr(body, 1, ?) FROM read_parquet(?) "
+                        "WHERE CAST(text_id AS VARCHAR) IN (SELECT text_id FROM visible_text_ids) "
+                        "AND regexp_matches(body, ?, 'i') LIMIT ?",
+                        [self.snippet_chars, shards, regex, limit],
+                    ).fetchall()
+                except duckdb.Error as exc:
+                    raise ValueError(f"text_retrieve body query failed (RE2/grep semantics): {exc}") from exc
+                finally:
+                    self._connection.unregister("visible_text_ids")
             for text_id, snippet in rows:
                 tid = str(text_id)
                 self._snippets.setdefault((dataset, tid), str(snippet or ""))
-                if tid not in exclude:
-                    found.add(tid)
+                found.add(tid)
             if len(found) >= limit:
                 break
         return found

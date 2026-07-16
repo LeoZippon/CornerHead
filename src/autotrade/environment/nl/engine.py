@@ -553,14 +553,26 @@ def _provider_evidence(item: dict[str, object], snippet_chars: int | None) -> di
     return projected
 
 
+def _enum_token_pattern(choice: str) -> str:
+    """Standalone-token pattern for one enum value.
+
+    ASCII values keep the ASCII word guard so ``结论PASS`` still parses. CJK has
+    no delimiters, so a CJK-bearing value adjacent to any word char (``不减持``,
+    ``减持压力``) is ambiguous — refusing to parse it surfaces an auditable
+    failure instead of a silently inverted label. ``\\w`` covers CJK in Python.
+    """
+    boundary = r"\w" if re.search(r"[^\x00-\x7f]", choice) else r"[A-Za-z0-9_]"
+    return rf"(?<!{boundary}){re.escape(choice)}(?!{boundary})"
+
+
 def _first_enum_value(content: str, choices: tuple[str, ...]) -> str | None:
     """Return the first standalone allowed token; raw content remains in the provider audit."""
     if not choices:
         return None
     by_folded = {choice.casefold(): choice for choice in choices}
-    alternatives = "|".join(re.escape(choice) for choice in sorted(choices, key=len, reverse=True))
+    alternatives = "|".join(_enum_token_pattern(choice) for choice in sorted(choices, key=len, reverse=True))
     match = re.search(
-        rf"(?<![A-Za-z0-9_])(?:{alternatives})(?![A-Za-z0-9_])",
+        rf"(?:{alternatives})",
         str(content or ""),
         flags=re.IGNORECASE,
     )

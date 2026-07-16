@@ -146,6 +146,20 @@ class NLSubAgentEngineTest(unittest.TestCase):
             self.assertIn("2021-10-02", initial["decision_as_of"])
             self.assertEqual(initial["response_contract"]["values"], ["PASS", "DOWNGRADE", "REJECT"])
 
+    def test_enum_matching_respects_cjk_token_boundaries(self):
+        from autotrade.environment.nl.engine import _first_enum_value
+
+        choices = ("减持", "增持")
+        # A negated/embedded CJK value must not parse as a match — a silent
+        # inversion is worse than an auditable parse failure.
+        self.assertIsNone(_first_enum_value("不减持", choices))
+        self.assertIsNone(_first_enum_value("减持压力不大，维持增持评级之外的判断", choices))
+        self.assertEqual(_first_enum_value("减持", choices), "减持")
+        self.assertEqual(_first_enum_value("结论：减持。", choices), "减持")
+        # ASCII values keep the looser ASCII-word guard: CJK neighbors are fine.
+        self.assertEqual(_first_enum_value("结论PASS", ("PASS", "REJECT")), "PASS")
+        self.assertIsNone(_first_enum_value("PASSED", ("PASS", "REJECT")))
+
     def test_enum_contract_rejects_unrecognized_provider_answer(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, _ = self.make_engine(["MAYBE"], Path(tmp))
@@ -486,6 +500,42 @@ class NLSubAgentEngineTest(unittest.TestCase):
             )
             hits = retriever.search("shared rare signal", max_results=5)
             self.assertEqual({hit["text_id"] for hit in hits}, {"fz"})
+
+    def test_general_body_search_limit_counts_only_visible_matches(self):
+        # The body-shard LIMIT must apply after the PIT visibility semi-join:
+        # a burst of future-dated matching rows must not crowd a visible match
+        # out of the result cap (completeness, not leakage).
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            frozen = pd.DataFrame(
+                [{"text_id": "fz", "dataset": "news", "ts_codes": "000001.SZ",
+                  "title": "unrelated", "available_at": "2025-03-01T18:00:00+08:00"}]
+            )
+            future_ids = [f"rp{i}" for i in range(500)]
+            replay = pd.DataFrame(
+                [{"text_id": tid, "dataset": "news", "ts_codes": "000002.SZ",
+                  "title": "future note", "available_at": "2099-01-01T18:00:00+08:00"}
+                 for tid in future_ids]
+                + [{"text_id": "visible_tail", "dataset": "news", "ts_codes": "000003.SZ",
+                    "title": "old note", "available_at": "2025-03-02T18:00:00+08:00"}]
+            )
+            fz_idx = tmp / "text_index.parquet"; frozen.to_parquet(fz_idx, index=False)
+            fz_lib = tmp / "text_library"; fz_lib.mkdir()
+            pd.DataFrame({"text_id": ["fz"], "body": ["nothing here"]}).to_parquet(
+                fz_lib / "news.parquet", index=False
+            )
+            rp_idx = tmp / "replay_index.parquet"; replay.to_parquet(rp_idx, index=False)
+            rp_lib = tmp / "replay_library"; rp_lib.mkdir()
+            pd.DataFrame(
+                {"text_id": future_ids + ["visible_tail"],
+                 "body": ["shared rare signal"] * (len(future_ids) + 1)}
+            ).to_parquet(rp_lib / "news.parquet", index=False)
+            retriever = TextRetriever(
+                fz_idx, fz_lib, replay_index_path=rp_idx, replay_library_dir=rp_lib,
+                as_of=pd.Timestamp("2025-05-01T09:30:00+08:00").to_pydatetime(),
+            )
+            hits = retriever.search("shared rare signal", max_results=5)
+            self.assertEqual({hit["text_id"] for hit in hits}, {"visible_tail"})
 
     def test_legacy_keyword_requests_map_to_patterns(self):
         with tempfile.TemporaryDirectory() as tmp:
