@@ -389,8 +389,30 @@ class BacktestTool:
         self._backtest_started = True  # bracket open: any later failure must emit a terminal event
         self._backtest_started_monotonic = time.monotonic()
 
+        environment_progress_hook = self.ctx.extra.get("environment_progress_hook")
+        environment_replay_stage = str(self.ctx.extra.get("environment_replay_stage") or "frozen_test")
+        if mode == "frozen_eval" and callable(environment_progress_hook):
+            environment_progress_hook(
+                environment_replay_stage,
+                {"day_index": 0, "total_days": total_trade_days, "percent": 0.0, "elapsed_seconds": 0.0},
+            )
+
         def _on_progress(date: str, idx: int, total: int, elapsed: float, orders: int) -> None:
-            if probe or mode != "valid":
+            if mode == "frozen_eval":
+                if callable(environment_progress_hook):
+                    # Host status intentionally omits hidden dates, orders, NL
+                    # activity and results; only runtime progress reaches the UI.
+                    environment_progress_hook(
+                        environment_replay_stage,
+                        {
+                            "day_index": idx,
+                            "total_days": total,
+                            "percent": round(100.0 * idx / total, 1) if total else 0.0,
+                            "elapsed_seconds": round(elapsed, 1),
+                        },
+                    )
+                return
+            if probe:
                 return  # do not stream progressive future-window/order feedback
             self.ctx.trace.emit(
                 "backtest_progress",

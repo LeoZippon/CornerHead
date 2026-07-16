@@ -184,10 +184,13 @@ class FakePipeline:
 
     # -- pipeline surface ---------------------------------------------------
     def run_meta_learning(self, *, epoch_id, parent, previous_taste="", visible_fold=None, directive_override=None,
-                          system_prompt_override="", user_question_hook=None, agent_ready_hook=None):
+                          system_prompt_override="", user_question_hook=None, agent_ready_hook=None,
+                          environment_progress_hook=None):
         self.calls.append(("meta", epoch_id, previous_taste, directive_override, system_prompt_override))
         if agent_ready_hook is not None:
             agent_ready_hook()
+        if environment_progress_hook is not None:
+            environment_progress_hook("meta_finalize", None)
         taste = f"taste-{epoch_id}"
         meta_dir = Path(self.config.experiment_dir) / "meta_learning" / epoch_id
         meta_dir.mkdir(parents=True, exist_ok=True)
@@ -208,10 +211,13 @@ class FakePipeline:
 
     def run_fold(self, fold, *, epoch_id, parent, taste_prompt="", fold_directive="",
                  system_prompt_override="", rerun_id=None, sandbox_gpu_count=None, step_gate_hook=None,
-                 user_question_hook=None):
+                 user_question_hook=None, environment_progress_hook=None):
         self.calls.append(("fold", epoch_id, fold.fold_id, taste_prompt, fold_directive,
                            parent.artifact_id if parent else None, system_prompt_override, rerun_id))
         self.gpu_counts_seen = getattr(self, "gpu_counts_seen", []) + [sandbox_gpu_count]
+        if environment_progress_hook is not None:
+            environment_progress_hook("acceptance", None)
+            environment_progress_hook("persistence", None)
         self._counter += 1
         artifact_id = f"strategy_{epoch_id}_{fold.fold_id}" + (f"__r{rerun_id[:8]}" if rerun_id else "")
         frozen = self._freeze_fake(epoch_id, artifact_id, content=f"# v{self._counter}\n")
@@ -243,7 +249,9 @@ class FakePipeline:
             test_summary={"total_return": 0.02},
         )
 
-    def run_heldout(self, final, trading_days, *, epoch_id, skip_labels=None):
+    def run_heldout(
+        self, final, trading_days, *, epoch_id, skip_labels=None, environment_progress_hook=None
+    ):
         self.calls.append(("heldout", epoch_id, frozenset(skip_labels or ())))
         from autotrade.pipelines.folds import heldout_periods
 
@@ -256,6 +264,10 @@ class FakePipeline:
         ):
             if skip_labels and str(period["label"]) in skip_labels:
                 continue
+            if environment_progress_hook is not None:
+                environment_progress_hook(
+                    "heldout", {"day_index": 1, "total_days": 1, "percent": 100.0, "elapsed_seconds": 0.1}
+                )
             self.ledger.append(
                 {
                     "record_type": "heldout",
@@ -877,6 +889,20 @@ class InteractiveRunnerTest(unittest.TestCase):
 
         status.set(state="running_session", session_started_at=utc_now_iso())
         self.assertEqual(status._data["researcher_wait_seconds"], 0.0)
+
+    def test_status_reporter_tracks_and_resets_environment_progress(self) -> None:
+        status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=Path(self.config.work_root))
+        status.set(state="running_session", session_started_at=utc_now_iso())
+        status.set(environment_stage="frozen_test", environment_progress={"day_index": 0, "total_days": 61})
+        started = status._data["environment_stage_started_at"]
+        status.set(environment_stage="frozen_test", environment_progress={"day_index": 30, "total_days": 61})
+        self.assertEqual(status._data["environment_stage_started_at"], started)
+        self.assertEqual(status._data["environment_progress"]["day_index"], 30)
+
+        status.set(state="running_session", session_started_at=utc_now_iso())
+        self.assertIsNone(status._data["environment_stage"])
+        self.assertIsNone(status._data["environment_stage_started_at"])
+        self.assertIsNone(status._data["environment_progress"])
 
     def test_status_reporter_does_not_attach_previous_session_run(self) -> None:
         work_root = Path(self.config.work_root)

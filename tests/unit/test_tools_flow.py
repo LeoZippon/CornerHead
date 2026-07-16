@@ -1016,12 +1016,22 @@ def main(ctx):
             ctx.manifest.update(frozen_strategy_artifact_hash=artifact_hash(ctx.paths.agent_output))
             sandbox.bind_snapshot_view(ctx.paths.snapshot_views / "test_decision_input")
             sealed: list[bool] = []
+            environment_progress: list[tuple[str, dict[str, object] | None]] = []
             ctx.executor.formal_seal_factory = lambda: sealed.append(True)
+            ctx.extra["environment_progress_hook"] = (
+                lambda stage, progress: environment_progress.append((stage, progress))
+            )
+            ctx.extra["environment_replay_stage"] = "frozen_test"
             public_trace_count = len(ctx.trace.read_events())
             summary = BacktestTool(ctx).run(mode="frozen_eval", result_name="test_000")
             self.assertEqual(sealed, [True])
             self.assertEqual(summary["result_name"], "test_000")
             self.assertEqual(len(ctx.trace.read_events()), public_trace_count)
+            self.assertTrue(environment_progress)
+            self.assertEqual(environment_progress[0][0], "frozen_test")
+            self.assertEqual(environment_progress[0][1]["day_index"], 0)
+            self.assertNotIn("trade_date", environment_progress[0][1])
+            self.assertNotIn("orders_so_far", environment_progress[0][1])
             host_manifest = json.loads(ctx.manifest.host_path.read_text(encoding="utf-8"))
             frozen = [item for item in host_manifest["backtest_summaries"] if item["mode"] == "frozen_eval"]
             self.assertEqual(len(frozen), 1)

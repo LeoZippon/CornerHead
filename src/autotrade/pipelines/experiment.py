@@ -344,6 +344,7 @@ class ExperimentPipeline:
         sandbox_gpu_count: int | None = None,
         step_gate_hook=None,
         user_question_hook=None,
+        environment_progress_hook=None,
     ) -> FoldOutcome:
         run_id = new_id("run")
         try:
@@ -359,6 +360,7 @@ class ExperimentPipeline:
                 sandbox_gpu_count=sandbox_gpu_count,
                 step_gate_hook=step_gate_hook,
                 user_question_hook=user_question_hook,
+                environment_progress_hook=environment_progress_hook,
             )
         except Exception as exc:
             self._record_attempt_failure(epoch_id=epoch_id, fold_id=fold.fold_id, run_id=run_id, exc=exc)
@@ -378,6 +380,7 @@ class ExperimentPipeline:
         sandbox_gpu_count: int | None = None,
         step_gate_hook=None,
         user_question_hook=None,
+        environment_progress_hook=None,
     ) -> FoldOutcome:
         run_started = time.monotonic()
         sandbox, docker = self._start_sandbox(run_id, gpu_count=sandbox_gpu_count)
@@ -520,9 +523,17 @@ class ExperimentPipeline:
             if user_question_hook is not None:
                 # ask_user tool bridge (see AgentSessionRunner._do_ask_user).
                 ctx.extra["user_question_hook"] = user_question_hook
+            if environment_progress_hook is not None:
+                # Host-only observability. Frozen test progress must never enter
+                # the Agent-readable trace or strategy surface.
+                ctx.extra["environment_progress_hook"] = environment_progress_hook
+                ctx.extra["environment_replay_stage"] = "frozen_test"
             agent = self.agent_factory(ctx, fold, dict(manifest.data))
             session_summary = agent.run()
             researcher_wait_seconds = _researcher_wait_seconds(session_summary)
+
+            if environment_progress_hook is not None:
+                environment_progress_hook("acceptance", None)
 
             if not ctx.write_locked:
                 # Deadline / call-limit exits skip finish_fold's quiesce: kill any
@@ -542,12 +553,16 @@ class ExperimentPipeline:
             # accepted strategy or abort the experiment. Record it and fall through
             # to a durable ledger entry (C1).
             try:
+                if environment_progress_hook is not None:
+                    environment_progress_hook("frozen_test", None)
                 test_summary = self._frozen_test_eval(ctx, sandbox, docker, frozen, result_name="test_000")
             except Exception as exc:  # noqa: BLE001 - recorded in the ledger below
                 test_eval_error = exc
         finally:
             if docker is not None:
                 docker.stop()
+        if environment_progress_hook is not None:
+            environment_progress_hook("persistence", None)
         style_rollup_error = self._write_style_rollups(paths.results, "valid", "test")
         if self.config.step_tree_enabled and paths.steps.exists():
             link_copytree(paths.steps, self.config.experiment_dir / "steps")
@@ -629,6 +644,7 @@ class ExperimentPipeline:
         system_prompt_override: str = "",
         user_question_hook=None,
         agent_ready_hook=None,
+        environment_progress_hook=None,
     ) -> tuple[FrozenArtifact | None, str]:
         if self.meta_learner is None:
             raise RuntimeError("no meta learner configured")
@@ -644,6 +660,7 @@ class ExperimentPipeline:
                 system_prompt_override=system_prompt_override,
                 user_question_hook=user_question_hook,
                 agent_ready_hook=agent_ready_hook,
+                environment_progress_hook=environment_progress_hook,
             )
         except Exception as exc:
             self._record_attempt_failure(
@@ -663,6 +680,7 @@ class ExperimentPipeline:
         system_prompt_override: str = "",
         user_question_hook=None,
         agent_ready_hook=None,
+        environment_progress_hook=None,
     ) -> tuple[FrozenArtifact | None, str]:
         run_started = time.monotonic()
         sandbox, docker = self._start_sandbox(run_id, kind="meta_learning")
@@ -825,6 +843,8 @@ class ExperimentPipeline:
                 session_summary = ctx.extra.get("agent_session_summary")
             self._validate_meta_learning_session(session_summary)
             researcher_wait_seconds = _researcher_wait_seconds(session_summary)
+            if environment_progress_hook is not None:
+                environment_progress_hook("meta_finalize", None)
             taste_current = _read_text(paths.workspace / "taste.md").strip()
             if not taste_current:
                 raise RuntimeError("meta-learning completed without writing non-empty taste.md")
@@ -857,6 +877,8 @@ class ExperimentPipeline:
         elif has_parent:
             status = "rejected_kept_parent"
         sandbox_image_error: RuntimeError | None = None
+        if environment_progress_hook is not None:
+            environment_progress_hook("environment_update", None)
         try:
             sandbox_image_update, self._active_sandbox_spec = maybe_rebuild_sandbox_image(
                 paths.workspace / SANDBOX_ENVIRONMENT_REQUEST_NAME,
@@ -877,6 +899,9 @@ class ExperimentPipeline:
         meta_dir.mkdir(parents=True, exist_ok=True)
         if taste:
             (meta_dir / "taste.md").write_text(taste + "\n", encoding="utf-8")
+
+        if environment_progress_hook is not None:
+            environment_progress_hook("persistence", None)
 
         def meta_record(collected: Path | None, collect_error: Exception | None) -> dict[str, object]:
             agent_trace_ref = (collected / "agent_trace.jsonl") if collected is not None else paths.agent_trace
@@ -990,11 +1015,17 @@ class ExperimentPipeline:
         *,
         epoch_id: str,
         skip_labels: frozenset[str] | set[str] | None = None,
+        environment_progress_hook=None,
     ) -> list[dict[str, object]]:
         attempt: dict[str, str] = {}
         try:
             return self._run_heldout_impl(
-                final, trading_days, epoch_id=epoch_id, skip_labels=skip_labels, attempt=attempt
+                final,
+                trading_days,
+                epoch_id=epoch_id,
+                skip_labels=skip_labels,
+                attempt=attempt,
+                environment_progress_hook=environment_progress_hook,
             )
         except Exception as exc:
             if attempt:
@@ -1011,6 +1042,7 @@ class ExperimentPipeline:
         epoch_id: str,
         skip_labels: frozenset[str] | set[str] | None,
         attempt: dict[str, str],
+        environment_progress_hook=None,
     ) -> list[dict[str, object]]:
         periods = heldout_periods(
             self.config.heldout_first_period,
@@ -1094,6 +1126,9 @@ class ExperimentPipeline:
                     phase=PHASE_FROZEN,
                     write_locked=True,
                 )
+                if environment_progress_hook is not None:
+                    ctx.extra["environment_progress_hook"] = environment_progress_hook
+                    ctx.extra["environment_replay_stage"] = "heldout"
                 self._bind_formal_view(sandbox, docker, "test_decision_input")
                 summary = BacktestTool(ctx).run(mode="frozen_eval", result_name=f"heldout_{index:03d}")
             finally:

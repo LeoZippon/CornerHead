@@ -555,7 +555,7 @@ Agent trace 按事件记录主对话和上下文压缩：
 | `valid` | 验证决策输入 `/mnt/snapshot` | `/mnt/snapshots/valid` | `results/valid_<idx>/` | Agent 可读 |
 | `frozen_eval` | 仅 formal 容器可见的测试或 held-out `/mnt/snapshot` | 宿主 Test/Held-out replay（不挂载给容器） | `results/test_<idx>/` 或 `heldout_<idx>/` | 不反馈给 Agent |
 
-`frozen_eval` 的开始、逐日进度、失败和指标不写入 Agent 可读 `agent_trace.jsonl`；完整摘要只进入 host manifest、实验 ledger 与宿主结果目录。
+`frozen_eval` 的开始、逐日进度、失败和指标不写入 Agent 可读 `agent_trace.jsonl`；完整摘要只进入 host manifest、实验 ledger 与宿主结果目录。交互 worker 可把阶段名、阶段开始时间和节流后的 `day_index/total_days` 写入宿主控制面的 `status.json`，供控制台判断仍在运行；该投影剔除日期、订单、NL 活动和结果，且不挂载给 Sandbox。
 
 
 ### 3.2 Broker 设计、账户模型与强制约束
@@ -902,6 +902,7 @@ substep 的声明预算 `B` 同时定义三件事：
 - 开始时记录 `backtest_start`。
 - 回放期间按交易日边界节流记录 `backtest_progress`，包含进度、已用时和累计订单数；控制台保存最新进度，在首条进度前也用 `backtest_start` 本地计时显示“初始化/首日处理中”。
 - 完整 Valid 进入/离开 `ctx.nl()` 时记录不含文本内容的 `backtest_activity`，并标明 cache checking/hit/miss/bypass；控制台显示 NL 调用序号和当前等待时间，长研究日不再表现为无状态卡死。
+- 冻结测试与 held-out 复用同一节流回调，但只把日序号/总日数投影到宿主 `status.json`；不写 Agent Trace，不增加数据扫描，也不按 tick 写状态。
 - Agent 观察中的每次回测成功或失败都附带 `backtests_used`、`backtests_limit`、`backtests_remaining`；零订单会与静态发现的吞宽泛异常、盲竞价分支读取 `ctx.price()` 合并成非阻断诊断。
 - 结束或中止保证有一条终止 `backtest` 事件；外部中止记录 `status="aborted"`。
 - Runner 另记完整工具墙钟的 `budget_exclusion`，使控制台显示的活跃会话预算与真实回补一致；Step/ask_user 等待同样回补，并单列 `researcher_wait_seconds`，不进入实时或账本 `run_wall_seconds`。

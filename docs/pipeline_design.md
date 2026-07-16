@@ -571,7 +571,7 @@ experiments/<experiment_id>/
 |---|---|---|
 | `params.json` | 创建方 | 实验参数和交互式专有设置；每次启动据此确定性重建运行配置 |
 | `control.json` | 控制方 | 模式、暂停或停止请求、会话批准、研究者输入、重跑、回滚、提前收官和资源分配 |
-| `status.json` | worker（manager 仅在拉起瞬间写一次 `launching` 存根，进程创建前完成，无并发写者） | pid、心跳、当前会话、run_id 与实时 trace 路径、进度、错误；`launching` 桥接进程拉起到 worker 首次写状态的窗口（同时阻止该窗口内的重复拉起/删除），超时未接管降级为 `interrupted` |
+| `status.json` | worker（manager 仅在拉起瞬间写一次 `launching` 存根，进程创建前完成，无并发写者） | pid、心跳、当前会话、run_id 与实时 trace 路径、Agent 结束后的 Environment 阶段/粗粒度回放进度、错误；`launching` 桥接进程拉起到 worker 首次写状态的窗口（同时阻止该窗口内的重复拉起/删除），超时未接管降级为 `interrupted` |
 | `schedule.json` | 仅 worker | 启动时写出的会话计划（元学习/Fold/held-out） |
 | `analysis/` | worker / Web 后端 | Fold 完成后的 LLM 策略分析（markdown + provenance sidecar） |
 
@@ -580,6 +580,7 @@ experiments/<experiment_id>/
 - 三档运行模式：`auto` 连续执行；`manual` 每个会话启动前需批准；`step` 在 `manual` 基础上，每次正式验证回测后再挂起等待批准并可注入 Step 级指令（逐 Fold 可用 `set_step_gate` 显式覆盖开/关，清空恢复模式默认；等待时间回补 Fold 推理预算，且不计入实时/完成 Fold 有效耗时）。
 - `status.json` 的 `run_id`、trace 路径和 deadline 始终绑定同一个、且不早于 `session_started_at` 的 run；运行态和两种研究者等待态都会发现新 run。Web 在 state、session 或 run 变化时强制重取详情并重建 SSE。倒计时指 Agent 活跃会话预算，回测与研究者等待独立计时并回补。
 - 实时 Trace 节点重挂后在“自动滚动”开启时回到底部；长回测在首个按日进度前也持续显示已用墙钟，避免把初始化/首日计算误判为停止。
+- Agent `session_end` 后，控制台沿用同一状态轮询展示验收/冻结、冻结测试、结果落盘和 Fold 分析阶段及阶段墙钟；冻结测试与 held-out 只展示节流后的 `day_index/total_days`，不展示隐藏日期、订单、NL 活动、指标或结果。该宿主状态不进入 Agent Trace、Prompt、Sandbox 或预算核算，也不新增服务或轮询通道。
 - 暂停和停止在会话边界生效，不中断正在运行的 Fold。
 - 强制终止只用于中途停止进程；被中断的 Fold 需要整体重跑，并可能留下待人工处理的未记账运行目录。
 

@@ -344,7 +344,9 @@ class InteractiveExperimentRunner:
                         system_prompt_override=control.prompt_overrides.get(key, ""),
                         user_question_hook=self._user_question_hook(key),
                         agent_ready_hook=agent_ready_hook,
+                        environment_progress_hook=self._environment_progress_hook,
                     )
+                    self._clear_environment_progress()
                 completed += 1
                 self.status.set(completed_sessions=completed)
             for fold in folds:
@@ -412,6 +414,7 @@ class InteractiveExperimentRunner:
                         sandbox_gpu_count=control.gpu_counts.get(key),
                         step_gate_hook=self._step_gate_hook(key),
                         user_question_hook=self._user_question_hook(key),
+                        environment_progress_hook=self._environment_progress_hook,
                     )
                     parent = outcome.frozen
                     if needs_rerun:
@@ -419,6 +422,7 @@ class InteractiveExperimentRunner:
                         # they are replayed below (registry shows latest-per-label).
                         heldout_done = set()
                     self._run_post_fold_hook(epoch_id, fold.fold_id, outcome)
+                    self._clear_environment_progress()
                 completed += 1
                 self.status.set(completed_sessions=completed)
         # A dynamic skip may leave Meta-started data work unused. Do not let it
@@ -438,10 +442,16 @@ class InteractiveExperimentRunner:
                 epoch_id=epoch_id, fold_id=None, run_id=None, trace_path=None,
                 session_started_at=utc_now_iso(), fold_deadline_at=None,
             )
+            self._environment_progress_hook("heldout", None)
             summaries = self.pipeline.run_heldout(
-                parent, trading_days, epoch_id=epoch_id, skip_labels=frozenset(heldout_done)
+                parent,
+                trading_days,
+                epoch_id=epoch_id,
+                skip_labels=frozenset(heldout_done),
+                environment_progress_hook=self._environment_progress_hook,
             )
             heldout_runs = len(summaries)
+            self._clear_environment_progress()
         completed += 1
         self.status.set(completed_sessions=completed, state="completed", phase=None, session_key=None)
         return {"final_strategy_artifact": parent.artifact_id, "heldout_runs": heldout_runs}
@@ -685,12 +695,22 @@ class InteractiveExperimentRunner:
     def _run_post_fold_hook(self, epoch_id: str, fold_id: str, outcome) -> None:
         if self.post_fold_hook is None:
             return
+        self._environment_progress_hook("analysis", None)
         record = self._latest_records("fold").get((epoch_id, fold_id))
         try:
             self.post_fold_hook(record or {}, outcome)
             self.status.set(analysis_error=None)
         except Exception as exc:  # noqa: BLE001 - analysis is advisory, never fatal
             self.status.set(analysis_error=f"{type(exc).__name__}: {exc}")
+
+    def _environment_progress_hook(
+        self, stage: str, progress: dict[str, object] | None = None
+    ) -> None:
+        """Publish host-only Environment progress without touching Agent state."""
+        self.status.set(environment_stage=stage, environment_progress=progress)
+
+    def _clear_environment_progress(self) -> None:
+        self.status.set(environment_stage=None)
 
 
 # ---------------------------------------------------------------------------

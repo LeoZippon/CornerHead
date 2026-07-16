@@ -647,7 +647,20 @@ class PipelineEndToEndTest(unittest.TestCase):
                 config, FakeSnapshotProvider(), lambda ctx, fold, manifest: ScriptedFoldAgent(ctx), proxy=ScriptedLLM([])
             )
             fold = build_fold_schedule("2022Q1", "2022Q1", TRADING_DAYS)[0]
-            outcome = pipeline.run_fold(fold, epoch_id="epoch_001", parent=None)
+            environment_progress: list[tuple[str, dict[str, object] | None]] = []
+            outcome = pipeline.run_fold(
+                fold,
+                epoch_id="epoch_001",
+                parent=None,
+                environment_progress_hook=(
+                    lambda stage, progress: environment_progress.append((stage, progress))
+                ),
+            )
+
+            stages = [stage for stage, _ in environment_progress]
+            self.assertEqual(stages[0], "acceptance")
+            self.assertIn("frozen_test", stages)
+            self.assertEqual(stages[-1], "persistence")
 
             run_dir = config.experiment_dir / "artifacts" / outcome.run_id
             data_summary = json.loads((run_dir / "data_summary.json").read_text(encoding="utf-8"))

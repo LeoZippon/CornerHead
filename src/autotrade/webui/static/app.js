@@ -12,6 +12,15 @@ const STATE_LABELS = {
   created: "未启动", legacy: "历史实验", unreadable: "不可解析", unknown: "未知",
 };
 const KIND_LABELS = { fold: "Fold", meta_learning: "元学习", heldout: "Held-out" };
+const ENVIRONMENT_STAGE_LABELS = {
+  acceptance: "验收与冻结校验",
+  frozen_test: "冻结测试回放",
+  persistence: "结果与审计产物落盘",
+  analysis: "Fold 策略分析",
+  meta_finalize: "元学习结果校验",
+  environment_update: "Sandbox 环境更新",
+  heldout: "Held-out 回放",
+};
 // Dead-worker states the backend can relaunch from a ledger resume; mirrors
 // manager.py _TERMINAL_RESUMABLE_STATES. Keep in sync or the resume button
 // silently disappears for a resumable experiment (e.g. "terminated").
@@ -1853,6 +1862,11 @@ function liveTracePanel(detail, session) {
   let activeBacktestStartedMs = null;
   let backtestProgress = null;
   let agentSessionEnded = false;
+  let agentSessionEndedMs = null;
+  let environmentStage = status.environment_stage || null;
+  let environmentStageStartedMs = status.environment_stage_started_at
+    ? Date.parse(status.environment_stage_started_at) : null;
+  let environmentProgress = status.environment_progress || null;
   let statsSignature = "";
   const tick = () => {
     if (!sawEvent) {
@@ -1869,9 +1883,25 @@ function liveTracePanel(detail, session) {
     } else if (sessionState === "waiting_user_reply") {
       countdown.style.display = "";
       countdown.textContent = "等待研究者答复（Agent 会话计时暂停）";
+    } else if (environmentStage && sessionState === "running_session") {
+      countdown.style.display = "";
+      const progress = environmentProgress || {};
+      const done = Number(progress.day_index) || 0;
+      const total = Number(progress.total_days) || 0;
+      const pct = Number(progress.percent);
+      const replayText = total
+        ? ` ${done}/${total} 日（${Number.isFinite(pct) ? pct.toFixed(1) : "0.0"}%）`
+        : "";
+      const stageStarted = environmentStageStartedMs || agentSessionEndedMs || Date.now();
+      const elapsed = fmtDuration(Math.max(0, (Date.now() - stageStarted) / 1000));
+      const prefix = environmentStage === "heldout" ? "Environment" : "Agent 推理已结束；Environment";
+      const label = ENVIRONMENT_STAGE_LABELS[environmentStage] || environmentStage;
+      countdown.textContent = `${prefix}：${label}${replayText} · 本阶段 ${elapsed} · 不消耗 Agent 预算`;
     } else if (agentSessionEnded && sessionState === "running_session") {
       countdown.style.display = "";
-      countdown.textContent = "Agent 推理已结束；Environment 正在验收、评估或落盘（不消耗 Agent 预算）";
+      const elapsed = agentSessionEndedMs
+        ? ` · 已 ${fmtDuration(Math.max(0, (Date.now() - agentSessionEndedMs) / 1000))}` : "";
+      countdown.textContent = `Agent 推理已结束；Environment 正在验收、评估或落盘${elapsed} · 不消耗 Agent 预算`;
     } else if (deadlineMs && sessionState === "running_session") {
       countdown.style.display = "";
       if (inBacktest) {
@@ -1905,6 +1935,9 @@ function liveTracePanel(detail, session) {
       activeBacktestStartedMs = stats.active_backtest_started_at ? Date.parse(stats.active_backtest_started_at) : null;
       backtestProgress = stats.backtest_progress || null;
       agentSessionEnded = Number((stats.counts || {}).session_end || 0) > 0;
+      if (agentSessionEnded && !agentSessionEndedMs && stats.last_event_ts) {
+        agentSessionEndedMs = Date.parse(stats.last_event_ts);
+      }
       const signature = JSON.stringify([stats.counts, stats.backtest_wall_seconds,
         stats.llm_prompt_tokens, stats.llm_completion_tokens, stats.llm_total_tokens,
         stats.in_backtest, stats.backtest_progress]);
@@ -1923,6 +1956,10 @@ function liveTracePanel(detail, session) {
         deadlineMs = raw.fold_deadline_at ? Date.parse(raw.fold_deadline_at) : null;
         if (raw.session_started_at) startedMs = Date.parse(raw.session_started_at);
         traceKnown = Boolean(raw.trace_path && raw.fold_deadline_at);
+        environmentStage = raw.environment_stage || null;
+        environmentStageStartedMs = raw.environment_stage_started_at
+          ? Date.parse(raw.environment_stage_started_at) : null;
+        environmentProgress = raw.environment_progress || null;
       }
     } catch { /* transient */ }
   };
@@ -1942,6 +1979,10 @@ function liveTracePanel(detail, session) {
       sessionState = freshDetail.state;
       deadlineMs = rawStatus.fold_deadline_at ? Date.parse(rawStatus.fold_deadline_at) : null;
       traceKnown = Boolean(rawStatus.trace_path && rawStatus.fold_deadline_at);
+      environmentStage = rawStatus.environment_stage || null;
+      environmentStageStartedMs = rawStatus.environment_stage_started_at
+        ? Date.parse(rawStatus.environment_stage_started_at) : null;
+      environmentProgress = rawStatus.environment_progress || null;
     },
   };
   (async () => {

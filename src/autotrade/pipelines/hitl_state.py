@@ -403,6 +403,9 @@ class StatusReporter:
             "researcher_wait_seconds": 0.0,
             "wait_started_at": None,
             "fold_deadline_at": None,
+            "environment_stage": None,
+            "environment_stage_started_at": None,
+            "environment_progress": None,
             "completed_sessions": 0,
             "total_sessions": None,
             "error": None,
@@ -428,6 +431,9 @@ class StatusReporter:
             if new_session:
                 fields.setdefault("researcher_wait_seconds", 0.0)
                 fields.setdefault("wait_started_at", None)
+                fields.setdefault("environment_stage", None)
+                fields.setdefault("environment_stage_started_at", None)
+                fields.setdefault("environment_progress", None)
             elif previous not in _RESEARCHER_WAIT_STATES and state in _RESEARCHER_WAIT_STATES:
                 fields.setdefault("wait_started_at", utc_now_iso())
             elif previous in _RESEARCHER_WAIT_STATES and state not in _RESEARCHER_WAIT_STATES:
@@ -444,6 +450,11 @@ class StatusReporter:
                     round(float(self._data.get("researcher_wait_seconds") or 0.0) + waited, 3),
                 )
                 fields.setdefault("wait_started_at", None)
+            if "environment_stage" in fields:
+                stage = fields.get("environment_stage")
+                if stage != self._data.get("environment_stage"):
+                    fields.setdefault("environment_stage_started_at", utc_now_iso() if stage else None)
+                    fields.setdefault("environment_progress", None)
             self._data.update(fields)
             state = self._data.get("state")
             changed = "state" in fields and state != previous
