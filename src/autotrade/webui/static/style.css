@@ -252,15 +252,19 @@ table.kv td:first-child { color: var(--muted); white-space: nowrap; width: 10.5r
 table.data th, table.data td { padding: 0.42rem 0.6rem; border-bottom: 1px solid var(--row-border); text-align: right; font-variant-numeric: tabular-nums; }
 table.data th { color: var(--muted); font-weight: 600; }
 table.data th:first-child, table.data td:first-child { text-align: left; }
-/* full-cycle stats strip: one compact row per series under the equity chart,
-   spanning the card width like the chart above it */
-table.cycle-stats { width: 100%; font-size: 0.8rem; margin-top: 0.45rem; color: var(--muted); }
-table.cycle-stats th, table.cycle-stats td { padding: 0.22rem 0.55rem; border-bottom: 1px solid var(--row-border); }
-table.cycle-stats th:first-child, table.cycle-stats td:first-child { width: 1%; padding-right: 1.1rem; }
+/* full-cycle stats strip: one row per series under the equity chart, spanning
+   the card width. Muted headers, hairline separators, tabular figures; series
+   identity comes from a chart-colored swatch beside the label. */
+table.cycle-stats { width: 100%; font-size: 0.875rem; margin-top: 0.6rem; }
+table.cycle-stats th, table.cycle-stats td { padding: 0.34rem 0.65rem; border-bottom: 1px solid var(--row-border); }
+table.cycle-stats th:first-child, table.cycle-stats td:first-child { width: 1%; padding-right: 1.2rem; white-space: nowrap; }
 table.cycle-stats th { font-weight: 500; white-space: nowrap; }
-table.cycle-stats td { color: var(--text); white-space: nowrap; }
+table.cycle-stats td { white-space: nowrap; }
 table.cycle-stats tr:last-child td, table.cycle-stats tr:last-child th { border-bottom: none; }
-table.cycle-stats th[title] { cursor: help; text-decoration: underline dotted var(--row-border); text-underline-offset: 3px; }
+table.cycle-stats th[title] { cursor: help; text-decoration: underline dotted var(--border); text-underline-offset: 3px; }
+table.cycle-stats .legend-swatch { width: 0.6rem; height: 0.6rem; border-radius: 2px; margin-right: 0.5rem; vertical-align: -1px; }
+/* epoch switcher row above the equity chart */
+.epoch-switch { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0 0 0.65rem; }
 .num.pos { color: var(--gain); }
 .num.neg { color: var(--loss); }
 

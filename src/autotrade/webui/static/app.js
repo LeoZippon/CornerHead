@@ -375,13 +375,18 @@ function cycleStatsTable(payload) {
   const stats = payload.stats || {};
   const keys = ["valid", "test", "heldout"].filter((k) => stats[k]);
   if (!keys.length) return null;
+  const INK = themeInk();
+  const seriesColor = { valid: INK.validColor, test: INK.testColor, heldout: INK.heldoutColor };
   const columns = CYCLE_STAT_COLUMNS.filter(([field]) =>
     keys.some((k) => stats[k][field] !== null && stats[k][field] !== undefined));
   const head = el("tr", {},
     el("th", {}, `全周期（${epochShort(payload.epoch_id)}）`),
     ...columns.map(([, label, full]) => el("th", { title: full }, label)));
+  // Identity rides a colored swatch matching the chart line, never colored text.
   const rows = keys.map((k) => el("tr", {},
-    el("td", {}, CYCLE_SERIES_SHORT[k] || k),
+    el("td", {},
+      el("span", { class: "legend-swatch", style: `background:${seriesColor[k]}` }),
+      CYCLE_SERIES_SHORT[k] || k),
     ...columns.map(([field, , , fmt, signed]) => {
       const v = stats[k][field];
       return el("td", { class: signed ? signCls(v) : "" }, v === null || v === undefined ? "—" : fmt(v));
@@ -398,7 +403,7 @@ function equityHost(expId, fp, opts) {
     .then((payload) => {
       host.innerHTML = "";
       if (!opts?.mini && (payload.epochs || []).length > 1) {
-        host.append(el("div", { class: "actions" }, ...payload.epochs.map((e) => el("button", {
+        host.append(el("div", { class: "epoch-switch" }, ...payload.epochs.map((e) => el("button", {
           class: `btn small${e === payload.epoch_id ? " primary" : ""}`,
           onclick: () => {
             host.innerHTML = "";
