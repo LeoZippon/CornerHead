@@ -1676,3 +1676,9 @@
 - NL 正确性：通用正文检索先按 PIT 可见 text_id 半连接再 LIMIT，未来行不再挤占结果配额（新增回归测试对旧实现失败）；enum 解析对含 CJK 的值要求独立成词，"不减持"不再解析为"减持"（ASCII 值边界维持原样，`结论PASS` 仍可解析）。
 - 控制台：/trace* 端点 run_id 单段校验堵住路径穿越（与 style 端点同款守卫 + 回归测试）；累计验证/测试收益只在单 Epoch 内复利（`metrics` 取最新 Epoch 并以 `epoch_id` 标注，`metrics_by_epoch` 逐 Epoch 并列），`/equity` 支持按 Epoch 切换并附服务端全周期统计（累计/年化收益、年化波动、Sharpe、最大回撤、日胜率、β、超额、跟踪误差、信息比率）；SIGCHLD 忽略导致 subprocess returncode 恒 0 已加显式注释；QMT README 三闸门失败语义（confirm 不匹配/时段外为 error 而非 dry_run）与幂等日界口径对齐代码；冻结评估进度负载只含运行时键的回归断言加固。
 - Validation：全量 tests/unit 860 passed + 41 subtests（114.63s）；`node --check`、`git diff --check` clean。运行中的实验 worker 未受影响（提示词/环境变更在其下次会话启动后生效）。
+
+2026-07-16 案例研究修复批次·对抗复审收口
+
+- Fable 对抗复审在自批次中定位 3 个实质缺陷并已修复：(F1) `ensure_trade_cal_coverage` 在数据集循环前可能写湖，空响应下仍退出 75 恢复世代——现返回是否写入并计入无变更判定；(F2) 收缩覆盖被拒（`blocked_shrink_overwrite`，数据完整性告警）曾并入"零行未就绪"分类——现单独计数并无条件 fail-fast，不受 `--zero-rows-not-ready` 影响；(F3) `trade_count`/`benchmark` 因公开 manifest 白名单缺项从未真正落入开发历史——已补白名单。
+- 低危加固：`order_lifecycle` 计数键 `submitted`→`total`（消除与订单状态同名的潜在重复计数）；退出路径诊断措辞不再断言"全部来自区间末强平"（维保强平另计）；`unknown_position_row_key` advisory 提示自建行可忽略；收尾提示注明 Step 树"若启用"。已确认收口项：run 内恢复免重跑的表述经 `covering_complete_validation` 双 hash + `step_rollback` 默认还原 models/ 验证成立；测试揭示封存、PIT 带宽预算均未回归。
+- Validation：全量 tests/unit 862 passed + 41 subtests（112.57s）；`git diff --check` clean。

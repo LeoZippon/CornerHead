@@ -274,7 +274,9 @@ def _strategy_advisories(root: Path) -> list[dict[str, object]]:
                             f"position rows have no '{key_node.value}' key (exact keys: "
                             "account, ts_code, side, quantity, sellable_quantity, entry_price, "
                             "entry_date, entry_cost, last_price, market_value); .get() with a "
-                            "default silently returns the default and turns exit logic into dead code"
+                            "default silently returns the default and turns exit logic into dead "
+                            "code. Ignore if this variable holds your own derived/enriched rows "
+                            "rather than raw ctx.positions rows"
                         ),
                     }
                 )

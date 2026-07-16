@@ -122,7 +122,7 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
     # host's mandatory region-end liquidation, which bypasses the order book.
     # Splitting submissions/fills by direction makes that visible in one probe.
     order_lifecycle = {
-        group: {"submitted": 0, "filled": 0, "rejected": 0, "cancelled": 0}
+        group: {"total": 0, "filled": 0, "rejected": 0, "cancelled": 0}
         for group in ("entry", "exit", "cash")
     }
     for order in orders:
@@ -133,9 +133,11 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
             else "cash" if action in _CASH_ACTIONS else "entry"
         )
         bucket = order_lifecycle[group]
-        bucket["submitted"] += 1
+        bucket["total"] += 1
         status = str(order.get("status") or "")
-        if status in bucket:
+        # "total" is deliberately not a status name: a still-"submitted" order
+        # must not double-count if stats ever run mid-book.
+        if status in ("filled", "rejected", "cancelled"):
             bucket[status] += 1
     strategy_exit_fill_count = order_lifecycle["exit"]["filled"]
     # Exit-date liquidation evidence: the mandatory exit leaves unsellable

@@ -1147,9 +1147,10 @@ def _diagnostic_warnings(
     exit_fills = int(stats.get("strategy_exit_fill_count") or 0)
     if host_liq > 0 and exit_fills == 0 and int(stats.get("trade_count") or 0) > 0:
         warnings.append(
-            f"退出路径检查：本次回放的 {int(stats.get('trade_count') or 0)} 笔平仓全部来自宿主区间末强制清仓"
-            f"（host_exit_liquidation_count={host_liq}，策略自身退出成交=0）。策略从未主动卖出任何持仓——"
-            "请核对持仓行键名（quantity/sellable_quantity）与卖出腿是否真正提交；若确为有意的持有到期设计，请在结论中说明理由。"
+            f"退出路径检查：本次回放 trade_count={int(stats.get('trade_count') or 0)}，策略自身退出成交=0，"
+            f"宿主区间末强制清仓 host_exit_liquidation_count={host_liq}（维保强平如有另计）。"
+            "策略从未主动卖出任何持仓——请核对持仓行键名（quantity/sellable_quantity）与卖出腿是否真正提交；"
+            "若确为有意的持有到期设计，请在结论中说明理由。"
         )
     if stats.get("liquidation_complete") is False:
         leftovers = stats.get("unliquidated_positions") or []

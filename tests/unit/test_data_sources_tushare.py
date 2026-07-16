@@ -2233,6 +2233,71 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn("not_ready_no_mutation", output.getvalue())
         self.assertFalse((self.raw_dir / "margin" / "trade_date=20200102.parquet").exists())
 
+    def test_event_flow_not_ready_vetoed_by_trade_cal_refresh(self):
+        # A trade_cal coverage refresh IS a lake write: exit 75 asserts "no
+        # mutation" and must not fire even when every dataset was empty.
+        self._write_trade_cal("20200102")
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            datasets=["margin"],
+            force=True,
+            page_limit=None,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+            zero_rows_not_ready=True,
+        )
+
+        with patch.object(download, "load_token", return_value="token"), \
+                patch.object(download, "TuShareClient", return_value=EmptyTradeDateClient()), \
+                patch.object(download, "ensure_trade_cal_coverage", return_value=True):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(download.download_event_flow(args), 0)
+
+        self.assertIn("deferred to the retry job", output.getvalue())
+        self.assertNotIn("not_ready_no_mutation", output.getvalue())
+
+    def test_event_flow_blocked_shrink_raises_even_when_not_ready_enabled(self):
+        # A non-empty response refused by the destructive-shrink guard is a
+        # data-integrity alarm, never a "source not published yet" condition.
+        self._write_trade_cal("20200102")
+        path = self.raw_dir / "margin" / "trade_date=20200102.parquet"
+        original = pd.DataFrame(
+            [{"trade_date": "20200102", "exchange_id": f"EX{i:02d}", "rzye": 1.0} for i in range(30)]
+        )
+        common.write_parquet(path, original, api_name="margin", params={}, fields=list(original.columns), source_hash="old")
+
+        class ShrunkMarginClient(EmptyTradeDateClient):
+            def query(self, api_name, params=None, fields="", retries=5):
+                if api_name == "margin":
+                    columns = fields.split(",")
+                    row = ["20200102" if col == "trade_date" else "EX00" if col == "exchange_id" else 1.0 for col in columns]
+                    return common.ApiResult(columns, [row], common.stable_hash({"api_name": api_name}))
+                return super().query(api_name, params, fields, retries)
+
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            datasets=["margin"],
+            force=True,
+            page_limit=None,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+            zero_rows_not_ready=True,
+            revision_ledger=str(self.root / "shrink_revision_events.jsonl"),
+        )
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=ShrunkMarginClient()):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                with self.assertRaisesRegex(RuntimeError, "overwrite was blocked"):
+                    download.download_event_flow(args)
+
+        self.assertTrue(pd.read_parquet(path).equals(original))
+
     def test_event_flow_zero_rows_not_ready_partial_write_commits(self):
         self._write_trade_cal("20200102")
 

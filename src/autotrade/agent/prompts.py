@@ -231,7 +231,7 @@ PROTOCOL_INSTRUCTION = "\n\n".join(
 
 WRAP_UP_PROMPT = """\
 本 Fold 时间即将用完。请立即收尾：
-1. 先重新读取 /mnt/artifacts/steps/tree.txt 和本 run 的回测记录，确认最佳已完整验证版本——不要凭记忆分类哪个结果是完整验证；
+1. 先重新读取 /mnt/artifacts/steps/tree.txt（若本次运行启用 Step 树）和本 run 的回测记录，确认最佳已完整验证版本——不要凭记忆分类哪个结果是完整验证；
 2. 把最佳已验证版本写入 output/，需要继承的模型参数写入 models/；若最佳 Step 不是当前产物，先用 step_rollback 恢复它；
 3. 运行 modification_check；
 4. `finish_fold` 只接受**本 run 内**已有成功完整验证回测的产物 hash：本 run 验证过的 Step 恢复后无需重跑；跨 run/跨 Fold 恢复的 Step 在本 run 没有验证记录，仍需先跑一次完整验证并为其墙钟时间留余量——时间不够时优先恢复本 run 内最近已完整验证的 Step；

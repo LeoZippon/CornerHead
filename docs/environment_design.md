@@ -925,7 +925,7 @@ substep 的声明预算 `B` 同时定义三件事：
 |---|---|
 | 开始与耗时 | `started_at`、`replay_wall_seconds` |
 | 回放规模 | 策略日 `replayed_trade_days`、退出日 `replayed_exit_days`、`total_ticks`、`intraday_ticks`、`offsession_ticks`、`decision_calls`、`strategy_action_count` |
-| 订单生命周期 | `order_lifecycle`（entry/exit/cash 三向 submitted/filled/rejected/cancelled 计数，Probe 同样返回）、`strategy_exit_fill_count`（策略自身发起的退出成交数，宿主区间末强平不计入）、`host_exit_liquidation_count`；当 `trade_count>0` 且策略退出成交为 0 时，回测附带警示级"退出路径检查"诊断（warn-only，不改变验收资格） |
+| 订单生命周期 | `order_lifecycle`（entry/exit/cash 三向 total/filled/rejected/cancelled 计数，Probe 同样返回）、`strategy_exit_fill_count`（策略自身发起的退出成交数，宿主区间末强平不计入）、`host_exit_liquidation_count`；当 `trade_count>0` 且策略退出成交为 0 时，回测附带警示级"退出路径检查"诊断（warn-only，不改变验收资格） |
 | 清算摘要 | `liquidation_complete`、`unliquidated_position_count`；`liquidation_complete=false` 时附带 warn-only 诊断 |
 | 状态写入 | `state_staged_writes` / `state_unmerged_writes` |
 | substep 统计 | `substep_runtime`，含 count、total_real_wall_s、max_real_wall_s |

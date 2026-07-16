@@ -169,13 +169,15 @@ def sse_trade_cal_covers(raw_dir: Path, start_date: str, end_date: str) -> bool:
     dates = dates[dates != ""]
     return bool(not dates.empty and dates.min() <= start_date and dates.max() >= end_date)
 
-def ensure_trade_cal_coverage(client: TuShareClient, raw_dir: Path, start_date: str, end_date: str) -> None:
+def ensure_trade_cal_coverage(client: TuShareClient, raw_dir: Path, start_date: str, end_date: str) -> bool:
+    """Extend local SSE trade_cal when it lags; True means the lake was written."""
     if parse_yyyymmdd(start_date) > parse_yyyymmdd(end_date):
-        return
+        return False
     if sse_trade_cal_covers(raw_dir, start_date, end_date):
-        return
+        return False
     print(f"refreshing trade_cal coverage for {start_date}-{end_date}")
     download_trade_cal(client, raw_dir, start_date, end_date, force=False)
+    return True
 
 def download_bak_basic(
     client: TuShareClient,
@@ -1076,8 +1078,9 @@ def download_event_flow(args: argparse.Namespace) -> int:
     allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     trade_dates: list[str] = []
     trade_end_date = args.end_date
+    trade_cal_refreshed = False
     if any(EVENT_FLOW_SPECS[name].strategy == "trade_date" for name in datasets):
-        ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date)
+        trade_cal_refreshed = ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date)
         latest_trade_calendar_date = latest_sse_calendar_date(raw_dir)
         trade_end_date = min(args.end_date, latest_trade_calendar_date)
         if trade_end_date < args.end_date:
@@ -1089,13 +1092,16 @@ def download_event_flow(args: argparse.Namespace) -> int:
         if not trade_dates:
             print(f"event/flow trade-date datasets skipped: no SSE open dates for {args.start_date}-{trade_end_date}")
     required_zero_skipped: list[str] = []
-    total_written = 0
+    blocked_overwrites: list[str] = []
+    # trade_cal coverage refresh IS a lake write: it must veto the exit-75
+    # no-mutation contract even when every dataset response was empty.
+    total_written = 1 if trade_cal_refreshed else 0
     for dataset in datasets:
         spec = EVENT_FLOW_SPECS[dataset]
         start_date = max(args.start_date, spec.start_date)
         if spec.strategy == "trade_date":
             dates = [d for d in trade_dates if start_date <= d <= trade_end_date]
-            written, zero_skipped = download_event_trade_date_dataset(
+            written, zero_skipped, blocked_skipped = download_event_trade_date_dataset(
                 client,
                 raw_dir,
                 spec,
@@ -1108,12 +1114,21 @@ def download_event_flow(args: argparse.Namespace) -> int:
             total_written += written
             if zero_skipped and not spec.zero_rows_ok:
                 required_zero_skipped.append(f"{spec.api_name}:{zero_skipped}")
+            if blocked_skipped and not spec.zero_rows_ok:
+                blocked_overwrites.append(f"{spec.api_name}:{blocked_skipped}")
         elif spec.strategy == "range_month":
             windows = month_windows(args.start_date, args.end_date)
             dataset_windows = [(s, e, m) for s, e, m in windows if e >= start_date]
             total_written += download_event_range_month(client, raw_dir, spec, dataset_windows, args.force, event_page_limit(spec, args.page_limit), revision_ledger, allow_empty_revision_overwrite)
         else:
             raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {dataset}")
+    if blocked_overwrites:
+        # Non-empty responses whose overwrite the revision guard refused
+        # (destructive shrink): a data-integrity alarm, never "not ready".
+        raise RuntimeError(
+            "required event/flow partitions had non-empty responses whose overwrite was blocked; "
+            f"review the revision ledger before retrying: {blocked_overwrites}"
+        )
     if required_zero_skipped:
         if getattr(args, "zero_rows_not_ready", False):
             # Pre-open attempts hit the source before T-1 margin publication;
@@ -1154,11 +1169,12 @@ def download_event_trade_date_dataset(
     page_limit: int | None,
     revision_ledger: Path | str | None = None,
     allow_empty_revision_overwrite: bool = False,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     page_limit = page_limit or spec.page_limit
     written = 0
     skipped = 0
     zero_skipped = 0
+    blocked_skipped = 0
     total_rows = 0
     total_pages = 0
     for index, trade_date in enumerate(trade_dates, start=1):
@@ -1195,12 +1211,14 @@ def download_event_trade_date_dataset(
             total_rows += len(df)
             written += 1
         else:
-            zero_skipped += 1
+            # Non-empty response refused by the revision guard (destructive
+            # shrink): distinct from an empty/not-published response.
+            blocked_skipped += 1
         total_pages += pages
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-    print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} zero_skipped={zero_skipped} rows_written={total_rows} pages={total_pages}")
-    return written, zero_skipped
+    print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} zero_skipped={zero_skipped} blocked_skipped={blocked_skipped} rows_written={total_rows} pages={total_pages}")
+    return written, zero_skipped, blocked_skipped
 
 def download_event_range_month(
     client: TuShareClient,
