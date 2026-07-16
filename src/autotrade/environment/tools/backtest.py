@@ -101,7 +101,13 @@ MODES = ("valid", "frozen_eval")
 
 def agent_visible_backtest_result(summary: dict[str, object]) -> dict[str, object]:
     """Remove host-only filesystem coordinates from Agent-visible channels."""
-    return agent_visible_tool_result(summary)
+    result = agent_visible_tool_result(summary)
+    # The tool schema arrives natively with every function-calling turn; echoing
+    # ~2KB of it per success observation only burns context window. Error paths
+    # attach tool_spec deliberately (it corrects malformed calls) and the host
+    # manifest keeps the full summary for audit.
+    result.pop("tool_spec", None)
+    return result
 
 
 class BacktestTool:

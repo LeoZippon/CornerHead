@@ -483,11 +483,17 @@ function equityChart(payload, { width = 680, height = 240, ddH = 90, mini = fals
   // Date labels: below the drawdown subplot when present (shared axis at the
   // figure bottom), otherwise a clear step below the main axis line.
   const tickY = showDD ? height + gap + ddH + 10 : padT + mainH + (mini ? 17 : 20);
+  const lastTick = dates.length - 1;
   dates.forEach((d, i) => {
-    if (i % tickEvery !== 0 && i !== dates.length - 1) return;
+    // Render modulo ticks plus the final date; drop a modulo tick that would
+    // crowd the end-anchored final label.
+    if (i !== lastTick && (i % tickEvery !== 0 || lastTick - i < tickEvery / 2)) return;
     const withYear = prevYear !== d.slice(0, 4);
     prevYear = d.slice(0, 4);
-    svg.push(`<text x="${xOf(i)}" y="${tickY}" text-anchor="middle" font-size="${mini ? 10 : 11}" fill="${INK.muted}">${fmtDateTick(d, withYear)}</text>`);
+    // The final tick sits at the plot's right edge (padR is slim): end-anchor
+    // it so the label stays inside the SVG instead of overflowing the border.
+    const anchor = i === lastTick ? "end" : "middle";
+    svg.push(`<text x="${xOf(i)}" y="${tickY}" text-anchor="${anchor}" font-size="${mini ? 10 : 11}" fill="${INK.muted}">${fmtDateTick(d, withYear)}</text>`);
   });
   // drawdown subplot
   let ddY = null;
