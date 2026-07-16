@@ -342,7 +342,9 @@ TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_sched
 
 回测的逐 tick 数据视图按真实落库任务的约定完成时间放行数据；纯审计任务不落新数据，也不能成为可见性节点。完整门禁语义见 §3.3。
 
-runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw/PIT，下载子进程继承同一 flock（经 `TUSHARE_UPDATE_LOCK_HELD` 标记避免重复加锁），避免 runner 异常退出后残留写进程失锁。手工 `tushare_download.py` 对生产 `data/raw` 的写命令同样非阻塞获取该独占锁，锁忙时直接失败而不是与 cron 或发布竞态。任一 raw 或 PIT 落库任务在第一条写命令前把 `data/raw/.raw_generation.json` 标为 `updating`，全部成功后发布新的 `committed` 湖世代；失败为 `dirty`，只能由同 job、区间和命令精确重跑恢复。纯审计任务不改变世代。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
+runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw/PIT，下载子进程继承同一 flock（经 `TUSHARE_UPDATE_LOCK_HELD` 标记避免重复加锁），避免 runner 异常退出后残留写进程失锁。手工 `tushare_download.py` 对生产 `data/raw` 的写命令同样非阻塞获取该独占锁，锁忙时直接失败而不是与 cron 或发布竞态。任一 raw 或 PIT 落库任务在第一条写命令前把 `data/raw/.raw_generation.json` 标为 `updating`，全部成功后发布新的 `committed` 湖世代；失败为 `dirty`，只能由同 job、区间和命令精确重跑恢复。纯审计任务不改变世代。
+
+盘前两融任务（`cn_preopen_margin_secs_backfill_0903`/`_retry_0913`、`cn_preopen_margin_backfill_0905`/`_retry_0915`）带 `--zero-rows-not-ready`：源端尚未发布（必需数据集返回空响应）是常规事件而非失败——若本次调用没有任何写入，进程以退出码 75 结束（与竞价捕获相同的"无变更可重试"契约），cron 恢复先前 `committed` 世代并记 `not_ready`，由独立命名的重试任务或夜间全量同步补齐；若部分数据集已写入，则正常提交世代并把空分区留给重试任务。历史回补不带该旗标，必需数据集的空响应仍 fail-fast。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
 
 实验不直接跟随 live 目录变化：首次启动在锁空闲且 generation committed 时按需发布 `data/research_releases/<generation_id>/`；更新锁忙或 generation 为 `updating` / `dirty` 时立即复用最近完整版本。raw Parquet、配对 sidecar 和 PIT Parquet 使用硬链接，其余小文件与质量状态使用副本，实时目录 `rt_min_live` 不进入版本。发布后所有 Fold、交易日历和恢复运行都读取同一个实验 pin，因此数据更新无需中断实验。部署后须先在 committed 世代完成一次 bootstrap；此前若更新锁正忙会立即失败而非等待。
 

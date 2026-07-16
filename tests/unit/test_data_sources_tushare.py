@@ -2211,6 +2211,60 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "required event/flow partitions returned zero rows"):
                 download.download_event_flow(args)
 
+    def test_event_flow_zero_rows_not_ready_exits_75_without_mutation(self):
+        self._write_trade_cal("20200102")
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            datasets=["margin"],
+            force=True,
+            page_limit=None,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+            zero_rows_not_ready=True,
+        )
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=EmptyTradeDateClient()):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(download.download_event_flow(args), common.NO_MUTATION_RETRY_EXIT_CODE)
+
+        self.assertIn("not_ready_no_mutation", output.getvalue())
+        self.assertFalse((self.raw_dir / "margin" / "trade_date=20200102.parquet").exists())
+
+    def test_event_flow_zero_rows_not_ready_partial_write_commits(self):
+        self._write_trade_cal("20200102")
+
+        class MarginOnlyClient(EmptyTradeDateClient):
+            def query(self, api_name, params=None, fields="", retries=5):
+                if api_name == "margin":
+                    columns = fields.split(",")
+                    row = ["20200102" if col == "trade_date" else "SSE" if col == "exchange_id" else 1.0 for col in columns]
+                    return common.ApiResult(columns, [row], common.stable_hash({"api_name": api_name}))
+                return super().query(api_name, params, fields, retries)
+
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            datasets=["margin", "margin_detail"],
+            force=True,
+            page_limit=None,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+            zero_rows_not_ready=True,
+        )
+
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=MarginOnlyClient()):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(download.download_event_flow(args), 0)
+
+        self.assertIn("deferred to the retry job", output.getvalue())
+        self.assertTrue((self.raw_dir / "margin" / "trade_date=20200102.parquet").exists())
+        self.assertFalse((self.raw_dir / "margin_detail" / "trade_date=20200102.parquet").exists())
+
     def test_revision_sentinel_marks_source_failures_as_error(self):
         self._write_trade_cal("20200102")
         path = self.raw_dir / "daily" / "trade_date=20200102.parquet"

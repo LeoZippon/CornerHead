@@ -162,7 +162,8 @@
         "--datasets",
         "margin",
         "margin_detail",
-        "--force"
+        "--force",
+        "--zero-rows-not-ready"
       ],
       "lock_wait_seconds": 180,
       "skip_if_already_ok": true
@@ -175,7 +176,8 @@
       "extra_args": [
         "--datasets",
         "margin_secs",
-        "--force"
+        "--force",
+        "--zero-rows-not-ready"
       ],
       "lock_wait_seconds": 180,
       "skip_if_already_ok": true
@@ -189,7 +191,8 @@
         "--datasets",
         "margin",
         "margin_detail",
-        "--force"
+        "--force",
+        "--zero-rows-not-ready"
       ],
       "lock_wait_seconds": 180,
       "skip_if_already_ok": true
@@ -202,7 +205,8 @@
       "extra_args": [
         "--datasets",
         "margin_secs",
-        "--force"
+        "--force",
+        "--zero-rows-not-ready"
       ],
       "lock_wait_seconds": 180,
       "skip_if_already_ok": true

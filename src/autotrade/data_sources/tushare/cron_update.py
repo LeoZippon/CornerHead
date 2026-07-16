@@ -784,9 +784,12 @@ def main() -> int:
             if transaction is not None:
                 mark_raw_generation_dirty(raw_dir, transaction, error=f"runner_exception: {exc}")
             raise
+        # Exit 75 asserts "no lake mutation happened"; only operations whose
+        # download paths enforce that contract may restore the prior generation
+        # (auction polling, and event_flow runs with --zero-rows-not-ready).
         no_mutation_retry = bool(
             returncode == NO_MUTATION_RETRY_EXIT_CODE
-            and ctx.job.get("operation") == "auction_capture"
+            and ctx.job.get("operation") in {"auction_capture", "download_event_flow"}
             and len(commands) == 1
         )
         if transaction is not None:

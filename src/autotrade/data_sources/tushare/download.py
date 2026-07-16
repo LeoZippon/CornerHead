@@ -1089,12 +1089,13 @@ def download_event_flow(args: argparse.Namespace) -> int:
         if not trade_dates:
             print(f"event/flow trade-date datasets skipped: no SSE open dates for {args.start_date}-{trade_end_date}")
     required_zero_skipped: list[str] = []
+    total_written = 0
     for dataset in datasets:
         spec = EVENT_FLOW_SPECS[dataset]
         start_date = max(args.start_date, spec.start_date)
         if spec.strategy == "trade_date":
             dates = [d for d in trade_dates if start_date <= d <= trade_end_date]
-            zero_skipped = download_event_trade_date_dataset(
+            written, zero_skipped = download_event_trade_date_dataset(
                 client,
                 raw_dir,
                 spec,
@@ -1104,16 +1105,30 @@ def download_event_flow(args: argparse.Namespace) -> int:
                 revision_ledger,
                 allow_empty_revision_overwrite,
             )
+            total_written += written
             if zero_skipped and not spec.zero_rows_ok:
                 required_zero_skipped.append(f"{spec.api_name}:{zero_skipped}")
         elif spec.strategy == "range_month":
             windows = month_windows(args.start_date, args.end_date)
             dataset_windows = [(s, e, m) for s, e, m in windows if e >= start_date]
-            download_event_range_month(client, raw_dir, spec, dataset_windows, args.force, event_page_limit(spec, args.page_limit), revision_ledger, allow_empty_revision_overwrite)
+            total_written += download_event_range_month(client, raw_dir, spec, dataset_windows, args.force, event_page_limit(spec, args.page_limit), revision_ledger, allow_empty_revision_overwrite)
         else:
             raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {dataset}")
     if required_zero_skipped:
-        raise RuntimeError(f"required event/flow partitions returned zero rows and were not written: {required_zero_skipped}")
+        if getattr(args, "zero_rows_not_ready", False):
+            # Pre-open attempts hit the source before T-1 margin publication;
+            # an empty response is a regular not-ready event, not a failure.
+            # Exit 75 keeps the auction-capture no-mutation contract: cron
+            # restores the committed generation and the retry job re-attempts.
+            if total_written == 0:
+                print(json.dumps({
+                    "status": "not_ready_no_mutation",
+                    "zero_row_partitions": required_zero_skipped,
+                }, ensure_ascii=False, sort_keys=True))
+                return NO_MUTATION_RETRY_EXIT_CODE
+            print(f"required event/flow partitions still empty; deferred to the retry job: {required_zero_skipped}")
+        else:
+            raise RuntimeError(f"required event/flow partitions returned zero rows and were not written: {required_zero_skipped}")
     print(f"event/flow download finished under {raw_dir}")
     return 0
 
@@ -1139,7 +1154,7 @@ def download_event_trade_date_dataset(
     page_limit: int | None,
     revision_ledger: Path | str | None = None,
     allow_empty_revision_overwrite: bool = False,
-) -> int:
+) -> tuple[int, int]:
     page_limit = page_limit or spec.page_limit
     written = 0
     skipped = 0
@@ -1185,7 +1200,7 @@ def download_event_trade_date_dataset(
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} zero_skipped={zero_skipped} rows_written={total_rows} pages={total_pages}")
-    return zero_skipped
+    return written, zero_skipped
 
 def download_event_range_month(
     client: TuShareClient,
@@ -1196,7 +1211,7 @@ def download_event_range_month(
     page_limit: int,
     revision_ledger: Path | str | None = None,
     allow_empty_revision_overwrite: bool = False,
-) -> None:
+) -> int:
     written = 0
     skipped = 0
     total_rows = 0
@@ -1232,6 +1247,7 @@ def download_event_range_month(
         if index % 24 == 0:
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
+    return written
 
 def download_board_trading(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
@@ -3163,6 +3179,13 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--fundamental-refresh-event-days", type=int, default=90)
     parser.add_argument("--fundamental-dividend-probe-days", type=int, default=0)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--zero-rows-not-ready",
+        action="store_true",
+        help="event_flow tier only: treat required zero-row responses as source-not-ready instead of failing. "
+        "Exits 75 (no-mutation retry contract) when nothing was written; with partial writes it commits and "
+        "defers the empty partitions to the retry job. For pre-open cron attempts that race source publication.",
+    )
     parser.add_argument("--max-codes", type=int)
     parser.add_argument("--codes", nargs="+", help="Optional explicit ts_code list for intraday minute window tests or targeted refreshes.")
     parser.add_argument("--page-limit", type=int, help="Optional requested page size; text evidence datasets are clamped to official per-call limits.")
