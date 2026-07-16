@@ -1635,3 +1635,8 @@
 - Backtest `nl_cost` 细分 provider/检索/过滤墙钟、token、证据、缓存和零证据跳过；Probe 在继续 withholding 内容的同时给出完整窗口逻辑调用投影与 provider 结构上界，不把退化墙钟伪装成真实 NL 延迟。
 - Q4 `valid_006` 离线只读复算：基线 1693.590s（NL 763.858s，105 provider/112 retrieval）；五类 30 日事件过滤命中 4/30、跳过 26/30，冷过滤 51.523s，结构上限 8 provider/4 retrieval。结合策略 exact-tail 基准 7.119→1.608s/日（4.43x，因子最大误差 2.3e-16），预计完整 Valid 约 682s；不做付费 provider 重跑。
 - 不增加服务、数据库或跨回测缓存；正文 sidecar/持久缓存仅在正式复跑未达 `NL<=350s、总墙钟<=900s` 时再评估。最终 `tests/unit` 848 passed + 41 subtests，定向 158 passed；Prompt 重导出、`git diff --check` clean。全量测试前后可用内存 368/367GiB，GPU 未用于本任务。
+
+2026-07-16 lzp-test18 优化版本前端恢复
+
+- 源码提交 `d2dba11` 后，从前端恢复 `epoch_002/fold_2025Q1`；首个 worker 在建立 session 前发现冻结父策略目录遗留的 Python bytecode 缓存并退出。仅删除 Q3/Q4 父策略下两个生成的 `__pycache__`，未修改策略源码、结果账本或冻结产物。
+- 第二次前端恢复成功：PID `2652768`、run `run_6efb54947eb3`、代码版本 `d2dba11`；最终检查为 `running_session`、`worker_alive=true`、心跳正常、`error=null`。优化 directive 已要求五类 30 日事件门控、enum 决策、无证据数值回退及 exact-tail 因子计算。
