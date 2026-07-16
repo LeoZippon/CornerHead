@@ -186,6 +186,14 @@ main { max-width: 1380px; margin: 1.6rem auto; padding: 0 clamp(14px, 3vw, 34px)
 
 /* detail layout */
 .detail { display: grid; grid-template-columns: 22.5rem minmax(0, 1fr); gap: 1.1rem; align-items: start; }
+/* Right column of the detail grid. Cards keep one rhythm via the flex gap;
+   per-card .section-gap top margins (meant for stacked flow layouts) are
+   neutralized so the first visible card tops out flush with the left panel,
+   and empty placeholder spans (ask-user/step-gate when inactive) are removed
+   from the flow so they cannot double the gap or become the "first" child. */
+.session-detail { display: flex; flex-direction: column; gap: 1rem; }
+.session-detail > .section-gap { margin-top: 0; }
+.session-detail > span:empty { display: none; }
 .panel {
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
   box-shadow: var(--shadow); padding: 0.95rem 1.1rem;

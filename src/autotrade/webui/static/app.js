@@ -1417,7 +1417,9 @@ function sessionListPanel(detail, selectedKey) {
 
 function sessionDetailPanel(detail, selectedKey) {
   const session = (detail.sessions || []).find((entry) => entry.key === selectedKey);
-  const panel = el("div", {});
+  // Flex column with a uniform card gap: whichever cards are present, the
+  // first one's top aligns with the session list in the left grid column.
+  const panel = el("div", { class: "session-detail" });
   if (!session) {
     panel.append(el("div", { class: "panel" }, el("div", { class: "empty" }, "请选择左侧的会话")));
     return panel;
