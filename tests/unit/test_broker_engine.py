@@ -464,6 +464,27 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual(valid_odd.status, "filled")
         self.assertEqual(broker.position_quantity("688001.SH", account="stock"), 201)
 
+    def test_submission_reject_keeps_the_callers_reason(self):
+        # A resolved close() whose sellable amount fails the lot gate must keep
+        # the strategy's own reason string on the reject record — not the
+        # resolved verb name, which the caller's code never contains.
+        broker = self.make_broker()
+        order = broker.reject_submission(
+            ts_code="000001.SZ",
+            action="sell",
+            reason="amount_below_lot_size",
+            amount=0,
+            submitted_at="2022-01-04T09:38:00+08:00",
+            strategy_reason="max_positions",
+        )
+        self.assertEqual(order.reject_reason, "amount_below_lot_size")
+        self.assertEqual(order.reason, "max_positions")
+        # Without a caller reason the record falls back to the verb, as before.
+        fallback = broker.reject_submission(
+            ts_code="000001.SZ", action="sell", reason="amount_below_lot_size", amount=0
+        )
+        self.assertEqual(fallback.reason, "sell")
+
     def test_bail_balance_gates_fin_buy_and_short(self):
         broker = self.make_broker(shortable=("000001.SZ", "000002.SZ"))
         # Financing far beyond the credit bail balance (~500,000) is rejected.

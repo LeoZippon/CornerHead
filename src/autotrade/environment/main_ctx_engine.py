@@ -1538,6 +1538,7 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
             amount=action.get("amount"),
             submitted_at=str(action.get("submitted_at") or ""),
             order_id=str(action.get("order_id") or ""),
+            strategy_reason=str(action.get("reason") or ""),
         )
         return True
     if name == "close":
@@ -1560,6 +1561,7 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
             amount=action.get("amount"),
             submitted_at=str(action.get("submitted_at") or ""),
             order_id=str(action.get("order_id") or ""),
+            strategy_reason=str(action.get("reason") or ""),
         )
         return True
     broker.passorder(
@@ -1633,6 +1635,7 @@ def _execute_afterhours_action(broker: SimBroker, action: dict[str, object], *, 
         "amount": action.get("amount"),
         "submitted_at": str(action.get("submitted_at") or ""),
         "order_id": str(action.get("order_id") or "") or None,
+        "strategy_reason": str(action.get("reason") or ""),
     }
     limit = _float_or_none(action.get("limit")) if name != "close" else None
     if limit is not None and limit <= 0:

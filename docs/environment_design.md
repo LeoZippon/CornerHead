@@ -895,7 +895,7 @@ substep 的声明预算 `B` 同时定义三件事：
 - 这些上限只用于终止挂死，不是策略接受门槛。
 - 策略已在验证回放中满足更紧上限，最终评估的放宽只用于降低机器负载波动造成的非确定性失败。
 
-回放没有独立的固定总时长上限；总上界随交易日数和每日硬上限自然伸缩。`replay_window=N` 明确表示 N 个执行策略的交易日，并额外读取 1 个退出日；summary 分别报告 `replayed_trade_days` 和 `replayed_exit_days`。Probe 的策略反馈仅给未提交 action 原因和粗粒度策略拒单类别，不给市场/资格拒单、收益、成交或归因；完整 Valid 的结果目录保留完整审计。Probe 若返回 `withheld_probe`，同时给出 `runtime_representative=false` 和醒目警告，其快速退化路径墙钟不得外推真实 NL；`nl_cost` 仍按观察到的逻辑调用密度报告完整窗口调用投影，并以每次调用的最大结构轮次给出 provider 调用上界。它不是 provider 延迟预测。仿真时间预算不能替代墙钟兜底，因为单个 tick 内的死循环不推进仿真时间。
+回放没有独立的固定总时长上限；总上界随交易日数和每日硬上限自然伸缩。`replay_window=N` 明确表示 N 个执行策略的交易日，并额外读取 1 个退出日；summary 分别报告 `replayed_trade_days` 和 `replayed_exit_days`。Probe 的策略反馈仅给未提交 action 原因、粗粒度策略拒单类别和 `order_lifecycle` 方向计数，不给市场/资格拒单、收益、成交或归因；Probe 不落任何结果文件，summary 中 `result_path=null`，完整 Valid 的结果目录保留完整审计。Probe 运行期错误的原始文本仍只留宿主审计面（`failed_probe` 证据目录），但公开错误会附带异常**类名**与策略自身文件的 `文件:行号` 定位（与拒单/生命周期计数同一低带宽等级；错误消息本身可能内嵌回放窗口数值，故不返回）。Probe 若返回 `withheld_probe`，同时给出 `runtime_representative=false` 和醒目警告，其快速退化路径墙钟不得外推真实 NL；`nl_cost` 仍按观察到的逻辑调用密度报告完整窗口调用投影，并以每次调用的最大结构轮次给出 provider 调用上界。它不是 provider 延迟预测。仿真时间预算不能替代墙钟兜底，因为单个 tick 内的死循环不推进仿真时间。
 
 回测可观测性：
 
@@ -925,12 +925,13 @@ substep 的声明预算 `B` 同时定义三件事：
 |---|---|
 | 开始与耗时 | `started_at`、`replay_wall_seconds` |
 | 回放规模 | 策略日 `replayed_trade_days`、退出日 `replayed_exit_days`、`total_ticks`、`intraday_ticks`、`offsession_ticks`、`decision_calls`、`strategy_action_count` |
-| 清算摘要 | `liquidation_complete`、`unliquidated_position_count` |
+| 订单生命周期 | `order_lifecycle`（entry/exit/cash 三向 submitted/filled/rejected/cancelled 计数，Probe 同样返回）、`strategy_exit_fill_count`（策略自身发起的退出成交数，宿主区间末强平不计入）、`host_exit_liquidation_count`；当 `trade_count>0` 且策略退出成交为 0 时，回测附带警示级"退出路径检查"诊断（warn-only，不改变验收资格） |
+| 清算摘要 | `liquidation_complete`、`unliquidated_position_count`；`liquidation_complete=false` 时附带 warn-only 诊断 |
 | 状态写入 | `state_staged_writes` / `state_unmerged_writes` |
 | substep 统计 | `substep_runtime`，含 count、total_real_wall_s、max_real_wall_s |
 | 阶段耗时 | `phase_seconds`，含 Agent `strategy_compute`、`strategy_ipc`、`nl_service`、Timeview、state、Broker 与 `host_replay_overhead`；各项合计覆盖回放墙钟 |
 | NL 调用 | `nl_calls`、实际执行 `nl_executed_calls`、`nl_cache_hits`、`nl_cache_misses` 与 `nl_outcome_counts`；`nl_cost` 细分无证据跳过、provider/检索/事件过滤次数与墙钟、token、证据量及 Probe 结构投影 |
-| 软诊断 | formal Agent 与宿主回放进程峰值 RSS、分钟读取/归一化/预取等待耗时、修改检查的宽 Parquet 读取/吞异常/盲竞价取价 advisory、零订单诊断；均不改变验收和冻结资格 |
+| 软诊断 | formal Agent 与宿主回放进程峰值 RSS、分钟读取/归一化/预取等待耗时、修改检查的宽 Parquet 读取/吞异常/盲竞价取价/未知持仓行键（`unknown_position_row_key`，`.positions` 行上使用 `qty`/`volume` 等不存在键）advisory、零订单与退出路径诊断；均不改变验收和冻结资格 |
 
 **逐窗口归因（Barra-lite，全部回放模式）**
 

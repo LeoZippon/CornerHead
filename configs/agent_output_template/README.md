@@ -157,7 +157,7 @@ therefore do not appear in `pending()` before submission.
 | `ctx.cur_date` | Current trade date derived from `cur_datetime`, `YYYYMMDD`; use for daily logic, cache keys, and state filenames |
 | `ctx.cur_time` | Current intraday minute derived from `cur_datetime`, `HH:MM`; use for scheduled actions such as 09:25 and 14:57 |
 | `ctx.account` | Read-only dual-account snapshot: `stock`, `credit`, `total_assets`, `risk_limits` |
-| `ctx.positions` | Read-only per-symbol position rows; each row includes `account` to distinguish stock and credit holdings |
+| `ctx.positions` | Read-only per-symbol position rows. Exact row keys: `account`, `ts_code`, `side`, `quantity`, `sellable_quantity`, `entry_price`, `entry_date`, `entry_cost`, `last_price`, `market_value`. There is no `qty`/`volume`/`cost_basis`/`avg_price` key — `row.get("volume", 0)` silently returns 0 and kills every exit path. Detect holdings via `quantity`; size sells by `sellable_quantity` (T+1 sellable, net of pending sells), never by `quantity` |
 | `ctx.price(ts_code)` | Current tick-visible price for one symbol; future prices are never visible, and 09:15 plus ordinary off-session ticks usually return `None` |
 | `ctx.bar(ts_code)` | Current tick-visible bar for one symbol; returns `None` when no bar is visible |
 | `ctx.bars` | Current tick-visible market bar list; contains only this tick, never future bars |

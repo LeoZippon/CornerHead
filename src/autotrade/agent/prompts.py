@@ -89,7 +89,7 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - 订单类型：市价单按进入 bar 的 open + 滑点成交；该分钟该票无成交时继续挂单、在当日下一个有成交的 bar 成交（当日收盘仍未成交自动撤销）。限价单（FIX_PRICE）挂单，若 open 已优于限价则按 open 成交，否则须 bar **严格击穿**限价（买单 low 低于限价 / 卖单 high 高于限价）才按限价成交——仅触及视为排队未成交；对只有日线数据的股票（按日线合成 bar 撮合）限价单不做区间击穿、只按合成 bar 参考价成交。限价单默认当日有效，直到成交、策略主动撤销或日终清扫。需要“N 分钟后撤单”时，用 `pending()` 的 `age_minutes` 加 `cancel()` 自行管理。
 - 同一 bar 内 Broker 按 FIFO 撮合：已成交/拒绝的前序单立即释放占用，只有更早仍挂单的订单继续冻结。
 - Broker 约束：策略只表达意图。每次实验同时运行普通+信用两个独立账户（现金、持仓、T+1 各自独立、互不担保），Broker 强制各账户现金与保证金可用余额、T+1 可卖余额、手数、涨跌停、停牌、融资融券标的与授信额度、融券限价规则、维保比例强平（只清信用账户）、账户间划转提取线和回放末日强制清仓。最大持仓数、单票权重和集中度默认由你控制。
-- `ctx.account`、`ctx.positions`、`ctx.broker.stock/credit` 是 tick 入口快照；同 tick 新 action 只进入 action 队列（已提交的轻量单也进入 `pending()`），不回写账户视图。批量下单从入口快照读取一次总预算，在本地逐笔递减并为费用/滑点留缓冲，不要在循环中反复读取静态 `available_cash` 当作剩余预算。
+- `ctx.account`、`ctx.positions`、`ctx.broker.stock/credit` 是 tick 入口快照；同 tick 新 action 只进入 action 队列（已提交的轻量单也进入 `pending()`），不回写账户视图。批量下单从入口快照读取一次总预算，在本地逐笔递减并为费用/滑点留缓冲，不要在循环中反复读取静态 `available_cash` 当作剩余预算。`ctx.positions` 每行的**确切键**：`account`/`ts_code`/`side`/`quantity`/`sellable_quantity`/`entry_price`/`entry_date`/`entry_cost`/`last_price`/`market_value`——不存在 `qty`/`volume`/`cost_basis`/`avg_price` 等键，`row.get("volume", 0)` 会静默返回 0 并让全部退出路径变成死代码。判断持有看 `quantity`，卖出数量按 `sellable_quantity`（T+1 可卖、已扣在途卖单），成本用 `entry_price`/`entry_cost`。
 - 子步骤预算：所有会访问 `ctx.state_dir`、调用 `ctx.broker`、调用 `ctx.nl()`、读写策略状态或做实质筛选/推理的策略步骤，都必须放进 `ctx.substep(name, budget_minutes=B)`；`B>0`、tick 内 name 唯一、低报会 fail-fast。`ctx.broker` 原语和 `ctx.state_dir` 在子步骤外会被拒绝；宿主还会用 `main(ctx)` 总耗时减去 substep 耗时，拒绝实质未包裹计算。`B<1` 的轻量块在回测中视为本决策分钟内完成（仍统计/限时并带 `ready_at` 元数据）；`B>=1` 的 broker action 只有在生成 tick、`ready_at` 和释放 tick 都处于交易所接受申报窗口内才提交，否则记录未提交/未成交，不会自动排到下一交易时段。未 ready 的跨分钟 broker 动作还不是委托，不会出现在 `pending()`；`pending()` 只展示已提交但未成交/可撤的在途单。
 - 回测成本：`backtest` 独立计时，不计入 Fold 推理 deadline，但单 Fold 次数受 `max_backtests_per_fold` 限制；单 tick 与单交易日真实墙钟硬上限由 run manifest 给出。小 `replay_window` 中 NL 内容会被 withheld；`runtime_representative=false` 时墙钟不能外推完整 Valid，但 `nl_cost` 会按调用密度给出完整窗口逻辑调用投影和 provider 调用结构上界。NL 真实延迟仍须用完整 Valid 验证并留足余量。
 - 回测归因：验证回测的返回附带 `benchmark` 诊断块（同窗沪深300收益、超额、β、市值风格倾斜；完整版含 PB/换手倾斜与申万行业净权重，在结果目录 `style_analysis.json`）。用它解读收益来源——绝对收益要对照基准看，超额为负的"正收益"不是证据，β 高说明在赌方向而非选股。这些是**描述性归因，不是优化目标**：不要为追求特定 β 或风格倾斜数值而改策略。
@@ -231,10 +231,11 @@ PROTOCOL_INSTRUCTION = "\n\n".join(
 
 WRAP_UP_PROMPT = """\
 本 Fold 时间即将用完。请立即收尾：
-1. 把当前最好的已验证版本写入 output/，需要继承的模型参数写入 models/；若最佳 Step 不是当前产物，先恢复它；
-2. 运行 modification_check；
-3. `finish_fold` 会拒绝当前 hash 没有成功完整验证回测的产物：恢复的已验证 Step 无需重跑；若当前产物尚无完整验证且时间不够整段回放，恢复最近已完整验证的 Step；
-4. 然后立刻调用 finish_fold。不要再开新的探索。\
+1. 先重新读取 /mnt/artifacts/steps/tree.txt 和本 run 的回测记录，确认最佳已完整验证版本——不要凭记忆分类哪个结果是完整验证；
+2. 把最佳已验证版本写入 output/，需要继承的模型参数写入 models/；若最佳 Step 不是当前产物，先用 step_rollback 恢复它；
+3. 运行 modification_check；
+4. `finish_fold` 只接受**本 run 内**已有成功完整验证回测的产物 hash：本 run 验证过的 Step 恢复后无需重跑；跨 run/跨 Fold 恢复的 Step 在本 run 没有验证记录，仍需先跑一次完整验证并为其墙钟时间留余量——时间不够时优先恢复本 run 内最近已完整验证的 Step；
+5. 然后立刻调用 finish_fold。不要再开新的探索。\
 """
 
 DEFAULT_ANTI_OVERFIT_PROMPT = """\

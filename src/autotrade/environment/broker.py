@@ -789,6 +789,7 @@ class SimBroker:
                 amount=volume,
                 submitted_at=submitted_at,
                 order_id=order_id,
+                strategy_reason=str(reason or ""),
             )
             return order_id
         shares, amount_reject = self.validate_order_amount(action, str(order_code), volume)
@@ -800,6 +801,7 @@ class SimBroker:
                 amount=volume,
                 submitted_at=submitted_at,
                 order_id=order_id,
+                strategy_reason=str(reason or ""),
             )
             return order_id
         if op_type == optype.SLO_SELL and not is_limit:
@@ -1088,8 +1090,13 @@ class SimBroker:
         amount: object = None,
         submitted_at: str = "",
         order_id: str | None = None,
+        strategy_reason: str = "",
     ) -> Order:
-        """Record a submission-time reject before an order reaches the book."""
+        """Record a submission-time reject before an order reaches the book.
+
+        ``reason`` is the reject cause; ``strategy_reason`` keeps the caller's own
+        reason string on the record, same as filled orders — a resolved ``close``
+        must not overwrite it with the resolved verb name."""
         action = str(action).lower().strip()
         pair = _ACTION_TO_ACCOUNT_OP.get(action)
         side = "short" if action in {"short", "cover"} else "long"
@@ -1105,7 +1112,7 @@ class SimBroker:
             trade_date=self.current_date,
             decision_time=str(submitted_at or ""),
             submitted_at=str(submitted_at or ""),
-            reason=action,
+            reason=str(strategy_reason or action),
             account=pair[0] if pair else "",
             op_type=pair[1] if pair else None,
             **({"order_id": str(order_id)} if order_id else {}),

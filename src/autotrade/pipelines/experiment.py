@@ -1512,7 +1512,14 @@ def _compact_fold_history(record: dict[str, object]) -> dict[str, object]:
                         "sharpe",
                         "max_drawdown",
                         "order_count",
+                        "trade_count",
+                        # Exit health + benchmark-relative view: a lineage whose
+                        # every exit is a host liquidation, or whose "gains" trail
+                        # the index, must stay visible to later epochs.
                         "host_exit_liquidation_count",
+                        "strategy_exit_fill_count",
+                        "liquidation_complete",
+                        "benchmark",
                         "error",
                     )
                     if key in summary

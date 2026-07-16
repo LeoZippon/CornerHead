@@ -12,6 +12,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import shutil
 import threading
 import time
@@ -675,7 +676,9 @@ class BacktestTool:
             "complete_validation": complete_validation,
             "replay_window": replay_window,
             "result_name": result_dir.name,
-            "result_path": self.ctx.executor.map_path(result_dir),
+            # Probes write no result artifacts; a real path here sends the agent
+            # to an empty directory at debugging time (audited failure mode).
+            "result_path": None if probe else self.ctx.executor.map_path(result_dir),
             "host_result_path": str(result_dir),
             "decision_time": decision_time,
             "strategy_entry": "main",
@@ -698,6 +701,8 @@ class BacktestTool:
             # Lifecycle signal (also on probes): how many positions the HOST
             # had to liquidate at region end because the strategy never exited.
             "host_exit_liquidation_count": stats["host_exit_liquidation_count"],
+            "order_lifecycle": stats["order_lifecycle"],
+            "strategy_exit_fill_count": int(stats["strategy_exit_fill_count"]),
             "modification_delta_summary": _modification_delta_summary(modification_check),
             "strategy_advisories": strategy_advisories,
             "probe_note": (
@@ -946,8 +951,15 @@ class BacktestTool:
                 retry_hint=getattr(source, "retry_hint", None),
             )
         self._record_probe_failure_detail(detail)
+        identity = _probe_error_identity(detail, source)
+        message = "probe failed inside the isolated replay; raw strategy/runtime error text is host-only."
+        if identity:
+            # Class name + agent-code line only — the same low-bandwidth class of
+            # signal as reject/lifecycle counters; messages stay withheld because
+            # they can embed replay-window values.
+            message += f" 异常定位（仅类名与策略文件行号）：{identity}。"
         return ToolError(
-            "probe failed inside the isolated replay; raw strategy/runtime error text is host-only.",
+            message,
             error_type=getattr(source, "error_type", None) or "probe_runtime_error",
             reason=getattr(source, "reason", None),
             retry_hint=(
@@ -955,6 +967,35 @@ class BacktestTool:
                 or "Reduce the strategy to the smallest failing control flow, then rerun a small probe."
             ),
         )
+
+
+_TRACEBACK_FRAME_RE = re.compile(r'File "([^"]+)", line (\d+)')
+_ERROR_CLASS_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Interrupt))\b")
+_WRAPPER_ERROR_CLASSES = frozenset({"ToolError", "BacktestError", "ArtifactError"})
+
+
+def _probe_error_identity(detail: str, source: BaseException) -> str:
+    """Exception class plus the agent's own strategy file:line, nothing else.
+
+    Enough to aim the next probe (the audited alternative was minutes of blind
+    guessing), while the raw message stays host-side: probe error text can embed
+    replay-window values the agent must not see."""
+    klass = ""
+    location = ""
+    for line in (detail or "").splitlines():
+        match = _ERROR_CLASS_RE.match(line.strip())
+        if match:
+            klass = match.group(1)
+    for filename, lineno in _TRACEBACK_FRAME_RE.findall(detail or ""):
+        if "/output/" in filename and filename.endswith(".py"):
+            location = f"{Path(filename).name}:{lineno}"
+    if not klass:
+        fallback = type(source).__name__
+        if fallback not in _WRAPPER_ERROR_CLASSES and _ERROR_CLASS_RE.match(fallback):
+            klass = fallback
+    if not klass:
+        return location
+    return f"{klass} at {location}" if location else klass
 
 
 def _profile_kwargs(record: dict[str, object]) -> dict[str, object]:
@@ -1101,6 +1142,20 @@ def _diagnostic_warnings(
             f"Backtest created {int(stats.get('order_count') or 0)} orders but completed with zero trades."
             f"{category_note} Inspect order sizing, account/position state, and submission timing before "
             "accepting the result."
+        )
+    host_liq = int(stats.get("host_exit_liquidation_count") or 0)
+    exit_fills = int(stats.get("strategy_exit_fill_count") or 0)
+    if host_liq > 0 and exit_fills == 0 and int(stats.get("trade_count") or 0) > 0:
+        warnings.append(
+            f"退出路径检查：本次回放的 {int(stats.get('trade_count') or 0)} 笔平仓全部来自宿主区间末强制清仓"
+            f"（host_exit_liquidation_count={host_liq}，策略自身退出成交=0）。策略从未主动卖出任何持仓——"
+            "请核对持仓行键名（quantity/sellable_quantity）与卖出腿是否真正提交；若确为有意的持有到期设计，请在结论中说明理由。"
+        )
+    if stats.get("liquidation_complete") is False:
+        leftovers = stats.get("unliquidated_positions") or []
+        warnings.append(
+            f"区间末仍有 {len(leftovers)} 个持仓未能清仓（停牌/跌停/T+1 等）；"
+            "final_equity 已按市值计入，但实盘中这些头寸要继续承担隔夜风险。"
         )
     peak = int(stats.get("agent_peak_rss_bytes") or 0)
     if peak >= _AGENT_MEMORY_ADVISORY_BYTES:

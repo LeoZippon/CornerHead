@@ -18,6 +18,11 @@ from autotrade.environment.broker import SimBroker
 # the same constant so detailed_return and the Barra-lite sidecar agree.
 TRADING_DAYS_PER_YEAR = 244
 
+# Position-reducing verbs; fills here are strategy-initiated exits, as opposed
+# to the host's mandatory region-end liquidation (which bypasses the book).
+_EXIT_ACTIONS = frozenset({"sell", "credit_sell", "sell_repay", "cover"})
+_CASH_ACTIONS = frozenset({"direct_repay", "transfer"})
+
 
 @dataclass
 class ReplayResult:
@@ -112,6 +117,27 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
     status_counts: dict[str, int] = {}
     for order in orders:
         status_counts[str(order["status"])] = status_counts.get(str(order["status"]), 0) + 1
+    # Entry/exit order lifecycle (also on probes): the audited failure mode is a
+    # strategy whose exit leg never fires — every round-trip then comes from the
+    # host's mandatory region-end liquidation, which bypasses the order book.
+    # Splitting submissions/fills by direction makes that visible in one probe.
+    order_lifecycle = {
+        group: {"submitted": 0, "filled": 0, "rejected": 0, "cancelled": 0}
+        for group in ("entry", "exit", "cash")
+    }
+    for order in orders:
+        action = str(order.get("action") or "")
+        group = (
+            "exit"
+            if action in _EXIT_ACTIONS
+            else "cash" if action in _CASH_ACTIONS else "entry"
+        )
+        bucket = order_lifecycle[group]
+        bucket["submitted"] += 1
+        status = str(order.get("status") or "")
+        if status in bucket:
+            bucket[status] += 1
+    strategy_exit_fill_count = order_lifecycle["exit"]["filled"]
     # Exit-date liquidation evidence: the mandatory exit leaves unsellable
     # inventory (suspension, limit lock, T+1, missing price) in the book. Final
     # equity already marks it to market; the leftovers are reported explicitly so
@@ -166,6 +192,8 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "turnover": float(broker.traded_notional / initial) if initial else 0.0,
         "order_count": len(orders),
         "order_status_counts": status_counts,
+        "order_lifecycle": order_lifecycle,
+        "strategy_exit_fill_count": strategy_exit_fill_count,
         "reject_counts": dict(broker.reject_counts),
         "margin_secs_reject_count": margin_secs_reject_count,
         "broker_inventory_reject_count": broker.reject_counts.get("broker_inventory_unavailable", 0),

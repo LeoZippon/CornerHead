@@ -666,6 +666,55 @@ def main(ctx):
             self.assertTrue(any("09:15/09:25 盲竞价" in item for item in warnings))
             self.assertTrue(check["allowed_to_backtest"])
 
+    def test_probe_error_identity_exposes_class_and_agent_line_only(self):
+        from autotrade.environment.tools.backtest import _probe_error_identity
+        from autotrade.environment.tools.base import ToolError
+
+        self.assertEqual(
+            _probe_error_identity("AttributeError: 'int' object has no attribute 'get'", ValueError("x")),
+            "AttributeError",
+        )
+        traceback_detail = (
+            "Traceback (most recent call last):\n"
+            '  File "/mnt/runtime/driver.py", line 10, in run\n'
+            '  File "/mnt/agent/output/candidate.py", line 52, in _held\n'
+            "KeyError: '20250107'\n"
+        )
+        identity = _probe_error_identity(traceback_detail, KeyError("20250107"))
+        self.assertEqual(identity, "KeyError at candidate.py:52")
+        self.assertNotIn("20250107", identity)  # message content stays host-only
+        # Wrapper classes with no parsable detail yield no identity at all.
+        self.assertEqual(_probe_error_identity("main policy runner failed: ", ToolError("x")), "")
+
+    def test_all_host_liquidation_exits_trigger_exit_path_warning(self):
+        from autotrade.environment.tools.backtest import _diagnostic_warnings
+
+        warnings = _diagnostic_warnings(
+            {
+                "order_count": 80,
+                "trade_count": 55,
+                "host_exit_liquidation_count": 55,
+                "strategy_exit_fill_count": 0,
+                "liquidation_complete": False,
+                "unliquidated_positions": [{"ts_code": "000001.SZ"}, {"ts_code": "000002.SZ"}],
+            }
+        )
+
+        self.assertTrue(any("退出路径检查" in item and "host_exit_liquidation_count=55" in item for item in warnings))
+        self.assertTrue(any("2 个持仓未能清仓" in item for item in warnings))
+        # A strategy that actually exits on its own gets no exit-path warning.
+        clean = _diagnostic_warnings(
+            {
+                "order_count": 80,
+                "trade_count": 55,
+                "host_exit_liquidation_count": 3,
+                "strategy_exit_fill_count": 52,
+                "liquidation_complete": True,
+                "unliquidated_positions": [],
+            }
+        )
+        self.assertFalse(any("退出路径检查" in item for item in clean))
+
     def test_memory_diagnostic_is_a_neutral_chinese_performance_note(self):
         from autotrade.environment.tools.backtest import _diagnostic_warnings
 
@@ -695,6 +744,30 @@ def main(ctx):
             self.assertTrue(check["allowed_to_backtest"])
             kinds = {item["kind"] for item in check["advisories"]}
             self.assertEqual(kinds, {"unprojected_parquet_read", "suppressed_broad_exception"})
+
+    def test_modification_check_flags_unknown_position_row_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            (ctx.paths.agent_output / "main.py").write_text(
+                """def main(ctx):
+    rows = ctx.positions
+    held = {p["ts_code"] for p in rows if float(p.get("volume", 0) or 0) > 0}
+    for pos in ctx.positions:
+        qty = int(pos.get("qty", 0) or 0)
+        sellable = int(pos.get("sellable_quantity", 0) or 0)
+        cb = pos["entry_price"]
+    for order in ctx.broker.pending():
+        age = order.get("age_minutes")
+""",
+                encoding="utf-8",
+            )
+
+            check = ModificationCheckTool(ctx).run()
+
+            self.assertTrue(check["allowed_to_backtest"])
+            flagged = [item for item in check["advisories"] if item["kind"] == "unknown_position_row_key"]
+            self.assertEqual({item["message"].split("'")[1] for item in flagged}, {"volume", "qty"})
+            self.assertEqual(len(flagged), 2)
 
     def test_strategy_stdout_does_not_corrupt_rpc(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1032,6 +1105,13 @@ def main(ctx):
             self.assertEqual(environment_progress[0][1]["day_index"], 0)
             self.assertNotIn("trade_date", environment_progress[0][1])
             self.assertNotIn("orders_so_far", environment_progress[0][1])
+            # Regression pin: host status/progress carries ONLY runtime keys —
+            # never returns, dates, orders or NL activity of the sealed replay.
+            for _, progress in environment_progress:
+                if progress is not None:
+                    self.assertEqual(
+                        set(progress), {"day_index", "total_days", "percent", "elapsed_seconds"}
+                    )
             host_manifest = json.loads(ctx.manifest.host_path.read_text(encoding="utf-8"))
             frozen = [item for item in host_manifest["backtest_summaries"] if item["mode"] == "frozen_eval"]
             self.assertEqual(len(frozen), 1)

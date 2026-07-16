@@ -107,6 +107,7 @@ def main(ctx) -> None:
 - 重复处理大 PIT 表时，投影所需列并按标的先截取能精确覆盖最长因子窗口的尾部，再计算横截面和合并；以全历史实现核对因子、排名、候选和订单等价（浮点容差不高于 `1e-12`），不用采样或近似值换速度。
 - 跨 tick 暂存写 `ctx.state_dir`（单个文件不超过64 MiB）；它在 substep 内首次访问时才复制可见状态，纯 Broker block 不创建副本，访问后的延迟可见性不变。Broker 是现金、持仓、负债和在途订单的真相源，`state_dir` 只保存策略自己的目标、计划和轻量状态。
 - `ctx.account`、`ctx.positions`、`ctx.broker.stock/credit` 是 tick 入口快照；同 tick action 只进入 action 队列（已提交的轻量单也进入 `pending()`），不会回写这些视图。批量 sizing 应读取一次总预算、本地逐笔递减并预留费用/滑点；Broker 不接受 `weight`，也不会替策略压量或取整。
+- `ctx.positions` 行 schema 是显式合同（系统提示词与模板 README 均逐键列出）：`account`/`ts_code`/`side`/`quantity`/`sellable_quantity`/`entry_price`/`entry_date`/`entry_cost`/`last_price`/`market_value`。不存在 `qty`/`volume`/`cost_basis`/`avg_price`；`row.get()` 带默认值会静默吞掉键名错误并杀死退出路径（lap-test19/lzp-test18 案例研究的核心缺陷）。modification_check 对 `.positions` 行上的未知常量键返回 `unknown_position_row_key` advisory（warn-only）。
 - Broker 在同一 Bar 内按 FIFO 撮合；已成交/拒绝订单立即释放占用，只有更早仍挂单的订单继续冻结。
 - 正式策略解释器固定 hash seed 以保证未排序容器跨进程可复现；涉及选股优先级时仍应显式 `sorted(...)`，不要把集合迭代顺序当信号。
 - 当复杂度确有需要时，把横截面候选生成与逐标的持仓、下单和撤单管理拆成小模块；简单策略不为拆分而拆分。

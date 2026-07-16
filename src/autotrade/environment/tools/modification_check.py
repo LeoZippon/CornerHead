@@ -136,6 +136,49 @@ class ModificationCheckTool:
         return summary
 
 
+_POSITION_ROW_KEYS = frozenset(
+    {
+        "account",
+        "ts_code",
+        "side",
+        "quantity",
+        "sellable_quantity",
+        "entry_price",
+        "entry_date",
+        "entry_cost",
+        "last_price",
+        "market_value",
+    }
+)
+
+
+def _positions_rooted(node: ast.AST) -> bool:
+    return any(isinstance(child, ast.Attribute) and child.attr == "positions" for child in ast.walk(node))
+
+
+def _position_row_names(tree: ast.AST) -> set[str]:
+    """Loop/comprehension targets iterating position rows: ``for p in ctx.positions``
+    directly, or via a simple alias assigned from a ``.positions``-rooted expression."""
+    aliases = {
+        target.id
+        for stmt in ast.walk(tree)
+        if isinstance(stmt, ast.Assign) and _positions_rooted(stmt.value)
+        for target in stmt.targets
+        if isinstance(target, ast.Name)
+    }
+
+    def _iterates_positions(iterable: ast.AST) -> bool:
+        return _positions_rooted(iterable) or (isinstance(iterable, ast.Name) and iterable.id in aliases)
+
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and _iterates_positions(node.iter):
+            names.add(node.target.id)
+        elif isinstance(node, ast.comprehension) and isinstance(node.target, ast.Name) and _iterates_positions(node.iter):
+            names.add(node.target.id)
+    return names
+
+
 def _strategy_advisories(root: Path) -> list[dict[str, object]]:
     advisories: list[dict[str, object]] = []
     for path in sorted(Path(root).rglob("*.py")):
@@ -144,6 +187,7 @@ def _strategy_advisories(root: Path) -> list[dict[str, object]]:
         except (OSError, UnicodeError, SyntaxError):
             continue
         relative = path.relative_to(root).as_posix()
+        position_rows = _position_row_names(tree)
         price_functions = {
             node.name
             for node in ast.walk(tree)
@@ -196,6 +240,44 @@ def _strategy_advisories(root: Path) -> list[dict[str, object]]:
                             ),
                         }
                     )
+            # Every position row exit-path bug audited so far was a hallucinated
+            # key (qty/volume/cost_basis) silently defaulted by dict.get; flag
+            # unknown keys on rows that iterate a `.positions` surface.
+            key_node = None
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in position_rows
+                and node.args
+            ):
+                key_node = node.args[0]
+            elif (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in position_rows
+            ):
+                key_node = node.slice
+            if (
+                key_node is not None
+                and isinstance(key_node, ast.Constant)
+                and isinstance(key_node.value, str)
+                and key_node.value not in _POSITION_ROW_KEYS
+            ):
+                advisories.append(
+                    {
+                        "kind": "unknown_position_row_key",
+                        "path": relative,
+                        "line": node.lineno,
+                        "message": (
+                            f"position rows have no '{key_node.value}' key (exact keys: "
+                            "account, ts_code, side, quantity, sellable_quantity, entry_price, "
+                            "entry_date, entry_cost, last_price, market_value); .get() with a "
+                            "default silently returns the default and turns exit logic into dead code"
+                        ),
+                    }
+                )
     return advisories
 
 
