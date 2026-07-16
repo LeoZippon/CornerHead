@@ -14,9 +14,11 @@ series (the chart shows a hint), they never raise.
 from __future__ import annotations
 
 import json
+import math
 from functools import lru_cache
 from pathlib import Path
 
+from autotrade.environment.replay_stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.style_analysis import BENCHMARK_LABEL, daily_returns_from_curve
 
 
@@ -146,6 +148,72 @@ def _benchmark_entry(bench: dict[str, float], dates: list[str]) -> dict[str, obj
     return _curve_entry("benchmark", BENCHMARK_LABEL, series)
 
 
+def _cycle_stats(series: list[tuple[str, float]], bench: dict[str, float]) -> dict[str, object] | None:
+    """Full-cycle statistics over one chained daily-return series.
+
+    Computed server-side like the curves. Return/vol/Sharpe/drawdown/win-rate
+    use every strategy day; the benchmark-relative block (β, excess, tracking
+    error, information ratio) uses date-matched days only, and both legs of the
+    excess are compounded over that same matched set so they stay comparable.
+    Alpha is deliberately not annualized (same rationale as the compact block).
+    """
+    if not series:
+        return None
+    values = [value for _, value in series]
+    n = len(values)
+    equity = 1.0
+    peak = 1.0
+    max_drawdown = 0.0
+    for value in values:
+        equity *= 1.0 + value
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, 1.0 - equity / peak)
+    cum = equity - 1.0
+    mean = sum(values) / n
+    variance = sum((value - mean) ** 2 for value in values) / (n - 1) if n > 1 else 0.0
+    vol = math.sqrt(variance)
+    stats: dict[str, object] = {
+        "n_days": n,
+        "cum_return": round(cum, 6),
+        "annualized_return": round((1.0 + cum) ** (TRADING_DAYS_PER_YEAR / n) - 1.0, 6) if cum > -1.0 else -1.0,
+        "annualized_vol": round(vol * math.sqrt(TRADING_DAYS_PER_YEAR), 6),
+        "sharpe": round(mean / vol * math.sqrt(TRADING_DAYS_PER_YEAR), 4) if vol > 0 else 0.0,
+        "max_drawdown": round(max_drawdown, 6),
+        "daily_win_rate": round(sum(1 for value in values if value > 0) / n, 4),
+    }
+    paired = [(value, bench[date]) for date, value in series if date in bench]
+    if len(paired) >= 2:
+        strategy_leg = [a for a, _ in paired]
+        bench_leg = [b for _, b in paired]
+        strategy_cum = math.prod(1.0 + value for value in strategy_leg) - 1.0
+        bench_cum = math.prod(1.0 + value for value in bench_leg) - 1.0
+        bench_mean = sum(bench_leg) / len(bench_leg)
+        strategy_mean = sum(strategy_leg) / len(strategy_leg)
+        bench_var = sum((b - bench_mean) ** 2 for b in bench_leg)
+        active = [a - b for a, b in paired]
+        active_mean = sum(active) / len(active)
+        active_var = sum((x - active_mean) ** 2 for x in active) / (len(active) - 1)
+        stats.update(
+            {
+                "benchmark_days": len(paired),
+                "benchmark_return": round(bench_cum, 6),
+                "excess_return": round(strategy_cum - bench_cum, 6),
+                "beta": (
+                    round(sum((a - strategy_mean) * (b - bench_mean) for a, b in paired) / bench_var, 4)
+                    if bench_var > 0
+                    else None
+                ),
+                "tracking_error": round(math.sqrt(active_var * TRADING_DAYS_PER_YEAR), 6),
+                "information_ratio": (
+                    round(active_mean / math.sqrt(active_var) * math.sqrt(TRADING_DAYS_PER_YEAR), 4)
+                    if active_var > 0
+                    else None
+                ),
+            }
+        )
+    return stats
+
+
 # ---------------------------------------------------------------------------
 # payload assembly
 # ---------------------------------------------------------------------------
@@ -176,7 +244,9 @@ def fold_equity_payload(
     return payload
 
 
-def experiment_equity_payload(experiments_root: Path, experiment_id: str) -> dict[str, object]:
+def experiment_equity_payload(
+    experiments_root: Path, experiment_id: str, epoch_id: str | None = None
+) -> dict[str, object]:
     from .registry import (
         read_ledger_records,
         latest_fold_records,
@@ -187,8 +257,14 @@ def experiment_equity_payload(experiments_root: Path, experiment_id: str) -> dic
 
     experiment_dir = resolve_experiment_dir(experiments_root, experiment_id)
     records = read_ledger_records(experiment_dir)
-    folds = list(latest_fold_records(records).values())
-    folds.sort(key=lambda r: (str(r.get("epoch_id")), str(r.get("test_period") or r.get("fold_id"))))
+    all_folds = list(latest_fold_records(records).values())
+    all_folds.sort(key=lambda r: (str(r.get("epoch_id")), str(r.get("test_period") or r.get("fold_id"))))
+    # Epochs are alternative passes over the SAME fold calendar: chaining folds
+    # across epochs would compound each quarter once per epoch and blend curves
+    # no strategy produced. One epoch per payload; the SPA switches.
+    epochs = sorted({str(r.get("epoch_id")) for r in all_folds})
+    selected = str(epoch_id) if epoch_id and str(epoch_id) in epochs else (epochs[-1] if epochs else None)
+    folds = [r for r in all_folds if str(r.get("epoch_id")) == selected]
     revealed = test_results_revealed(experiment_dir)
     heldout = latest_heldout_records(records) if revealed else []
     heldout_runs = sorted({str(r.get("run_id") or "") for r in heldout if r.get("run_id")})
@@ -214,4 +290,12 @@ def experiment_equity_payload(experiments_root: Path, experiment_id: str) -> dic
     for run_id in heldout_runs:
         bench.update(_rollup_benchmark(experiment_dir, run_id, "heldout"))
     all_dates = [date for chain in chains.values() for date, _ in chain]
-    return {"series": series, "benchmark": _benchmark_entry(bench, all_dates)}
+    return {
+        "series": series,
+        "benchmark": _benchmark_entry(bench, all_dates),
+        "epochs": epochs,
+        "epoch_id": selected,
+        # Full-cycle statistics per chained series (Barra-lite regression core
+        # plus risk/consistency metrics); fold-level tilts stay on the fold view.
+        "stats": {key: _cycle_stats(chain, bench) for key, chain in chains.items() if chain},
+    }

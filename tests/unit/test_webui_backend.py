@@ -343,6 +343,14 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(page["events"], [])
         self.assertEqual(page["next_offset"], first["next_offset"])
 
+    def test_trace_run_id_traversal_is_rejected(self) -> None:
+        outside = self.experiments_root / "exp_other" / "artifacts" / "run_evil"
+        outside.mkdir(parents=True, exist_ok=True)
+        (outside / "agent_trace.jsonl").write_text('{"event_type": "secret"}\n', encoding="utf-8")
+        for run_id in ("../exp_other/artifacts/run_evil", "..", ".hidden", "/etc"):
+            response = self.client.get("/api/experiments/exp_hitl/trace", params={"run_id": run_id})
+            self.assertEqual(response.status_code, 404, run_id)
+
     def test_trace_tail_returns_recent_events_and_stream_offset(self) -> None:
         response = self.client.get(
             "/api/experiments/exp_hitl/trace", params={"run_id": "run_001", "tail_events": 2}
@@ -1032,6 +1040,70 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(fold["valid"]["benchmark"]["dates"], ["20220106"])
         self.assertEqual(fold["test"]["benchmark"]["dates"], [])  # no rollup for the test chain
         self.assertEqual(len(fold["test"]["series"][0]["dates"]), 1)
+
+    def _append_epoch_002_fold(self) -> None:
+        """Second-epoch re-run of the same fold calendar with its own run/results."""
+        experiment_dir = self.experiments_root / "exp_hitl"
+        results = experiment_dir / "artifacts" / "run_e2" / "results"
+        window = results / "valid_000"
+        window.mkdir(parents=True, exist_ok=True)
+        (window / "detailed_return.json").write_text(
+            json.dumps({"initial_cash": 1_000_000.0, "equity_curve": {"20220106": 1_050_000.0, "20220107": 1_029_000.0}}),
+            encoding="utf-8",
+        )
+        (results / "style_valid.json").write_text(
+            json.dumps({"benchmark_daily": [["20220106", 0.01], ["20220107", 0.005]]}), encoding="utf-8"
+        )
+        ledger = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
+        record = {
+            "record_type": "fold",
+            "experiment_id": "exp_hitl",
+            "epoch_id": "epoch_002",
+            "fold_id": "fold_2022Q1",
+            "run_id": "run_e2",
+            "fold_status": "frozen",
+            "test_period": "20220101..20220331",
+            "validation_result": {"total_return": 0.029, "sharpe": 0.5, "long_return": 0.029, "short_return": 0.0},
+            "test_result": {"total_return": -0.02, "sharpe": -0.3, "long_return": -0.02, "short_return": 0.0},
+            "selected_step_id": "step_000",
+            "steps": [{"step_id": "step_000", "validation_result_ref": str(window)}],
+        }
+        with ledger.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+
+    def test_metrics_and_equity_never_mix_epochs(self) -> None:
+        # Epochs re-run the SAME fold calendar: cumulative metrics and daily
+        # curves must come from one epoch at a time, never compounded across
+        # epochs (that counts each quarter once per epoch).
+        self._append_epoch_002_fold()
+        self._reveal()
+        summary = {e["experiment_id"]: e for e in self.client.get("/api/experiments").json()["experiments"]}["exp_hitl"]
+        self.assertEqual(summary["metrics"]["epoch_id"], "epoch_002")
+        self.assertAlmostEqual(summary["metrics"]["cum_valid_return"], 0.029)  # NOT (1.10)(1.029)-1
+        self.assertAlmostEqual(summary["metrics"]["cum_test_return"], -0.02)
+        by_epoch = {entry["epoch_id"]: entry for entry in summary["metrics_by_epoch"]}
+        self.assertAlmostEqual(by_epoch["epoch_001"]["cum_valid_return"], 0.10)
+        self.assertAlmostEqual(by_epoch["epoch_002"]["cum_valid_return"], 0.029)
+
+        payload = self.client.get("/api/experiments/exp_hitl/equity").json()
+        self.assertEqual(payload["epoch_id"], "epoch_002")
+        self.assertEqual(payload["epochs"], ["epoch_001", "epoch_002"])
+        valid = {series["key"]: series for series in payload["series"]}["valid"]
+        self.assertEqual(valid["dates"], ["20220106", "20220107"])  # epoch_002's window only
+        stats = payload["stats"]["valid"]
+        self.assertEqual(stats["n_days"], 2)
+        self.assertAlmostEqual(stats["cum_return"], 0.029)
+        self.assertAlmostEqual(stats["max_drawdown"], 0.02)
+        self.assertAlmostEqual(stats["benchmark_return"], 1.01 * 1.005 - 1.0)
+        self.assertAlmostEqual(stats["excess_return"], 0.029 - (1.01 * 1.005 - 1.0))
+        self.assertIn("beta", stats)
+        self.assertIn("information_ratio", stats)
+
+        earlier = self.client.get("/api/experiments/exp_hitl/equity", params={"epoch_id": "epoch_001"}).json()
+        self.assertEqual(earlier["epoch_id"], "epoch_001")
+        valid_e1 = {series["key"]: series for series in earlier["series"]}.get("valid")
+        if valid_e1 is not None:
+            self.assertNotIn("20220107", valid_e1["dates"])
 
     def test_equity_never_reads_mutable_raw_for_missing_benchmark(self) -> None:
         # P2-3: historical charts use frozen rollups ONLY. A run without a

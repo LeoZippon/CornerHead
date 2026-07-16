@@ -335,22 +335,86 @@ function chartLegend(seriesList) {
    Series = daily simple returns [[YYYYMMDD, r], ...]; the client compounds
    into cumulative curves and running drawdowns. Benchmark is drawn dashed in
    neutral ink (a reference, not a categorical slot). */
-const EQUITY_CACHE = new Map(); // experiment_id -> { fp, payload }
+const EQUITY_CACHE = new Map(); // `${experiment_id}::${epoch_id}` -> { fp, payload }
 
-async function fetchExperimentEquity(expId, fp) {
-  const hit = EQUITY_CACHE.get(expId);
+async function fetchExperimentEquity(expId, fp, epochId = null) {
+  const cacheKey = `${expId}::${epochId || ""}`;
+  const hit = EQUITY_CACHE.get(cacheKey);
   if (hit && hit.fp === fp) return hit.payload;
-  const payload = await api(`/api/experiments/${encodeURIComponent(expId)}/equity`);
-  EQUITY_CACHE.set(expId, { fp, payload });
+  const query = epochId ? `?epoch_id=${encodeURIComponent(epochId)}` : "";
+  const payload = await api(`/api/experiments/${encodeURIComponent(expId)}/equity${query}`);
+  EQUITY_CACHE.set(cacheKey, { fp, payload });
   return payload;
 }
 
-/* Async host: renders the chart when the series payload arrives. */
+function epochShort(epochId) {
+  const m = /^epoch_0*(\d+)$/.exec(String(epochId || ""));
+  return m ? `E${m[1]}` : String(epochId || "");
+}
+
+/* Full-cycle statistics table (server-computed in equity.py::_cycle_stats):
+   one column per chained series of the selected epoch. Pure rendering. */
+const CYCLE_STAT_ROWS = [
+  ["cum_return", "累计收益", (v) => fmtPct(v), true],
+  ["annualized_return", "年化收益", (v) => fmtPct(v), true],
+  ["annualized_vol", "年化波动", (v) => fmtPct(v), false],
+  ["sharpe", "Sharpe", (v) => Number(v).toFixed(2), true],
+  ["max_drawdown", "最大回撤", (v) => fmtPct(v), false],
+  ["daily_win_rate", "日胜率", (v) => fmtPct(v), false],
+  ["benchmark_return", "沪深300 同期", (v) => fmtPct(v), false],
+  ["excess_return", "超额收益", (v) => fmtPct(v), true],
+  ["beta", "β", (v) => Number(v).toFixed(2), false],
+  ["tracking_error", "跟踪误差（年化）", (v) => fmtPct(v), false],
+  ["information_ratio", "信息比率", (v) => Number(v).toFixed(2), true],
+  ["n_days", "交易日数", (v) => String(v), false],
+];
+
+function cycleStatsTable(payload) {
+  const stats = payload.stats || {};
+  const labels = Object.fromEntries((payload.series || []).map((s) => [s.key, s.label]));
+  const keys = ["valid", "test", "heldout"].filter((k) => stats[k]);
+  if (!keys.length) return null;
+  const rows = CYCLE_STAT_ROWS
+    .filter(([field]) => keys.some((k) => stats[k][field] !== null && stats[k][field] !== undefined))
+    .map(([field, label, fmt, signed]) => el("tr", {},
+      el("td", {}, label),
+      ...keys.map((k) => {
+        const v = stats[k][field];
+        return el("td", { class: signed ? signCls(v) : "" }, v === null || v === undefined ? "—" : fmt(v));
+      })));
+  return el("table", { class: "data section-gap" },
+    el("tr", {},
+      el("th", {}, `全周期统计（${epochShort(payload.epoch_id)}）`),
+      ...keys.map((k) => el("th", {}, labels[k] || k))),
+    ...rows);
+}
+
+/* Async host: renders the chart (plus, on full-size charts, the epoch switcher
+   and the full-cycle stats table) when the series payload arrives. Each epoch
+   is charted alone — epochs re-run the same fold calendar and must not blend. */
 function equityHost(expId, fp, opts) {
   const host = el("div", {}, el("div", { class: "hint" }, "收益曲线加载中…"));
-  fetchExperimentEquity(expId, fp)
-    .then((payload) => { host.innerHTML = ""; host.append(equityChart(payload, opts)); })
+  const render = (epochId) => fetchExperimentEquity(expId, fp, epochId)
+    .then((payload) => {
+      host.innerHTML = "";
+      if (!opts?.mini && (payload.epochs || []).length > 1) {
+        host.append(el("div", { class: "actions" }, ...payload.epochs.map((e) => el("button", {
+          class: `btn small${e === payload.epoch_id ? " primary" : ""}`,
+          onclick: () => {
+            host.innerHTML = "";
+            host.append(el("div", { class: "hint" }, "收益曲线加载中…"));
+            render(e);
+          },
+        }, epochShort(e)))));
+      }
+      host.append(equityChart(payload, opts));
+      if (!opts?.mini) {
+        const statsTable = cycleStatsTable(payload);
+        if (statsTable) host.append(statsTable);
+      }
+    })
     .catch((error) => { host.innerHTML = ""; host.append(el("div", { class: "hint" }, `收益曲线加载失败：${error.message}`)); });
+  render(null);
   return host;
 }
 
@@ -680,10 +744,13 @@ function experimentCard(item) {
     card.append(el("div", { class: "meta-line" }, `账本记录：${item.folds_recorded} 个 Fold ｜ ${item.heldout_recorded || 0} 个 held-out`));
   }
   // Same component + order as the hero and detail pages (Held-out first).
+  // Cumulative valid/test metrics are per-epoch (latest) — never mixed across
+  // epochs, which re-run the same fold calendar.
+  const epochTag = metrics.epoch_id ? `（${epochShort(metrics.epoch_id)}）` : "";
   card.append(statTilesRow([
     { label: "Held-out 收益", value: fmtPct(metrics.cum_heldout_return), cls: signCls(metrics.cum_heldout_return) },
-    { label: "累计测试收益", value: fmtPct(metrics.cum_test_return), cls: signCls(metrics.cum_test_return) },
-    { label: "累计验证收益", value: fmtPct(metrics.cum_valid_return), cls: signCls(metrics.cum_valid_return) },
+    { label: `累计测试收益${epochTag}`, value: fmtPct(metrics.cum_test_return), cls: signCls(metrics.cum_test_return) },
+    { label: `累计验证收益${epochTag}`, value: fmtPct(metrics.cum_valid_return), cls: signCls(metrics.cum_valid_return) },
   ]));
   if ((item.fold_returns || []).length) {
     card.append(equityHost(item.experiment_id, equityFingerprint(item), { width: 400, height: 130, mini: true }));
@@ -757,8 +824,8 @@ function heroPanel(item) {
     ),
     el("div", { class: "section-gap" }, statTilesRow([
       { label: "Held-out 收益（最终样本外）", value: fmtPct(metrics.cum_heldout_return), cls: `hero-key ${signCls(metrics.cum_heldout_return)}` },
-      { label: "累计测试收益", value: fmtPct(metrics.cum_test_return), cls: signCls(metrics.cum_test_return) },
-      { label: "累计验证收益", value: fmtPct(metrics.cum_valid_return), cls: signCls(metrics.cum_valid_return) },
+      { label: `累计测试收益${metrics.epoch_id ? `（${epochShort(metrics.epoch_id)}）` : ""}`, value: fmtPct(metrics.cum_test_return), cls: signCls(metrics.cum_test_return) },
+      { label: `累计验证收益${metrics.epoch_id ? `（${epochShort(metrics.epoch_id)}）` : ""}`, value: fmtPct(metrics.cum_valid_return), cls: signCls(metrics.cum_valid_return) },
       { label: "平均测试 Sharpe", value: metrics.mean_test_sharpe === null || metrics.mean_test_sharpe === undefined ? "—" : Number(metrics.mean_test_sharpe).toFixed(2) },
       { label: "已完成 Fold", value: String(item.folds_recorded ?? 0) },
     ])),
@@ -1129,11 +1196,12 @@ async function renderDetailPage(experimentId, selectedKey) {
       equityHost(detail.experiment_id, equityFingerprint(detail), { width: 980, height: 240, ddH: 90 }),
     );
     // Tile order standardized with the homepage hero: Held-out → test → valid.
+    const epochTag = metrics.epoch_id ? `（${epochShort(metrics.epoch_id)}）` : "";
     container.append(el("div", { class: "panel section-gap" },
       statTilesRow([
         { label: "Held-out 收益（最终样本外）", value: fmtPct(metrics.cum_heldout_return), cls: signCls(metrics.cum_heldout_return) },
-        { label: "累计测试收益", value: fmtPct(metrics.cum_test_return), cls: signCls(metrics.cum_test_return) },
-        { label: "累计验证收益", value: fmtPct(metrics.cum_valid_return), cls: signCls(metrics.cum_valid_return) },
+        { label: `累计测试收益${epochTag}`, value: fmtPct(metrics.cum_test_return), cls: signCls(metrics.cum_test_return) },
+        { label: `累计验证收益${epochTag}`, value: fmtPct(metrics.cum_valid_return), cls: signCls(metrics.cum_valid_return) },
         { label: "平均测试 Sharpe", value: sharpe === null || sharpe === undefined ? "—" : Number(sharpe).toFixed(2), cls: signCls(sharpe) },
         { label: "会话进度", value: `${detail.completed_sessions ?? 0} / ${detail.total_sessions ?? "?"}` },
       ]),

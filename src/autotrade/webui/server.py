@@ -323,9 +323,9 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
     # ---- equity series ---------------------------------------------------------------
     @app.get("/api/experiments/{experiment_id}/equity")
-    def get_experiment_equity(experiment_id: str) -> dict[str, object]:
+    def get_experiment_equity(experiment_id: str, epoch_id: str | None = Query(None)) -> dict[str, object]:
         _experiment_dir(experiment_id)
-        return equity.experiment_equity_payload(manager.experiments_root, experiment_id)
+        return equity.experiment_equity_payload(manager.experiments_root, experiment_id, epoch_id=epoch_id)
 
     @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/equity")
     def get_fold_equity(experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
@@ -496,6 +496,10 @@ def run(
 
     # Auto-reap detached workers so exited experiments never linger as zombies
     # (their liveness is judged via status.json pid checks).
+    # CAUTION: with SIGCHLD ignored, every subprocess.run() in THIS process
+    # returns returncode 0 regardless of the child's real exit status. Current
+    # callers (docker cleanup, nvidia-smi, git stamps) parse stdout or check
+    # filesystem state only; new code here must not rely on returncode/check=True.
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)
     app = create_app(repo_root, experiments_root)
     if uds is not None:

@@ -26,6 +26,10 @@ STREAM_IDLE_HEARTBEAT_EVERY = 15
 def resolve_trace_path(experiment_dir: Path, run_id: str | None) -> Path | None:
     """Prefer the collected canonical trace; fall back to the live one."""
     experiment_dir = Path(experiment_dir)
+    if run_id and ("/" in run_id or "\\" in run_id or run_id.startswith(".")):
+        # Same guard as the style endpoint: run_id must stay one path segment
+        # so it cannot traverse outside this experiment's artifacts/.
+        return None
     if run_id:
         collected = experiment_dir / "artifacts" / run_id / "agent_trace.jsonl"
         if collected.exists():

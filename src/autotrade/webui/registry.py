@@ -132,6 +132,15 @@ def _compound(returns: list[float]) -> float | None:
     return total - 1.0
 
 
+def _latest_epoch(folds: list[dict[str, object]]) -> str | None:
+    epochs = sorted({str(record.get("epoch_id")) for record in folds})
+    return epochs[-1] if epochs else None
+
+
+def _epoch_folds(folds: list[dict[str, object]], epoch_id: str | None) -> list[dict[str, object]]:
+    return [record for record in folds if str(record.get("epoch_id")) == epoch_id]
+
+
 def _metric_series(records: list[dict[str, object]], result_key: str, metric: str) -> list[float]:
     values: list[float] = []
     for record in records:
@@ -201,12 +210,34 @@ def summarize_experiment(experiment_dir: Path) -> dict[str, object]:
                 "completed_sessions": (status.get("completed_sessions") if isinstance(status, Mapping) else None)
                 or completed_sessions,
                 "current_session": status.get("session_key") if isinstance(status, Mapping) else None,
+                # Epochs re-run the same fold calendar, so cumulative metrics
+                # must never mix epochs (that compounds each quarter once per
+                # epoch). Headline = the latest epoch; earlier epochs stay
+                # comparable side by side in metrics_by_epoch.
                 "metrics": {
-                    "cum_valid_return": _compound(_metric_series(folds, "validation_result", "total_return")),
-                    "cum_test_return": _compound(_metric_series(folds, "test_result", "total_return")) if revealed else None,
-                    "mean_test_sharpe": _mean(_metric_series(folds, "test_result", "sharpe")) if revealed else None,
+                    "epoch_id": _latest_epoch(folds),
+                    "cum_valid_return": _compound(
+                        _metric_series(_epoch_folds(folds, _latest_epoch(folds)), "validation_result", "total_return")
+                    ),
+                    "cum_test_return": _compound(
+                        _metric_series(_epoch_folds(folds, _latest_epoch(folds)), "test_result", "total_return")
+                    ) if revealed else None,
+                    "mean_test_sharpe": _mean(
+                        _metric_series(_epoch_folds(folds, _latest_epoch(folds)), "test_result", "sharpe")
+                    ) if revealed else None,
                     "cum_heldout_return": _compound(_metric_series(heldout, "test_result", "total_return")) if revealed else None,
                 },
+                "metrics_by_epoch": [
+                    {
+                        "epoch_id": epoch,
+                        "folds": len(epoch_folds),
+                        "cum_valid_return": _compound(_metric_series(epoch_folds, "validation_result", "total_return")),
+                        "cum_test_return": _compound(_metric_series(epoch_folds, "test_result", "total_return")) if revealed else None,
+                        "mean_test_sharpe": _mean(_metric_series(epoch_folds, "test_result", "sharpe")) if revealed else None,
+                    }
+                    for epoch in sorted({str(record.get("epoch_id")) for record in folds})
+                    for epoch_folds in [_epoch_folds(folds, epoch)]
+                ],
                 "fold_returns": [
                     {
                         "epoch_id": record.get("epoch_id"),
