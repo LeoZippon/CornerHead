@@ -147,6 +147,19 @@ class OpenFill:
     cost_basis: float
 
 
+def clamp_to_limit_band(price: float, band: tuple[float | None, float | None] | None) -> float:
+    """A-share fills cannot print outside the daily price band: slippage is a
+    liquidity assumption and must saturate at the band edge, never breach it."""
+    if not band:
+        return price
+    down, up = band
+    if up is not None and price > up:
+        return up
+    if down is not None and price < down:
+        return down
+    return price
+
+
 def project_open(
     cost: CostModel,
     *,
@@ -156,6 +169,7 @@ def project_open(
     trade_date: str,
     apply_slippage: bool = True,
     financed: bool = False,
+    band: tuple[float | None, float | None] | None = None,
 ) -> OpenFill:
     """Project a long buy (cash or 融资), or a 融券 short open, at ``raw_price``.
 
@@ -167,7 +181,9 @@ def project_open(
     collateral is the net proceeds. ``apply_slippage`` is True for marketable fills,
     False for limit/auction fills (where ``raw_price`` is already the fill price)."""
     is_buy = side == "long"
-    price = cost.slipped_price(raw_price, is_buy=is_buy) if apply_slippage else float(raw_price)
+    price = clamp_to_limit_band(
+        cost.slipped_price(raw_price, is_buy=is_buy) if apply_slippage else float(raw_price), band
+    )
     notional = shares * price
     fee = cost.trade_fee(notional)
     if side == "long":

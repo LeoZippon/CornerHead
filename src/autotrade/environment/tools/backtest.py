@@ -561,6 +561,8 @@ class BacktestTool:
                 if minute_source is not None:
                     minute_source.close()
                     data_load.update(minute_source.stats())
+                # Also runs on the error path, where the post-with assignment
+                # below is never reached but failure records still report RSS.
                 data_load["host_peak_rss_bytes"] = int(rss_monitor.peak_bytes)
         data_load["host_peak_rss_bytes"] = int(rss_monitor.peak_bytes)
         replay.host_peak_rss_bytes = int(rss_monitor.peak_bytes) or None
@@ -804,10 +806,6 @@ class BacktestTool:
         if not orders:
             return None
         frame = pd.DataFrame(orders)
-        if "source_artifacts" in frame.columns:
-            frame["source_artifacts"] = frame["source_artifacts"].map(
-                lambda value: json.dumps(list(value) if isinstance(value, (list, tuple)) else [], ensure_ascii=False)
-            )
         orders_path = result_dir / "orders.parquet"
         frame.to_parquet(orders_path, index=False)
         return orders_path
@@ -1008,10 +1006,6 @@ def _replay_trade_dates(path: Path) -> tuple[str, ...]:
     if dates.empty:
         raise ToolError(f"replay daily data is empty: {path}")
     return tuple(sorted(dates["trade_date"].astype(str).unique()))
-
-
-def _first_replay_trade_dates(path: Path, count: int) -> tuple[str, ...]:
-    return _replay_trade_dates(path)[: max(1, int(count))]
 
 
 def _trade_date_filters(trade_dates: tuple[str, ...] | None):

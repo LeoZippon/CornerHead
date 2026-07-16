@@ -60,6 +60,7 @@ from autotrade.environment.broker_core import (
     CostModel,
     DebtContract,
     accrue_debt_interest,
+    clamp_to_limit_band,
     credit_maintenance_ratio,
     enable_bail_balance,
     is_bse_market,
@@ -287,6 +288,18 @@ class MarketData:
         limit = bar.get("down_limit")
         return pd.notna(limit) and pd.notna(price) and float(price) <= float(limit)
 
+    @staticmethod
+    def limit_band(bar: pd.Series | None) -> tuple[float | None, float | None]:
+        """(down_limit, up_limit) of the day; None entries when unavailable."""
+        if bar is None:
+            return (None, None)
+        down = bar.get("down_limit")
+        up = bar.get("up_limit")
+        return (
+            float(down) if pd.notna(down) else None,
+            float(up) if pd.notna(up) else None,
+        )
+
 
 @dataclass
 class Order:
@@ -309,7 +322,6 @@ class Order:
     status: str = "submitted"
     reject_reason: str | None = None
     reason: str = ""
-    source_artifacts: list[str] = field(default_factory=list)
     price_label: str = "price"
     account: str = ""
     op_type: int | None = None
@@ -338,7 +350,6 @@ class Order:
             "fee": self.fee,
             "stamp_duty": self.stamp_duty,
             "reason": self.reason,
-            "source_artifacts": list(self.source_artifacts),
         }
 
 
@@ -1245,7 +1256,6 @@ class SimBroker:
         amount: int | None = None,
         time: str = "",
         reason: str = "",
-        source_artifacts: list[str] | None = None,
         price_label: str = "price",
         apply_slippage: bool = True,
         order_id: str | None = None,
@@ -1279,7 +1289,6 @@ class SimBroker:
             limit_price=limit_price,
             reason=str(reason or action),
             **({"order_id": order_id} if order_id else {}),
-            source_artifacts=list(source_artifacts or []),
             price_label=price_label,
             account=pair[0] if pair else "",
             op_type=pair[1] if pair else None,
@@ -1317,13 +1326,14 @@ class SimBroker:
         cap_reject = self._single_name_cap_reject(order.ts_code, shares, raw_price)
         if cap_reject is not None:
             return self._reject(order, cap_reject)
+        band = MarketData.limit_band(bar)
         if order.action == "short":
             inventory_reject = self._short_inventory_reject(order.ts_code)
             if inventory_reject is not None:
                 return self._reject(order, inventory_reject)
             if MarketData.limit_down_blocked_at_price(bar, raw_price):
                 return self._reject(order, "limit_down_blocked_short")
-            return self._fill_short_open(order, state, raw_price, shares, apply_slippage)
+            return self._fill_short_open(order, state, raw_price, shares, apply_slippage, band)
         if MarketData.limit_up_blocked_at_price(bar, raw_price):
             return self._reject(order, "limit_up_blocked_buy")
         if order.action == "credit_buy":
@@ -1334,13 +1344,13 @@ class SimBroker:
             reject = self._credit_target_reject(order.ts_code, "margin_secs_not_finable")
             if reject is not None:
                 return self._reject(order, reject)
-            return self._fill_fin_open(order, state, raw_price, shares, apply_slippage)
-        return self._fill_long_open(order, state, raw_price, shares, apply_slippage)
+            return self._fill_fin_open(order, state, raw_price, shares, apply_slippage, band)
+        return self._fill_long_open(order, state, raw_price, shares, apply_slippage, band)
 
-    def _fill_long_open(self, order: Order, state: AccountState, raw_price: float, shares: int, apply_slippage: bool = True) -> Order:
+    def _fill_long_open(self, order: Order, state: AccountState, raw_price: float, shares: int, apply_slippage: bool = True, band: tuple[float | None, float | None] | None = None) -> Order:
         fill = project_open(
             self.profile.cost_model, side="long", raw_price=raw_price, shares=shares,
-            trade_date=order.trade_date, apply_slippage=apply_slippage,
+            trade_date=order.trade_date, apply_slippage=apply_slippage, band=band,
         )
         # A cash/担保品 buy may only deploy the account's available cash: 融券
         # proceeds are locked collateral in the credit account, and the two
@@ -1353,12 +1363,12 @@ class SimBroker:
         self._add_to_position(state, order.ts_code, "long", shares, fill.price, fill.cost_basis, order.trade_date)
         return self._fill(order, fill.price, shares, "open")
 
-    def _fill_fin_open(self, order: Order, state: AccountState, raw_price: float, shares: int, apply_slippage: bool = True) -> Order:
+    def _fill_fin_open(self, order: Order, state: AccountState, raw_price: float, shares: int, apply_slippage: bool = True, band: tuple[float | None, float | None] | None = None) -> Order:
         """融资买入: no cash moves; notional+fee become a fin contract's principal,
         gated on 保证金可用余额 and the 融资 quota."""
         fill = project_open(
             self.profile.cost_model, side="long", raw_price=raw_price, shares=shares,
-            trade_date=order.trade_date, apply_slippage=apply_slippage, financed=True,
+            trade_date=order.trade_date, apply_slippage=apply_slippage, financed=True, band=band,
         )
         # Opening the contract moves the bail balance by the financed fee (booked at
         # 100% as an immediate 浮亏) plus the margin occupied by the new principal.
@@ -1381,10 +1391,10 @@ class SimBroker:
         )
         return self._fill(order, fill.price, shares, "open")
 
-    def _fill_short_open(self, order: Order, state: AccountState, raw_price: float, shares: int, apply_slippage: bool = True) -> Order:
+    def _fill_short_open(self, order: Order, state: AccountState, raw_price: float, shares: int, apply_slippage: bool = True, band: tuple[float | None, float | None] | None = None) -> Order:
         fill = project_open(
             self.profile.cost_model, side="short", raw_price=raw_price, shares=shares,
-            trade_date=order.trade_date, apply_slippage=apply_slippage,
+            trade_date=order.trade_date, apply_slippage=apply_slippage, band=band,
         )
         # 保证金可用余额 must back the new short's margin plus its open costs
         # (the bail balance moves by -margin - fee - duty when the short opens).
@@ -1442,6 +1452,7 @@ class SimBroker:
         if pos.side == "short" and MarketData.limit_up_blocked_at_price(bar, raw_price):
             return self._reject(order, "limit_up_blocked_cover")
         price = self.profile.slipped_price(raw_price, is_buy=is_buy) if apply_slippage else raw_price
+        price = clamp_to_limit_band(price, MarketData.limit_band(bar))
         fill = self._reduce_position(state, pos, shares, price, order.trade_date)
         if fill is not None:
             order.fee = fill.fee
@@ -1577,7 +1588,10 @@ class SimBroker:
         if pos.side == "short" and MarketData.limit_up_blocked_at_price(bar, raw_price):
             self._event("exit_blocked_limit_up", ts_code=ts_code, side=pos.side, trade_date=trade_date, forced=forced)
             return False
-        price = self.profile.slipped_price(raw_price, is_buy=pos.side == "short")
+        price = clamp_to_limit_band(
+            self.profile.slipped_price(raw_price, is_buy=pos.side == "short"),
+            MarketData.limit_band(bar),
+        )
         side = pos.side
         fill = self._reduce_position(state, pos, sellable, price, trade_date, forced=forced, price_label="close")
         if not forced:

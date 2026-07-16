@@ -228,33 +228,30 @@ def _style_exposures(
 
 
 def _rank_cross_section(df) -> dict[str, tuple[float, float, float, float]]:
-    """One trade date's cross-section -> ts_code: (close, size/pb/turnover pct)."""
-    out: dict[str, tuple[float, float, float, float]] = {}
-    pct = {column: df[column].rank(pct=True) for column in _STYLE_COLUMNS}
+    """One trade date's cross-section -> ts_code: (close, size/pb/turnover pct).
 
-    def _pct(series, i) -> float:
-        try:
-            value = float(series.iloc[i])
-        except (TypeError, ValueError):
-            return 0.5
-        return value if math.isfinite(value) else 0.5
+    Vectorized: this runs for every replay day of every backtest, and a per-row
+    Python loop over the ~5k-code cross-section cost seconds per replay."""
+    import numpy as np
+    import pandas as pd
 
-    closes = df["close"]
-    codes = df["ts_code"]
-    for i in range(len(df)):
-        try:
-            close = float(closes.iloc[i])
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(close):
-            continue
-        out[str(codes.iloc[i])] = (
-            close,
-            _pct(pct["circ_mv"], i),
-            _pct(pct["pb"], i),
-            _pct(pct["turnover_rate"], i),
+    closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=float)
+    codes = df["ts_code"].astype(str).to_numpy()
+    pct = {
+        column: pd.to_numeric(df[column].rank(pct=True), errors="coerce")
+        .fillna(0.5)
+        .replace([np.inf, -np.inf], 0.5)
+        .to_numpy(dtype=float)
+        for column in _STYLE_COLUMNS
+    }
+    keep = np.isfinite(closes)
+    return {
+        code: (float(close), float(size), float(pb), float(turnover))
+        for code, close, size, pb, turnover, ok in zip(
+            codes, closes, pct["circ_mv"], pct["pb"], pct["turnover_rate"], keep
         )
-    return out
+        if ok
+    }
 
 
 def _compact(regression: Mapping[str, object], style: Mapping[str, object], total_return: object) -> dict[str, object]:

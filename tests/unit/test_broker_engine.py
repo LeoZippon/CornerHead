@@ -464,6 +464,24 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual(valid_odd.status, "filled")
         self.assertEqual(broker.position_quantity("688001.SH", account="stock"), 201)
 
+    def test_slipped_fill_saturates_at_the_daily_limit_band(self):
+        # Slippage is a liquidity assumption; no exchange print exists outside
+        # [down_limit, up_limit]. A buy whose raw price passes the limit block
+        # but whose slipped price would cross the band fills AT the band edge.
+        daily = make_daily([("20220104", "000001.SZ", 10.998, 10.999, 11.0, 9.0, False)])
+        broker = self.make_broker(daily=daily, slippage_bps=20.0)
+        buy = broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.998, amount=1000)
+        self.assertEqual(buy.status, "filled")
+        self.assertEqual(buy.price, 11.0)  # 10.998 * 1.002 = 11.02 -> clamped
+        sell_daily = make_daily([("20220104", "000001.SZ", 9.002, 9.001, 11.0, 9.0, False)])
+        seller = self.make_broker(daily=sell_daily, slippage_bps=20.0)
+        seller.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        seller.roll_to_date("20220105")
+        seller._advance_date = lambda *_: None  # keep the same bar for the sell leg
+        sale = seller.execute("000001.SZ", "sell", trade_date="20220104", raw_price=9.002, amount=1000)
+        self.assertEqual(sale.status, "filled")
+        self.assertEqual(sale.price, 9.0)  # 9.002 * 0.998 = 8.984 -> clamped
+
     def test_submission_reject_keeps_the_callers_reason(self):
         # A resolved close() whose sellable amount fails the lot gate must keep
         # the strategy's own reason string on the reject record — not the

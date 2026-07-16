@@ -144,15 +144,6 @@ def _jsonable(value):
 def _executor_pathsep_join(executor, paths: list[Path]) -> str:
     return os.pathsep.join(executor.map_path(path) for path in paths if path.exists())
 
-_ACTION_ALIASES = {
-    "long": "buy",
-    "sell_short": "short",
-    "close_long": "sell",
-    "close_short": "cover",
-    "exit": "close",
-    "margin_buy": "fin_buy",
-    "cancel_order": "cancel",
-}
 _ORDER_ACTIONS = {
     "buy", "sell", "credit_buy", "credit_sell", "short", "cover", "close",
     "fin_buy", "sell_repay", "direct_repay", "transfer",
@@ -1704,8 +1695,9 @@ def _cancel_day_end_orders(broker: SimBroker, *, trade_date: str, minute_key: st
 
 
 def _action_name(action: dict[str, object]) -> str:
-    raw = str(action.get("action", "")).lower().strip()
-    return _ACTION_ALIASES.get(raw, raw)
+    # The driver emits canonical verbs only; unknown names fall through to the
+    # _ORDER_ACTIONS membership checks and are recorded as ignored, not rewritten.
+    return str(action.get("action", "")).lower().strip()
 
 
 def _cancel_pending_order(

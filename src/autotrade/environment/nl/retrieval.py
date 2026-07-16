@@ -132,25 +132,27 @@ class TextRetriever:
         once their dataset's refresh node has completed (None = frozen-only view)."""
         if self.index.empty or "_source" not in self.index.columns:
             return self.index
-        cache_key = "frozen" if self.as_of is None else pd.Timestamp(self.as_of).isoformat()
+        cutoff_by_dataset: dict[str, pd.Timestamp] = {}
+        if self.as_of is None:
+            cache_key = "frozen"
+        else:
+            # Convert each dataset's cutoff once, then broadcast by a vectorized
+            # dict map (a per-row lambda over the multi-million-row index used to
+            # dominate NL retrieval). Text visibility only moves at refresh-node
+            # boundaries, so the cache is keyed by the CUTOFF SIGNATURE rather
+            # than the raw tick time: every tick between two nodes reuses the
+            # same materialized slice instead of rebuilding it per tick.
+            cmap = {d: text_dataset_visible_cutoff(d, self.as_of) for d in self._datasets.unique()}
+            cutoff_by_dataset = {d: (pd.Timestamp(c) if c is not None else pd.NaT) for d, c in cmap.items()}
+            cache_key = "|".join(f"{d}={cutoff_by_dataset[d]}" for d in sorted(cutoff_by_dataset))
         if cache_key == self._visible_cache_key and self._visible_cache is not None:
             return self._visible_cache
         if self.as_of is None:
             visible = self.index[self._frozen_mask]
         else:
-            # Convert each dataset's cutoff once, then broadcast by a vectorized
-            # dict map. A per-row ``pd.Timestamp()`` lambda over the multi-million
-            # row index dominated NL retrieval (tens of seconds rebuilt on every
-            # decision tick); mapping the handful of unique datasets is ~150x cheaper.
-            cmap = {d: text_dataset_visible_cutoff(d, self.as_of) for d in self._datasets.unique()}
-            cutoff_by_dataset = {d: (pd.Timestamp(c) if c is not None else pd.NaT) for d, c in cmap.items()}
             cutoff = self._datasets.map(cutoff_by_dataset)
             replay_visible = (~self._frozen_mask) & (self._available_at <= cutoff)
             visible = self.index[self._frozen_mask | replay_visible]
-        # One research tick commonly issues several nl() calls and each NL task
-        # may search three rounds. The PIT boundary is identical across them, so
-        # retain only the latest materialized visibility slice instead of
-        # rebuilding a multi-million-row mask for every tool call.
         self._visible_cache_key = cache_key
         self._visible_cache = visible
         return visible

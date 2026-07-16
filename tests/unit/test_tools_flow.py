@@ -1483,13 +1483,13 @@ def main(ctx):
 
     def test_probe_daily_predicate_matches_full_read_then_filter(self):
         from autotrade.environment.tools.backtest import (
-            _first_replay_trade_dates,
             _read_replay_daily,
+            _replay_trade_dates,
         )
 
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
-            dates = _first_replay_trade_dates(ctx.paths.valid / "daily.parquet", 2)
+            dates = _replay_trade_dates(ctx.paths.valid / "daily.parquet")[:2]
             filtered = _read_replay_daily(ctx.paths.valid, trade_dates=dates)
             full = _read_replay_daily(ctx.paths.valid)
             expected = full[full["trade_date"].astype(str).isin(dates)].reset_index(drop=True)
@@ -2242,6 +2242,75 @@ class AgentSessionRunnerTest(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(compact_proxy.calls[0]["timeout_seconds"], 10)
+
+    def test_forced_compaction_bypasses_only_the_token_threshold(self):
+        compactor = ContextCompactor(
+            ScriptedLLM([]),
+            ContextCompactionConfig(
+                token_threshold=10_000_000,
+                min_messages=3,
+                keep_recent_messages=1,
+                min_remaining_seconds=0,
+            ),
+        )
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "short"},
+            {"role": "assistant", "content": "old"},
+            {"role": "user", "content": "latest"},
+        ]
+        blocked, decision = compactor.should_compact(messages, remaining_seconds=600)
+        self.assertFalse(blocked)
+        self.assertEqual(decision["skip_reason"], "below_token_threshold")
+        forced, forced_decision = compactor.should_compact(messages, remaining_seconds=600, force=True)
+        self.assertTrue(forced)
+        self.assertEqual(forced_decision["trigger_reason"], "forced_context_overflow")
+        # The failure circuit still applies even when forced.
+        compactor._consecutive_failures = 3
+        still_blocked, circuit = compactor.should_compact(messages, remaining_seconds=600, force=True)
+        self.assertFalse(still_blocked)
+        self.assertEqual(circuit["skip_reason"], "failure_circuit_open")
+
+    def test_llm_failure_circuit_aborts_the_session(self):
+        from autotrade.environment.llm.proxy import LLMProxyError
+
+        class FailingProxy:
+            provider = "deepseek"
+            model = "m"
+
+            def complete_tools(self, *args, **kwargs):
+                raise LLMProxyError("connection refused")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            runner = AgentSessionRunner(
+                ctx,
+                FailingProxy(),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5)),
+                fold_info={},
+                acceptance_rules={},
+            )
+            summary = runner.run()
+            # A fast-failing provider must trip the circuit, not burn the whole
+            # max_llm_calls budget one error observation at a time.
+            self.assertEqual(summary["finish_status"], "llm_unavailable")
+            self.assertLessEqual(int(summary.get("llm_calls") or 0), 3)
+
+    def test_backtest_budget_reports_step_counters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([]),
+                AgentSessionConfig(fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5)),
+                fold_info={},
+                acceptance_rules={},
+            )
+            runner._accepted_steps = 2
+            budget = runner._backtest_budget()
+            self.assertEqual(budget["steps_used"], 2)
+            self.assertEqual(budget["steps_limit"], runner.config.max_steps)
+            self.assertEqual(budget["steps_remaining"], runner.config.max_steps - 2)
 
     def test_context_compactor_zero_call_limit_blocks_provider_call(self):
         compact_proxy = ScriptedLLM([json.dumps({"goal": "should not run"})])
