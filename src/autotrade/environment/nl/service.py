@@ -164,6 +164,7 @@ class StrategyNLService:
             cache_key: tuple[str, str, str] | None = None
             revision: str | None = None
             matching_evidence_count: int | None = None
+            prefetched_evidence: list[dict[str, object]] = []
             if ts_code:
                 candidate_terms = company_terms(context, ts_code)
                 cache_key = _analysis_cache_key(ts_code, prompt, kwargs, context)
@@ -175,8 +176,10 @@ class StrategyNLService:
                             company_terms=candidate_terms,
                             patterns=event_filter.patterns,
                             lookback_days=event_filter.lookback_days,
+                            max_results=ENUM_MAX_RESULTS if response_format else 0,
                         )
                         matching_evidence_count = state.match_count
+                        prefetched_evidence = list(state.evidence)
                         self.event_filter_calls += 1
                     else:
                         state = self.retriever.candidate_evidence_state(
@@ -254,13 +257,19 @@ class StrategyNLService:
                 failure_policy=self.failure_policy,
                 deadline_at=self.deadline_at,
                 max_tokens=ENUM_MAX_TOKENS if response_format else 3000,
-                max_tool_rounds=1 if response_format else MAX_TOOL_ROUNDS,
+                max_tool_rounds=(0 if response_format and event_filter else 1) if response_format else MAX_TOOL_ROUNDS,
                 response_choices=response_format.choices if response_format else (),
                 max_results_per_search=ENUM_MAX_RESULTS if response_format else None,
                 max_evidence_snippet_chars=ENUM_SNIPPET_CHARS if response_format else None,
                 lookback_days=event_filter.lookback_days if event_filter else None,
             )
-            result = engine.run(ts_code=ts_code, prompt=prompt, request_kwargs=kwargs, config=config)
+            result = engine.run(
+                ts_code=ts_code,
+                prompt=prompt,
+                request_kwargs=kwargs,
+                config=config,
+                prefetched_evidence=prefetched_evidence,
+            )
             self._record_execution_stats(result.llm_calls, result.tool_calls, result.evidence)
             record = result.to_record()
             record["cache"] = {
@@ -494,7 +503,9 @@ def _parse_response_format(raw: object) -> _ResponseFormat | None:
 
 def _provider_call_limit(kwargs: dict[str, object]) -> int:
     try:
-        return 2 if _parse_response_format(kwargs.get("response_format")) else MAX_TOOL_ROUNDS + 1
+        if not _parse_response_format(kwargs.get("response_format")):
+            return MAX_TOOL_ROUNDS + 1
+        return 1 if kwargs.get("event_filter") is not None else 2
     except ValueError:
         return MAX_TOOL_ROUNDS + 1
 

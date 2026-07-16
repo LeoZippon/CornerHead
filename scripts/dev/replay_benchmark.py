@@ -3,9 +3,9 @@
 
 Reuses an existing run's prepared snapshot views and a frozen strategy artifact
 to drive ``run_main_ctx_replay`` inside a real Docker sandbox, so engine
-optimizations can be measured and parity-checked (identical return stats and
-order stream) without spending tokens. NL is not served: only use strategies
-whose recorded backtests show ``nl_calls == 0``.
+optimizations can be measured and parity-checked without spending Agent tokens.
+By default NL is not served. Passing ``--nl-model`` wires the production NL
+service to that provider model for a representative end-to-end replay.
 
 Example (test2's frozen month fold):
   ~/miniconda3/envs/quant/bin/python scripts/dev/replay_benchmark.py \
@@ -35,18 +35,27 @@ add_repo_src(__file__)
 
 import pandas as pd
 
+from autotrade.environment.artifacts import load_strategy_artifact
 from autotrade.environment.replay_stats import compute_return_stats
 from autotrade.environment.broker import (
     BrokerProfile,
+    auction_prints_by_date,
     load_corporate_actions_by_date,
     load_shortable_by_date,
     load_shortable_codes,
 )
 from autotrade.environment.executor import DockerExecutor
+from autotrade.environment.llm import DeepSeekProxy
 from autotrade.environment.main_ctx_engine import MainPolicyRunner, run_main_ctx_replay
+from autotrade.environment.nl.service import (
+    StrategyNLService,
+    cleanup_nl_rpc_files,
+    prepare_nl_rpc_files,
+)
 from autotrade.environment.replay_market import ParquetMinuteReplaySource
 from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, SandboxSpec, link_copytree
 from autotrade.environment.runtime import write_json_atomic
+from autotrade.environment.tools.backtest import _nl_call_budget, _optional_float, _read_replay_auction
 
 
 def _profile_kwargs(record: dict[str, object]) -> dict[str, object]:
@@ -54,6 +63,11 @@ def _profile_kwargs(record: dict[str, object]) -> dict[str, object]:
 
     names = {field.name for field in dataclasses.fields(BrokerProfile)}
     return {key: value for key, value in record.items() if key in names}
+
+
+def _snapshot_identity(path: Path) -> dict[str, object]:
+    record = json.loads(path.read_text(encoding="utf-8"))
+    return {key: record.get(key) for key in ("kind", "snapshot_id", "snapshot_hash", "period_start", "period_end")}
 
 
 def main() -> int:
@@ -66,6 +80,13 @@ def main() -> int:
     parser.add_argument("--label", default="bench")
     parser.add_argument("--image", default=None, help="sandbox image override")
     parser.add_argument("--out", type=Path, default=None, help="result JSON path (default .runtime/bench/<label>.json)")
+    parser.add_argument("--nl-model", default=None, help="enable live production NL using this provider model")
+    parser.add_argument(
+        "--nl-log-dir",
+        type=Path,
+        default=None,
+        help="NL audit directory (default: timestamped sibling of the result JSON)",
+    )
     parser.add_argument("--offsession-tick-minutes", type=int, default=None, help="override the manifest value")
     parser.add_argument("--intraday-decision-minutes", type=int, default=None, help="override (engine support required)")
     parser.add_argument(
@@ -73,13 +94,22 @@ def main() -> int:
         action="store_true",
         help="load the whole minute file before replay (legacy A/B baseline)",
     )
+    parser.add_argument("--cpu-only", action="store_true", help="do not reserve a GPU for the strategy container")
     parser.add_argument("--keep-workdir", action="store_true")
     args = parser.parse_args()
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    strategy_hash = load_strategy_artifact(args.strategy).artifact_hash
+    decision_identity = _snapshot_identity(
+        args.source_run / "runtime" / "snapshot_views" / "valid_decision_input" / "manifest.json"
+    )
+    replay_identity = _snapshot_identity(args.source_run / "snapshots" / "valid" / "manifest.json")
     models_dir = args.models or Path(f"{args.strategy}.models")
-    work_dir = repo_root / ".runtime" / "bench" / f"{args.label}_{int(time.time())}"
+    run_stamp = time.time_ns()
+    work_dir = repo_root / ".runtime" / "bench" / f"{args.label}_{run_stamp}"
     out_path = args.out or (repo_root / ".runtime" / "bench" / f"{args.label}.json")
+    nl_log_dir = args.nl_log_dir or out_path.parent / f"{out_path.stem}-nl_{run_stamp}"
+    timeview_enabled = bool(manifest.get("timeview_enabled", manifest.get("rolling_asof_enabled", True)))
 
     sandbox = LocalSandbox(work_dir)
     sandbox.prepare_layout()
@@ -93,17 +123,31 @@ def main() -> int:
         args.strategy, repo_root / "configs" / "agent_output_template",
         source_model_root=models_dir if models_dir.is_dir() else None,
     )
-    spec = SandboxSpec.from_host_fraction()
+    spec = SandboxSpec.from_host_fraction(gpu=None) if args.cpu_only else SandboxSpec.from_host_fraction()
     if args.image:
         spec = __import__("dataclasses").replace(spec, image=args.image)
     sandbox.write_runtime_env(mode="docker", sandbox_spec=spec)
     docker = DockerSandbox(sandbox, spec)
-    docker.start()
-    result_payload: dict[str, object] = {"label": args.label, "source_run": str(args.source_run)}
+    result_payload: dict[str, object] = {
+        "label": args.label,
+        "source_run": str(args.source_run),
+        "strategy": str(args.strategy),
+        "strategy_artifact_hash": strategy_hash,
+        "decision_snapshot": decision_identity,
+        "replay_snapshot": replay_identity,
+        "sandbox_spec": spec.to_record(),
+    }
+    if args.nl_model:
+        result_payload["nl_log_dir"] = str(nl_log_dir)
+    nl_service = None
+    requests_host = responses_host = None
     try:
+        docker.start()
+        result_payload["image_id"] = docker.image_id
         docker.bind_snapshot_view("valid_decision_input")
         executor = DockerExecutor(docker.container, paths)
         replay_daily = pd.read_parquet(paths.valid / "daily.parquet")
+        replay_auction = _read_replay_auction(paths.valid)
         minute_file = paths.valid / "intraday_1min.parquet"
         replay_minutes = (
             pd.read_parquet(minute_file)
@@ -111,7 +155,7 @@ def main() -> int:
             else None
         )
         minute_source = (
-            ParquetMinuteReplaySource(minute_file, include_timeview_rows=True)
+            ParquetMinuteReplaySource(minute_file, include_timeview_rows=timeview_enabled)
             if not args.eager_minutes and minute_file.exists()
             else None
         )
@@ -119,18 +163,28 @@ def main() -> int:
         offsession = (
             int(args.offsession_tick_minutes)
             if args.offsession_tick_minutes is not None
-            else int(manifest.get("offsession_tick_minutes", 15))
+            else int(manifest.get("offsession_tick_minutes", 30))
         )
-        engine_kwargs: dict[str, object] = {}
-        if args.intraday_decision_minutes is not None:
-            engine_kwargs["intraday_decision_minutes"] = int(args.intraday_decision_minutes)
+        if args.nl_model:
+            requests_host, responses_host = prepare_nl_rpc_files(paths.agent)
+            nl_service = StrategyNLService(
+                proxy=DeepSeekProxy.from_env(model=args.nl_model),
+                snapshot_dir=paths.current_snapshot,
+                replay_dir=paths.valid if timeview_enabled else None,
+                log_dir=nl_log_dir,
+                failure_policy=str(manifest.get("nl_failure_policy", "return_error_with_audit")),
+                per_call_timeout_seconds=float(manifest.get("backtest_max_seconds_per_decision", 1800.0)) * 0.8,
+                max_calls=_nl_call_budget(manifest, replay_daily),
+            )
         with MainPolicyRunner(
             executor,
             paths,
-            timeout_seconds=900.0,
+            timeout_seconds=float(manifest.get("backtest_max_seconds_per_decision", 1800.0)),
             decision_time=decision_time,
             replay_granularity="minute" if replay_minutes is not None or minute_source is not None else "daily",
-            nl_service=None,
+            nl_service=nl_service,
+            requests_path=requests_host,
+            responses_path=responses_host,
             decision_max_sim_minutes=manifest.get("decision_max_sim_minutes"),
         ) as policy:
             policy.validate_main()
@@ -141,9 +195,13 @@ def main() -> int:
                 shortable_codes=load_shortable_codes(view, decision_time[:10].replace("-", "")),
                 shortable_by_date=load_shortable_by_date(paths.valid),
                 corporate_actions_by_date=load_corporate_actions_by_date(paths.valid),
+                auction_prints_by_date=auction_prints_by_date(
+                    replay_auction if replay_auction is not None else pd.DataFrame()
+                ),
                 main_policy=policy,
                 replay_intraday_1min=replay_minutes,
                 replay_minute_source=minute_source,
+                replay_auction_results=replay_auction,
                 auction_enabled=bool(manifest.get("auction_enabled", True)),
                 auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
                 auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
@@ -151,13 +209,17 @@ def main() -> int:
                 afterhours_decision_time=(manifest.get("afterhours_decision_time") or None),
                 execution_lag_bars=int(manifest.get("execution_lag_bars", 2)),
                 offsession_tick_minutes=offsession,
-                max_seconds_per_trading_day=None,  # benchmark: no load-dependent aborts
-                enforce_substep_timeout=False,
-                enforce_substep_coverage=False,
-                timeview_enabled=bool(manifest.get("timeview_enabled", True)),
+                intraday_decision_minutes=int(
+                    args.intraday_decision_minutes
+                    if args.intraday_decision_minutes is not None
+                    else manifest.get("intraday_decision_minutes", 1)
+                ),
+                max_seconds_per_trading_day=_optional_float(
+                    manifest.get("backtest_max_seconds_per_trading_day", 3600)
+                ),
+                timeview_enabled=timeview_enabled,
                 snapshot_dir=paths.current_snapshot,
                 replay_dir=paths.valid,
-                **engine_kwargs,
             )
             wall = time.monotonic() - started
         if minute_source is not None:
@@ -184,12 +246,35 @@ def main() -> int:
                 "stats": stats,
             }
         )
+        if nl_service is not None:
+            result_payload.update(
+                {
+                    "nl_calls": nl_service.calls,
+                    "nl_executed_calls": nl_service.executed_calls,
+                    "nl_cache_hits": nl_service.cache_hits,
+                    "nl_cache_misses": nl_service.cache_misses,
+                    "nl_outcome_counts": dict(sorted(nl_service.outcome_counts.items())),
+                    "nl_cost": nl_service.cost_summary(),
+                }
+            )
     finally:
-        if "minute_source" in locals() and minute_source is not None:
-            minute_source.close()
-        docker.stop()
-        if not args.keep_workdir:
-            shutil.rmtree(work_dir, ignore_errors=True)
+        try:
+            try:
+                if "minute_source" in locals() and minute_source is not None:
+                    minute_source.close()
+            finally:
+                try:
+                    if requests_host is not None and responses_host is not None:
+                        cleanup_nl_rpc_files(requests_host, responses_host)
+                finally:
+                    if nl_service is not None:
+                        nl_service.close()
+        finally:
+            try:
+                docker.stop()
+            finally:
+                if not args.keep_workdir:
+                    shutil.rmtree(work_dir, ignore_errors=True)
     write_json_atomic(out_path, result_payload)
     print(json.dumps({k: result_payload.get(k) for k in ("label", "wall_seconds", "phase_seconds", "order_count", "orders_sha256")}, ensure_ascii=False, default=str))
     print(f"full result: {out_path}")

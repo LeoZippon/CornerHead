@@ -1659,3 +1659,12 @@
 - `lap-test19` 完成 Q2 后进入 Q3 人工批准门时，status 只切换 session key/state，仍携带 Q2 的 `session_started_at`/run/trace/deadline；前端又把任意存活 worker + 时间戳视为运行中，导致 Q3 从 Q2 起点持续计时。实际 Q3 尚未启动。
 - 前端统一复用 active-session/wait-state 集合，只有运行中、Step 等待和 Agent 提问等待才计算会话墙钟；普通待批准/暂停只显示状态。Pipeline gate 统一清空上一会话身份与时钟，恢复 session 边界不变量。静态页面已同步；当前旧 worker 无需重启，浏览器刷新即可停止误计时。
 - Validation：interactive pipeline 45 passed + 4 subtests；WebUI backend 44 passed；`node --check`、`git diff --check` 通过。实验 worker 未中断，仓库外实验状态未修改。
+
+2026-07-16 lzp-test18 Q4 真实性能复跑与平仓故障定因
+
+- `lzp-test18`/`lap-test19` 的策略无法自主平仓不是 Broker、T+1 或结果随机性：公开持仓行字段为 `quantity`、`sellable_quantity`、`entry_price` 等。lzp 冻结策略读取不存在的 `volume`（Q4 还读取不存在的 `cost_basis`/`avg_price`），lap Q1–Q3 读取不存在的 `qty`；`.get(..., 0)` 将接口误用静默变成空持仓。lzp Q4 `valid_006` 因而 73 笔买入、0 笔卖出、44 个宿主期末退出；lap Q2 修正为 `quantity` 的 `valid_003` 随即产生 237 笔已成交卖单，证明执行链正常。冻结策略、账本和实验状态均未改写。
+- 扩展独立 `replay_benchmark.py`，可在原始 decision/replay snapshot、冻结镜像、真实竞价/分钟/盘后/Timeview/公司行动和生产超时下接入正式 NL RPC；记录策略/快照/镜像身份、逐阶段耗时、NL 成本与订单摘要。Q4 性能派生物仅位于 `.runtime/bench/`，不参与模型选择。
+- `event_filter + enum` 直接复用门控已得到的最多 5 条候选证据，取消模型再次检索；每个逻辑调用最多 1 次 provider。该直答快路径的隐藏推理按调用关闭、预算调为 512 token；单独 enum 检索和通用自由分析继续沿用原推理配置。真实困难样本从“隐藏推理耗尽预算、无标签”恢复为一次 5.809s 的 `PASS`。
+- exact-tail 因子在 2025-07-01/08-01/09-30 三个真实 PIT 状态与旧实现的最大误差为 `2.47e-16`、候选顺序完全一致，单次 6.42–7.45s 降至 1.55–2.03s（3.66–4.14x）。完整 Q4 重放：1693.590→826.108s（2.05x，-51.2%）；NL 763.858→58.695s（-92.3%）；策略计算 538.606→248.938s（-53.8%）；provider 105→3、检索 112→0。28 次逻辑调用中 25 次无证据直接跳过，3 次均完成。
+- 达成 `NL<=350s`、完整重放 `<=900s` 等门槛。剩余主要成本为策略计算 248.9s、Timeview roll 165.6s、宿主开销 136.1s、IPC 120.0s；事件过滤仅 48.8s，再引入正文 sidecar/跨回测持久缓存最多节约约 6% 总墙钟且增加失效与复现复杂度，当前不值得。此复跑用于性能验证，因事件门控改变 NL 执行路径，不将其 5.19% 收益用于策略质量结论。
+- Validation：NL + DeepSeek 定向 69 passed + 10 subtests；tools-flow 109 passed + 9 subtests；全量 `tests/unit` 850 passed + 41 subtests（26 个既有 warning，112.07s）；`git diff --check` clean。基准显式 CPU-only；共享主机上的正式实验负载保留，未改动其 worker。

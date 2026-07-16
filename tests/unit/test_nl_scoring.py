@@ -133,6 +133,7 @@ class NLSubAgentEngineTest(unittest.TestCase):
             self.assertEqual(result.content, "DOWNGRADE")
             self.assertEqual(len(proxy.calls), 2)
             self.assertEqual([call["max_tokens"] for call in proxy.calls], [128, 128])
+            self.assertEqual([call["thinking_enabled"] for call in proxy.calls], [None, None])
             self.assertEqual(proxy.calls[-1]["tool_choice"], "none")
             self.assertEqual(result.tool_calls[0]["arguments"]["max_results"], 5)
             self.assertEqual(len(result.evidence[0]["snippet"]), 1500)
@@ -781,7 +782,7 @@ class NLBudgetTest(unittest.TestCase):
                 snap / "universe.parquet", index=False
             )
 
-            proxy = ScriptedLLM([tool_call("重大诉讼", max_results=20), "**DOWNGRADE** not REJECT"])
+            proxy = ScriptedLLM(["**DOWNGRADE** not REJECT"])
             service = StrategyNLService(
                 proxy=proxy,
                 snapshot_dir=snap,
@@ -827,14 +828,17 @@ class NLBudgetTest(unittest.TestCase):
                 ["miss", "hit", "miss", "hit", "miss"],
             )
             self.assertEqual((service.executed_calls, service.cache_hits, service.cache_misses), (1, 2, 3))
-            self.assertEqual((service.no_evidence_skips, service.provider_calls, service.retrieval_calls), (3, 2, 1))
-            self.assertEqual(len(proxy.calls), 2)
-            self.assertEqual([call["max_tokens"] for call in proxy.calls], [128, 128])
-            self.assertEqual(proxy.calls[-1]["tool_choice"], "none")
-            self.assertEqual(refreshed["tool_calls"][0]["arguments"]["max_results"], 5)
+            self.assertEqual((service.no_evidence_skips, service.provider_calls, service.retrieval_calls), (3, 1, 0))
+            self.assertEqual(len(proxy.calls), 1)
+            self.assertEqual(proxy.calls[0]["max_tokens"], 512)
+            self.assertEqual(proxy.calls[0]["tool_choice"], "none")
+            self.assertFalse(proxy.calls[0]["thinking_enabled"])
+            self.assertEqual(refreshed["tool_calls"], [])
+            initial = json.loads(proxy.calls[0]["messages"][1]["content"])
+            self.assertEqual([item["text_id"] for item in initial["prefetched_evidence"]], ["r2"])
             cost = service.cost_summary()
             self.assertEqual((cost["event_filter_calls"], cost["evidence_items"]), (5, 1))
-            self.assertEqual(cost["max_provider_calls_per_logical_call"], 2)
+            self.assertEqual(cost["max_provider_calls_per_logical_call"], 1)
 
 
 class CompanyContextStoreTest(unittest.TestCase):
@@ -1001,9 +1005,10 @@ class TextRetrieverRollingTest(unittest.TestCase):
             retriever = self._retriever(Path(tmp))
             retriever.as_of = datetime(2022, 1, 5, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
             active = retriever.candidate_evidence_state(
-                "000001.SZ", patterns=("body",), lookback_days=30
+                "000001.SZ", patterns=("body",), lookback_days=30, max_results=5
             )
             self.assertEqual(active.match_count, 1)
+            self.assertEqual([item["text_id"] for item in active.evidence], ["r1"])
             self.assertEqual(
                 [hit["text_id"] for hit in retriever.search(
                     "body", ts_code="000001.SZ", max_results=10, lookback_days=30

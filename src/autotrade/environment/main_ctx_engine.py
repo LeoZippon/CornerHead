@@ -535,9 +535,9 @@ def run_main_ctx_replay(
 
     ``enforce_substep_timeout`` (default True) keeps the per-substep wall fail-fast
     that aborts the replay when a declared ``ctx.substep`` block runs over its budget
-    B. Declared budgets advance sim time, so valid/test/held-out all enforce it;
-    only the token-free dev benchmark harness passes False. The per-substep
-    runtime statistics are aggregated either way; only the raise is skipped.
+    B. Declared budgets advance sim time, so formal evaluation and production-path
+    benchmarks enforce it. Targeted diagnostics may disable the raise while still
+    collecting the same per-substep runtime statistics.
     ``enforce_substep_coverage`` rejects substantive Python-side ``main(ctx)`` time
     outside declared substeps (with a small overhead grace), so heavy unwrapped work
     cannot hide in the tick's aggregate wall time.

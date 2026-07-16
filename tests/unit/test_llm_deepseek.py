@@ -110,6 +110,30 @@ class DeepSeekClientTest(unittest.TestCase):
             self.assertFalse(compact_proxy.client.config.thinking_enabled)
             self.assertIsNone(compact_proxy.client.config.reasoning_effort)
 
+    def test_tool_call_can_disable_thinking_without_mutating_proxy(self):
+        configs = []
+
+        def fake_chat_tools(client, messages, *, tools, tool_choice, max_tokens):
+            configs.append(client.config)
+            return DeepSeekResponse(content="PASS", model=client.config.model)
+
+        proxy = DeepSeekProxy(DeepSeekClient(test_config(thinking_enabled=True, reasoning_effort="max")))
+        with patch.object(DeepSeekClient, "chat_tools", new=fake_chat_tools):
+            response = proxy.complete_tools(
+                [{"role": "user", "content": "classify"}],
+                tools=[],
+                tool_choice="none",
+                timeout_seconds=10.0,
+                max_tokens=512,
+                thinking_enabled=False,
+            )
+
+        self.assertEqual(response.content, "PASS")
+        self.assertFalse(configs[0].thinking_enabled)
+        self.assertIsNone(configs[0].reasoning_effort)
+        self.assertTrue(proxy.client.config.thinking_enabled)
+        self.assertEqual(proxy.client.config.reasoning_effort, "max")
+
     def test_json_mode_requires_prompt_to_mention_json(self):
         client = DeepSeekClient(test_config())
         with self.assertRaises(ValueError):

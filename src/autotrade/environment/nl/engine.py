@@ -20,7 +20,9 @@ from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.tools.base import ActionField, ActionSpec, ToolSchemaError
 
 MAX_TOOL_ROUNDS = 3
-ENUM_MAX_TOKENS = 128
+# Compatible providers may count hidden reasoning against this cap when they do
+# not support the per-call override; 128 can end before a one-word label appears.
+ENUM_MAX_TOKENS = 512
 ENUM_MAX_RESULTS = 5
 ENUM_SNIPPET_CHARS = 1000
 TEXT_RETRIEVE_TOOL = "text_retrieve"
@@ -280,6 +282,7 @@ class NLSubAgentEngine:
         prompt: str,
         request_kwargs: dict[str, object] | None = None,
         config: NLSubAgentConfig,
+        prefetched_evidence: list[dict[str, object]] | None = None,
     ) -> NLSubAgentResult:
         ts_code = str(ts_code or "").strip()
         task = NLSubAgentResult(ts_code=ts_code, task_id=new_id("nlsub"), state="failed")
@@ -292,9 +295,13 @@ class NLSubAgentEngine:
             prompt=prompt,
             request_kwargs=request_kwargs or {},
             config=config,
+            prefetched_evidence=prefetched_evidence or [],
         )
         candidate_terms = company_terms(task.company_context, ts_code)
-        evidence_seen: set[str] = set()
+        task.evidence.extend(prefetched_evidence or [])
+        evidence_seen = {
+            str(item.get("text_id", "")) for item in task.evidence if item.get("text_id")
+        }
         try:
             for round_index in range(1, config.max_tool_rounds + 1):
                 task.rounds = round_index
@@ -395,6 +402,11 @@ class NLSubAgentEngine:
                 max_tokens=config.max_tokens,
                 # Near the deadline a retry cannot fit: one bounded attempt only.
                 max_retries=0 if deadline_clamped else None,
+                # A prefetched enum is a direct, mechanically validated label;
+                # enum tasks that still plan retrieval retain configured reasoning.
+                thinking_enabled=(
+                    False if config.response_choices and config.max_tool_rounds == 0 else None
+                ),
             )
         except Exception as exc:
             detail.update(
@@ -424,6 +436,7 @@ class NLSubAgentEngine:
         prompt: str,
         request_kwargs: dict[str, object],
         config: NLSubAgentConfig,
+        prefetched_evidence: list[dict[str, object]],
     ) -> list[dict[str, str]]:
         body = {
             "request": {
@@ -440,6 +453,11 @@ class NLSubAgentEngine:
                 "values": list(config.response_choices),
                 "instruction": "Return exactly one listed value and no explanation.",
             }
+        if prefetched_evidence:
+            body["prefetched_evidence"] = [
+                _provider_evidence(item, config.max_evidence_snippet_chars)
+                for item in prefetched_evidence
+            ]
         return [
             {"role": "system", "content": SUB_AGENT_SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(body, ensure_ascii=False, sort_keys=True)},

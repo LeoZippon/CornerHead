@@ -41,6 +41,7 @@ class CandidateEvidenceState:
 
     revision: str
     match_count: int
+    evidence: tuple[dict[str, object], ...] = ()
 
 
 class TextRetriever:
@@ -214,20 +215,7 @@ class TextRetriever:
             # are appended on demand as the replay clock advances.
             self._candidate_bodies(corpus, index)
         self._prime_snippets(selected)
-        records = []
-        for row in selected.to_dict("records"):
-            records.append(
-                {
-                    "text_id": str(row.get("text_id", "")),
-                    "title": str(row.get("title", "")),
-                    "available_at": str(row.get("available_at", "")),
-                    "source_hash": str(row.get("source_hash", "")),
-                    "ts_codes": str(row.get("ts_codes", "")),
-                    "relevance": str(row.get("_relevance", "background")),
-                    "snippet": self._snippet(str(row.get("dataset", "")), str(row.get("text_id", ""))),
-                }
-            )
-        return records
+        return self._evidence_records(selected)
 
     def candidate_revision(
         self,
@@ -252,6 +240,7 @@ class TextRetriever:
         company_terms: list[str] | None = None,
         patterns: tuple[str, ...] = (),
         lookback_days: int | None = None,
+        max_results: int = 0,
     ) -> CandidateEvidenceState:
         """Hash and count the matching evidence visible inside a rolling PIT window."""
         if not str(ts_code or "").strip():
@@ -268,10 +257,34 @@ class TextRetriever:
             for row in ordered.itertuples(index=False, name=None):
                 digest.update("\x1f".join(row).encode("utf-8"))
                 digest.update(b"\n")
+        evidence: tuple[dict[str, object], ...] = ()
+        if max_results > 0 and not visible.empty:
+            selected = visible.copy()
+            selected["_relevance"] = "candidate"
+            selected["_rank"] = 40
+            sort_cols = ["_rank"] + (["available_at"] if "available_at" in selected.columns else [])
+            selected = selected.sort_values(sort_cols, ascending=[False] * len(sort_cols)).head(max_results)
+            self._prime_snippets(selected)
+            evidence = tuple(self._evidence_records(selected))
         return CandidateEvidenceState(
             revision=f"sha256:{digest.hexdigest()}",
             match_count=int(len(visible)),
+            evidence=evidence,
         )
+
+    def _evidence_records(self, rows: pd.DataFrame) -> list[dict[str, object]]:
+        return [
+            {
+                "text_id": str(row.get("text_id", "")),
+                "title": str(row.get("title", "")),
+                "available_at": str(row.get("available_at", "")),
+                "source_hash": str(row.get("source_hash", "")),
+                "ts_codes": str(row.get("ts_codes", "")),
+                "relevance": str(row.get("_relevance", "background")),
+                "snippet": self._snippet(str(row.get("dataset", "")), str(row.get("text_id", ""))),
+            }
+            for row in rows.to_dict("records")
+        ]
 
     def _matching_candidate_rows(
         self,
