@@ -350,6 +350,7 @@ META_LEARNING_INSTRUCTION = """\
 | `web_search` | engine, perspective, query, max_results? | 配置允许时用于元学习联网检索；`engine` 和 `perspective` 按工具 schema 与 run manifest 选择 |
 | `web_fetch` | url, max_chars?, use_proxy? | 元学习专用；宿主侧只读抓取公开 http/https 页面，默认直连；`use_proxy=true` 才允许使用 active 代理；GET-only，无登录、认证、POST、浏览器渲染或 JS 执行 |
 | `modification_check` | （无） | 检查正则化改动是否在约束内 |
+| `ask_user` | question | 关键方向分叉时向研究者提交一个问题并等待答复；无人值守立即返回 unattended，由你自主决策 |
 | `done` | （无） | 写好 Taste、必要修改通过 modification_check 后结束会话 |
 
 一轮可以发起多个工具调用：相互独立的只读检索（grep/glob/web_search/web_fetch）可在同一轮并行发起；有状态修改按因果顺序单独调用。每个工具调用都会单独返回一条结果。

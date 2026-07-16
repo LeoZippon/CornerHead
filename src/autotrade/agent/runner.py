@@ -61,6 +61,9 @@ from .prompts import WRAP_UP_PROMPT, build_meta_learning_prompt, build_system_pr
 
 SESSION_MODES = ("fold", "meta_learning")
 TERMINAL_ACTIONS = {"done", "finish_fold"}
+# Consecutive main-conversation LLM failures before the session aborts as
+# llm_unavailable (matches the compactor's failure circuit default).
+_LLM_FAILURE_CIRCUIT = 3
 _CLEARED_TOOL_RESULT = json.dumps(
     {
         "observation": "cleared",
@@ -204,6 +207,7 @@ class AgentSessionRunner:
         self._excluded_backtest_seconds: float = 0.0
         self._researcher_wait_seconds: float = 0.0
         self._backtest_count: int = 0
+        self._accepted_steps: int = 0
         self._token_totals: dict[str, int] = {
             key: 0
             for key in (
@@ -247,6 +251,7 @@ class AgentSessionRunner:
         step_index = 1
         self.ctx.current_step_id = f"step_{step_index:03d}"
         wrap_up_sent = False
+        llm_failure_streak = 0
         finish_status = "deadline_timeout"
 
         while llm_calls < self.config.max_llm_calls:
@@ -269,8 +274,25 @@ class AgentSessionRunner:
             try:
                 response = self._next_turn(messages, remaining)
                 llm_calls += 1
+                llm_failure_streak = 0
             except LLMProxyError as exc:
                 llm_calls += 1
+                llm_failure_streak += 1
+                error_text = str(exc).lower()
+                # A context-window overflow is not retryable and no threshold-
+                # gated path will ever shrink the history (the char-based token
+                # estimate undercounts CJK ~2x): force one compaction now.
+                context_overflow = "context" in error_text and (
+                    "length" in error_text or "maximum" in error_text or "exceed" in error_text
+                )
+                if context_overflow:
+                    messages = self._compact_if_needed(messages, self._remaining_seconds(), force=True)
+                elif llm_failure_streak >= _LLM_FAILURE_CIRCUIT:
+                    # Provider outage circuit (mirrors the compactor's): without
+                    # it a fast-failing provider burns the whole llm_calls
+                    # budget in minutes and consumes the fold for nothing.
+                    finish_status = "llm_unavailable"
+                    break
                 observation = {
                     "observation": "llm_error",
                     "error": safe_error_summary(exc),
@@ -376,7 +398,9 @@ class AgentSessionRunner:
             self.search.read_spec,
             self.modification_check.spec,
             self.backtest.spec,
-            self.step_rollback.spec,
+            # Without a step tree the tool can only error; an undocumented
+            # always-failing tool is interaction noise, so hide it entirely.
+            *([self.step_rollback.spec] if self.ctx.manifest.get("step_tree_enabled") else []),
             self.finish_fold.spec,
             self.web_search.spec if self.web_search is not None else build_web_search_spec(self.web_search_engines),
             self.web_fetch.spec,
@@ -466,7 +490,8 @@ class AgentSessionRunner:
             "read": self._do_read,
             "modification_check": self._do_modification_check,
             "backtest": self._do_backtest,
-            "step_rollback": self._do_step_rollback,
+            # Mirrors the spec gate: without a step tree the tool is hidden.
+            **({"step_rollback": self._do_step_rollback} if self.ctx.manifest.get("step_tree_enabled") else {}),
             "finish_fold": self._do_finish_fold,
             "ask_user": self._do_ask_user,
             "web_search": self._do_web_search,
@@ -511,10 +536,17 @@ class AgentSessionRunner:
 
     def _backtest_budget(self) -> dict[str, int]:
         limit = int(self.config.max_backtests_per_fold)
+        steps_limit = int(self.config.max_steps)
         return {
             "backtests_used": self._backtest_count,
             "backtests_limit": limit,
             "backtests_remaining": max(0, limit - self._backtest_count),
+            # Formal-step budget (successful complete validations). The session
+            # ends when the cap is consumed, so the agent must see the counter
+            # instead of tallying its own validations against manifest budgets.
+            "steps_used": self._accepted_steps,
+            "steps_limit": steps_limit,
+            "steps_remaining": max(0, steps_limit - self._accepted_steps),
         }
 
     def _do_backtest(self, args: dict[str, object]) -> dict[str, object]:
@@ -566,6 +598,8 @@ class AgentSessionRunner:
                 )
             if directive and str(directive).strip():
                 researcher_directive = str(directive).strip()
+        if result.get("status") == "ok" and result.get("complete_validation"):
+            self._accepted_steps += 1
         observation = {
             "observation": "backtest",
             **agent_visible_backtest_result(result),
@@ -718,6 +752,10 @@ class AgentSessionRunner:
                 tool_choice="auto",
                 timeout_seconds=timeout,
                 max_tokens=self.config.max_response_tokens,
+                # Provider-internal retries multiply the timeout; disable them
+                # when a second attempt could not fit the remaining deadline so
+                # the "worst overrun is one bounded call" invariant holds.
+                max_retries=0 if timeout * 2.0 > max(remaining, 1.0) else None,
             )
         except LLMProxyError as exc:
             detail.update(
@@ -973,10 +1011,14 @@ class AgentSessionRunner:
     def _effective_deadline_at(self) -> datetime:
         return datetime.now(timezone.utc) + timedelta(seconds=max(0.0, self._remaining_seconds()))
 
-    def _compact_if_needed(self, messages: list[dict[str, str]], remaining: float) -> list[dict[str, str]]:
+    def _compact_if_needed(
+        self, messages: list[dict[str, str]], remaining: float, *, force: bool = False
+    ) -> list[dict[str, str]]:
         if self.compactor is None:
             return messages
-        result = self.compactor.compact(messages, remaining_seconds=remaining, step_id=self.ctx.current_step_id)
+        result = self.compactor.compact(
+            messages, remaining_seconds=remaining, step_id=self.ctx.current_step_id, force=force
+        )
         if result is None:
             return messages
         self.ctx.trace.emit("context_compaction", result.event, step_id=self.ctx.current_step_id)

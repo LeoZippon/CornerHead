@@ -78,7 +78,12 @@ class ContextCompactor:
         self.compaction_count = 0
         self.compaction_attempts = 0
 
-    def should_compact(self, messages: list[dict[str, str]], *, remaining_seconds: float) -> tuple[bool, dict[str, object]]:
+    def should_compact(
+        self, messages: list[dict[str, str]], *, remaining_seconds: float, force: bool = False
+    ) -> tuple[bool, dict[str, object]]:
+        """``force`` bypasses the size heuristics only (a provider context-length
+        error is ground truth that the char-based estimate undercounted); the
+        call-limit, failure-circuit and structural guards still apply."""
         estimated_tokens = estimate_messages_tokens(messages)
         non_summary_count = len([message for message in messages[1:] if not is_compaction_message(message)])
         reason = {
@@ -101,9 +106,9 @@ class ContextCompactor:
             return False, {**reason, "skip_reason": "not_enough_messages"}
         if non_summary_count <= self.config.keep_recent_messages:
             return False, {**reason, "skip_reason": "nothing_to_compact"}
-        if estimated_tokens < self.config.token_threshold:
+        if not force and estimated_tokens < self.config.token_threshold:
             return False, {**reason, "skip_reason": "below_token_threshold"}
-        return True, {**reason, "trigger_reason": "estimated_tokens"}
+        return True, {**reason, "trigger_reason": "forced_context_overflow" if force else "estimated_tokens"}
 
     def compact(
         self,
@@ -111,8 +116,9 @@ class ContextCompactor:
         *,
         remaining_seconds: float,
         step_id: str | None,
+        force: bool = False,
     ) -> ContextCompactionResult | None:
-        should_compact, decision = self.should_compact(messages, remaining_seconds=remaining_seconds)
+        should_compact, decision = self.should_compact(messages, remaining_seconds=remaining_seconds, force=force)
         if not should_compact:
             return None
 
