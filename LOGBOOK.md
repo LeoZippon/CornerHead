@@ -1682,3 +1682,14 @@
 - Fable 对抗复审在自批次中定位 3 个实质缺陷并已修复：(F1) `ensure_trade_cal_coverage` 在数据集循环前可能写湖，空响应下仍退出 75 恢复世代——现返回是否写入并计入无变更判定；(F2) 收缩覆盖被拒（`blocked_shrink_overwrite`，数据完整性告警）曾并入"零行未就绪"分类——现单独计数并无条件 fail-fast，不受 `--zero-rows-not-ready` 影响；(F3) `trade_count`/`benchmark` 因公开 manifest 白名单缺项从未真正落入开发历史——已补白名单。
 - 低危加固：`order_lifecycle` 计数键 `submitted`→`total`（消除与订单状态同名的潜在重复计数）；退出路径诊断措辞不再断言"全部来自区间末强平"（维保强平另计）；`unknown_position_row_key` advisory 提示自建行可忽略；收尾提示注明 Step 树"若启用"。已确认收口项：run 内恢复免重跑的表述经 `covering_complete_validation` 双 hash + `step_rollback` 默认还原 models/ 验证成立；测试揭示封存、PIT 带宽预算均未回归。
 - Validation：全量 tests/unit 862 passed + 41 subtests（112.57s）；`git diff --check` clean。
+
+2026-07-16 全仓库设计原则合规扫描与修复（4 个 Sub Agent 并行扫描：环境核心/Agent+Pipeline/数据层/控制台运维）
+
+- 前端更新：静态 SPA 已同步至前端服务器，console 重启加载新 API；实测按 Epoch 指标与全周期统计已在线（lzp-test18 E1 +14.87%/E2 +11.51%/E3 +0.08% 分列，E1 全年 Sharpe 0.60、β 0.88、超额 −0.64%）。
+- Agent 会话稳态（扫描确认后修复）：主对话 provider 调用按剩余截止时间钳制内部重试（"最坏超时为一次有界调用"不再被 3 倍重试破坏）；连续 3 次失败熔断为 `llm_unavailable`（故障提供方不再烧光 200 次调用预算）；上下文超长错误强制一次压缩（绕过 CJK 低估 ~2x 的 token 估计阈值，保留熔断）；backtest 观察回显 `steps_used/limit/remaining`；`step_rollback` 仅在启用 Step 树时注册；meta 工具表补 `ask_user` 行。
+- 环境核心：滑点成交价钳制进当日涨跌停区间（滑点是流动性假设，不打印交易所不可能的价格；含区间末强平路径）；删除无生产者的 `_ACTION_ALIASES` 兼容映射与死字段 `Order.source_artifacts`（orders.parquet 少一恒空列）；`_rank_cross_section` 向量化（每次回放每日 ~5k 行的纯 Python 循环消除）；NL 可见索引缓存改按数据集 cutoff 签名（节点间的每个 tick 复用同一物化切片，不再按 tick 重建百万行帧）。
+- 数据层：`forecast_vip/express_vip` ann_month 整月重拉补 `allow_key_removal_overwrite=True`（与全部整分区兄弟路径一致；update_flag 原地替代/撤回不再永久卡死当月刷新，防缩水护栏保留）。经证据核查后跳过：09:20 事件/资金审计实测 2m40s 完成于 09:25 闸门前，且缩小数据集范围会破坏研究发布消费的全域状态文件契约——不改。
+- 控制台：trace 分页对超过页预算的单行事件跳行前进（此前 SSE 与回放加载器会在同一 offset 永久空转）；创建实验的并发上限检查提前到建目录之前（拒绝不再留下半创建目录导致重试撞 "already exists"）。
+- 复审回退：backtest 失败路径的 `host_peak_rss_bytes` 记录实为错误路径必需（非重复赋值），已恢复并加注释。
+- 其余扫描结论：4 份报告均判定总体合规；明确不修（成本>收益）：快照分钟构建整窗内存（500G 主机非瓶颈）、竞价缺 Bar 市价单不对称（罕见数据缺口、方向保守）、NL legacy keywords 映射（有测试的受支持行为）、盲竞价 tick 市价单不冻结资金（提交-成交窗口小、方向保守，已知事项待后续评估按涨停价冻结）。
+- Validation：全量 tests/unit 868 passed + 41 subtests（113s）；`git diff --check` clean；PROMPTS.md 重导出。
