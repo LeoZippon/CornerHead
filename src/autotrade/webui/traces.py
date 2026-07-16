@@ -51,7 +51,24 @@ def read_trace_page(path: Path, *, offset: int = 0, max_bytes: int = DEFAULT_PAG
     with path.open("rb") as handle:
         handle.seek(offset)
         chunk = handle.read(max_bytes)
-    consumed = chunk.rfind(b"\n") + 1
+        consumed = chunk.rfind(b"\n") + 1
+        if consumed <= 0 and chunk and offset + len(chunk) < size:
+            # A single event line larger than the page budget: without progress
+            # the SSE stream and the replay loader would re-request this offset
+            # forever. Skip past the oversized line (mirrors the tail reader's
+            # truncation handling) and surface a placeholder event.
+            while True:
+                more = handle.read(max_bytes)
+                if not more:
+                    break
+                newline = more.find(b"\n")
+                if newline >= 0:
+                    skipped_to = handle.tell() - len(more) + newline + 1
+                    return {
+                        "events": [{"raw": f"<oversized event skipped: {skipped_to - offset} bytes>"}],
+                        "next_offset": skipped_to,
+                        "eof": skipped_to >= size,
+                    }
     if consumed <= 0:
         return {"events": [], "next_offset": offset, "eof": offset + len(chunk) >= size and not chunk}
     events: list[dict[str, object]] = []

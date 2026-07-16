@@ -152,6 +152,15 @@ class ExperimentManager:
         experiment_dir = self.experiments_root / experiment_id
         if experiment_dir.exists():
             raise ManagerError(f"experiment {experiment_id!r} already exists")
+        # Check the running cap BEFORE any directory is created: the same check
+        # inside start_worker would otherwise leave a half-created experiment
+        # whose retry then dead-ends on "already exists". Race-free with the
+        # later spawn — the whole method runs under self._mutate.
+        running = self.running_experiments()
+        if len(running) >= MAX_RUNNING_EXPERIMENTS:
+            raise ManagerError(
+                f"parallel experiment cap reached ({MAX_RUNNING_EXPERIMENTS}); running: {', '.join(sorted(running))}"
+            )
         merged = dict(params)
         merged["experiment_id"] = experiment_id
         # Force (never setdefault): callers must not redirect where experiments

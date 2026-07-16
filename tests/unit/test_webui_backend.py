@@ -343,6 +343,21 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(page["events"], [])
         self.assertEqual(page["next_offset"], first["next_offset"])
 
+    def test_trace_page_skips_an_oversized_event_line(self) -> None:
+        # A single event line larger than the page budget must not stall the
+        # pager at the same offset forever (live SSE + replay loader progress).
+        path = self.experiments_root / "oversized.jsonl"
+        path.write_text(
+            json.dumps({"seq": 0, "payload": "x" * 4000}) + "\n" + json.dumps({"seq": 1}) + "\n",
+            encoding="utf-8",
+        )
+        page = read_trace_page(path, offset=0, max_bytes=256)
+        self.assertGreater(page["next_offset"], 0)
+        self.assertIn("oversized", str(page["events"][0].get("raw")))
+        follow = read_trace_page(path, offset=page["next_offset"], max_bytes=256)
+        self.assertEqual([event.get("seq") for event in follow["events"]], [1])
+        self.assertTrue(follow["eof"])
+
     def test_trace_run_id_traversal_is_rejected(self) -> None:
         outside = self.experiments_root / "exp_other" / "artifacts" / "run_evil"
         outside.mkdir(parents=True, exist_ok=True)
@@ -409,6 +424,29 @@ class WebuiBackendTest(unittest.TestCase):
         unknown = self.client.post("/api/experiments", json={"params": {**params, "experiment_id": "x2", "bogus": 1}})
         self.assertEqual(unknown.status_code, 400)
         self.assertIn("unknown experiment parameters", unknown.json()["detail"])
+
+    def test_create_rejected_by_running_cap_leaves_no_directory(self) -> None:
+        from autotrade.webui import manager as manager_module
+
+        with patch.object(
+            ExperimentManager, "running_experiments", return_value=["a", "b", "c", "d", "e"]
+        ), patch.object(manager_module, "MAX_RUNNING_EXPERIMENTS", 5):
+            response = self.client.post(
+                "/api/experiments",
+                json={
+                    "params": {
+                        "experiment_id": "exp_capped",
+                        "first_test_period": "2022Q1",
+                        "last_test_period": "2022Q1",
+                        "heldout_first_period": "2023Q1",
+                        "heldout_last_period": "2023Q1",
+                    }
+                },
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("cap", response.json()["detail"])
+        # No half-created experiment: a later retry must not hit "already exists".
+        self.assertFalse((self.experiments_root / "exp_capped").exists())
 
     def test_create_experiment_rejects_hidden_params_and_forces_roots(self) -> None:
         base = {
