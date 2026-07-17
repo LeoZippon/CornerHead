@@ -79,8 +79,15 @@ class ExperimentPipeline:
         self._raw_dir = Path(provider_raw_dir) if provider_raw_dir is not None else None
         # Identical builds recur constantly (adjacent folds share the decision
         # snapshot anchor; multi-epoch reruns are snapshot-invariant) — cache
-        # them per experiment and hardlink into each run's sandbox.
-        self.snapshots = CachingSnapshotProvider(snapshots, config.experiment_dir / "snapshot_cache")
+        # them and hardlink into each run's sandbox. The key is fully
+        # content-derived (parts + provider config + raw-lake generation +
+        # format version) and builds are cross-process single-flighted, so the
+        # cache is SHARED across experiments under one root: parallel
+        # experiments over the same windows reuse each other's builds
+        # (measured: 8.1GB and ~6.5min/fold duplicated between two live
+        # experiments). The dot-dir stays invisible to the console listing;
+        # clear it manually when no experiments run if disk ever demands.
+        self.snapshots = CachingSnapshotProvider(snapshots, config.experiment_dir.parent / ".snapshot_cache")
         self.agent_factory = agent_factory
         self.proxy = proxy
         self.nl_proxy = nl_proxy

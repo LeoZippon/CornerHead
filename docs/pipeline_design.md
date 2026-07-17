@@ -421,7 +421,6 @@ experiments/<experiment_id>/
   research_release/
     manifest.json
     quality/
-  snapshot_cache/
   reports/
   hitl/
 ```
@@ -435,7 +434,7 @@ experiments/<experiment_id>/
 | `meta_learning/` | Pipeline | 元学习 Taste；trace 由账本 `agent_trace_ref` 指向 canonical run 目录 |
 | `artifacts/<run_id>/` | Environment | Sandbox run manifest、trace、results、logs |
 | `research_release/` | Pipeline | 实验固定的数据 generation 与质量状态；恢复时原样复用 |
-| `snapshot_cache/` | Pipeline | 实验内决策快照/回放槽构建缓存（见下） |
+| `<experiments_root>/.snapshot_cache/` | Pipeline | 跨实验共享的决策快照/回放槽构建缓存：键完全由内容（构件+提供方配置+raw 世代+格式版本）派生并跨进程 single-flight，并行实验同窗口互相复用；点前缀目录不进入控制台实验列表，无实验运行时可手动清理（见下） |
 | `reports/` | reporting 脚本 | 实验图表和汇总 |
 | `hitl/` | 交互式 worker / Web 后端 | HITL 控制面文件与 Fold 分析（见第 5 章） |
 

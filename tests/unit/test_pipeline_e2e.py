@@ -972,7 +972,7 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual(calls["decision"], decision_builds)
             self.assertEqual(calls["replay"], replay_builds)
             self.assertEqual(second.fold_status, "frozen")
-            cache_entries = [p for p in (config.experiment_dir / "snapshot_cache").iterdir() if not p.name.startswith(".")]
+            cache_entries = [p for p in (config.experiment_dir.parent / ".snapshot_cache").iterdir() if not p.name.startswith(".")]
             self.assertEqual(len(cache_entries), decision_builds + replay_builds)
 
     def test_fold_rejects_generation_switch_before_agent_or_container_start(self):
