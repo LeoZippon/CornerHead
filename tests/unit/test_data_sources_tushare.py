@@ -2208,7 +2208,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
 
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=EmptyTradeDateClient()):
-            with self.assertRaisesRegex(RuntimeError, "required event/flow partitions returned zero rows"):
+            with self.assertRaisesRegex(RuntimeError, "required event/flow partitions returned zero or incomplete rows"):
                 download.download_event_flow(args)
 
     def test_event_flow_zero_rows_not_ready_exits_75_without_mutation(self):
@@ -2232,6 +2232,64 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertIn("not_ready_no_mutation", output.getvalue())
         self.assertFalse((self.raw_dir / "margin" / "trade_date=20200102.parquet").exists())
+
+    def test_margin_partial_exchange_day_is_not_ready_not_committed(self):
+        # Exchanges publish independently; an SSE-only margin day poisons
+        # market-wide aggregates and must ride the not-ready contract.
+        class PartialMarginClient(EmptyTradeDateClient):
+            def query(self, api_name, params=None, fields="", retries=5):
+                if api_name != "margin":
+                    return super().query(api_name, params, fields, retries)
+                self.calls.append((api_name, dict(params or {})))
+                columns = fields.split(",")
+                row = ["20260529" if col == "trade_date" else "SSE" if col == "exchange_id" else "1.0" for col in columns]
+                return common.ApiResult(columns, [row], common.stable_hash({"partial": True}))
+
+        self._write_trade_cal("20260529")
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20260529",
+            end_date="20260529",
+            datasets=["margin"],
+            force=True,
+            page_limit=None,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+            zero_rows_not_ready=True,
+        )
+        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=PartialMarginClient()):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(download.download_event_flow(args), common.NO_MUTATION_RETRY_EXIT_CODE)
+        self.assertIn("missing exchanges ['BSE', 'SZSE']", output.getvalue())
+        self.assertFalse((self.raw_dir / "margin" / "trade_date=20260529.parquet").exists())
+
+    def test_margin_committed_partial_partition_is_reattempted_and_audited(self):
+        # Pre-BSE days need SSE+SZSE only; post-cutover days need all three.
+        self.assertEqual(common.margin_missing_exchanges("20230210", ["SSE", "SZSE"]), [])
+        self.assertEqual(common.margin_missing_exchanges("20230213", ["SSE", "SZSE"]), ["BSE"])
+
+        margin_dir = self.raw_dir / "margin"
+        margin_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"trade_date": ["20260529"], "exchange_id": ["SSE"], "rzye": [1.0]}).to_parquet(
+            margin_dir / "trade_date=20260529.parquet", index=False
+        )
+        # A covering non-force run must not skip the committed partial day.
+        client = EmptyTradeDateClient()
+        written, zero_skipped, blocked = download.download_event_trade_date_dataset(
+            client, self.raw_dir, common.EVENT_FLOW_SPECS["margin"], ["20260529"], False, None
+        )
+        self.assertEqual((written, zero_skipped), (0, 1))
+        self.assertEqual([api for api, _ in client.calls], ["margin"])
+
+        findings: list[tuple[str, str, str, dict]] = []
+        audit.audit_margin_exchange_completeness(
+            self.raw_dir, lambda sev, code, msg, details: findings.append((sev, code, msg, details))
+        )
+        self.assertEqual(len(findings), 1)
+        severity, code, _, details = findings[0]
+        self.assertEqual((severity, code), ("error", "margin_exchange_completeness"))
+        self.assertEqual(details["incomplete_days"], [{"trade_date": "20260529", "missing_exchanges": ["BSE", "SZSE"]}])
 
     def test_macro_static_full_writes_per_loop_registry_files(self):
         class RegistryClient(EmptyTradeDateClient):
@@ -2312,8 +2370,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             def query(self, api_name, params=None, fields="", retries=5):
                 if api_name == "margin":
                     columns = fields.split(",")
-                    row = ["20200102" if col == "trade_date" else "EX00" if col == "exchange_id" else 1.0 for col in columns]
-                    return common.ApiResult(columns, [row], common.stable_hash({"api_name": api_name}))
+                    # Exchange-complete (SSE+SZSE pre-BSE) so the completeness
+                    # guard passes and the shrink guard is what fires.
+                    rows = [
+                        ["20200102" if col == "trade_date" else exchange if col == "exchange_id" else 1.0 for col in columns]
+                        for exchange in ("SSE", "SZSE")
+                    ]
+                    return common.ApiResult(columns, rows, common.stable_hash({"api_name": api_name}))
                 return super().query(api_name, params, fields, retries)
 
         args = argparse.Namespace(
@@ -2344,8 +2407,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             def query(self, api_name, params=None, fields="", retries=5):
                 if api_name == "margin":
                     columns = fields.split(",")
-                    row = ["20200102" if col == "trade_date" else "SSE" if col == "exchange_id" else 1.0 for col in columns]
-                    return common.ApiResult(columns, [row], common.stable_hash({"api_name": api_name}))
+                    # Both pre-BSE required exchanges: the day is complete and commits.
+                    rows = [
+                        ["20200102" if col == "trade_date" else exchange if col == "exchange_id" else 1.0 for col in columns]
+                        for exchange in ("SSE", "SZSE")
+                    ]
+                    return common.ApiResult(columns, rows, common.stable_hash({"api_name": api_name}))
                 return super().query(api_name, params, fields, retries)
 
         args = argparse.Namespace(

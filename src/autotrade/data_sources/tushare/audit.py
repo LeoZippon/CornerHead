@@ -2250,7 +2250,30 @@ def event_partition_prefix(spec: EventDataset) -> str:
         return "date"
     raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {spec.api_name}")
 
+def audit_margin_exchange_completeness(raw_dir: Path, add) -> None:
+    # Exchange-level margin days must carry every publishing exchange
+    # (SSE+SZSE, plus BSE from 20230213): partial days poison market-wide
+    # aggregates and the downloader refuses to commit them, so any committed
+    # partial partition is a data-integrity error needing manual repair.
+    incomplete: list[dict[str, Any]] = []
+    for path in sorted((raw_dir / "margin").glob("trade_date=*.parquet")):
+        trade_date = path.stem.split("=", 1)[1]
+        present = pd.read_parquet(path, columns=["exchange_id"])["exchange_id"]
+        missing = margin_missing_exchanges(trade_date, present)
+        if missing:
+            incomplete.append({"trade_date": trade_date, "missing_exchanges": missing})
+    if incomplete:
+        add(
+            "error",
+            "margin_exchange_completeness",
+            f"margin partitions missing required exchange rows: {len(incomplete)} day(s)",
+            {"incomplete_days": incomplete[:20], "incomplete_day_count": len(incomplete)},
+        )
+
+
 def audit_event_dataset(raw_dir: Path, spec: EventDataset, expected_paths: set[Path], add) -> None:
+    if spec.api_name == "margin":
+        audit_margin_exchange_completeness(raw_dir, add)
     audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
         domain="event",
         exact_limit_rows=frozenset({spec.page_limit, 5000, 6000, 10000}),

@@ -1192,9 +1192,9 @@ def download_event_flow(args: argparse.Namespace) -> int:
                     "zero_row_partitions": required_zero_skipped,
                 }, ensure_ascii=False, sort_keys=True))
                 return NO_MUTATION_RETRY_EXIT_CODE
-            print(f"required event/flow partitions still empty; deferred to the retry job: {required_zero_skipped}")
+            print(f"required event/flow partitions still empty/incomplete; deferred to the retry job: {required_zero_skipped}")
         else:
-            raise RuntimeError(f"required event/flow partitions returned zero rows and were not written: {required_zero_skipped}")
+            raise RuntimeError(f"required event/flow partitions returned zero or incomplete rows and were not written: {required_zero_skipped}")
     print(f"event/flow download finished under {raw_dir}")
     return 0
 
@@ -1231,7 +1231,13 @@ def download_event_trade_date_dataset(
     for index, trade_date in enumerate(trade_dates, start=1):
         path = raw_dir / spec.api_name / f"trade_date={trade_date}.parquet"
         if path.exists() and not force:
-            if spec.zero_rows_ok or parquet_rows(path) > 0:
+            complete = spec.zero_rows_ok or parquet_rows(path) > 0
+            if complete and spec.api_name == "margin":
+                # A committed partial day (missing exchanges) must be re-attempted
+                # by any covering run, not treated as done.
+                present = pd.read_parquet(path, columns=["exchange_id"])["exchange_id"]
+                complete = not margin_missing_exchanges(trade_date, present)
+            if complete:
                 skipped += 1
                 if index % 250 == 0:
                     print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -1246,6 +1252,16 @@ def download_event_trade_date_dataset(
             total_pages += pages
             print(f"{spec.api_name} trade_date={trade_date} returned zero rows; skipped_write")
             continue
+        if spec.api_name == "margin" and not df.empty:
+            missing = margin_missing_exchanges(trade_date, df["exchange_id"])
+            if missing:
+                # Exchanges publish independently; a partial response poisons
+                # market-wide aggregates, so it rides the same not-ready/retry
+                # contract as an empty one instead of being committed.
+                zero_skipped += 1
+                total_pages += pages
+                print(f"margin trade_date={trade_date} missing exchanges {missing}; skipped_write")
+                continue
         did_write = write_parquet_revision_aware(
             path,
             df,

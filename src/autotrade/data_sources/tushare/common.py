@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 import pandas as pd
 import requests
 
@@ -2103,6 +2103,18 @@ def selected_board_hot_is_new(args: argparse.Namespace) -> list[str]:
 
 def local_time(value: str, clock: str) -> str:
     return f"{value[:4]}-{value[4:6]}-{value[6:8]} {clock}+08:00"
+
+# BSE margin trading opened 2023-02-13; before that the exchange-level margin
+# table legitimately carries SSE+SZSE only. A day missing a required exchange
+# poisons market-wide aggregates (measured: 2026-06 Σrzye −49% craters from
+# SSE-only days), so partial days must never be committed.
+MARGIN_BSE_START = "20230213"
+
+def margin_missing_exchanges(trade_date: str, present: Iterable[str]) -> list[str]:
+    required = {"SSE", "SZSE"}
+    if str(trade_date) >= MARGIN_BSE_START:
+        required.add("BSE")
+    return sorted(required - {str(item) for item in present})
 
 def event_available_at(value: str, api_name: str) -> tuple[str, str]:
     text = str(value or "").strip()
