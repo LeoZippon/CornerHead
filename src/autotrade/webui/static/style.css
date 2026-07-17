@@ -487,9 +487,27 @@ details.advanced .form-grid { margin-top: 0.55rem; }
 /* ---- step tree ---- */
 .step-toolbar { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.6rem; flex-wrap: wrap; }
 .step-filter { flex: 0 1 280px; min-width: 160px; }
-.step-tree { margin-top: 0.5rem; font-size: 0.86rem; max-height: 62vh; overflow-y: auto;
+.step-tree { margin-top: 0.5rem; font-size: 0.86rem; max-height: 62vh; overflow: auto;
   border: 1px solid var(--border); border-radius: 8px; padding: 0.25rem 0; }
-.step-node { display: flex; align-items: center; gap: 0.5rem; padding: 0.26rem 0.6rem; cursor: pointer; }
+.step-node { display: flex; align-items: center; gap: 0.5rem; padding: 0.26rem 0.6rem; cursor: pointer;
+  /* Deep trees grow rightward and scroll instead of clipping (fault tolerance);
+     min-width keeps hover/selection backgrounds spanning the visible width. */
+  width: max-content; min-width: 100%; }
+/* lineage rails: one 20px column per tree level, drawn edge-to-edge so the
+   lines join seamlessly across rows */
+.step-rail { flex: none; width: 20px; align-self: stretch; margin: -0.26rem 0; }
+.step-rail.open, .step-rail.chain {
+  background: linear-gradient(var(--border), var(--border)) 9px 0 / 1px 100% no-repeat; }
+.step-rail.tee {
+  background:
+    linear-gradient(var(--border), var(--border)) 9px 0 / 1px 100% no-repeat,
+    linear-gradient(var(--border), var(--border)) 10px 50% / 9px 1px no-repeat; }
+.step-rail.last {
+  background:
+    linear-gradient(var(--border), var(--border)) 9px 0 / 1px 50% no-repeat,
+    linear-gradient(var(--border), var(--border)) 10px 50% / 9px 1px no-repeat; }
+/* a chain whose branch ends here: rail stops at the row's own center */
+.step-rail.end { background: linear-gradient(var(--border), var(--border)) 9px 0 / 1px 50% no-repeat; }
 .step-node:hover { background: var(--chip-bg); }
 .step-node.failed { color: var(--muted); }
 .step-node.failed .step-label { text-decoration: line-through; }
@@ -499,7 +517,6 @@ details.advanced .form-grid { margin-top: 0.55rem; }
 .step-toggle.leaf { cursor: default; text-align: center; }
 .step-label { font-family: var(--mono, ui-monospace, monospace); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .step-chip { flex: none; color: var(--muted); font-size: 0.8rem; padding: 0 0.35rem; border-radius: 4px; background: var(--chip-bg); }
-.step-fork { flex: none; color: var(--muted); cursor: help; }
 .step-time { flex: none; margin-left: auto; color: var(--muted); font-size: 0.78rem; }
 .step-actions { flex: none; display: flex; gap: 0.3rem; }
 #step-tip { display: none; position: fixed; z-index: 200; min-width: 300px; max-width: 460px; pointer-events: none;

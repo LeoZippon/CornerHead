@@ -2327,15 +2327,31 @@ function stepTreeSection(detail, payload) {
         }
       }
     }
-    const walk = (parentKey, depth, parentForked = false) => {
-      for (const node of byParent.get(parentKey) || []) {
-        if (!visible.has(node.node_id)) continue;
+    // Connector-rail layout. Lineage chains dominate this tree (each Step
+    // parents on the previous one; measured trees run 16+ ancestors deep with
+    // <=6 forks), so columns advance ONLY at forks — a chain renders as a
+    // straight vertical rail, and every parent-child edge is drawn explicitly:
+    // "tee"/"last" elbows attach fork children, "chain" rails attach an only
+    // child to the row above, and open sibling rails run past nested subtrees.
+    const walk = (parentKey, guides, forked, inheritedOpen) => {
+      const siblings = (byParent.get(parentKey) || []).filter((node) => visible.has(node.node_id));
+      siblings.forEach((node, index) => {
+        const isLast = index === siblings.length - 1;
         const children = (byParent.get(node.node_id) || []).filter((child) => visible.has(child.node_id));
         // A filter overrides manual collapse: hits must never be hidden.
         const collapsed = !query && state.collapsed.has(node.node_id);
-        rows.append(stepTreeRow(detail, payload, node, depth, {
+        // Does this node's rail column stay live below its own row? Either a
+        // later sibling branch still hangs below (fork siblings), the ancestor
+        // fork's rail passes through (inherited along a chain), or the chain
+        // itself continues with an only child.
+        const open = forked ? !isLast : inheritedOpen;
+        const continues = !collapsed && children.length === 1;
+        rows.append(stepTreeRow(detail, payload, node, {
+          guides,
+          connector: !parentKey ? "" : forked
+            ? (open || continues ? "tee" : "last")
+            : (open || continues ? "chain" : "chain end"),
           childCount: children.length,
-          forkChild: parentForked,
           collapsed,
           toggle: () => {
             if (state.collapsed.has(node.node_id)) state.collapsed.delete(node.node_id);
@@ -2343,16 +2359,20 @@ function stepTreeSection(detail, payload) {
             render();
           },
         }));
-        // Lineage chains dominate this tree (each Step parents on the previous
-        // one; measured trees run 16+ ancestors deep with <=6 forks), so
-        // ancestor-count indentation grows without bound while encoding almost
-        // nothing. Indent only at forks: an only child continues at its
-        // parent's depth; fork children step one level in (capped) and carry a
-        // branch marker so sibling groups don't read as one chain.
-        if (!collapsed) walk(node.node_id, children.length > 1 ? Math.min(depth + 1, 8) : depth, children.length > 1);
-      }
+        if (!collapsed) {
+          const childForked = children.length > 1;
+          // A fork opens a new column; this node's column keeps its rail
+          // through the nested subtree while `open` (sibling/ancestor rail).
+          walk(
+            node.node_id,
+            childForked && parentKey ? [...guides, open] : guides,
+            childForked,
+            open,
+          );
+        }
+      });
     };
-    walk("", 0);
+    walk("", [], false, false);
     if (!rows.children.length) rows.append(el("div", { class: "empty" }, "没有命中的节点"));
     const failed = nodes.length - validated;
     summary.textContent = query
@@ -2386,7 +2406,7 @@ function stepTreeSection(detail, payload) {
   );
 }
 
-function stepTreeRow(detail, payload, node, depth, { childCount, forkChild, collapsed, toggle }) {
+function stepTreeRow(detail, payload, node, { guides, connector, childCount, collapsed, toggle }) {
   const metrics = node.metrics || {};
   const failed = node.status === "failed";
   const zipUrl = `/api/experiments/${encodeURIComponent(detail.experiment_id)}/steps/${encodeURIComponent(node.node_id)}/source.zip`;
@@ -2410,21 +2430,20 @@ function stepTreeRow(detail, payload, node, depth, { childCount, forkChild, coll
   }
   const row = el("div", {
     class: `step-node${failed ? " failed" : ""}`,
-    style: `padding-left:${8 + depth * 20}px`,
     onclick: () => { hideStepTip(); openStepNodeModal(detail, payload, node); },
     onmouseenter: (event) => showStepTip(node, event.currentTarget),
     onmouseleave: hideStepTip,
   },
+    // Lineage rails: ancestor columns (open = a later sibling still hangs
+    // below), then this row's own connector to its parent.
+    ...guides.map((open) => el("span", { class: `step-rail${open ? " open" : ""}` })),
+    connector ? el("span", { class: `step-rail ${connector}` }) : null,
     childCount
       ? el("button", {
           class: "step-toggle", title: collapsed ? `展开 ${childCount} 个子节点` : "折叠子树",
           onclick: (event) => { event.stopPropagation(); hideStepTip(); toggle(); },
         }, collapsed ? "▸" : "▾")
       : el("span", { class: "step-toggle leaf" }, "·"),
-    // Only forks indent, so mark each fork child as the start of an
-    // alternative branch — without it, sibling subtrees at the same indent
-    // would read as one continuous chain.
-    forkChild ? el("span", { class: "step-fork", title: "自上方节点分支" }, "⑂") : null,
     el("span", { class: "step-label" }, `${node.fold_id || node.fold_ref || "?"} · ${node.result_name || node.node_id}`),
     collapsed ? el("span", { class: "step-chip" }, `+${childCount}`) : null,
     Number.isFinite(metrics.total_return)
