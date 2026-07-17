@@ -501,6 +501,50 @@ class NLSubAgentEngineTest(unittest.TestCase):
             hits = retriever.search("shared rare signal", max_results=5)
             self.assertEqual({hit["text_id"] for hit in hits}, {"fz"})
 
+    def test_event_gate_regex_verdicts_are_memoized_per_corpus(self):
+        # The event gate runs every ctx.nl() call; (pattern, row) verdicts are
+        # immutable, so repeat calls must not re-regex already-tested rows
+        # (measured pre-fix: full-corpus rescans = 78% of NL wall).
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            index = pd.DataFrame([
+                {"text_id": "t1", "dataset": "anns_d", "ts_codes": "000001.SZ",
+                 "title": "重大诉讼公告", "available_at": "2025-03-01T18:00:00+08:00"},
+                {"text_id": "t2", "dataset": "anns_d", "ts_codes": "000001.SZ",
+                 "title": "日常经营公告", "available_at": "2025-03-02T18:00:00+08:00"},
+            ])
+            idx_path = tmp / "text_index.parquet"; index.to_parquet(idx_path, index=False)
+            lib = tmp / "text_library"; lib.mkdir()
+            pd.DataFrame({"text_id": ["t1", "t2"], "body": ["涉及诉讼", "无关内容"]}).to_parquet(
+                lib / "anns_d.parquet", index=False
+            )
+            retriever = TextRetriever(
+                idx_path, lib, as_of=pd.Timestamp("2025-05-01T09:30:00+08:00").to_pydatetime()
+            )
+            first = retriever.candidate_evidence_state("000001.SZ", patterns=("诉讼",))
+            self.assertEqual(first.match_count, 1)
+            class SpyConnection:
+                # duckdb connection methods are read-only attributes, so spy via a
+                # delegating wrapper on the retriever's handle instead.
+                def __init__(self, inner):
+                    self.inner, self.queries = inner, []
+
+                def execute(self, query, *args, **kwargs):
+                    self.queries.append(query)
+                    return self.inner.execute(query, *args, **kwargs)
+
+                def __getattr__(self, name):
+                    return getattr(self.inner, name)
+
+            spy = SpyConnection(retriever._connection)
+            retriever._connection = spy
+            second = retriever.candidate_evidence_state("000001.SZ", patterns=("诉讼",))
+            self.assertEqual(second.revision, first.revision)
+            self.assertFalse(
+                [q for q in spy.queries if "candidate_bodies" in q],
+                "body regex re-ran on cached rows",
+            )
+
     def test_general_body_search_limit_counts_only_visible_matches(self):
         # The body-shard LIMIT must apply after the PIT visibility semi-join:
         # a burst of future-dated matching rows must not crowd a visible match

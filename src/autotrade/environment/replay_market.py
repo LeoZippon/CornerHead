@@ -382,12 +382,13 @@ def minute_rows_with_daily_fallback(
         & fallback["ts_code"].astype(str).isin(present_codes)
     ].copy()
     if not close_fallback.empty:
-        existing_keys = set(zip(minute_rows["ts_code"].astype(str), minute_rows["minute_key"].astype(str)))
+        # Every close_fallback candidate has minute_key == "15:00", so only the
+        # day's 15:00 rows can collide — keying the full ~700k-row day frame
+        # cost ~0.2s/day of pure waste in host_replay_overhead.
+        at_close = minute_rows[minute_rows["minute_key"].astype(str) == "15:00"]
+        existing_keys = set(at_close["ts_code"].astype(str))
         close_fallback = close_fallback[
-            [
-                (str(row.ts_code), str(row.minute_key)) not in existing_keys
-                for row in close_fallback.itertuples()
-            ]
+            [str(row.ts_code) not in existing_keys for row in close_fallback.itertuples()]
         ]
     if missing_rows.empty and close_fallback.empty:
         return minute_rows

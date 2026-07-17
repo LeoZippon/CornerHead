@@ -33,6 +33,11 @@ class _CandidateCorpus:
     index: pd.DataFrame
     bodies: pd.DataFrame | None = None
     loaded_body_ids: set[tuple[str, str]] = field(default_factory=set)
+    # Per-pattern regex verdicts keyed by corpus row label. Rows and bodies are
+    # immutable once in the corpus, so a (pattern, row) verdict never changes;
+    # the event gate only regexes rows it has never tested (measured: the gate
+    # re-scanned the full corpus every ctx.nl() call — 78% of NL wall).
+    match_cache: dict[str, dict[object, bool]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -296,30 +301,35 @@ class TextRetriever:
     ) -> pd.DataFrame:
         valid = tuple(validate_pattern(pattern) for pattern in patterns)
         combined = "|".join(f"(?:{pattern})" for pattern in valid)
-        matched = self._title_code_match(visible, combined)
-        bodies = self._candidate_bodies(corpus, visible)
-        if not bodies.empty:
-            visible_ids = set(visible["text_id"].astype(str))
-            body_frame = bodies[bodies["text_id"].isin(visible_ids)]
-            if not body_frame.empty:
-                with self._query_lock:
-                    try:
-                        self._connection.register("candidate_bodies", body_frame)
-                        body_ids = self._connection.execute(
-                            "SELECT DISTINCT text_id FROM candidate_bodies "
-                            "WHERE regexp_matches(body, ?, 'i')",
-                            [combined],
-                        ).fetchall()
-                    except duckdb.Error as exc:
-                        raise ValueError(
-                            f"text_retrieve body query failed (RE2/grep semantics): {exc}"
-                        ) from exc
-                    finally:
-                        self._connection.unregister("candidate_bodies")
-                matched = matched | visible["text_id"].astype(str).isin(
-                    str(row[0]) for row in body_ids
-                )
-        return visible[matched]
+        cache = corpus.match_cache.setdefault(combined, {})
+        pending = visible.loc[[label for label in visible.index if label not in cache]]
+        if not pending.empty:
+            matched = self._title_code_match(pending, combined)
+            bodies = self._candidate_bodies(corpus, pending)
+            body_match_ids: set[str] = set()
+            if not bodies.empty:
+                pending_ids = set(pending["text_id"].astype(str))
+                body_frame = bodies[bodies["text_id"].isin(pending_ids)]
+                if not body_frame.empty:
+                    with self._query_lock:
+                        try:
+                            self._connection.register("candidate_bodies", body_frame)
+                            body_ids = self._connection.execute(
+                                "SELECT DISTINCT text_id FROM candidate_bodies "
+                                "WHERE regexp_matches(body, ?, 'i')",
+                                [combined],
+                            ).fetchall()
+                        except duckdb.Error as exc:
+                            raise ValueError(
+                                f"text_retrieve body query failed (RE2/grep semantics): {exc}"
+                            ) from exc
+                        finally:
+                            self._connection.unregister("candidate_bodies")
+                    body_match_ids = {str(row[0]) for row in body_ids}
+            verdict = matched | pending["text_id"].astype(str).isin(body_match_ids)
+            for label, value in verdict.items():
+                cache[label] = bool(value)
+        return visible[pd.Series([cache[label] for label in visible.index], index=visible.index, dtype=bool)]
 
     def _candidate_key(self, ts_code: str, company_terms: list[str] | None) -> tuple[str, ...]:
         return tuple(_candidate_terms(ts_code, company_terms))
