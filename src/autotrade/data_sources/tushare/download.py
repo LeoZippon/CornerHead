@@ -722,6 +722,8 @@ def download_macro(args: argparse.Namespace) -> int:
             download_macro_date_year(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "date_year_by_curr_type":
             download_macro_date_year_by_curr_type(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), selected_libor_currencies(args), revision_ledger, allow_empty_revision_overwrite)
+        elif spec.strategy == "static_full":
+            download_macro_static_full(client, raw_dir, spec, macro_page_limit(spec, args.page_limit), revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "date_year_by_ts_code":
             if dataset == "index_global":
                 codes = selected_index_codes(args)
@@ -729,6 +731,8 @@ def download_macro(args: argparse.Namespace) -> int:
                 codes = selected_cn_index_codes(args)
             elif dataset == "fx_daily":
                 codes = selected_fx_codes(args)
+            elif dataset == "yc_cb":
+                codes = ["1001.CB"]  # ChinaBond treasury yield curve (spot + YTM rows)
             else:
                 raise RuntimeError(f"no ts_code universe defined for by-ts_code macro dataset {dataset!r}")
             download_macro_date_year_by_ts_code(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), codes, revision_ledger, allow_empty_revision_overwrite)
@@ -778,6 +782,42 @@ def prune_stale_range_files(canonical: Path) -> None:
         stale.unlink()
         meta.unlink(missing_ok=True)
         print(f"pruned stale range partition {stale}")
+
+def download_macro_static_full(
+    client: TuShareClient,
+    raw_dir: Path,
+    spec: MacroDataset,
+    page_limit: int,
+    revision_ledger: Path | str | None = None,
+    allow_empty_revision_overwrite: bool = False,
+) -> None:
+    """Full registry refresh: small reference tables (contract/bond registries,
+    announcement ledgers) are re-pulled whole on every run and written through
+    the revision-aware overwrite (key-removal accepted as source correction;
+    the disproportionate-shrink guard still blocks transient truncation)."""
+    loops = spec.loop_values or ("",)
+    for value in loops:
+        params = {spec.loop_param: value} if value else {}
+        name = f"{spec.loop_param}={safe_partition_value(value)}.parquet" if value else "full.parquet"
+        path = raw_dir / spec.api_name / name
+        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+        df = augment_macro_frame(frame(result), spec)
+        meta_params = dict(params)
+        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+        did_write = write_parquet_revision_aware(
+            path,
+            df,
+            api_name=spec.api_name,
+            params=meta_params,
+            fields=list(df.columns),
+            source_hash=result.source_hash,
+            key_columns=list(spec.key_columns),
+            revision_ledger=revision_ledger,
+            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+            allow_key_removal_overwrite=True,
+        )
+        print(f"{spec.api_name} {name} rows={len(df)} written={bool(did_write)}")
+
 
 def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
     windows = month_windows(start_date, end_date)

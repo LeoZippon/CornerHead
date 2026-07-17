@@ -749,6 +749,50 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(manifest["window_config"]["macro_months"], 2)
             self.assertEqual(manifest["domain_windows"]["macro"]["window_months"], 2)
 
+    def test_macro_registry_datasets_are_exempt_from_the_window_floor(self):
+        # Instrument registries (fut_basic/opt_basic/cb_basic) stay valid for the
+        # instrument's whole life: an old list_date must survive the macro window
+        # floor, while a future list_date stays PIT-hidden and a windowed daily
+        # dataset keeps the floor.
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            events_root = Path(tmp) / "fund_events"
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            write_fundamental_status(status_path)
+            write(
+                raw / "fut_basic" / "exchange=CFFEX.parquet",
+                pd.DataFrame([
+                    {"ts_code": "IF1005.CFX", "exchange": "CFFEX", "list_date": "20100416",
+                     "available_at": "2010-04-16T23:59:59+08:00", "available_at_rule": "conservative_date_eod"},
+                    {"ts_code": "IF2299.CFX", "exchange": "CFFEX", "list_date": "20220916",
+                     "available_at": "2022-09-16T23:59:59+08:00", "available_at_rule": "conservative_date_eod"},
+                ]),
+            )
+            write(
+                raw / "fut_daily" / "trade_date=20200108.parquet",
+                pd.DataFrame([{
+                    "ts_code": "IF2001.CFX", "trade_date": "20200108", "settle": 4100.0,
+                    "available_at": "2020-01-08T23:59:59+08:00", "available_at_rule": "conservative_date_eod",
+                }]),
+            )
+            out = Path(tmp) / "snap"
+            config = SnapshotConfig(
+                window_months=2,
+                events_datasets=(),
+                macro_datasets=("fut_basic", "fut_daily"),
+                text_datasets=("cctv_news",),
+                fundamental_datasets=("income_vip",),
+                include_intraday=False,
+                include_industry=False,
+            )
+            SnapshotBuilder(raw, events_root, status_path).build_decision_snapshot(DECISION, out, config)
+            macro = pd.read_parquet(out / "macro.parquet")
+            registry = macro[macro["dataset"] == "fut_basic"]
+            self.assertEqual(sorted(registry["ts_code"]), ["IF1005.CFX"])  # old kept, future hidden
+            self.assertTrue(macro[macro["dataset"] == "fut_daily"].empty)  # window floor still applies
+
     def test_fundamental_event_reader_filters_partitions_by_min_available_at(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "fund_events"

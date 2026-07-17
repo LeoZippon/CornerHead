@@ -52,6 +52,11 @@ from autotrade.environment.runtime import new_id, utc_now_iso
 
 SNAPSHOT_DOMAIN_WORKERS = 2
 _BOARD_TRADING_DATASETS = frozenset(BOARD_TRADING_DATASETS)
+# Instrument registries in the macro domain (contract/bond basics): rows stay
+# valid for the instrument's whole life, so the macro window floor must not
+# truncate them; per-row available_at (list date) still enforces PIT.
+MACRO_REGISTRY_DATASETS = frozenset({"fut_basic", "opt_basic", "cb_basic"})
+_REGISTRY_WINDOW_FLOOR = pd.Timestamp("1990-01-01", tz=CN_TZ)
 DomainBuildResult = tuple[dict[str, object], dict[str, object]]
 DomainBuildTask = tuple[
     str,
@@ -144,6 +149,18 @@ class SnapshotConfig:
         "repo_daily",
         "us_tycr",
         "us_trycr",
+        # Derivatives market context (non-tradable): CFFEX index-futures basis,
+        # option PCR/IV inputs, CB conversion premium + redemption ledger, and
+        # the CN treasury curve. The Agent computes the signals itself.
+        "fut_basic",
+        "fut_mapping",
+        "fut_daily",
+        "opt_basic",
+        "opt_daily",
+        "cb_basic",
+        "cb_daily",
+        "cb_call",
+        "yc_cb",
     )
     text_datasets: tuple[str, ...] = (
         "anns_d", "major_news", "cctv_news", "npr", "research_report", "report_rc",
@@ -1242,7 +1259,12 @@ class SnapshotBuilder:
             dataset_dir = self.raw_dir / dataset
             if not dataset_dir.exists():
                 raise FileNotFoundError(f"missing configured dataset directory: {dataset_dir}")
-            rows = self._read_dataset_window(dataset_dir, decision_time, window_start, nat_counts)
+            # Registry datasets (contract/bond basics) stay valid for the
+            # instrument's whole life and are tiny: exempt from the window
+            # floor. PIT is still enforced per row (available_at from the
+            # list date must be at or before decision_time).
+            floor = _REGISTRY_WINDOW_FLOOR if dataset in MACRO_REGISTRY_DATASETS else window_start
+            rows = self._read_dataset_window(dataset_dir, decision_time, floor, nat_counts)
             rules[dataset] = "raw available_at column"
             if rows.empty:
                 continue

@@ -2022,11 +2022,18 @@ def expected_macro_paths(raw_dir: Path, spec: MacroDataset, start_date: str, end
     if spec.strategy == "trade_date":
         open_dates = load_sse_open_dates(raw_dir, start, end_date)
         return {raw_dir / spec.api_name / f"trade_date={d}.parquet" for d in open_dates}
+    if spec.strategy == "static_full":
+        directory = raw_dir / spec.api_name
+        if spec.loop_values:
+            return {directory / f"{spec.loop_param}={safe_partition_value(value)}.parquet" for value in spec.loop_values}
+        return {directory / "full.parquet"}
     if spec.strategy == "date_year_by_ts_code":
         if spec.api_name == "index_global":
             codes = selected_index_codes(args)
         elif spec.api_name in ("index_daily", "index_dailybasic"):
             codes = selected_cn_index_codes(args)
+        elif spec.api_name == "yc_cb":
+            codes = ["1001.CB"]
         else:
             codes = selected_fx_codes(args)
         return {
@@ -2055,6 +2062,8 @@ def macro_pit_rules() -> dict[str, str]:
         "daily_rates": "date-only rates and cross-market daily series are stamped at local end-of-day; do not use them for same-day open decisions without an explicit release time.",
         "eco_cal": "date+time events use source time when parseable; all-day or missing-time events fall back to date end-of-day.",
         "monetary_policy": "pub_date is used as conservative end-of-day availability; content_html/PDF are text evidence and should be hashed before LLM use.",
+        "derivatives_daily": "fut_daily/fut_mapping/opt_daily/cb_daily/yc_cb rows are stamped at trade_date end-of-day and roll on the evening node: usable from the NEXT trading morning, never for same-day open decisions.",
+        "derivatives_registry": "fut_basic/opt_basic/cb_basic rows become visible at their list_date; cb_call announcements at ann_date end-of-day (redemption events are evening disclosures).",
     }
 
 def macro_unit_rules() -> dict[str, str]:
@@ -2070,6 +2079,10 @@ def macro_unit_rules() -> dict[str, str]:
         "fx_daily": "FX quote fields are bid/ask prices; tick_qty is quote/tick count, not stock volume.",
         "eco_cal": "economic-calendar actual/previous/forecast values are heterogeneous by event and must not be pooled without event-specific parsing.",
         "monetary_policy": "text/PDF evidence; no numeric unit.",
+        "fut_daily": "futures prices are contract quote units (index points for CFFEX); vol/oi are lots (手); amount is 万元; multiplier from fut_basic converts to notional.",
+        "opt_daily": "option prices are premium quote units; vol/oi are contracts (手); amount is 万元; exercise_price from opt_basic shares the underlying quote unit.",
+        "cb_daily": "CB prices are per-100-par CNY; vol is lots (手), amount is 万元; bond_over_rate/cb_over_rate are percent.",
+        "yc_cb": "yield is percent per annum; curve_term is years; curve_type 0=YTM, 1=spot.",
     }
 
 def audit_macro_dataset(raw_dir: Path, spec: MacroDataset, expected_paths: set[Path], add) -> None:

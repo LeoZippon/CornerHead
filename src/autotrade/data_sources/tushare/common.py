@@ -225,6 +225,15 @@ MACRO_DATASETS = [
     "fx_daily",
     "eco_cal",
     "monetary_policy",
+    "fut_basic",
+    "fut_mapping",
+    "fut_daily",
+    "opt_basic",
+    "opt_daily",
+    "cb_basic",
+    "cb_daily",
+    "cb_call",
+    "yc_cb",
 ]
 
 MACRO_REGIME_DEFAULT_DATASETS = [
@@ -252,6 +261,17 @@ MACRO_REGIME_DEFAULT_DATASETS = [
     "ths_daily",
     "broker_recommend",
     "monetary_policy",
+    # Derivatives market context: CFFEX futures basis inputs, option chains,
+    # CB premium/redemption ledger, CN treasury curve.
+    "fut_basic",
+    "fut_mapping",
+    "fut_daily",
+    "opt_basic",
+    "opt_daily",
+    "cb_basic",
+    "cb_daily",
+    "cb_call",
+    "yc_cb",
 ]
 
 GLOBAL_CONTEXT_DEFAULT_DATASETS = [
@@ -490,6 +510,10 @@ class MacroDataset:
     start_month: str = "201001"
     start_quarter: str = "2010Q1"
     month_param: str = "m"  # month_loop query param name (broker_recommend uses "month")
+    # static_full registry pulls: one canonical file per loop value
+    # (e.g. exchange=CFFEX.parquet), or a single full.parquet when empty.
+    loop_param: str = ""
+    loop_values: tuple[str, ...] = ()
 
 @dataclass
 class EventDataset:
@@ -878,6 +902,94 @@ MACRO_SPECS = {
         key_columns=("pub_date", "title", "url"),
         date_column="pub_date",
         start_date="20010101",
+    ),
+    # ---- derivatives market context (non-tradable; the Agent computes signals
+    # such as index-futures basis, option PCR/IV and CB conversion premium).
+    # Daily tables ride the trade_date strategy and the evening Timeview node;
+    # registries are small static_full re-pulls with PIT rows keyed by
+    # list/announcement dates. ----
+    "fut_basic": MacroDataset(
+        api_name="fut_basic",
+        strategy="static_full",
+        fields="ts_code,symbol,exchange,name,fut_code,multiplier,trade_unit,per_unit,quote_unit,d_month,list_date,delist_date,last_ddate,trade_time_desc",
+        page_limit=10000,
+        key_columns=("ts_code",),
+        date_column="list_date",
+        loop_param="exchange",
+        loop_values=("CFFEX", "DCE", "CZCE", "SHFE", "INE", "GFEX"),
+    ),
+    "fut_mapping": MacroDataset(
+        api_name="fut_mapping",
+        strategy="trade_date",
+        fields="ts_code,trade_date,mapping_ts_code",
+        page_limit=2000,
+        key_columns=("trade_date", "ts_code"),
+        date_column="trade_date",
+    ),
+    "fut_daily": MacroDataset(
+        api_name="fut_daily",
+        strategy="trade_date",
+        fields="ts_code,trade_date,pre_close,pre_settle,open,high,low,close,settle,change1,change2,vol,amount,oi,oi_chg,delv_settle",
+        page_limit=2000,
+        key_columns=("trade_date", "ts_code"),
+        date_column="trade_date",
+    ),
+    "opt_basic": MacroDataset(
+        api_name="opt_basic",
+        strategy="static_full",
+        fields="ts_code,symbol,exchange,name,per_unit,opt_code,opt_type,call_put,exercise_type,exercise_price,s_month,maturity_date,list_price,list_date,delist_date,last_edate,last_ddate,quote_unit,min_price_chg",
+        page_limit=10000,
+        key_columns=("ts_code",),
+        date_column="list_date",
+        loop_param="exchange",
+        loop_values=("SSE", "SZSE", "CFFEX", "DCE", "SHFE", "CZCE", "GFEX"),
+    ),
+    "opt_daily": MacroDataset(
+        api_name="opt_daily",
+        strategy="trade_date",
+        fields="ts_code,trade_date,exchange,pre_settle,pre_close,open,high,low,close,settle,vol,amount,oi",
+        page_limit=15000,
+        key_columns=("trade_date", "ts_code"),
+        date_column="trade_date",
+        start_date="20150209",
+    ),
+    "cb_basic": MacroDataset(
+        api_name="cb_basic",
+        strategy="static_full",
+        # conv_price/clauses are the fields the conversion-premium and
+        # redemption-event signals need; stk_code links CB -> underlying stock.
+        fields="ts_code,bond_short_name,cb_code,cb_type,stk_code,stk_short_name,maturity,par,issue_price,issue_size,remain_size,value_date,maturity_date,rate_type,coupon_rate,pay_per_year,list_date,delist_date,exchange,conv_start_date,conv_end_date,first_conv_price,conv_price,put_clause,maturity_call_price,call_clause,reset_clause,guarantor,issue_rating,newest_rating,rating_comp",
+        page_limit=2000,
+        key_columns=("ts_code",),
+        date_column="list_date",
+    ),
+    "cb_daily": MacroDataset(
+        api_name="cb_daily",
+        # bond_value/cb_value/cb_over_rate are non-default display fields and
+        # must be requested explicitly.
+        strategy="trade_date",
+        fields="ts_code,trade_date,pre_close,open,high,low,close,change,pct_chg,vol,amount,bond_value,bond_over_rate,cb_value,cb_over_rate",
+        page_limit=2000,
+        key_columns=("trade_date", "ts_code"),
+        date_column="trade_date",
+        start_date="20180102",
+    ),
+    "cb_call": MacroDataset(
+        api_name="cb_call",
+        strategy="static_full",
+        fields="ts_code,call_type,is_call,ann_date,call_date,call_price,call_price_tax,call_vol,call_amount,payment_date,call_reg_date",
+        page_limit=2000,
+        # The staged is_call states of one bond are separate announcements.
+        key_columns=("ts_code", "ann_date", "is_call"),
+        date_column="ann_date",
+    ),
+    "yc_cb": MacroDataset(
+        api_name="yc_cb",
+        strategy="date_year_by_ts_code",
+        fields="trade_date,ts_code,curve_name,curve_type,curve_term,yield",
+        page_limit=2000,
+        key_columns=("trade_date", "ts_code", "curve_type", "curve_term"),
+        date_column="trade_date",
     ),
 }
 

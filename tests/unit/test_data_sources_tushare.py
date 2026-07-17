@@ -2233,6 +2233,40 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn("not_ready_no_mutation", output.getvalue())
         self.assertFalse((self.raw_dir / "margin" / "trade_date=20200102.parquet").exists())
 
+    def test_macro_static_full_writes_per_loop_registry_files(self):
+        class RegistryClient(EmptyTradeDateClient):
+            def query(self, api_name, params=None, fields="", retries=5):
+                self.calls.append((api_name, dict(params or {})))
+                columns = fields.split(",")
+                exchange = (params or {}).get("exchange", "")
+                if exchange != "CFFEX":
+                    return common.ApiResult(columns, [], common.stable_hash({"e": exchange}))
+                row = ["IF2001.CFX" if col == "ts_code" else "20191018" if col == "list_date" else exchange if col == "exchange" else "x" for col in columns]
+                return common.ApiResult(columns, [row], common.stable_hash({"e": exchange, "n": 1}))
+
+        client = RegistryClient()
+        spec = common.MACRO_SPECS["fut_basic"]
+        download.download_macro_static_full(client, self.raw_dir, spec, 10000)
+
+        path = self.raw_dir / "fut_basic" / "exchange=CFFEX.parquet"
+        self.assertTrue(path.exists())
+        frame = pd.read_parquet(path)
+        self.assertEqual(list(frame["ts_code"]), ["IF2001.CFX"])
+        # available_at stamped from list_date so registry rows are PIT-gated.
+        self.assertTrue(frame["available_at"].iloc[0].startswith("2019-10-18"))
+        self.assertEqual({p.get("exchange") for _, p in client.calls}, set(spec.loop_values))
+
+    def test_expected_macro_paths_cover_new_strategies(self):
+        from autotrade.data_sources.tushare import audit
+        import argparse
+
+        args = argparse.Namespace(datasets=None)
+        static_paths = audit.expected_macro_paths(self.raw_dir, common.MACRO_SPECS["fut_basic"], "20240101", "20240110", args)
+        self.assertIn(self.raw_dir / "fut_basic" / "exchange=CFFEX.parquet", static_paths)
+        self.assertEqual(len(static_paths), len(common.MACRO_SPECS["fut_basic"].loop_values))
+        yc_paths = audit.expected_macro_paths(self.raw_dir, common.MACRO_SPECS["yc_cb"], "20240101", "20240110", args)
+        self.assertEqual(yc_paths, {self.raw_dir / "yc_cb" / "ts_code=1001.CB" / "year=2024.parquet"})
+
     def test_event_flow_not_ready_vetoed_by_trade_cal_refresh(self):
         # A trade_cal coverage refresh IS a lake write: exit 75 asserts "no
         # mutation" and must not fire even when every dataset was empty.
