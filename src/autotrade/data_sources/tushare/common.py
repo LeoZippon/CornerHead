@@ -941,8 +941,10 @@ MACRO_SPECS = {
         page_limit=10000,
         key_columns=("ts_code",),
         date_column="list_date",
+        # Financial exchanges only, matching the opt_daily scope: commodity
+        # option registries add ~185k dead rows to every snapshot macro frame.
         loop_param="exchange",
-        loop_values=("SSE", "SZSE", "CFFEX", "DCE", "SHFE", "CZCE", "GFEX"),
+        loop_values=("SSE", "SZSE", "CFFEX"),
     ),
     "opt_daily": MacroDataset(
         api_name="opt_daily",
@@ -952,6 +954,11 @@ MACRO_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
         start_date="20150209",
+        # Financial options only (ETF + index): the whole-market pull is ~27k
+        # rows/day of mostly commodity options with no equity signal, which
+        # would put a multi-million-row year window into every snapshot.
+        loop_param="exchange",
+        loop_values=("SSE", "SZSE", "CFFEX"),
     ),
     "cb_basic": MacroDataset(
         api_name="cb_basic",

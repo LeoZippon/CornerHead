@@ -2021,6 +2021,12 @@ def expected_macro_paths(raw_dir: Path, spec: MacroDataset, start_date: str, end
         }
     if spec.strategy == "trade_date":
         open_dates = load_sse_open_dates(raw_dir, start, end_date)
+        if spec.loop_values:
+            return {
+                raw_dir / spec.api_name / f"{spec.loop_param}={safe_partition_value(value)}" / f"trade_date={d}.parquet"
+                for value in spec.loop_values
+                for d in open_dates
+            }
         return {raw_dir / spec.api_name / f"trade_date={d}.parquet" for d in open_dates}
     if spec.strategy == "static_full":
         directory = raw_dir / spec.api_name

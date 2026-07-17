@@ -873,12 +873,19 @@ def download_macro_trade_date(
     written = 0
     skipped = 0
     total_rows = 0
-    for index, trade_date in enumerate(trade_dates, start=1):
-        path = dataset_dir / f"trade_date={trade_date}.parquet"
+    # Optional scope loop (e.g. opt_daily per financial exchange): one file per
+    # (loop value, trade date) so partition pruning by date keeps working.
+    loops = spec.loop_values or ("",)
+    tasks = [(value, trade_date) for value in loops for trade_date in trade_dates]
+    for index, (loop_value, trade_date) in enumerate(tasks, start=1):
+        directory = dataset_dir / f"{spec.loop_param}={safe_partition_value(loop_value)}" if loop_value else dataset_dir
+        path = directory / f"trade_date={trade_date}.parquet"
         if path.exists() and not force and parquet_rows(path) > 0:
             skipped += 1
             continue
         params = {"trade_date": trade_date}
+        if loop_value:
+            params[spec.loop_param] = loop_value
         result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
         df = augment_macro_frame(frame(result), spec)
         if df.empty:
@@ -902,8 +909,8 @@ def download_macro_trade_date(
             written += 1
             total_rows += len(df)
         if index % 250 == 0:
-            print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows}")
-    print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows}")
+            print(f"{spec.api_name} {index}/{len(tasks)} skipped={skipped} written={written} rows_written={total_rows}")
+    print(f"{spec.api_name} done tasks={len(tasks)} skipped={skipped} written={written} rows_written={total_rows}")
 
 
 def download_macro_date_year(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, page_limit: int, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
