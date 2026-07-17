@@ -98,6 +98,9 @@ def make_config(tmp: Path, **overrides) -> ExperimentConfig:
         heldout_first_period="2026Q1",
         heldout_last_period="2026Q1",
         use_docker=False,
+        # The harness default is single-epoch (the production default is 3);
+        # multi-epoch tests override explicitly.
+        epochs=1,
     )
     defaults.update(overrides)
     return ExperimentConfig(**defaults)

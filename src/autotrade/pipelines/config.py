@@ -270,7 +270,9 @@ class ExperimentConfig:
     heldout_first_period: str | None = None
     heldout_last_period: str | None = None
     fold_period: str = "quarter"
-    epochs: int = 1
+    # Every real experiment ran 3 (meta-learning needs ≥2 to read history);
+    # lzp-test21 review kept this as the standing default.
+    epochs: int = 3
     window_months: int = 21
     max_fold_minutes: int = 20
     finalize_before_deadline_seconds: int = 300

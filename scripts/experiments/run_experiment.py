@@ -82,7 +82,7 @@ def build_parser(repo_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--last-test-quarter", default="2025Q4")
     parser.add_argument("--heldout-first-quarter")
     parser.add_argument("--heldout-last-quarter")
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=3)
     add_snapshot_window_arguments(parser, verbose_help=True)
     parser.add_argument(
         "--max-fold-minutes",

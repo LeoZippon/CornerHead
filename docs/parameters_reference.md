@@ -81,7 +81,7 @@
 | 参数 | 默认 | 作用 |
 |---|---:|---|
 | `fold_period` | `quarter` | Fold 决策/测试周期，`week`/`month`/`quarter`/`year` 四选一（CLI `--fold-period`） |
-| `epochs` | 1 | Epoch 数；每个 Epoch 前运行一次元学习 |
+| `epochs` | 3 | Epoch 数；每个 Epoch 前运行一次元学习 |
 | `experiment_id` | 必填 | 实验唯一标识；只接受字母、数字、下划线和连字符 |
 | `experiments_root` / `work_root` | `experiments` / `.runtime/sandboxes` | 持久实验目录与临时运行目录；控制台服务端管理，CLI 可覆盖 |
 | `template_dir` | `configs/agent_output_template` | 新实验的初始策略模板 |

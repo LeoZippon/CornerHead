@@ -70,7 +70,7 @@ PARAM_DEFAULTS: dict[str, object] = {
     "last_test_period": None,
     "heldout_first_period": None,
     "heldout_last_period": None,
-    "epochs": 1,
+    "epochs": 3,
     "window_months": 21,
     "daily_window_months": None,
     "fundamentals_window_months": None,

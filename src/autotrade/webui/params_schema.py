@@ -69,7 +69,10 @@ PERIOD_KEYS = ("first_test_period", "last_test_period", "heldout_first_period", 
 # The in-client sandbox agent stack is wired for the v4 interfaces; chat and
 # reasoner are legacy endpoints and stay out of the console choices.
 MODEL_CHOICES = ["deepseek-v4-pro", "deepseek-v4-flash"]
-DEV_DEFAULT_PERIODS = 4  # suggested development length (test periods) per cadence
+# Suggested development length (test periods) per cadence: 8 spans two years at
+# the default quarterly cadence — a one-year dev window is a single regime
+# sample (lzp-test21 review: dev-fit strategies inverted out-of-sample).
+DEV_DEFAULT_PERIODS = 8
 
 # (key, group, label, type, extra) — type in {"string","text","int","float","bool","choice","multi","period"}
 _FIELDS: list[dict[str, object]] = [
