@@ -451,7 +451,10 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .form-grid > .field.checkbox { padding-top: 1.45rem; }
 .field.checkbox input { margin-top: 0.3rem; width: 1.06rem; height: 1.06rem; }
 .check-group { display: flex; gap: 0.55rem; flex-wrap: wrap; padding: 0.25rem 0; }
-.check-item { display: inline-flex; align-items: center; gap: 0.45rem; font-size: 0.9rem; font-weight: 500;
+/* label.check-item (0,1,1) so the chip beats ".field label"'s block/600 rule —
+   as a bare class it loses and the chips render bold with baseline-aligned text. */
+label.check-item { display: inline-flex; align-items: center; gap: 0.45rem;
+  font-size: 0.875rem; font-weight: 500; margin: 0;
   /* line-height 1 keeps the CJK label's line box the glyph height, so flex
      centering aligns the text with the checkbox instead of a taller
      inherited line box sitting visually low. */
