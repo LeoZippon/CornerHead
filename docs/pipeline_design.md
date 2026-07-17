@@ -517,7 +517,7 @@ experiments/<experiment_id>/
 - 累计/复利 active return 统一用权益比口径 ∏(1+r)/∏(1+b)−1；汇总 `compound_active_return`、报告表 “Cum active” 列和 “Relative equity vs benchmark” 图三者口径一致。
 - development 汇总另含样本标准差 `std_test_return`、`std_active_return`（样本数 < 2 时为 null），以及逐 Fold active return 对零的单样本 t 统计量 `active_return_tstat`（样本数 < 2 或离散度为 0 时为 null）。
 - 相对权益曲线以策略权益除以 benchmark 权益表示，与上面的复利 active return 口径一致。
-- **跨 Epoch 不聚合**：Epoch 是对同一 Fold 日历的重复遍历，累计验证/测试收益只在单个 Epoch 内按 Fold 复利串联，绝不跨 Epoch 相加或相乘。控制台的 `metrics` 取最新 Epoch（`metrics.epoch_id` 标注），`metrics_by_epoch` 逐 Epoch 并列；`/equity` 收益曲线按所选 Epoch 单独成链（默认最新，支持切换），并附全周期统计（累计/年化收益、年化波动、Sharpe、最大回撤、日胜率、β、超额、跟踪误差、信息比率，均由服务端按日收益与冻结 benchmark 计算）。逐 Fold Barra-lite 风格倾斜仍在 Fold 视图。
+- **跨 Epoch 不聚合**：Epoch 是对同一 Fold 日历的重复遍历，累计验证/测试收益只在单个 Epoch 内按 Fold 复利串联，绝不跨 Epoch 相加或相乘。控制台的 `metrics` 取最新 Epoch（`metrics.epoch_id` 标注），`metrics_by_epoch` 逐 Epoch 并列；`/equity` 收益曲线按所选 Epoch 单独成链（默认最新，支持切换），并附全周期统计（累计/年化收益、年化波动、Sharpe、最大回撤、日胜率、β、超额、跟踪误差、信息比率，均由服务端按日收益与冻结 benchmark 计算）与逐日仓位序列（EOD 持仓总市值/权益，多空分列，取自各结果窗口的 `positions_eod.parquet`，与收益同窗口口径成链）；前端在回撤子图下方渲染联动仓位子图。逐 Fold Barra-lite 风格倾斜仍在 Fold 视图。
 
 ### 4.3 失败分类与记录语义
 

@@ -1109,6 +1109,29 @@ class WebuiBackendTest(unittest.TestCase):
         with ledger.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
 
+    def test_equity_payload_carries_position_exposure(self) -> None:
+        import pandas as pd
+
+        window = self.experiments_root / "exp_hitl" / "artifacts" / "run_001" / "results" / "valid_001"
+        window.mkdir(parents=True, exist_ok=True)
+        (window / "detailed_return.json").write_text(
+            json.dumps({"initial_cash": 1_000_000.0, "equity_curve": {"20220106": 1_000_000.0}}),
+            encoding="utf-8",
+        )
+        pd.DataFrame([
+            {"date": "20220106", "account": "stock", "ts_code": "000001.SZ", "side": "long",
+             "quantity": 1000, "last_price": 10.0, "market_value": 600_000.0},
+            {"date": "20220106", "account": "credit", "ts_code": "000002.SZ", "side": "short",
+             "quantity": 500, "last_price": 20.0, "market_value": -100_000.0},
+        ]).to_parquet(window / "positions_eod.parquet")
+
+        payload = self.client.get("/api/experiments/exp_hitl/equity").json()
+        exposure = payload["exposure"]["valid"]
+        self.assertEqual(exposure["dates"], ["20220106"])
+        self.assertAlmostEqual(exposure["long"][0], 0.6)   # 600k gross long / 1M equity
+        self.assertAlmostEqual(exposure["short"][0], 0.1)  # |−100k| short / 1M equity
+        self.assertNotIn("test", payload["exposure"])  # sealed pre-reveal
+
     def test_metrics_and_equity_never_mix_epochs(self) -> None:
         # Epochs re-run the SAME fold calendar: cumulative metrics and daily
         # curves must come from one epoch at a time, never compounded across

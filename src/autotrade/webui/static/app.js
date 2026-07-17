@@ -451,14 +451,32 @@ function equityChart(payload, { width = 680, height = 240, ddH = 90, mini = fals
     dash: s.key === "benchmark" ? "6 4" : null,
   }));
   const dates = [...new Set(seriesList.flatMap((s) => s.dates))].sort();
+  // Position-weight pane (EOD gross market value / equity), keyed like the
+  // return series so identity carries across the linked panes.
+  const exposureBy = payload.exposure || {};
+  const expList = mini ? [] : seriesList
+    .filter((s) => s.key !== "benchmark" && exposureBy[s.key] && (exposureBy[s.key].dates || []).length)
+    .map((s) => {
+      const e = exposureBy[s.key];
+      return {
+        key: s.key,
+        color: s.color,
+        long: new Map(e.dates.map((d, i) => [d, e.long[i]])),
+        short: new Map(e.dates.map((d, i) => [d, (e.short || [])[i] || 0])),
+        hasShort: (e.short || []).some((v) => v > 0.005),
+      };
+    });
   if (mini) ddH = 0;
   const showDD = ddH > 0;
-  const padL = mini ? 44 : 52, padR = 12, padT = 8, gap = showDD ? 16 : 0;
-  // With a drawdown subplot the shared date labels sit BELOW it, so the main
-  // plot needs only a slim bottom pad; standalone charts keep the label band.
-  const padB = showDD ? 12 : (mini ? 26 : 32);
-  const labelBand = showDD ? 24 : 0;
-  const totalH = height + (showDD ? ddH + gap : 0) + labelBand;
+  const showExp = expList.length > 0;
+  const expH = showExp ? 64 : 0;
+  const hasPanes = showDD || showExp;
+  const padL = mini ? 44 : 52, padR = 12, padT = 8, gap = hasPanes ? 16 : 0;
+  // With subplots the shared date labels sit BELOW them, so the main plot
+  // needs only a slim bottom pad; standalone charts keep the label band.
+  const padB = hasPanes ? 12 : (mini ? 26 : 32);
+  const labelBand = hasPanes ? 24 : 0;
+  const totalH = height + (showDD ? ddH + gap : 0) + (showExp ? expH + gap : 0) + labelBand;
   const plotW = width - padL - padR, mainH = height - padT - padB;
   const xOf = (i) => padL + (dates.length === 1 ? plotW / 2 : (i / (dates.length - 1)) * plotW);
   const cums = seriesList.flatMap((s) => [...s.cum.values()]);
@@ -480,9 +498,10 @@ function equityChart(payload, { width = 680, height = 240, ddH = 90, mini = fals
   // x ticks (≤7), year shown on the first tick and on year changes
   const tickEvery = Math.max(1, Math.ceil(dates.length / (mini ? 4 : 7)));
   let prevYear = null;
-  // Date labels: below the drawdown subplot when present (shared axis at the
+  // Date labels: below the lowest subplot when present (shared axis at the
   // figure bottom), otherwise a clear step below the main axis line.
-  const tickY = showDD ? height + gap + ddH + 10 : padT + mainH + (mini ? 17 : 20);
+  const panesBottom = height + (showDD ? gap + ddH : 0) + (showExp ? gap + expH : 0);
+  const tickY = hasPanes ? panesBottom + 10 : padT + mainH + (mini ? 17 : 20);
   const lastTick = dates.length - 1;
   dates.forEach((d, i) => {
     // Render modulo ticks plus the final date; drop a modulo tick that would
@@ -517,6 +536,28 @@ function equityChart(payload, { width = 680, height = 240, ddH = 90, mini = fals
       svg.push(`<path d="${line}" fill="none" stroke="${s.color}" stroke-width="1.5"${s.dash ? ` stroke-dasharray="${s.dash}"` : ""}/>`);
     }
   }
+  // position-weight subplot: 0..max(100%, observed) with 100% as reference line
+  if (showExp) {
+    const expTop = height + (showDD ? gap + ddH : 0) + gap;
+    const expMax = Math.max(1, ...expList.flatMap((s) => [...s.long.values(), ...s.short.values()]));
+    const yExp = (v) => expTop + (1 - v / expMax) * (expH - 14);
+    svg.push(`<line x1="${padL}" y1="${yExp(0)}" x2="${width - padR}" y2="${yExp(0)}" stroke="${INK.baseline}" stroke-width="1"/>`);
+    svg.push(`<line x1="${padL}" y1="${yExp(1)}" x2="${width - padR}" y2="${yExp(1)}" stroke="${INK.grid}" stroke-width="1"/>`);
+    svg.push(`<text x="${padL - 6}" y="${yExp(1) + 3.5}" text-anchor="end" font-size="10" fill="${INK.muted}">100%</text>`);
+    svg.push(`<text x="${padL - 6}" y="${yExp(0) + 3.5}" text-anchor="end" font-size="10" fill="${INK.muted}">仓位</text>`);
+    for (const s of expList) {
+      const pts = dates.filter((d) => s.long.has(d));
+      if (!pts.length) continue;
+      const line = pts.map((d, j) => `${j ? "L" : "M"}${xOf(dates.indexOf(d)).toFixed(1)},${yExp(s.long.get(d)).toFixed(1)}`).join(" ");
+      svg.push(`<path d="M${xOf(dates.indexOf(pts[0])).toFixed(1)},${yExp(0).toFixed(1)} ${line.slice(1)} L${xOf(dates.indexOf(pts[pts.length - 1])).toFixed(1)},${yExp(0).toFixed(1)} Z" fill="${s.color}" fill-opacity="0.16" stroke="none"/>`);
+      svg.push(`<path d="${line}" fill="none" stroke="${s.color}" stroke-width="1.5"/>`);
+      if (s.hasShort) {
+        const shortLine = pts.filter((d) => s.short.has(d))
+          .map((d, j) => `${j ? "L" : "M"}${xOf(dates.indexOf(d)).toFixed(1)},${yExp(s.short.get(d)).toFixed(1)}`).join(" ");
+        svg.push(`<path d="${shortLine}" fill="none" stroke="${s.color}" stroke-width="1.5" stroke-dasharray="4 3"/>`);
+      }
+    }
+  }
   // main lines (benchmark first so strategy lines sit on top) + endpoint dots
   for (const s of [...seriesList].sort((a, b) => (a.key === "benchmark" ? -1 : 0) - (b.key === "benchmark" ? -1 : 0))) {
     const pts = dates.filter((d) => s.cum.has(d));
@@ -534,7 +575,11 @@ function equityChart(payload, { width = 680, height = 240, ddH = 90, mini = fals
     const lines = [fmtDate(d)];
     for (const s of seriesList) {
       if (!s.cum.has(d)) continue;
-      lines.push(`${s.label} 累计 ${(s.cum.get(d) * 100).toFixed(2)}% ｜ 回撤 ${(s.dd.get(d) * 100).toFixed(2)}%`);
+      const exposure = expList.find((entry) => entry.key === s.key);
+      const expText = exposure && exposure.long.has(d)
+        ? ` ｜ 仓位 ${(exposure.long.get(d) * 100).toFixed(1)}%${exposure.hasShort ? `（空 ${(exposure.short.get(d) * 100).toFixed(1)}%）` : ""}`
+        : "";
+      lines.push(`${s.label} 累计 ${(s.cum.get(d) * 100).toFixed(2)}% ｜ 回撤 ${(s.dd.get(d) * 100).toFixed(2)}%${expText}`);
     }
     const x = i === 0 ? padL : xOf(i) - step / 2;
     const w = i === 0 || i === dates.length - 1 ? step / 2 : step;

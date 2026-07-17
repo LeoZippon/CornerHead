@@ -43,6 +43,65 @@ def _window_returns(window_dir: Path) -> tuple[tuple[str, float], ...]:
         return ()
 
 
+@lru_cache(maxsize=512)
+def _window_exposure_cached(
+    window_dir_str: str, positions_mtime_ns: int, detailed_mtime_ns: int
+) -> tuple[tuple[str, float, float], ...]:
+    """(date, long_weight, short_weight) per EOD: position market value / equity."""
+    del positions_mtime_ns, detailed_mtime_ns  # cache key components only
+    import pandas as pd
+
+    window_dir = Path(window_dir_str)
+    try:
+        payload = json.loads((window_dir / "detailed_return.json").read_text(encoding="utf-8"))
+        frame = pd.read_parquet(window_dir / "positions_eod.parquet", columns=["date", "side", "market_value"])
+    except (OSError, ValueError, KeyError):
+        return ()
+    curve = payload.get("equity_curve")
+    if not isinstance(curve, dict) or not curve:
+        return ()
+    frame["date"] = frame["date"].astype(str)
+    gross = frame.assign(mv=frame["market_value"].abs()).groupby(["date", "side"])["mv"].sum()
+    out: list[tuple[str, float, float]] = []
+    for date, equity in sorted(curve.items()):
+        eq = float(equity)
+        if not (eq > 0):
+            continue
+        out.append((
+            str(date),
+            round(float(gross.get((str(date), "long"), 0.0)) / eq, 4),
+            round(float(gross.get((str(date), "short"), 0.0)) / eq, 4),
+        ))
+    return tuple(out)
+
+
+def _window_exposure(window_dir: Path) -> tuple[tuple[str, float, float], ...]:
+    positions = window_dir / "positions_eod.parquet"
+    detailed = window_dir / "detailed_return.json"
+    try:
+        return _window_exposure_cached(
+            str(window_dir), positions.stat().st_mtime_ns, detailed.stat().st_mtime_ns
+        )
+    except (OSError, ValueError):
+        return ()
+
+
+def _run_rows(experiment_dir: Path, run_id: str | None, prefix: str, window: str | None, reader):
+    if not run_id:
+        return []
+    results_root = experiment_dir / "artifacts" / str(run_id) / "results"
+    if not results_root.is_dir():
+        return []
+    if window is not None:
+        window_dir = results_root / window
+        return _chain([list(reader(window_dir))]) if window_dir.is_dir() else []
+    merged: list[tuple] = []
+    for window_dir in sorted(results_root.iterdir()):
+        if window_dir.is_dir() and window_dir.name.startswith(prefix):
+            merged.extend(reader(window_dir))
+    return _chain([merged])
+
+
 def run_series(
     experiment_dir: Path, run_id: str | None, prefix: str, window: str | None = None
 ) -> list[tuple[str, float]]:
@@ -54,19 +113,14 @@ def run_series(
     versions, and merging them yields a curve no real backtest produced.
     Test/held-out runs write one window per run, so the prefix glob is exact.
     """
-    if not run_id:
-        return []
-    results_root = experiment_dir / "artifacts" / str(run_id) / "results"
-    if not results_root.is_dir():
-        return []
-    if window is not None:
-        window_dir = results_root / window
-        return _chain([list(_window_returns(window_dir))]) if window_dir.is_dir() else []
-    merged: list[tuple[str, float]] = []
-    for window_dir in sorted(results_root.iterdir()):
-        if window_dir.is_dir() and window_dir.name.startswith(prefix):
-            merged.extend(_window_returns(window_dir))
-    return _chain([merged])
+    return _run_rows(experiment_dir, run_id, prefix, window, _window_returns)
+
+
+def run_exposure_series(
+    experiment_dir: Path, run_id: str | None, prefix: str, window: str | None = None
+) -> list[tuple[str, float, float]]:
+    """Daily (date, long_weight, short_weight); same window semantics as returns."""
+    return _run_rows(experiment_dir, run_id, prefix, window, _window_exposure)
 
 
 def fold_valid_window(record: dict[str, object]) -> str | None:
@@ -106,15 +160,15 @@ def _rollup_benchmark(experiment_dir: Path, run_id: str | None, prefix: str) -> 
 SERIES_LABELS = {"valid": "策略（验证）", "test": "策略（测试）", "heldout": "策略（Held-out）"}
 
 
-def _chain(parts: list[list[tuple[str, float]]]) -> list[tuple[str, float]]:
-    """Date-sorted union of daily-return parts; the first value per date wins."""
+def _chain(parts: list[list[tuple]]) -> list[tuple]:
+    """Date-sorted union of daily rows (date-first tuples); first row per date wins."""
     seen: set[str] = set()
-    out: list[tuple[str, float]] = []
+    out: list[tuple] = []
     for part in parts:
-        for date, value in sorted(part):
-            if date not in seen:
-                seen.add(date)
-                out.append((date, value))
+        for row in sorted(part):
+            if row[0] not in seen:
+                seen.add(row[0])
+                out.append(row)
     return sorted(out)
 
 
@@ -146,6 +200,14 @@ def _curve_entry(key: str, label: str, series: list[tuple[str, float]]) -> dict[
 def _benchmark_entry(bench: dict[str, float], dates: list[str]) -> dict[str, object]:
     series = [(date, bench[date]) for date in sorted(set(dates)) if date in bench]
     return _curve_entry("benchmark", BENCHMARK_LABEL, series)
+
+
+def _exposure_entry(rows: list[tuple[str, float, float]]) -> dict[str, object]:
+    return {
+        "dates": [row[0] for row in rows],
+        "long": [row[1] for row in rows],
+        "short": [row[2] for row in rows],
+    }
 
 
 def _cycle_stats(series: list[tuple[str, float]], bench: dict[str, float]) -> dict[str, object] | None:
@@ -234,12 +296,15 @@ def fold_equity_payload(
     for prefix in prefixes:
         window = fold_valid_window(record) if prefix == "valid" else None
         strategy = run_series(experiment_dir, run_id, prefix, window=window)
+        exposure = run_exposure_series(experiment_dir, run_id, prefix, window=window)
         if prefix == "valid" and window is None:
             strategy = []  # no recorded validation window: never blend attempts
+            exposure = []
         bench = _rollup_benchmark(experiment_dir, run_id, prefix)
         payload[prefix] = {
             "series": [_curve_entry(prefix, SERIES_LABELS[prefix], strategy)],
             "benchmark": _benchmark_entry(bench, [date for date, _ in strategy]),
+            "exposure": {prefix: _exposure_entry(exposure)} if exposure else {},
         }
     return payload
 
@@ -290,6 +355,17 @@ def experiment_equity_payload(
     for run_id in heldout_runs:
         bench.update(_rollup_benchmark(experiment_dir, run_id, "heldout"))
     all_dates = [date for chain in chains.values() for date, _ in chain]
+    exposure_chains = {
+        "valid": _chain([
+            run_exposure_series(experiment_dir, str(r.get("run_id") or ""), "valid", window=window)
+            for r in folds
+            if (window := fold_valid_window(r)) is not None
+        ]),
+        "test": _chain([
+            run_exposure_series(experiment_dir, str(r.get("run_id") or ""), "test") for r in folds
+        ]) if revealed else [],
+        "heldout": _chain([run_exposure_series(experiment_dir, run_id, "heldout") for run_id in heldout_runs]),
+    }
     return {
         "series": series,
         "benchmark": _benchmark_entry(bench, all_dates),
@@ -298,4 +374,7 @@ def experiment_equity_payload(
         # Full-cycle statistics per chained series (Barra-lite regression core
         # plus risk/consistency metrics); fold-level tilts stay on the fold view.
         "stats": {key: _cycle_stats(chain, bench) for key, chain in chains.items() if chain},
+        # Daily position weight (EOD gross market value / equity) per series,
+        # rendered as a linked pane under the return curves.
+        "exposure": {key: _exposure_entry(rows) for key, rows in exposure_chains.items() if rows},
     }
