@@ -1709,3 +1709,11 @@
 2026-07-16 收益曲线下新增联动仓位子图
 
 - /equity 与 Fold equity 负载新增逐日仓位序列（EOD 持仓总市值/权益、多空分列，取自 positions_eod.parquet，与收益同口径按 Epoch 成链、受揭示封存门控）；前端在回撤子图下方渲染联动仓位子图（同色系、共享 x 轴与悬浮提示，100% 参考线，做空虚线）。WebUI 49 passed；实测 lzp-test18 E1 244 日、多头仓位中位 99.1%；console 已重启、静态已同步。
+
+2026-07-17 衍生品市场上下文数据接入（期货/期权/可转债/中债曲线）
+
+- 新增 9 个不可交易上下文数据集（fut_basic/fut_mapping/fut_daily、opt_basic/opt_daily 限 SSE/SZSE/CFFEX、cb_basic/cb_daily/cb_call、yc_cb），全部复用宏观域机制：日频表 trade_date 策略 + 晚间节点可见（EOD 盖章、次晨可用），注册表新增 ~30 行 static_full 整表刷新策略；快照侧注册表豁免宏观窗口下限（老合约条款可见，逐行 available_at 照常执行 PIT）；审计/夜间更新/研究发布自动覆盖。零 Broker/工具/提示协议改动——信号（基差、PCR/IV、转股溢价、强赎事件）由 Agent 自行用 DuckDB 计算。
+- 回填踩坑与修复：opt_daily 全市场 2.7 万行/日（多为商品期权）会使快照宏观帧膨胀 →限定金融交易所（~1.5-2k 行/日，15×缩减），并按场所上市日（SZSE/CFFEX 2019-12-23）生成审计预期；yc_cb 为 ~500 期限点/日的密集曲线且 API 拒绝 offset 分页（50101）→ 改为按交易日单次拉取（1,010 行/日单页），覆盖起点 2016-06-20 实测探明。
+- 全量回填完成：fut_mapping/fut_daily 各 4,014 分区、opt_daily 5,957 文件 217 万行、cb_daily 74 万行、yc_cb 2,447 日，共 ~615MB；宏观审计（20260601-20260716）status=ok 0 错误 0 警告。
+- 专项案例研究（.runtime/bench/derivatives_case_study*.py + summary json）：真实决策快照双构建对比 —— 构建 824.7s→886.0s（+7.4%），macro 帧 1.06M→3.04M 行 / 64.8→114MB；热路径确认无回归（Timeview 以 footer 硬链接冻结宏观文件、逐节点只写新可见回放行、Agent 侧 DuckDB 投影查询）；回放槽 8 日窗构建 40s；PIT 逐项断言通过（决策日只见 T-1 结算、区间内 06-29 结算当日全天不可见、06-30 盘前可见；注册表老合约可见/未来合约隐藏）；Agent 视角基差信号端到端验证（IF 主力 2026-06 末贴水 -2.9%，主力换月 06-18→06-22 可见）。
+- Validation：全量 tests/unit 872+ 通过（新增 static_full/审计预期/窗口豁免/场所起始日回归测试）；git diff --check clean。
