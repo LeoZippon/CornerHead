@@ -2327,7 +2327,7 @@ function stepTreeSection(detail, payload) {
         }
       }
     }
-    const walk = (parentKey, depth) => {
+    const walk = (parentKey, depth, parentForked = false) => {
       for (const node of byParent.get(parentKey) || []) {
         if (!visible.has(node.node_id)) continue;
         const children = (byParent.get(node.node_id) || []).filter((child) => visible.has(child.node_id));
@@ -2335,6 +2335,7 @@ function stepTreeSection(detail, payload) {
         const collapsed = !query && state.collapsed.has(node.node_id);
         rows.append(stepTreeRow(detail, payload, node, depth, {
           childCount: children.length,
+          forkChild: parentForked,
           collapsed,
           toggle: () => {
             if (state.collapsed.has(node.node_id)) state.collapsed.delete(node.node_id);
@@ -2342,7 +2343,13 @@ function stepTreeSection(detail, payload) {
             render();
           },
         }));
-        if (!collapsed) walk(node.node_id, depth + 1);
+        // Lineage chains dominate this tree (each Step parents on the previous
+        // one; measured trees run 16+ ancestors deep with <=6 forks), so
+        // ancestor-count indentation grows without bound while encoding almost
+        // nothing. Indent only at forks: an only child continues at its
+        // parent's depth; fork children step one level in (capped) and carry a
+        // branch marker so sibling groups don't read as one chain.
+        if (!collapsed) walk(node.node_id, children.length > 1 ? Math.min(depth + 1, 8) : depth, children.length > 1);
       }
     };
     walk("", 0);
@@ -2379,7 +2386,7 @@ function stepTreeSection(detail, payload) {
   );
 }
 
-function stepTreeRow(detail, payload, node, depth, { childCount, collapsed, toggle }) {
+function stepTreeRow(detail, payload, node, depth, { childCount, forkChild, collapsed, toggle }) {
   const metrics = node.metrics || {};
   const failed = node.status === "failed";
   const zipUrl = `/api/experiments/${encodeURIComponent(detail.experiment_id)}/steps/${encodeURIComponent(node.node_id)}/source.zip`;
@@ -2414,6 +2421,10 @@ function stepTreeRow(detail, payload, node, depth, { childCount, collapsed, togg
           onclick: (event) => { event.stopPropagation(); hideStepTip(); toggle(); },
         }, collapsed ? "▸" : "▾")
       : el("span", { class: "step-toggle leaf" }, "·"),
+    // Only forks indent, so mark each fork child as the start of an
+    // alternative branch — without it, sibling subtrees at the same indent
+    // would read as one continuous chain.
+    forkChild ? el("span", { class: "step-fork", title: "自上方节点分支" }, "⑂") : null,
     el("span", { class: "step-label" }, `${node.fold_id || node.fold_ref || "?"} · ${node.result_name || node.node_id}`),
     collapsed ? el("span", { class: "step-chip" }, `+${childCount}`) : null,
     Number.isFinite(metrics.total_return)

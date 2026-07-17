@@ -499,6 +499,7 @@ details.advanced .form-grid { margin-top: 0.55rem; }
 .step-toggle.leaf { cursor: default; text-align: center; }
 .step-label { font-family: var(--mono, ui-monospace, monospace); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .step-chip { flex: none; color: var(--muted); font-size: 0.8rem; padding: 0 0.35rem; border-radius: 4px; background: var(--chip-bg); }
+.step-fork { flex: none; color: var(--muted); cursor: help; }
 .step-time { flex: none; margin-left: auto; color: var(--muted); font-size: 0.78rem; }
 .step-actions { flex: none; display: flex; gap: 0.3rem; }
 #step-tip { display: none; position: fixed; z-index: 200; min-width: 300px; max-width: 460px; pointer-events: none;
