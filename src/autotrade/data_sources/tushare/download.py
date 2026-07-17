@@ -874,9 +874,15 @@ def download_macro_trade_date(
     skipped = 0
     total_rows = 0
     # Optional scope loop (e.g. opt_daily per financial exchange): one file per
-    # (loop value, trade date) so partition pruning by date keeps working.
+    # (loop value, trade date) so partition pruning by date keeps working; each
+    # loop value honours its own venue listing date.
     loops = spec.loop_values or ("",)
-    tasks = [(value, trade_date) for value in loops for trade_date in trade_dates]
+    tasks = [
+        (value, trade_date)
+        for value in loops
+        for trade_date in trade_dates
+        if not value or trade_date >= spec.loop_start_date(value)
+    ]
     for index, (loop_value, trade_date) in enumerate(tasks, start=1):
         directory = dataset_dir / f"{spec.loop_param}={safe_partition_value(loop_value)}" if loop_value else dataset_dir
         path = directory / f"trade_date={trade_date}.parquet"

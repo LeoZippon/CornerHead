@@ -2266,6 +2266,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(len(static_paths), len(common.MACRO_SPECS["fut_basic"].loop_values))
         yc_paths = audit.expected_macro_paths(self.raw_dir, common.MACRO_SPECS["yc_cb"], "20240101", "20240110", args)
         self.assertEqual(yc_paths, {self.raw_dir / "yc_cb" / "ts_code=1001.CB" / "year=2024.parquet"})
+        # Loop venues that listed later must not be expected before their start.
+        self._write_trade_cal("20180104")
+        opt_paths = audit.expected_macro_paths(self.raw_dir, common.MACRO_SPECS["opt_daily"], "20180104", "20180104", args)
+        self.assertEqual({p.parent.name for p in opt_paths}, {"exchange=SSE"})
 
     def test_event_flow_not_ready_vetoed_by_trade_cal_refresh(self):
         # A trade_cal coverage refresh IS a lake write: exit 75 asserts "no

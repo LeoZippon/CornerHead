@@ -514,6 +514,14 @@ class MacroDataset:
     # (e.g. exchange=CFFEX.parquet), or a single full.parquet when empty.
     loop_param: str = ""
     loop_values: tuple[str, ...] = ()
+    # Optional per-loop-value start dates (parallel to loop_values) for
+    # trade_date loops whose venues listed at different times.
+    loop_start_dates: tuple[str, ...] = ()
+
+    def loop_start_date(self, value: str) -> str:
+        if self.loop_start_dates and value in self.loop_values:
+            return self.loop_start_dates[self.loop_values.index(value)]
+        return self.start_date
 
 @dataclass
 class EventDataset:
@@ -957,8 +965,10 @@ MACRO_SPECS = {
         # Financial options only (ETF + index): the whole-market pull is ~27k
         # rows/day of mostly commodity options with no equity signal, which
         # would put a multi-million-row year window into every snapshot.
+        # SZSE 300ETF options and CFFEX index options both listed 2019-12-23.
         loop_param="exchange",
         loop_values=("SSE", "SZSE", "CFFEX"),
+        loop_start_dates=("20150209", "20191223", "20191223"),
     ),
     "cb_basic": MacroDataset(
         api_name="cb_basic",
