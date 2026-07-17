@@ -438,7 +438,7 @@ class SnapshotBuilder:
         def build_macro(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
             macro, meta = self._build_available_at_domain(
-                config.macro_datasets, decision_time, macro_window_start
+                config.macro_datasets, decision_time, macro_window_start, lifetime_registries=True
             )
             profile = _write_with_profile(
                 output_dir / "macro.parquet", macro, build_seconds=time.perf_counter() - started
@@ -1249,7 +1249,12 @@ class SnapshotBuilder:
         return minute, meta
 
     def _build_available_at_domain(
-        self, datasets: tuple[str, ...], decision_time: datetime, window_start: pd.Timestamp
+        self,
+        datasets: tuple[str, ...],
+        decision_time: datetime,
+        window_start: pd.Timestamp,
+        *,
+        lifetime_registries: bool = False,
     ) -> tuple[pd.DataFrame, dict[str, object]]:
         frames: list[pd.DataFrame] = []
         rules: dict[str, str] = {}
@@ -1260,10 +1265,15 @@ class SnapshotBuilder:
             if not dataset_dir.exists():
                 raise FileNotFoundError(f"missing configured dataset directory: {dataset_dir}")
             # Registry datasets (contract/bond basics) stay valid for the
-            # instrument's whole life and are tiny: exempt from the window
-            # floor. PIT is still enforced per row (available_at from the
-            # list date must be at or before decision_time).
-            floor = _REGISTRY_WINDOW_FLOOR if dataset in MACRO_REGISTRY_DATASETS else window_start
+            # instrument's whole life and are tiny: the DECISION snapshot
+            # exempts them from the window floor (PIT still enforced per row
+            # via the list-date available_at). Replay slots must NOT: their
+            # rows are unioned with the frozen snapshot by the Timeview, so a
+            # second full-life copy would duplicate every registry row in the
+            # agent's backtest view — the slot only needs registries newly
+            # listed inside the replay window.
+            exempt = lifetime_registries and dataset in MACRO_REGISTRY_DATASETS
+            floor = _REGISTRY_WINDOW_FLOOR if exempt else window_start
             rows = self._read_dataset_window(dataset_dir, decision_time, floor, nat_counts)
             rules[dataset] = "raw available_at column"
             if rows.empty:

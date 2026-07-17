@@ -2068,7 +2068,7 @@ def macro_pit_rules() -> dict[str, str]:
         "eco_cal": "date+time events use source time when parseable; all-day or missing-time events fall back to date end-of-day.",
         "monetary_policy": "pub_date is used as conservative end-of-day availability; content_html/PDF are text evidence and should be hashed before LLM use.",
         "derivatives_daily": "fut_daily/fut_mapping/opt_daily/cb_daily/yc_cb rows are stamped at trade_date end-of-day and roll on the evening node: usable from the NEXT trading morning, never for same-day open decisions.",
-        "derivatives_registry": "fut_basic/opt_basic/cb_basic rows become visible at their list_date; cb_call announcements at ann_date end-of-day (redemption events are evening disclosures).",
+        "derivatives_registry": "fut_basic/opt_basic/cb_basic rows become visible at their list_date; cb_call announcements at ann_date end-of-day (redemption events are evening disclosures). WARNING: cb_basic is a nightly CURRENT-STATE refresh — conv_price/remain_size/newest_rating/delist_date must never feed historical backtests; derive the as-of conversion price from cb_daily (100 * stock close / cb_value), use cb_over_rate for as-of premium and cb_call for redemption outcomes.",
     }
 
 def macro_unit_rules() -> dict[str, str]:

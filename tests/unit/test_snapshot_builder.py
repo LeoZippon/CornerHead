@@ -792,6 +792,15 @@ class SnapshotBuilderTest(unittest.TestCase):
             registry = macro[macro["dataset"] == "fut_basic"]
             self.assertEqual(sorted(registry["ts_code"]), ["IF1005.CFX"])  # old kept, future hidden
             self.assertTrue(macro[macro["dataset"] == "fut_daily"].empty)  # window floor still applies
+            # Replay slots must NOT apply the exemption: the Timeview unions the
+            # slot with the frozen snapshot, so a second full-life registry copy
+            # would duplicate every row in the agent's backtest view.
+            slot = Path(tmp) / "slot"
+            SnapshotBuilder(raw, events_root, status_path).build_replay_slot(
+                "20211008", "20211011", slot, label="valid", config=config
+            )
+            slot_macro = pd.read_parquet(slot / "macro.parquet")
+            self.assertTrue(slot_macro.empty or slot_macro[slot_macro["dataset"] == "fut_basic"].empty)
 
     def test_fundamental_event_reader_filters_partitions_by_min_available_at(self):
         with tempfile.TemporaryDirectory() as tmp:

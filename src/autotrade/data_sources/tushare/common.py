@@ -519,8 +519,14 @@ class MacroDataset:
     loop_start_dates: tuple[str, ...] = ()
 
     def loop_start_date(self, value: str) -> str:
-        if self.loop_start_dates and value in self.loop_values:
-            return self.loop_start_dates[self.loop_values.index(value)]
+        if self.loop_start_dates:
+            if len(self.loop_start_dates) != len(self.loop_values):
+                raise ValueError(
+                    f"{self.api_name}: loop_start_dates ({len(self.loop_start_dates)}) "
+                    f"must parallel loop_values ({len(self.loop_values)})"
+                )
+            if value in self.loop_values:
+                return self.loop_start_dates[self.loop_values.index(value)]
         return self.start_date
 
 @dataclass

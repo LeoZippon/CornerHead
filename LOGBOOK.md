@@ -1717,3 +1717,11 @@
 - 全量回填完成：fut_mapping/fut_daily 各 4,014 分区、opt_daily 5,957 文件 217 万行、cb_daily 74 万行、yc_cb 2,447 日，共 ~615MB；宏观审计（20260601-20260716）status=ok 0 错误 0 警告。
 - 专项案例研究（.runtime/bench/derivatives_case_study*.py + summary json）：真实决策快照双构建对比 —— 构建 824.7s→886.0s（+7.4%），macro 帧 1.06M→3.04M 行 / 64.8→114MB；热路径确认无回归（Timeview 以 footer 硬链接冻结宏观文件、逐节点只写新可见回放行、Agent 侧 DuckDB 投影查询）；回放槽 8 日窗构建 40s；PIT 逐项断言通过（决策日只见 T-1 结算、区间内 06-29 结算当日全天不可见、06-30 盘前可见；注册表老合约可见/未来合约隐藏）；Agent 视角基差信号端到端验证（IF 主力 2026-06 末贴水 -2.9%，主力换月 06-18→06-22 可见）。
 - Validation：全量 tests/unit 872+ 通过（新增 static_full/审计预期/窗口豁免/场所起始日回归测试）；git diff --check clean。
+
+2026-07-17 收尾合规扫描（2 个子代理端到端复查）与修复
+
+- 广域扫描（agent/pipeline/webui/ops）：三原则全部 PASS、零发现；PROMPTS.md 再生成逐字节一致；11 条文档关键断言逐一对码通过；872 tests 复跑通过。
+- 衍生品深扫（Fable）确认两处 HIGH 并已修复：(1) 注册表窗口豁免泄漏到回放槽 → 与冻结快照在 Timeview 合并后注册表整表重复（Agent 侧 join 双倍行）——豁免改为仅决策快照路径，回放槽实测 82,719→41,535 行、窗口前注册表行=0（新增回归测试）；(2) cb_basic 为当前状态表，conv_price/delist_date/remain_size/newest_rating 按 list_date 盖章即历史前视——cb_price_chg 需逐券 ts_code 无法整表拉取，按最简方案改为文档硬禁令 + PIT 推导口径（转股价 = 100×正股close/cb_daily.cb_value，溢价用 cb_over_rate，赎回结局用 cb_call），同步写入数据文档与审计 PIT 规则。
+- 文档订正：yc_cb 拉取方式（按交易日）、期权 SSE/SZSE/CFFEX 限定与场所起始日、fut_daily 全市场保留理由（商品期货作宏观背景）、连续合约行不可见提示；loop_start_dates 与 loop_values 长度不匹配现报明确错误。
+- 其余低危发现按成本效益处置：yc_cb 页满崩溃保持 fail-fast（当前 ~1,010 行/日对 2000 上限有 2 倍余量）；30 天窗外空洞人工回补语义保留（审计红灯即人工介入信号，实测覆盖完整）。
+- Validation：全量 tests/unit 复跑通过；回放槽重建 41.3s 验证修复；git diff --check clean。

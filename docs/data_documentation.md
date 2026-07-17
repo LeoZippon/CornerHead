@@ -175,17 +175,19 @@ flowchart LR
 
 | 数据 | 接口 | 拉取方式 | 用途 |
 |---|---|---|---|
-| 期货合约注册表 | `fut_basic` | 按交易所整表刷新（`exchange=*.parquet`） | 合约乘数/上市退市日；股指期货基差年化 |
+| 期货合约注册表 | `fut_basic` | 按交易所整表刷新（`exchange=*.parquet`，全部 6 所） | 合约乘数/上市退市日；股指期货基差年化 |
 | 期货主力/连续映射 | `fut_mapping` | 按交易日 | 主力合约代码解析（如 `IF.CFX`→当月合约） |
-| 期货日线 | `fut_daily` | 按交易日 | 股指期货结算价/持仓量 → 基差(贴水)、IC/IM−IF/IH 价差 |
-| 期权合约注册表 | `opt_basic` | 按交易所整表刷新 | `call_put`/行权价/到期日；PCR 与 IV 计算输入 |
-| 期权日线 | `opt_daily` | 按交易日 | ETF/股指期权成交与持仓 → PCR、IV/偏度（IV 需自行反解） |
-| 可转债注册表 | `cb_basic` | 单文件整表刷新 | `stk_code` 正股映射、最新转股价与条款 |
-| 可转债日线 | `cb_daily` | 按交易日 | `cb_over_rate` 等转股/纯债溢价（须显式请求非默认字段） |
+| 期货日线 | `fut_daily` | 按交易日（全市场，商品期货保留作宏观/通胀背景） | 股指期货结算价/持仓量 → 基差(贴水)、IC/IM−IF/IH 价差 |
+| 期权合约注册表 | `opt_basic` | 按交易所整表刷新（限 SSE/SZSE/CFFEX） | `call_put`/行权价/到期日；PCR 与 IV 计算输入 |
+| 期权日线 | `opt_daily` | 按交易所×交易日（`exchange=*/trade_date=*.parquet`，限 SSE/SZSE/CFFEX；SZSE/CFFEX 自 2019-12-23） | ETF/股指期权成交与持仓 → PCR、IV/偏度（IV 需自行反解） |
+| 可转债注册表 | `cb_basic` | 单文件整表刷新 | `stk_code` 正股映射与固定条款 |
+| 可转债日线 | `cb_daily` | 按交易日 | `cb_value`/`cb_over_rate` 等当日转股/纯债溢价（须显式请求非默认字段；历史溢价一律用本表） |
 | 可转债赎回公告 | `cb_call` | 单文件整表刷新 | 强赎/到期赎回事件阶梯（对正股的负面事件信号） |
-| 中债国债收益率曲线 | `yc_cb` | 按曲线代码+年份（`1001.CB`） | 无风险利率（IV/基差年化输入）、期限利差 |
+| 中债国债收益率曲线 | `yc_cb` | 按交易日单次拉取（`ts_code=1001.CB/trade_date=*.parquet`，~500 期限点/日，自 2016-06） | 无风险利率（IV/基差年化输入）、期限利差 |
 
-衍生品日频表按 `trade_date` 当日收盘后保守可见（EOD 盖章 + 晚间节点），只能用于次一交易日及以后的决策；注册表行按 `list_date`（`cb_call` 按 `ann_date`）可见。合约/转债注册表体量小、整表刷新并走修订感知覆盖；快照侧注册表豁免宏观窗口下限（老合约/老转债的条款仍可见），逐行 `available_at` 照常执行 PIT 墙。
+衍生品日频表按 `trade_date` 当日收盘后保守可见（EOD 盖章 + 晚间节点），只能用于次一交易日及以后的决策；注册表行按 `list_date`（`cb_call` 按 `ann_date`）可见。合约/转债注册表体量小、整表刷新并走修订感知覆盖；**决策快照**侧注册表豁免宏观窗口下限（老合约/老转债的条款仍可见），回放槽不豁免（避免与冻结快照在 Timeview 合并后重复行），逐行 `available_at` 照常执行 PIT 墙。
+
+**PIT 硬禁令（cb_basic 为当前状态表）**：`cb_basic` 每晚整表刷新反映**当前**状态，其 `conv_price`/`remain_size`/`newest_rating`/`delist_date` 在历史回测中即前视信息，禁止使用——历史任意时点的转股价按 `conv_price_t = 100 × 正股close_t / cb_daily.cb_value_t` 由当日行 PIT 推出，溢价直接用 `cb_daily.cb_over_rate`，赎回结局用 `cb_call`。期货/期权合约的 `delist_date` 是上市即定的合约条款，可正常使用。`fut_basic` 中连续/主力合约行（如 `IF.CFX`）无 `list_date`、在快照中不可见——主力解析一律走 `fut_mapping`。
 
 只有日期或月份的数据不得用于同日开盘决策；进入环境层后应优先使用精确发布时间或保守延后时间。
 
