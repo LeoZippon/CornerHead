@@ -927,6 +927,7 @@ substep 的声明预算 `B` 同时定义三件事：
 | 回放规模 | 策略日 `replayed_trade_days`、退出日 `replayed_exit_days`、`total_ticks`、`intraday_ticks`、`offsession_ticks`、`decision_calls`、`strategy_action_count` |
 | 订单生命周期 | `order_lifecycle`（entry/exit/cash 三向 total/filled/rejected/cancelled 计数，Probe 同样返回）、`strategy_exit_fill_count`（策略自身发起的退出成交数，宿主区间末强平不计入）、`host_exit_liquidation_count`；当 `trade_count>0` 且策略退出成交为 0 时，回测附带警示级"退出路径检查"诊断（warn-only，不改变验收资格） |
 | 清算摘要 | `liquidation_complete`、`unliquidated_position_count`；`liquidation_complete=false` 时附带 warn-only 诊断 |
+| 仓位与稳定性 | `exposure`（`avg_gross`/`max_gross`：EOD 总持仓市值绝对值 ÷ 当日权益；`zero_position_days`、`replay_days`）与 `weekly_returns`（ISO 周复利收益分解，与日收益同用期初权益基线）；完整 Valid 与 test/held-out 返回，Probe 不返回（属 P&L 派生）。描述性事实，供 Agent 自查结构性低仓位与子区间稳定性，非优化目标 |
 | 状态写入 | `state_staged_writes` / `state_unmerged_writes` |
 | substep 统计 | `substep_runtime`，含 count、total_real_wall_s、max_real_wall_s |
 | 阶段耗时 | `phase_seconds`，含 Agent `strategy_compute`、`strategy_ipc`、`nl_service`、Timeview、state、Broker 与 `host_replay_overhead`；各项合计覆盖回放墙钟 |

@@ -179,6 +179,42 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         reason = str(event.get("reason") or "unspecified")
         unsubmitted_action_reason_counts[reason] = unsubmitted_action_reason_counts.get(reason, 0) + 1
 
+    # Exposure diagnostics: gross = Σ|EOD market value| / same-day equity.
+    # Primitive facts only — the audited failure mode is a structurally
+    # low-exposure strategy whose returns get read as stock-picking quality
+    # while it mostly held cash; the agent combines these with the benchmark
+    # block itself.
+    gross_by_date: dict[str, float] = {}
+    for row in broker.positions_eod_records():
+        date = str(row["date"])
+        gross_by_date[date] = gross_by_date.get(date, 0.0) + abs(float(row["market_value"]))
+    exposure_series = [
+        (gross_by_date.get(str(date), 0.0) / float(equity)) if float(equity) > 0 else 0.0
+        for date, equity in curve.items()
+    ]
+    exposure = {
+        "avg_gross": float(sum(exposure_series) / len(exposure_series)) if exposure_series else 0.0,
+        "max_gross": float(max(exposure_series)) if exposure_series else 0.0,
+        "zero_position_days": int(sum(1 for value in exposure_series if value == 0.0)),
+        "replay_days": len(exposure_series),
+    }
+    # Weekly return decomposition (ISO weeks, initial-equity baseline like the
+    # daily series): sub-period stability at a glance instead of one
+    # whole-window number.
+    weekly_returns: list[dict[str, object]] = []
+    if len(curve):
+        dated = pd.Series(
+            curve.to_numpy(dtype=float),
+            index=pd.to_datetime(curve.index.astype(str), format="%Y%m%d"),
+        )
+        week_end_equity = dated.resample("W").last().dropna()
+        week_starts = [float(initial), *(float(value) for value in week_end_equity.iloc[:-1])]
+        weekly_returns = [
+            {"week_end": end.strftime("%Y%m%d"), "return": float(equity / start - 1.0)}
+            for (end, equity), start in zip(week_end_equity.items(), week_starts)
+            if start > 0
+        ]
+
     return {
         "initial_cash": initial,
         "final_equity": float(curve.iloc[-1]) if len(curve) else initial,
@@ -189,6 +225,8 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         "sharpe": sharpe,
         "max_drawdown": max_drawdown,
         "win_rate": float(wins / len(realized)) if realized else 0.0,
+        "exposure": exposure,
+        "weekly_returns": weekly_returns,
         "full_close_count": len(full_closes),
         "trade_count": len(realized),
         "turnover": float(broker.traded_notional / initial) if initial else 0.0,

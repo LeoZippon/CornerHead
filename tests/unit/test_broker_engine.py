@@ -1522,6 +1522,31 @@ class ReturnStatsTest(unittest.TestCase):
         self.assertEqual(stats["unliquidated_positions"], [])
         self.assertEqual(stats["remaining_liabilities"], 0.0)
 
+    def test_exposure_and_weekly_decomposition(self):
+        # Gross exposure from EOD snapshots over same-day equity, and ISO-week
+        # compounded returns with the initial-equity baseline.
+        broker = SimBroker(BrokerProfile(), MarketData(REPLAY), shortable_codes=frozenset())
+        broker.execute("000001.SZ", "buy", trade_date="20220104", raw_price=10.0, amount=1000)
+        broker.mark_to_market("20220104")  # EOD market value 1000 * 10.5
+        equity1 = broker.equity()
+        initial = broker.initial_equity
+        result = ReplayResult(
+            equity_curve=pd.Series(
+                {"20220104": equity1, "20220105": equity1, "20220112": equity1 * 1.01}
+            ),
+            broker=broker, decision_date="20220104", exit_date="20220112",
+        )
+        stats = compute_return_stats(result)
+        exposure = stats["exposure"]
+        self.assertEqual(exposure["replay_days"], 3)
+        self.assertEqual(exposure["zero_position_days"], 2)
+        self.assertAlmostEqual(exposure["max_gross"], 10_500.0 / equity1)
+        self.assertAlmostEqual(exposure["avg_gross"], 10_500.0 / equity1 / 3)
+        weekly = stats["weekly_returns"]
+        self.assertEqual([entry["week_end"] for entry in weekly], ["20220109", "20220116"])
+        self.assertAlmostEqual(weekly[0]["return"], equity1 / initial - 1.0)
+        self.assertAlmostEqual(weekly[1]["return"], 0.01)
+
     def test_exit_day_leftovers_reported_as_incomplete_liquidation(self):
         suspended_exit = make_daily(
             [

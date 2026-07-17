@@ -769,6 +769,10 @@ class BacktestTool:
                 "short_return": stats["short_return"],
                 "sharpe": stats["sharpe"],
                 "max_drawdown": stats["max_drawdown"],
+                # Exposure + weekly decomposition: P&L-derived, so non-probe
+                # only, like the return metrics above.
+                "exposure": stats["exposure"],
+                "weekly_returns": stats["weekly_returns"],
                 # Exit-day liquidation completeness: final equity is mark-to-market
                 # either way; leftovers (suspension/limit-lock/T+1) are itemized in
                 # detailed_return.json's unliquidated_positions.
