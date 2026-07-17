@@ -2264,8 +2264,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         static_paths = audit.expected_macro_paths(self.raw_dir, common.MACRO_SPECS["fut_basic"], "20240101", "20240110", args)
         self.assertIn(self.raw_dir / "fut_basic" / "exchange=CFFEX.parquet", static_paths)
         self.assertEqual(len(static_paths), len(common.MACRO_SPECS["fut_basic"].loop_values))
-        yc_paths = audit.expected_macro_paths(self.raw_dir, common.MACRO_SPECS["yc_cb"], "20240101", "20240110", args)
-        self.assertEqual(yc_paths, {self.raw_dir / "yc_cb" / "ts_code=1001.CB" / "year=2024.parquet"})
+        self._write_trade_cal("20240104")
+        yc_paths = audit.expected_macro_paths(self.raw_dir, common.MACRO_SPECS["yc_cb"], "20240104", "20240104", args)
+        self.assertEqual(yc_paths, {self.raw_dir / "yc_cb" / "ts_code=1001.CB" / "trade_date=20240104.parquet"})
         # Loop venues that listed later must not be expected before their start.
         self._write_trade_cal("20180104")
         opt_paths = audit.expected_macro_paths(self.raw_dir, common.MACRO_SPECS["opt_daily"], "20180104", "20180104", args)

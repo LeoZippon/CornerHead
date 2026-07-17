@@ -731,8 +731,6 @@ def download_macro(args: argparse.Namespace) -> int:
                 codes = selected_cn_index_codes(args)
             elif dataset == "fx_daily":
                 codes = selected_fx_codes(args)
-            elif dataset == "yc_cb":
-                codes = ["1001.CB"]  # ChinaBond treasury yield curve (spot + YTM rows)
             else:
                 raise RuntimeError(f"no ts_code universe defined for by-ts_code macro dataset {dataset!r}")
             download_macro_date_year_by_ts_code(client, raw_dir, spec, start_date, args.end_date, args.force, macro_page_limit(spec, args.page_limit), codes, revision_ledger, allow_empty_revision_overwrite)

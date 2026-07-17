@@ -1002,11 +1002,18 @@ MACRO_SPECS = {
     ),
     "yc_cb": MacroDataset(
         api_name="yc_cb",
-        strategy="date_year_by_ts_code",
+        strategy="trade_date",
         fields="trade_date,ts_code,curve_name,curve_type,curve_term,yield",
         page_limit=2000,
         key_columns=("trade_date", "ts_code", "curve_type", "curve_term"),
         date_column="trade_date",
+        # The ChinaBond curve is a dense ~500-term grid (~1,010 rows/day) and
+        # the API rejects offset paging (50101), so pull one day per call:
+        # a single page holds a full day, and query_paged never advances.
+        # TuShare coverage starts 2016-06.
+        start_date="20160620",
+        loop_param="ts_code",
+        loop_values=("1001.CB",),
     ),
 }
 

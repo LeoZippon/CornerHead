@@ -2039,8 +2039,6 @@ def expected_macro_paths(raw_dir: Path, spec: MacroDataset, start_date: str, end
             codes = selected_index_codes(args)
         elif spec.api_name in ("index_daily", "index_dailybasic"):
             codes = selected_cn_index_codes(args)
-        elif spec.api_name == "yc_cb":
-            codes = ["1001.CB"]
         else:
             codes = selected_fx_codes(args)
         return {
