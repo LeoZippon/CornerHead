@@ -17,7 +17,14 @@
   "revision_monitor": {
     "ledger_path": "results/data_quality/revision_events.jsonl",
     "summary_path": "results/data_quality/revision_summary.json",
-    "sentinel_datasets": ["daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d", "limit_list_d"],
+    "sentinel_datasets": [
+      "daily",
+      "adj_factor",
+      "daily_basic",
+      "stk_limit",
+      "suspend_d",
+      "limit_list_d"
+    ],
     "sentinel_sample_size": 12
   },
   "jobs": {
@@ -246,113 +253,995 @@
     }
   },
   "interfaces": [
-    {"dataset": "stock_basic", "api": "stock_basic", "domain": "reference", "frequency": "low_frequency", "official_update": "基础信息；官方建议本地保存后使用，未标具体入库时刻。", "cron_policy": "daily_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=25"},
-    {"dataset": "stock_company", "api": "stock_company", "domain": "reference", "frequency": "low_frequency", "official_update": "上市公司基础信息；官方未标具体入库时刻。", "cron_policy": "daily_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=112"},
-    {"dataset": "trade_cal", "api": "trade_cal", "domain": "reference", "frequency": "regular", "official_update": "交易日历；权限表为定期更新。", "cron_policy": "daily_skip_existing", "doc_ref": "https://tushare.pro/document/2?doc_id=26"},
-    {"dataset": "bak_basic", "api": "bak_basic", "domain": "reference", "frequency": "trade_date", "official_update": "历史每天股票列表；官方未标具体入库时刻。", "cron_policy": "same_day_evening_recent_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=262"},
-    {"dataset": "namechange", "api": "namechange", "domain": "reference", "frequency": "event_driven", "official_update": "股票曾用名；公告驱动，官方未标具体入库时刻。", "cron_policy": "daily_force_refresh_slow", "doc_ref": "https://tushare.pro/document/2?doc_id=100"},
-    {"dataset": "index_classify", "api": "index_classify", "domain": "reference", "frequency": "low_frequency", "official_update": "申万行业分类；全量分类，官方未标具体入库时刻。", "cron_policy": "daily_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=181"},
-    {"dataset": "index_member_all", "api": "index_member_all", "domain": "reference", "frequency": "low_frequency", "official_update": "申万行业成分；全量数据，官方未标具体入库时刻。", "cron_policy": "daily_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=335"},
-
-    {"dataset": "daily", "api": "daily", "domain": "base_research", "frequency": "trade_date", "official_update": "交易日每日15:00-16:00之间入库。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=27"},
-    {"dataset": "adj_factor", "api": "adj_factor", "domain": "base_research", "frequency": "trade_date", "official_update": "盘前09:15-09:20完成当日复权因子入库。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=28"},
-    {"dataset": "daily_basic", "api": "daily_basic", "domain": "base_research", "frequency": "trade_date", "official_update": "交易日每日15:00-17:00之间更新。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=32"},
-    {"dataset": "stk_limit", "api": "stk_limit", "domain": "base_research", "frequency": "trade_date", "official_update": "每个交易日08:40左右更新当日涨跌停价格；权限表记为交易日09:00。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=183"},
-    {"dataset": "stk_auction", "api": "stk_auction", "domain": "base_research", "frequency": "trade_date", "official_update": "交易日09:27-09:29可获取当日最终开盘集合竞价成交；历史从2025-01-16起可用。", "cron_policy": "same_day_poll_0927_then_retry_0931_and_2320_forced_reconciliation", "doc_ref": "https://tushare.pro/document/2?doc_id=369"},
-    {"dataset": "suspend_d", "api": "suspend_d", "domain": "base_research", "frequency": "event_driven", "official_update": "不定期。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=214"},
-    {"dataset": "limit_list_d", "api": "limit_list_d", "domain": "base_research", "frequency": "trade_date", "official_update": "每日涨跌停、炸板数据；官方页面未标具体入库时刻。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=298"},
-
-    {"dataset": "income_vip", "api": "income_vip", "domain": "base_research", "frequency": "filing_realtime", "official_update": "利润表；权限表为全部历史、实时更新。", "cron_policy": "daily_refresh_latest_6_report_periods", "doc_ref": "https://tushare.pro/document/2?doc_id=33"},
-    {"dataset": "balancesheet_vip", "api": "balancesheet_vip", "domain": "base_research", "frequency": "filing_realtime", "official_update": "资产负债表；权限表为全部历史、实时更新。", "cron_policy": "daily_refresh_latest_6_report_periods", "doc_ref": "https://tushare.pro/document/2?doc_id=36"},
-    {"dataset": "cashflow_vip", "api": "cashflow_vip", "domain": "base_research", "frequency": "filing_realtime", "official_update": "现金流量表；权限表为全部历史、实时更新。", "cron_policy": "daily_refresh_latest_6_report_periods", "doc_ref": "https://tushare.pro/document/2?doc_id=44"},
-    {"dataset": "fina_indicator_vip", "api": "fina_indicator_vip", "domain": "base_research", "frequency": "filing_realtime", "official_update": "财务指标；权限表为全部历史、随财报实时更新。", "cron_policy": "daily_refresh_latest_6_report_periods", "doc_ref": "https://tushare.pro/document/2?doc_id=79"},
-    {"dataset": "forecast_vip", "api": "forecast_vip", "domain": "base_research", "frequency": "filing_realtime", "official_update": "业绩预告；权限表为全部历史、实时更新。", "cron_policy": "daily_refresh_latest_3_announcement_months", "doc_ref": "https://tushare.pro/document/2?doc_id=45"},
-    {"dataset": "express_vip", "api": "express_vip", "domain": "base_research", "frequency": "filing_realtime", "official_update": "业绩快报；权限表为全部历史、实时更新。", "cron_policy": "daily_refresh_latest_3_announcement_months", "doc_ref": "https://tushare.pro/document/2?doc_id=46"},
-    {"dataset": "dividend", "api": "dividend", "domain": "base_research", "frequency": "filing_realtime", "official_update": "分红送股；权限表为全部历史、实时更新。", "cron_policy": "daily_refresh_recent_affected_codes_plus_90d_date_probe", "doc_ref": "https://tushare.pro/document/2?doc_id=103"},
-    {"dataset": "fina_audit", "api": "fina_audit", "domain": "base_research", "frequency": "filing_realtime", "official_update": "财务审计意见；权限表为全部历史、随财报实时更新。", "cron_policy": "daily_refresh_recent_affected_codes", "doc_ref": "https://tushare.pro/document/2?doc_id=80"},
-    {"dataset": "fina_mainbz_vip", "api": "fina_mainbz_vip", "domain": "base_research", "frequency": "filing_realtime", "official_update": "主营业务构成；权限表为全部历史、随财报实时更新。", "cron_policy": "daily_refresh_recent_affected_codes", "doc_ref": "https://tushare.pro/document/2?doc_id=81"},
-    {"dataset": "disclosure_date", "api": "disclosure_date", "domain": "base_research", "frequency": "regular", "official_update": "财报披露计划；权限表为全部历史、定期更新。", "cron_policy": "daily_refresh_latest_6_report_periods", "doc_ref": "https://tushare.pro/document/2?doc_id=162"},
-
-    {"dataset": "stk_mins_1min", "api": "stk_mins", "domain": "intraday_minutes", "frequency": "trade_date", "official_update": "历史分钟数据每天收盘后处理更新，17:00-21:00之间完成。", "cron_policy": "evening_update_plus_1d_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=370"},
-
-    {"dataset": "margin", "api": "margin", "domain": "event_flow", "frequency": "trade_date", "official_update": "融资融券交易汇总；权限表为每日09:00更新。", "cron_policy": "preopen_force_retry_0905_0915_then_audit_0920", "doc_ref": "https://tushare.pro/document/2?doc_id=58"},
-    {"dataset": "margin_detail", "api": "margin_detail", "domain": "event_flow", "frequency": "trade_date", "official_update": "融资融券交易明细；权限表为每日09:00更新。", "cron_policy": "preopen_force_retry_0905_0915_then_audit_0920", "doc_ref": "https://tushare.pro/document/2?doc_id=59"},
-    {"dataset": "margin_secs", "api": "margin_secs", "domain": "event_flow", "frequency": "trade_date", "official_update": "融资融券标的；官方页面标注每天盘前更新。", "cron_policy": "same_day_preopen_force_retry_0903_0913_plus_evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=326"},
-    {"dataset": "top10_holders", "api": "top10_holders", "domain": "event_flow", "frequency": "event_driven", "official_update": "前十大股东（季频，按公告日增量）；披露期更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=61"},
-    {"dataset": "top10_floatholders", "api": "top10_floatholders", "domain": "event_flow", "frequency": "event_driven", "official_update": "前十大流通股东（季频，按公告日增量）；披露期更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=62"},
-    {"dataset": "pledge_detail", "api": "pledge_detail", "domain": "event_flow", "frequency": "event_driven", "official_update": "股权质押明细（按公告日增量）。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=111"},
-    {"dataset": "stk_surv", "api": "stk_surv", "domain": "event_flow", "frequency": "event_driven", "official_update": "机构调研记录；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=275"},
-    {"dataset": "new_share", "api": "new_share", "domain": "event_flow", "frequency": "event_driven", "official_update": "IPO 新股列表（按上市日）。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=123"},
-    {"dataset": "broker_recommend", "api": "broker_recommend", "domain": "macro", "frequency": "event_driven", "official_update": "券商月度金股组合；每月初更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=337"},
-    {"dataset": "moneyflow", "api": "moneyflow", "domain": "event_flow", "frequency": "trade_date", "official_update": "个股资金流向；权限表为交易日19:00更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=170"},
-    {"dataset": "moneyflow_dc", "api": "moneyflow_dc", "domain": "event_flow", "frequency": "trade_date", "official_update": "东财个股资金流向；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=339"},
-    {"dataset": "moneyflow_ths", "api": "moneyflow_ths", "domain": "event_flow", "frequency": "trade_date", "official_update": "同花顺个股资金流向；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=344"},
-    {"dataset": "moneyflow_ind_dc", "api": "moneyflow_ind_dc", "domain": "event_flow", "frequency": "trade_date", "official_update": "东财行业/概念板块资金流向；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=343"},
-    {"dataset": "moneyflow_ind_ths", "api": "moneyflow_ind_ths", "domain": "event_flow", "frequency": "trade_date", "official_update": "同花顺行业资金流向；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=341"},
-    {"dataset": "moneyflow_cnt_ths", "api": "moneyflow_cnt_ths", "domain": "event_flow", "frequency": "trade_date", "official_update": "同花顺概念板块资金流向；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=342"},
-    {"dataset": "cyq_perf", "api": "cyq_perf", "domain": "event_flow", "frequency": "trade_date", "official_update": "每日筹码分布汇总（成本分位/获利盘）；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=293"},
-    {"dataset": "bak_daily", "api": "bak_daily", "domain": "event_flow", "frequency": "trade_date", "official_update": "备用日行情（31 派生列）；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=255"},
-    {"dataset": "stk_premarket", "api": "stk_premarket", "domain": "event_flow", "frequency": "trade_date", "official_update": "盘前股本与涨跌停静态表；交易日 09:00 前更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=284"},
-    {"dataset": "slb_len", "api": "slb_len", "domain": "event_flow", "frequency": "trade_date", "official_update": "转融通余额汇总；盘后更新（2024-07 转融券暂停后部分为零）。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=332"},
-    {"dataset": "slb_len_mm", "api": "slb_len_mm", "domain": "event_flow", "frequency": "trade_date", "official_update": "做市借券余额；盘后更新（同上）。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=333"},
-    {"dataset": "stk_holdernumber", "api": "stk_holdernumber", "domain": "event_flow", "frequency": "event_driven", "official_update": "股东人数；权限表为不定期更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=166"},
-    {"dataset": "stk_holdertrade", "api": "stk_holdertrade", "domain": "event_flow", "frequency": "event_driven", "official_update": "股东增减持；权限表为交易日19:00更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=175"},
-    {"dataset": "repurchase", "api": "repurchase", "domain": "event_flow", "frequency": "event_driven", "official_update": "股票回购；权限表为每日定时更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=124"},
-    {"dataset": "share_float_complete", "api": "share_float", "domain": "event_flow", "frequency": "regular", "official_update": "限售股解禁；权限表为定期更新。", "cron_policy": "daily_refresh_recent_and_rebuild_union", "doc_ref": "https://tushare.pro/document/2?doc_id=160"},
-    {"dataset": "block_trade", "api": "block_trade", "domain": "event_flow", "frequency": "trade_date", "official_update": "大宗交易；权限表为每日21:00更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=161"},
-
-    {"dataset": "kpl_list", "api": "kpl_list", "domain": "board_trading", "frequency": "trade_date", "official_update": "开盘啦榜单数据；官方页面标注次日08:30更新。", "cron_policy": "next_morning_force_refresh_0850", "doc_ref": "https://tushare.pro/document/2?doc_id=347"},
-    {"dataset": "kpl_concept_cons", "api": "kpl_concept_cons", "domain": "board_trading", "frequency": "trade_date", "official_update": "开盘啦概念成分与热度；次日 08:30 前更新。", "cron_policy": "evening_plus_next_day_preopen_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=351"},
-    {"dataset": "dc_index", "api": "dc_index", "domain": "board_trading", "frequency": "trade_date", "official_update": "东财概念/行业板块指数日行情；盘后更新。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=362"},
-    {"dataset": "dc_member", "api": "dc_member", "domain": "board_trading", "frequency": "trade_date", "official_update": "东财板块成分（分页大表）；盘后更新。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=363"},
-    {"dataset": "ths_daily", "api": "ths_daily", "domain": "macro", "frequency": "trade_date", "official_update": "同花顺概念/行业指数日行情；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=260"},
-    {"dataset": "limit_step", "api": "limit_step", "domain": "board_trading", "frequency": "trade_date", "official_update": "涨停股票连板天梯；官方页面未标具体入库时刻。", "cron_policy": "evening_update_plus_preopen_board_force", "doc_ref": "https://tushare.pro/document/2?doc_id=356"},
-    {"dataset": "limit_cpt_list", "api": "limit_cpt_list", "domain": "board_trading", "frequency": "trade_date", "official_update": "涨停最强板块统计；官方页面未标具体入库时刻。", "cron_policy": "evening_update_plus_preopen_board_force", "doc_ref": "https://tushare.pro/document/2?doc_id=357"},
-    {"dataset": "limit_list_ths", "api": "limit_list_ths", "domain": "board_trading", "frequency": "trade_date", "official_update": "同花顺涨跌停榜单；历史从20231101开始，增量每天16:00左右更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=355"},
-    {"dataset": "top_list", "api": "top_list", "domain": "board_trading", "frequency": "trade_date", "official_update": "龙虎榜每日明细；权限表为每日20:00更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=106"},
-    {"dataset": "top_inst", "api": "top_inst", "domain": "board_trading", "frequency": "trade_date", "official_update": "龙虎榜机构明细；权限表为每日20:00更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=107"},
-    {"dataset": "hm_list", "api": "hm_list", "domain": "board_trading", "frequency": "low_frequency", "official_update": "市场游资名录；低频参考表，官方未标具体入库时刻。", "cron_policy": "daily_skip_existing", "doc_ref": "https://tushare.pro/document/2?doc_id=311"},
-    {"dataset": "hm_detail", "api": "hm_detail", "domain": "board_trading", "frequency": "trade_date", "official_update": "游资交易每日明细；数据开始于2022年8月，官方页面未标具体入库时刻。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=312"},
-    {"dataset": "ths_hot", "api": "ths_hot", "domain": "board_trading", "frequency": "intraday_and_evening", "official_update": "同花顺热榜；每日盘中提取4次、收盘后4次，最晚22:00/22:30附近。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=320"},
-    {"dataset": "dc_hot", "api": "dc_hot", "domain": "board_trading", "frequency": "intraday_and_evening", "official_update": "东方财富热榜；每日盘中提取4次、收盘后4次，最晚22:00/22:30附近。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=321"},
-
-    {"dataset": "irm_qa_sh", "api": "irm_qa_sh", "domain": "text_evidence", "frequency": "trade_date", "official_update": "投资者互动问答；随发布滚动更新。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=364"},
-    {"dataset": "irm_qa_sz", "api": "irm_qa_sz", "domain": "text_evidence", "frequency": "trade_date", "official_update": "投资者互动问答；随发布滚动更新。", "cron_policy": "same_day_evening_recent_force_refresh", "doc_ref": "https://tushare.pro/document/2?doc_id=365"},
-    {"dataset": "anns_d", "api": "anns_d", "domain": "text_evidence", "frequency": "event_driven", "official_update": "全量公告；官方页面提供发布时间字段rec_time，未标固定入库时刻。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=176"},
-    {"dataset": "major_news", "api": "major_news", "domain": "text_evidence", "frequency": "near_realtime", "official_update": "新闻通讯；官方页面提供pub_time，未标固定入库时刻。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=195"},
-    {"dataset": "cctv_news", "api": "cctv_news", "domain": "text_evidence", "frequency": "daily", "official_update": "新闻联播文字稿；按日期提取，官方未标具体入库时刻。", "cron_policy": "next_morning_force_refresh_recent", "doc_ref": "https://tushare.pro/document/2?doc_id=154"},
-    {"dataset": "npr", "api": "npr", "domain": "text_evidence", "frequency": "event_driven", "official_update": "国家政策法规库；官方页面提供pubtime，未标固定入库时刻。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=406"},
-    {"dataset": "research_report", "api": "research_report", "domain": "text_evidence", "frequency": "daily", "official_update": "券商研究报告；增量每天两次更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=415"},
-    {"dataset": "report_rc", "api": "report_rc", "domain": "text_evidence", "frequency": "daily", "official_update": "卖方盈利预测；每天19:00-22:00更新当日数据。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=292"},
-    {"dataset": "news", "api": "news", "domain": "text_evidence", "frequency": "near_realtime", "official_update": "新闻快讯；官方页面提供datetime，未标固定入库时刻。", "cron_policy": "same_day_evening_open_window_plus_next_morning_recent_force_refresh", "doc_ref": "https://www.tushare.pro/document/41?doc_id=143"},
-
-    {"dataset": "cn_schedule", "api": "cn_schedule", "domain": "macro_context", "frequency": "monthly", "official_update": "中国经济数据发布日程；持续更新中。", "cron_policy": "daily_refresh_current_month", "doc_ref": "https://tushare.pro/document/2?doc_id=461"},
-    {"dataset": "cn_gdp", "api": "cn_gdp", "domain": "macro_context", "frequency": "quarterly", "official_update": "GDP；官方页面未标固定入库时刻，按国家统计局发布节奏。", "cron_policy": "daily_skip_existing_and_refresh_open_periods", "doc_ref": "https://tushare.pro/document/2?doc_id=227"},
-    {"dataset": "cn_cpi", "api": "cn_cpi", "domain": "macro_context", "frequency": "monthly", "official_update": "CPI；官方页面未标固定入库时刻，按统计数据发布节奏。", "cron_policy": "daily_skip_existing_and_refresh_open_months", "doc_ref": "https://tushare.pro/document/2?doc_id=228"},
-    {"dataset": "cn_ppi", "api": "cn_ppi", "domain": "macro_context", "frequency": "monthly", "official_update": "PPI；官方页面未标固定入库时刻，按统计数据发布节奏。", "cron_policy": "daily_skip_existing_and_refresh_open_months", "doc_ref": "https://tushare.pro/document/2?doc_id=229"},
-    {"dataset": "cn_pmi", "api": "cn_pmi", "domain": "macro_context", "frequency": "monthly", "official_update": "PMI；官方页面未标固定入库时刻，按统计数据发布节奏。", "cron_policy": "daily_skip_existing_and_refresh_open_months", "doc_ref": "https://tushare.pro/document/2?doc_id=325"},
-    {"dataset": "cn_m", "api": "cn_m", "domain": "macro_context", "frequency": "monthly", "official_update": "货币供应量；官方页面未标固定入库时刻，按央行发布节奏。", "cron_policy": "daily_skip_existing_and_refresh_open_months", "doc_ref": "https://tushare.pro/document/2?doc_id=242"},
-    {"dataset": "sf_month", "api": "sf_month", "domain": "macro_context", "frequency": "monthly", "official_update": "社会融资规模；官方页面未标固定入库时刻，按央行发布节奏。", "cron_policy": "daily_skip_existing_and_refresh_open_months", "doc_ref": "https://tushare.pro/document/2?doc_id=310"},
-    {"dataset": "shibor", "api": "shibor", "domain": "macro_context", "frequency": "daily", "official_update": "SHIBOR利率；权限表为每日12:00。", "cron_policy": "evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=202"},
-    {"dataset": "shibor_quote", "api": "shibor_quote", "domain": "macro_context", "frequency": "daily", "official_update": "SHIBOR报价；权限表为每日12:00。", "cron_policy": "evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=203"},
-    {"dataset": "shibor_lpr", "api": "shibor_lpr", "domain": "macro_context", "frequency": "daily_or_monthly", "official_update": "LPR贷款基础利率；权限表为每日12:00。", "cron_policy": "evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=204"},
-    {"dataset": "hibor", "api": "hibor", "domain": "macro_context", "frequency": "daily", "official_update": "HIBOR拆借利率；权限表为每日12:00。", "cron_policy": "evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=206"},
-    {"dataset": "libor", "api": "libor", "domain": "macro_context", "frequency": "daily", "official_update": "LIBOR拆借利率；权限表为每日12:00。", "cron_policy": "evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=205"},
-    {"dataset": "repo_daily", "api": "repo_daily", "domain": "macro_context", "frequency": "daily", "official_update": "债券回购日行情；官方页面未标具体入库时刻。", "cron_policy": "evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=256"},
-    {"dataset": "us_tycr", "api": "us_tycr", "domain": "macro_context", "frequency": "daily", "official_update": "美国国债收益率曲线；官方页面未标具体入库时刻。", "cron_policy": "evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=218"},
-    {"dataset": "us_trycr", "api": "us_trycr", "domain": "macro_context", "frequency": "daily", "official_update": "美国实际收益率曲线；官方页面未标具体入库时刻。", "cron_policy": "evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=219"},
-    {"dataset": "us_tbr", "api": "us_tbr", "domain": "macro_context", "frequency": "daily", "official_update": "美国国债短期利率；官方页面未标具体入库时刻。", "cron_policy": "evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=220"},
-    {"dataset": "us_tltr", "api": "us_tltr", "domain": "macro_context", "frequency": "daily", "official_update": "美国长期国债利率；官方页面未标具体入库时刻。", "cron_policy": "evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=222"},
-    {"dataset": "index_daily", "api": "index_daily", "domain": "macro_context", "frequency": "daily", "official_update": "A股核心宽基指数日线（上证指数/上证50/沪深300/中证500/中证1000/创业板指/科创50）；收盘后官方发布。", "cron_policy": "evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=95"},
-    {"dataset": "index_dailybasic", "api": "index_dailybasic", "domain": "macro", "frequency": "trade_date", "official_update": "重要指数每日估值指标；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=128"},
-    {"dataset": "sw_daily", "api": "sw_daily", "domain": "macro", "frequency": "trade_date", "official_update": "申万行业指数日行情；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=311"},
-    {"dataset": "ci_daily", "api": "ci_daily", "domain": "macro", "frequency": "trade_date", "official_update": "中信行业指数日行情；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=310"},
-    {"dataset": "daily_info", "api": "daily_info", "domain": "macro", "frequency": "trade_date", "official_update": "沪深市场每日交易统计；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=215"},
-    {"dataset": "sz_daily_info", "api": "sz_daily_info", "domain": "macro", "frequency": "trade_date", "official_update": "深圳市场每日交易概况；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=278"},
-    {"dataset": "moneyflow_mkt_dc", "api": "moneyflow_mkt_dc", "domain": "macro", "frequency": "trade_date", "official_update": "东财全市场资金流向；盘后更新。", "cron_policy": "evening_open_window_force_refresh_with_revision_ledger", "doc_ref": "https://tushare.pro/document/2?doc_id=345"},
-    {"dataset": "index_global", "api": "index_global", "domain": "macro_context", "frequency": "daily", "official_update": "全球指数日线；官方页面未标具体入库时刻。", "cron_policy": "evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=211"},
-    {"dataset": "fx_daily", "api": "fx_daily", "domain": "macro_context", "frequency": "daily", "official_update": "外汇日线；官方页面说明交易日期为GMT，未标具体入库时刻。", "cron_policy": "evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=179"},
-    {"dataset": "eco_cal", "api": "eco_cal", "domain": "macro_context", "frequency": "event_driven", "official_update": "全球财经日历；包括经济事件数据更新，官方未标固定入库时刻。", "cron_policy": "evening_rolling_update", "doc_ref": "https://tushare.pro/document/2?doc_id=233"},
-    {"dataset": "monetary_policy", "api": "monetary_policy", "domain": "macro_context", "frequency": "quarterly", "official_update": "央行货币政策执行报告；季度更新，一年四篇，按发布日。", "cron_policy": "daily_skip_existing_and_refresh_open_year", "doc_ref": "https://tushare.pro/document/2?doc_id=465"}
+    {
+      "dataset": "stock_basic",
+      "api": "stock_basic",
+      "domain": "reference",
+      "frequency": "low_frequency",
+      "official_update": "基础信息；官方建议本地保存后使用，未标具体入库时刻。",
+      "cron_policy": "daily_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=25"
+    },
+    {
+      "dataset": "stock_company",
+      "api": "stock_company",
+      "domain": "reference",
+      "frequency": "low_frequency",
+      "official_update": "上市公司基础信息；官方未标具体入库时刻。",
+      "cron_policy": "daily_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=112"
+    },
+    {
+      "dataset": "trade_cal",
+      "api": "trade_cal",
+      "domain": "reference",
+      "frequency": "regular",
+      "official_update": "交易日历；权限表为定期更新。",
+      "cron_policy": "daily_skip_existing",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=26"
+    },
+    {
+      "dataset": "bak_basic",
+      "api": "bak_basic",
+      "domain": "reference",
+      "frequency": "trade_date",
+      "official_update": "历史每天股票列表；官方未标具体入库时刻。",
+      "cron_policy": "same_day_evening_recent_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=262"
+    },
+    {
+      "dataset": "namechange",
+      "api": "namechange",
+      "domain": "reference",
+      "frequency": "event_driven",
+      "official_update": "股票曾用名；公告驱动，官方未标具体入库时刻。",
+      "cron_policy": "daily_force_refresh_slow",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=100"
+    },
+    {
+      "dataset": "index_classify",
+      "api": "index_classify",
+      "domain": "reference",
+      "frequency": "low_frequency",
+      "official_update": "申万行业分类；全量分类，官方未标具体入库时刻。",
+      "cron_policy": "daily_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=181"
+    },
+    {
+      "dataset": "index_member_all",
+      "api": "index_member_all",
+      "domain": "reference",
+      "frequency": "low_frequency",
+      "official_update": "申万行业成分；全量数据，官方未标具体入库时刻。",
+      "cron_policy": "daily_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=335"
+    },
+    {
+      "dataset": "daily",
+      "api": "daily",
+      "domain": "base_research",
+      "frequency": "trade_date",
+      "official_update": "交易日每日15:00-16:00之间入库。",
+      "cron_policy": "same_day_evening_recent_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=27"
+    },
+    {
+      "dataset": "adj_factor",
+      "api": "adj_factor",
+      "domain": "base_research",
+      "frequency": "trade_date",
+      "official_update": "盘前09:15-09:20完成当日复权因子入库。",
+      "cron_policy": "same_day_evening_recent_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=28"
+    },
+    {
+      "dataset": "daily_basic",
+      "api": "daily_basic",
+      "domain": "base_research",
+      "frequency": "trade_date",
+      "official_update": "交易日每日15:00-17:00之间更新。",
+      "cron_policy": "same_day_evening_recent_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=32"
+    },
+    {
+      "dataset": "stk_limit",
+      "api": "stk_limit",
+      "domain": "base_research",
+      "frequency": "trade_date",
+      "official_update": "每个交易日08:40左右更新当日涨跌停价格；权限表记为交易日09:00。",
+      "cron_policy": "same_day_evening_recent_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=183"
+    },
+    {
+      "dataset": "stk_auction",
+      "api": "stk_auction",
+      "domain": "base_research",
+      "frequency": "trade_date",
+      "official_update": "交易日09:27-09:29可获取当日最终开盘集合竞价成交；历史从2025-01-16起可用。",
+      "cron_policy": "same_day_poll_0927_then_retry_0931_and_2320_forced_reconciliation",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=369"
+    },
+    {
+      "dataset": "suspend_d",
+      "api": "suspend_d",
+      "domain": "base_research",
+      "frequency": "event_driven",
+      "official_update": "不定期。",
+      "cron_policy": "same_day_evening_recent_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=214"
+    },
+    {
+      "dataset": "limit_list_d",
+      "api": "limit_list_d",
+      "domain": "base_research",
+      "frequency": "trade_date",
+      "official_update": "每日涨跌停、炸板数据；官方页面未标具体入库时刻。",
+      "cron_policy": "same_day_evening_recent_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=298"
+    },
+    {
+      "dataset": "income_vip",
+      "api": "income_vip",
+      "domain": "base_research",
+      "frequency": "filing_realtime",
+      "official_update": "利润表；权限表为全部历史、实时更新。",
+      "cron_policy": "daily_refresh_latest_6_report_periods",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=33"
+    },
+    {
+      "dataset": "balancesheet_vip",
+      "api": "balancesheet_vip",
+      "domain": "base_research",
+      "frequency": "filing_realtime",
+      "official_update": "资产负债表；权限表为全部历史、实时更新。",
+      "cron_policy": "daily_refresh_latest_6_report_periods",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=36"
+    },
+    {
+      "dataset": "cashflow_vip",
+      "api": "cashflow_vip",
+      "domain": "base_research",
+      "frequency": "filing_realtime",
+      "official_update": "现金流量表；权限表为全部历史、实时更新。",
+      "cron_policy": "daily_refresh_latest_6_report_periods",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=44"
+    },
+    {
+      "dataset": "fina_indicator_vip",
+      "api": "fina_indicator_vip",
+      "domain": "base_research",
+      "frequency": "filing_realtime",
+      "official_update": "财务指标；权限表为全部历史、随财报实时更新。",
+      "cron_policy": "daily_refresh_latest_6_report_periods",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=79"
+    },
+    {
+      "dataset": "forecast_vip",
+      "api": "forecast_vip",
+      "domain": "base_research",
+      "frequency": "filing_realtime",
+      "official_update": "业绩预告；权限表为全部历史、实时更新。",
+      "cron_policy": "daily_refresh_latest_3_announcement_months",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=45"
+    },
+    {
+      "dataset": "express_vip",
+      "api": "express_vip",
+      "domain": "base_research",
+      "frequency": "filing_realtime",
+      "official_update": "业绩快报；权限表为全部历史、实时更新。",
+      "cron_policy": "daily_refresh_latest_3_announcement_months",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=46"
+    },
+    {
+      "dataset": "dividend",
+      "api": "dividend",
+      "domain": "base_research",
+      "frequency": "filing_realtime",
+      "official_update": "分红送股；权限表为全部历史、实时更新。",
+      "cron_policy": "daily_refresh_recent_affected_codes_plus_90d_date_probe",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=103"
+    },
+    {
+      "dataset": "fina_audit",
+      "api": "fina_audit",
+      "domain": "base_research",
+      "frequency": "filing_realtime",
+      "official_update": "财务审计意见；权限表为全部历史、随财报实时更新。",
+      "cron_policy": "daily_refresh_recent_affected_codes",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=80"
+    },
+    {
+      "dataset": "fina_mainbz_vip",
+      "api": "fina_mainbz_vip",
+      "domain": "base_research",
+      "frequency": "filing_realtime",
+      "official_update": "主营业务构成；权限表为全部历史、随财报实时更新。",
+      "cron_policy": "daily_refresh_recent_affected_codes",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=81"
+    },
+    {
+      "dataset": "disclosure_date",
+      "api": "disclosure_date",
+      "domain": "base_research",
+      "frequency": "regular",
+      "official_update": "财报披露计划；权限表为全部历史、定期更新。",
+      "cron_policy": "daily_refresh_latest_6_report_periods",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=162"
+    },
+    {
+      "dataset": "stk_mins_1min",
+      "api": "stk_mins",
+      "domain": "intraday_minutes",
+      "frequency": "trade_date",
+      "official_update": "历史分钟数据每天收盘后处理更新，17:00-21:00之间完成。",
+      "cron_policy": "evening_update_plus_1d_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=370"
+    },
+    {
+      "dataset": "margin",
+      "api": "margin",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "融资融券交易汇总；权限表为每日09:00更新。",
+      "cron_policy": "preopen_force_retry_0905_0915_then_audit_0920",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=58"
+    },
+    {
+      "dataset": "margin_detail",
+      "api": "margin_detail",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "融资融券交易明细；权限表为每日09:00更新。",
+      "cron_policy": "preopen_force_retry_0905_0915_then_audit_0920",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=59"
+    },
+    {
+      "dataset": "margin_secs",
+      "api": "margin_secs",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "融资融券标的；官方页面标注每天盘前更新。",
+      "cron_policy": "same_day_preopen_force_retry_0903_0913_plus_evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=326"
+    },
+    {
+      "dataset": "top10_holders",
+      "api": "top10_holders",
+      "domain": "event_flow",
+      "frequency": "event_driven",
+      "official_update": "前十大股东（季频，按公告日增量）；披露期更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=61"
+    },
+    {
+      "dataset": "top10_floatholders",
+      "api": "top10_floatholders",
+      "domain": "event_flow",
+      "frequency": "event_driven",
+      "official_update": "前十大流通股东（季频，按公告日增量）；披露期更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=62"
+    },
+    {
+      "dataset": "pledge_detail",
+      "api": "pledge_detail",
+      "domain": "event_flow",
+      "frequency": "event_driven",
+      "official_update": "股权质押明细（按公告日增量）。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=111"
+    },
+    {
+      "dataset": "stk_surv",
+      "api": "stk_surv",
+      "domain": "event_flow",
+      "frequency": "event_driven",
+      "official_update": "机构调研记录；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=275"
+    },
+    {
+      "dataset": "new_share",
+      "api": "new_share",
+      "domain": "event_flow",
+      "frequency": "event_driven",
+      "official_update": "IPO 新股列表（按上市日）。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=123"
+    },
+    {
+      "dataset": "broker_recommend",
+      "api": "broker_recommend",
+      "domain": "macro",
+      "frequency": "event_driven",
+      "official_update": "券商月度金股组合；每月初更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=337"
+    },
+    {
+      "dataset": "moneyflow",
+      "api": "moneyflow",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "个股资金流向；权限表为交易日19:00更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=170"
+    },
+    {
+      "dataset": "moneyflow_dc",
+      "api": "moneyflow_dc",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "东财个股资金流向；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=339"
+    },
+    {
+      "dataset": "moneyflow_ths",
+      "api": "moneyflow_ths",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "同花顺个股资金流向；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=344"
+    },
+    {
+      "dataset": "moneyflow_ind_dc",
+      "api": "moneyflow_ind_dc",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "东财行业/概念板块资金流向；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=343"
+    },
+    {
+      "dataset": "moneyflow_ind_ths",
+      "api": "moneyflow_ind_ths",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "同花顺行业资金流向；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=341"
+    },
+    {
+      "dataset": "moneyflow_cnt_ths",
+      "api": "moneyflow_cnt_ths",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "同花顺概念板块资金流向；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=342"
+    },
+    {
+      "dataset": "cyq_perf",
+      "api": "cyq_perf",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "每日筹码分布汇总（成本分位/获利盘）；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=293"
+    },
+    {
+      "dataset": "bak_daily",
+      "api": "bak_daily",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "备用日行情（31 派生列）；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=255"
+    },
+    {
+      "dataset": "stk_premarket",
+      "api": "stk_premarket",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "盘前股本与涨跌停静态表；交易日 09:00 前更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=284"
+    },
+    {
+      "dataset": "slb_len",
+      "api": "slb_len",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "转融通余额汇总；盘后更新（2024-07 转融券暂停后部分为零）。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=332"
+    },
+    {
+      "dataset": "slb_len_mm",
+      "api": "slb_len_mm",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "做市借券余额；盘后更新（同上）。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=333"
+    },
+    {
+      "dataset": "stk_holdernumber",
+      "api": "stk_holdernumber",
+      "domain": "event_flow",
+      "frequency": "event_driven",
+      "official_update": "股东人数；权限表为不定期更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=166"
+    },
+    {
+      "dataset": "stk_holdertrade",
+      "api": "stk_holdertrade",
+      "domain": "event_flow",
+      "frequency": "event_driven",
+      "official_update": "股东增减持；权限表为交易日19:00更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=175"
+    },
+    {
+      "dataset": "repurchase",
+      "api": "repurchase",
+      "domain": "event_flow",
+      "frequency": "event_driven",
+      "official_update": "股票回购；权限表为每日定时更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=124"
+    },
+    {
+      "dataset": "share_float_complete",
+      "api": "share_float",
+      "domain": "event_flow",
+      "frequency": "regular",
+      "official_update": "限售股解禁；权限表为定期更新。",
+      "cron_policy": "daily_refresh_recent_and_rebuild_union",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=160"
+    },
+    {
+      "dataset": "block_trade",
+      "api": "block_trade",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "大宗交易；权限表为每日21:00更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=161"
+    },
+    {
+      "dataset": "kpl_list",
+      "api": "kpl_list",
+      "domain": "board_trading",
+      "frequency": "trade_date",
+      "official_update": "开盘啦榜单数据；官方页面标注次日08:30更新。",
+      "cron_policy": "next_morning_force_refresh_0850",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=347"
+    },
+    {
+      "dataset": "kpl_concept_cons",
+      "api": "kpl_concept_cons",
+      "domain": "board_trading",
+      "frequency": "trade_date",
+      "official_update": "开盘啦概念成分与热度；次日 08:30 前更新。",
+      "cron_policy": "evening_plus_next_day_preopen_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=351"
+    },
+    {
+      "dataset": "dc_index",
+      "api": "dc_index",
+      "domain": "board_trading",
+      "frequency": "trade_date",
+      "official_update": "东财概念/行业板块指数日行情；盘后更新。",
+      "cron_policy": "same_day_evening_recent_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=362"
+    },
+    {
+      "dataset": "dc_member",
+      "api": "dc_member",
+      "domain": "board_trading",
+      "frequency": "trade_date",
+      "official_update": "东财板块成分（分页大表）；盘后更新。",
+      "cron_policy": "same_day_evening_recent_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=363"
+    },
+    {
+      "dataset": "ths_daily",
+      "api": "ths_daily",
+      "domain": "macro",
+      "frequency": "trade_date",
+      "official_update": "同花顺概念/行业指数日行情；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=260"
+    },
+    {
+      "dataset": "limit_step",
+      "api": "limit_step",
+      "domain": "board_trading",
+      "frequency": "trade_date",
+      "official_update": "涨停股票连板天梯；官方页面未标具体入库时刻。",
+      "cron_policy": "evening_update_plus_preopen_board_force",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=356"
+    },
+    {
+      "dataset": "limit_cpt_list",
+      "api": "limit_cpt_list",
+      "domain": "board_trading",
+      "frequency": "trade_date",
+      "official_update": "涨停最强板块统计；官方页面未标具体入库时刻。",
+      "cron_policy": "evening_update_plus_preopen_board_force",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=357"
+    },
+    {
+      "dataset": "limit_list_ths",
+      "api": "limit_list_ths",
+      "domain": "board_trading",
+      "frequency": "trade_date",
+      "official_update": "同花顺涨跌停榜单；历史从20231101开始，增量每天16:00左右更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=355"
+    },
+    {
+      "dataset": "top_list",
+      "api": "top_list",
+      "domain": "board_trading",
+      "frequency": "trade_date",
+      "official_update": "龙虎榜每日明细；权限表为每日20:00更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=106"
+    },
+    {
+      "dataset": "top_inst",
+      "api": "top_inst",
+      "domain": "board_trading",
+      "frequency": "trade_date",
+      "official_update": "龙虎榜机构明细；权限表为每日20:00更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=107"
+    },
+    {
+      "dataset": "hm_list",
+      "api": "hm_list",
+      "domain": "board_trading",
+      "frequency": "low_frequency",
+      "official_update": "市场游资名录；低频参考表，官方未标具体入库时刻。",
+      "cron_policy": "daily_skip_existing",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=311"
+    },
+    {
+      "dataset": "hm_detail",
+      "api": "hm_detail",
+      "domain": "board_trading",
+      "frequency": "trade_date",
+      "official_update": "游资交易每日明细；数据开始于2022年8月，官方页面未标具体入库时刻。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=312"
+    },
+    {
+      "dataset": "ths_hot",
+      "api": "ths_hot",
+      "domain": "board_trading",
+      "frequency": "intraday_and_evening",
+      "official_update": "同花顺热榜；每日盘中提取4次、收盘后4次，最晚22:00/22:30附近。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=320"
+    },
+    {
+      "dataset": "dc_hot",
+      "api": "dc_hot",
+      "domain": "board_trading",
+      "frequency": "intraday_and_evening",
+      "official_update": "东方财富热榜；每日盘中提取4次、收盘后4次，最晚22:00/22:30附近。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=321"
+    },
+    {
+      "dataset": "irm_qa_sh",
+      "api": "irm_qa_sh",
+      "domain": "text_evidence",
+      "frequency": "trade_date",
+      "official_update": "投资者互动问答；随发布滚动更新。",
+      "cron_policy": "same_day_evening_recent_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=364"
+    },
+    {
+      "dataset": "irm_qa_sz",
+      "api": "irm_qa_sz",
+      "domain": "text_evidence",
+      "frequency": "trade_date",
+      "official_update": "投资者互动问答；随发布滚动更新。",
+      "cron_policy": "same_day_evening_recent_force_refresh",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=365"
+    },
+    {
+      "dataset": "anns_d",
+      "api": "anns_d",
+      "domain": "text_evidence",
+      "frequency": "event_driven",
+      "official_update": "全量公告；官方页面提供发布时间字段rec_time，未标固定入库时刻。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=176"
+    },
+    {
+      "dataset": "major_news",
+      "api": "major_news",
+      "domain": "text_evidence",
+      "frequency": "near_realtime",
+      "official_update": "新闻通讯；官方页面提供pub_time，未标固定入库时刻。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=195"
+    },
+    {
+      "dataset": "cctv_news",
+      "api": "cctv_news",
+      "domain": "text_evidence",
+      "frequency": "daily",
+      "official_update": "新闻联播文字稿；按日期提取，官方未标具体入库时刻。",
+      "cron_policy": "next_morning_force_refresh_recent",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=154"
+    },
+    {
+      "dataset": "npr",
+      "api": "npr",
+      "domain": "text_evidence",
+      "frequency": "event_driven",
+      "official_update": "国家政策法规库；官方页面提供pubtime，未标固定入库时刻。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=406"
+    },
+    {
+      "dataset": "research_report",
+      "api": "research_report",
+      "domain": "text_evidence",
+      "frequency": "daily",
+      "official_update": "券商研究报告；增量每天两次更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=415"
+    },
+    {
+      "dataset": "report_rc",
+      "api": "report_rc",
+      "domain": "text_evidence",
+      "frequency": "daily",
+      "official_update": "卖方盈利预测；每天19:00-22:00更新当日数据。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=292"
+    },
+    {
+      "dataset": "news",
+      "api": "news",
+      "domain": "text_evidence",
+      "frequency": "near_realtime",
+      "official_update": "新闻快讯；官方页面提供datetime，未标固定入库时刻。",
+      "cron_policy": "same_day_evening_open_window_plus_next_morning_recent_force_refresh",
+      "doc_ref": "https://www.tushare.pro/document/41?doc_id=143"
+    },
+    {
+      "dataset": "cn_schedule",
+      "api": "cn_schedule",
+      "domain": "macro_context",
+      "frequency": "monthly",
+      "official_update": "中国经济数据发布日程；持续更新中。",
+      "cron_policy": "daily_refresh_current_month",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=461"
+    },
+    {
+      "dataset": "cn_gdp",
+      "api": "cn_gdp",
+      "domain": "macro_context",
+      "frequency": "quarterly",
+      "official_update": "GDP；官方页面未标固定入库时刻，按国家统计局发布节奏。",
+      "cron_policy": "daily_skip_existing_and_refresh_open_periods",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=227"
+    },
+    {
+      "dataset": "cn_cpi",
+      "api": "cn_cpi",
+      "domain": "macro_context",
+      "frequency": "monthly",
+      "official_update": "CPI；官方页面未标固定入库时刻，按统计数据发布节奏。",
+      "cron_policy": "daily_skip_existing_and_refresh_open_months",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=228"
+    },
+    {
+      "dataset": "cn_ppi",
+      "api": "cn_ppi",
+      "domain": "macro_context",
+      "frequency": "monthly",
+      "official_update": "PPI；官方页面未标固定入库时刻，按统计数据发布节奏。",
+      "cron_policy": "daily_skip_existing_and_refresh_open_months",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=229"
+    },
+    {
+      "dataset": "cn_pmi",
+      "api": "cn_pmi",
+      "domain": "macro_context",
+      "frequency": "monthly",
+      "official_update": "PMI；官方页面未标固定入库时刻，按统计数据发布节奏。",
+      "cron_policy": "daily_skip_existing_and_refresh_open_months",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=325"
+    },
+    {
+      "dataset": "cn_m",
+      "api": "cn_m",
+      "domain": "macro_context",
+      "frequency": "monthly",
+      "official_update": "货币供应量；官方页面未标固定入库时刻，按央行发布节奏。",
+      "cron_policy": "daily_skip_existing_and_refresh_open_months",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=242"
+    },
+    {
+      "dataset": "sf_month",
+      "api": "sf_month",
+      "domain": "macro_context",
+      "frequency": "monthly",
+      "official_update": "社会融资规模；官方页面未标固定入库时刻，按央行发布节奏。",
+      "cron_policy": "daily_skip_existing_and_refresh_open_months",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=310"
+    },
+    {
+      "dataset": "shibor",
+      "api": "shibor",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "SHIBOR利率；权限表为每日12:00。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=202"
+    },
+    {
+      "dataset": "shibor_quote",
+      "api": "shibor_quote",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "SHIBOR报价；权限表为每日12:00。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=203"
+    },
+    {
+      "dataset": "shibor_lpr",
+      "api": "shibor_lpr",
+      "domain": "macro_context",
+      "frequency": "daily_or_monthly",
+      "official_update": "LPR贷款基础利率；权限表为每日12:00。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=204"
+    },
+    {
+      "dataset": "hibor",
+      "api": "hibor",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "HIBOR拆借利率；权限表为每日12:00。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=206"
+    },
+    {
+      "dataset": "libor",
+      "api": "libor",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "LIBOR拆借利率；权限表为每日12:00。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=205"
+    },
+    {
+      "dataset": "repo_daily",
+      "api": "repo_daily",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "债券回购日行情；官方页面未标具体入库时刻。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=256"
+    },
+    {
+      "dataset": "us_tycr",
+      "api": "us_tycr",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "美国国债收益率曲线；官方页面未标具体入库时刻。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=218"
+    },
+    {
+      "dataset": "us_trycr",
+      "api": "us_trycr",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "美国实际收益率曲线；官方页面未标具体入库时刻。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=219"
+    },
+    {
+      "dataset": "us_tbr",
+      "api": "us_tbr",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "美国国债短期利率；官方页面未标具体入库时刻。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=220"
+    },
+    {
+      "dataset": "us_tltr",
+      "api": "us_tltr",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "美国长期国债利率；官方页面未标具体入库时刻。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=222"
+    },
+    {
+      "dataset": "index_daily",
+      "api": "index_daily",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "A股核心宽基指数日线（上证指数/上证50/沪深300/中证500/中证1000/创业板指/科创50）；收盘后官方发布。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=95"
+    },
+    {
+      "dataset": "index_dailybasic",
+      "api": "index_dailybasic",
+      "domain": "macro",
+      "frequency": "trade_date",
+      "official_update": "重要指数每日估值指标；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=128"
+    },
+    {
+      "dataset": "sw_daily",
+      "api": "sw_daily",
+      "domain": "macro",
+      "frequency": "trade_date",
+      "official_update": "申万行业指数日行情；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=311"
+    },
+    {
+      "dataset": "ci_daily",
+      "api": "ci_daily",
+      "domain": "macro",
+      "frequency": "trade_date",
+      "official_update": "中信行业指数日行情；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=310"
+    },
+    {
+      "dataset": "daily_info",
+      "api": "daily_info",
+      "domain": "macro",
+      "frequency": "trade_date",
+      "official_update": "沪深市场每日交易统计；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=215"
+    },
+    {
+      "dataset": "sz_daily_info",
+      "api": "sz_daily_info",
+      "domain": "macro",
+      "frequency": "trade_date",
+      "official_update": "深圳市场每日交易概况；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=278"
+    },
+    {
+      "dataset": "moneyflow_mkt_dc",
+      "api": "moneyflow_mkt_dc",
+      "domain": "macro",
+      "frequency": "trade_date",
+      "official_update": "东财全市场资金流向；盘后更新。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=345"
+    },
+    {
+      "dataset": "index_global",
+      "api": "index_global",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "全球指数日线；官方页面未标具体入库时刻。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=211"
+    },
+    {
+      "dataset": "fx_daily",
+      "api": "fx_daily",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "外汇日线；官方页面说明交易日期为GMT，未标具体入库时刻。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=179"
+    },
+    {
+      "dataset": "eco_cal",
+      "api": "eco_cal",
+      "domain": "macro_context",
+      "frequency": "event_driven",
+      "official_update": "全球财经日历；包括经济事件数据更新，官方未标固定入库时刻。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=233"
+    },
+    {
+      "dataset": "monetary_policy",
+      "api": "monetary_policy",
+      "domain": "macro_context",
+      "frequency": "quarterly",
+      "official_update": "央行货币政策执行报告；季度更新，一年四篇，按发布日。",
+      "cron_policy": "daily_skip_existing_and_refresh_open_year",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=465"
+    },
+    {
+      "dataset": "fut_basic",
+      "api": "fut_basic",
+      "domain": "macro_context",
+      "frequency": "static",
+      "official_update": "期货合约注册表（六所整表刷新）；随晚间滚动更新重拉。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=135"
+    },
+    {
+      "dataset": "fut_mapping",
+      "api": "fut_mapping",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "期货主力连续合约映射；每日盘后更新。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=189"
+    },
+    {
+      "dataset": "fut_daily",
+      "api": "fut_daily",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "期货日线行情（全市场，股指期货基差输入）；交易所结算后发布。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=138"
+    },
+    {
+      "dataset": "opt_basic",
+      "api": "opt_basic",
+      "domain": "macro_context",
+      "frequency": "static",
+      "official_update": "期权合约注册表（限SSE/SZSE/CFFEX）；随晚间滚动更新重拉。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=158"
+    },
+    {
+      "dataset": "opt_daily",
+      "api": "opt_daily",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "期权日线行情（限SSE/SZSE/CFFEX，PCR/IV输入）；交易所结算后发布。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=159"
+    },
+    {
+      "dataset": "cb_basic",
+      "api": "cb_basic",
+      "domain": "macro_context",
+      "frequency": "static",
+      "official_update": "可转债注册表（当前状态表，历史回测禁用可变字段）；随晚间滚动更新重拉。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=185"
+    },
+    {
+      "dataset": "cb_daily",
+      "api": "cb_daily",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "可转债日线（含转股价值与溢价率）；收盘后发布。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=187"
+    },
+    {
+      "dataset": "cb_call",
+      "api": "cb_call",
+      "domain": "macro_context",
+      "frequency": "event",
+      "official_update": "可转债赎回公告（强赎/到期阶梯）；公告驱动，晚间披露为主。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=269"
+    },
+    {
+      "dataset": "yc_cb",
+      "api": "yc_cb",
+      "domain": "macro_context",
+      "frequency": "daily",
+      "official_update": "中债国债收益率曲线（按交易日）；中债登收盘后发布。",
+      "cron_policy": "evening_rolling_update",
+      "doc_ref": "https://tushare.pro/document/2?doc_id=201"
+    }
   ]
 }

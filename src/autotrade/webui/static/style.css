@@ -452,11 +452,16 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .field.checkbox input { margin-top: 0.3rem; width: 1.06rem; height: 1.06rem; }
 .check-group { display: flex; gap: 0.55rem; flex-wrap: wrap; padding: 0.25rem 0; }
 .check-item { display: inline-flex; align-items: center; gap: 0.45rem; font-size: 0.9rem; font-weight: 500;
-  cursor: pointer; padding: 0.3rem 0.75rem; border: 1px solid var(--border); border-radius: 999px;
+  /* line-height 1 keeps the CJK label's line box the glyph height, so flex
+     centering aligns the text with the checkbox instead of a taller
+     inherited line box sitting visually low. */
+  line-height: 1;
+  cursor: pointer; padding: 0.38rem 0.75rem; border: 1px solid var(--border); border-radius: 999px;
   background: var(--input-bg); transition: border-color 0.12s ease, background 0.12s ease; }
 .check-item:hover { border-color: var(--accent); }
 .check-item:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
-.check-item input { width: 1rem; height: 1rem; }
+/* strip the UA's asymmetric default checkbox margins (Chrome: 3px 3px 3px 4px) */
+.check-item input { width: 1rem; height: 1rem; margin: 0; flex: none; }
 details.advanced { margin-top: 0.55rem; }
 details.advanced summary { cursor: pointer; color: var(--muted); font-size: 0.875rem; }
 details.advanced .form-grid { margin-top: 0.55rem; }
