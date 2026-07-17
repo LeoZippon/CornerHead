@@ -32,6 +32,16 @@ AUDIT_ONLY_JOBS = {
     "cn_preopen_event_flow_audit_0920",
 }
 
+# Saturday deep re-sweeps of already-node-governed data: they repair historical
+# reference/fundamental rows whose visibility stays governed by the existing
+# evening / PIT-event-build nodes and row-level available_at stamps, and their
+# launches precede no trading session — so they define no visibility boundary
+# of their own.
+WEEKLY_DEEP_SWEEP_JOBS = {
+    "cn_weekly_reference_deep",
+    "cn_weekly_fundamental_deep",
+}
+
 
 def _cron_jobs() -> set[str]:
     schedule = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))
@@ -40,8 +50,8 @@ def _cron_jobs() -> set[str]:
 
 CRONTAB = REPO_ROOT / "ops" / "cron" / "tushare_update.cron"
 
-# A managed crontab line: "MM HH * * * ... --job <name> ...".
-_CRON_LINE = re.compile(r"^\s*(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*\s+.*--job\s+(\S+)")
+# A managed crontab line: "MM HH * * <*|dow> ... --job <name> ...".
+_CRON_LINE = re.compile(r"^\s*(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+[\d*]\s+.*--job\s+(\S+)")
 
 
 def _crontab_job_times() -> dict[str, time]:
@@ -133,7 +143,7 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
             schedule_jobs,
             "ops/cron/tushare_update.cron jobs differ from configs/tushare_update_schedule.json jobs",
         )
-        for job in schedule_jobs - AUDIT_ONLY_JOBS:
+        for job in schedule_jobs - AUDIT_ONLY_JOBS - WEEKLY_DEEP_SWEEP_JOBS:
             self.assertIn(job, REFRESH_NODES, f"data-landing job {job!r} has no Timeview refresh node")
 
     def test_evening_daily_set_cannot_bypass_dedicated_auction_capture(self) -> None:

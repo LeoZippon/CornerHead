@@ -50,10 +50,8 @@
         "stock_basic",
         "stock_company",
         "bak_basic",
-        "namechange",
         "index_classify",
         "index_member_all",
-        "ths_index",
         "index_basic",
         "--refresh-daily-datasets",
         "daily",
@@ -71,9 +69,9 @@
         "fina_audit",
         "fina_mainbz_vip",
         "--fundamental-refresh-event-days",
-        "90",
+        "10",
         "--fundamental-dividend-probe-days",
-        "90",
+        "10",
         "--event-datasets",
         "margin_secs",
         "moneyflow",
@@ -249,6 +247,45 @@
         "15"
       ],
       "lock_wait_seconds": 240,
+      "skip_if_already_ok": true
+    },
+    "cn_weekly_reference_deep": {
+      "description": "Weekly deep refresh of slow-moving per-code reference sweeps (namechange full per-code loop, ths_index membership) moved off the nightly critical path; ~57 min of per-code calls once a week instead of nightly.",
+      "operation": "download_tier",
+      "tier": "reference",
+      "end_date_offset_days": 0,
+      "end_date_mode": "sse_open_on_or_before",
+      "extra_args": [
+        "--refresh-reference-datasets",
+        "namechange",
+        "ths_index",
+        "--min-interval-seconds",
+        "0.50"
+      ],
+      "lock_wait_seconds": 1800,
+      "skip_if_already_ok": true
+    },
+    "cn_weekly_fundamental_deep": {
+      "description": "Weekly 90-day fundamental/dividend sweep for late corrections; the nightly job keeps a 10-day window (announcing codes still get ~10 nightly passes).",
+      "operation": "download_tier",
+      "tier": "fundamental",
+      "end_date_offset_days": 0,
+      "end_date_mode": "sse_open_on_or_before",
+      "extra_args": [
+        "--fundamental-refresh-period-count",
+        "6",
+        "--fundamental-refresh-ann-month-count",
+        "3",
+        "--fundamental-refresh-ts-code-datasets",
+        "dividend",
+        "fina_audit",
+        "fina_mainbz_vip",
+        "--fundamental-refresh-event-days",
+        "90",
+        "--fundamental-dividend-probe-days",
+        "90"
+      ],
+      "lock_wait_seconds": 1800,
       "skip_if_already_ok": true
     }
   },

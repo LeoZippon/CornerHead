@@ -59,3 +59,9 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # re-queries the exact date even when the morning capture succeeded, so a late
 # source correction is published before the normal nightly generation.
 20 23 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927 --force-run >> logs/tushare_cron_dispatch.log 2>&1
+
+# Weekly deep sweeps (Saturday, market closed; end date resolves to Friday):
+# slow-moving per-code reference loops and the 90-day fundamental/dividend
+# correction window, moved off the nightly critical path.
+35 12 * * 6 cd $MACROQUANT_ROOT && mkdir -p logs && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_reference_deep >> logs/tushare_cron_dispatch.log 2>&1
+0 14 * * 6 cd $MACROQUANT_ROOT && mkdir -p logs && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_fundamental_deep >> logs/tushare_cron_dispatch.log 2>&1
