@@ -1050,6 +1050,14 @@ function fieldNode(field, inputs) {
     if (field.max !== undefined) input.setAttribute("max", String(field.max));
     input.value = field.default ?? "";
     if (field.optional) input.placeholder = "留空使用默认";
+    if (field.type === "int" || field.type === "float") {
+      // Focused number inputs change value on mouse wheel (browser default) —
+      // an easy silent mis-edit while scrolling the form. Block the spin but
+      // keep page scrolling (unfocused inputs ignore wheel anyway).
+      input.addEventListener("wheel", (event) => {
+        if (document.activeElement === input) event.preventDefault();
+      }, { passive: false });
+    }
     if (field.type === "int") {
       // Native WebKit spinners are hidden (unstylable); draw our own steppers.
       const step = (direction) => {
