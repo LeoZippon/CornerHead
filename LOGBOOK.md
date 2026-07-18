@@ -1741,3 +1741,7 @@
 - 按批准落地四项：(1) margin 交易所完整性守卫（缺所需交易所行的日期走 not-ready/重试契约、审计报错；已修复 20260529/0605/0626/0703 四天 1→3 行，全历史零残留）；(2) 回测 summary 新增 exposure（avg/max gross、零仓位天数）与周度收益分解（Probe 不返回）；(3) 元学习 Taste 合同加固（禁止"真实 alpha"级泛化断言、禁止整族因子禁令、收敛期须保留每 Fold 至少一次可检验验证）+ 双 Prompt 策略类别中立化（多因子/事件驱动/趋势择时/均值回归/股票内统计套利，交易范围限 A 股现货+两融）；(4) 新实验默认 epochs=3（ExperimentConfig 单一事实源）、季度建议开发窗 8 季（两年）。验证窗口问题采用季度 WF（零代码）。
 - lzp-test22 故障根因：实验创建于夜间更新持锁期间，pin 回退到最新完整 release（2026-07-16 物化、早于衍生品回填），缺 fut_basic 等 9 数据集 → 首次快照构建深处 FileNotFoundError。修复：pin_research_release 增加 required_raw_datasets 合同（选择期跳过不完整 release、复用期给出可操作报错）；实验经控制台 API 删除重建（仅一条 attempt_failed 元学习记录，归档 .runtime/bench/），新 pin 世代 4175cdd8 含全部 121 数据集，实测通过。
 - Validation：全量 tests/unit 879 passed；margin 修复经无 --force 自愈路径实测（21 天跳过、恰好 4 天重拉）。
+
+2026-07-18 三子代理（Opus 4.8）三原则合规审计与择优修复
+
+- 数据层/环境层/管线控制台三路审计共 10 发现（0 高危）。按"收益/开销"择优落地 6 项：pipeline 设计文档"同一实验内"陈述订正为跨实验；running_experiments 跳过点目录（不再 stat 遍历共享快照缓存）；release 数据集合同拒绝"存在但为空"目录（rglob 短路，兼容嵌套布局）；cron 漂移守卫接受 DOW 区间/列表/步进表达式；NL match_cache 模式键 FIFO 上限 32（防逐 tick 变模式策略无界增长）；Taste 备选方向条款注明服务同一机制假设。4 项经客观评估不改：共享缓存 GC（并发安全机制开销 > 磁盘压力）、周扫新鲜度（既定权衡）、margin 守卫范围（有意限定）、equity≤0 曝光标记（Broker 强平使状态不可达）。全量 tests/unit 880 passed。
