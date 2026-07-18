@@ -1260,9 +1260,11 @@ class SnapshotBuilder:
     ) -> tuple[pd.DataFrame, dict[str, object]]:
         frames: list[pd.DataFrame] = []
         rules: dict[str, str] = {}
+        dataset_build_profile: dict[str, dict[str, object]] = {}
         duplicate_rows_dropped: dict[str, int] = {}
         nat_counts: dict[str, int] = {}
         for dataset in datasets:
+            dataset_started = time.perf_counter()
             dataset_dir = self.raw_dir / dataset
             if not dataset_dir.exists():
                 raise FileNotFoundError(f"missing configured dataset directory: {dataset_dir}")
@@ -1276,29 +1278,55 @@ class SnapshotBuilder:
             # listed inside the replay window.
             exempt = lifetime_registries and dataset in MACRO_REGISTRY_DATASETS
             floor = _REGISTRY_WINDOW_FLOOR if exempt else window_start
-            rows = self._read_dataset_window(dataset_dir, decision_time, floor, nat_counts)
+            rows, read_profile = self._read_dataset_window(dataset_dir, decision_time, floor, nat_counts)
             rules[dataset] = "raw available_at column"
-            if rows.empty:
-                continue
+            had_visible_rows = not rows.empty
             # Overlapping partition files (the pre-canonical macro range
             # family) repeat identical rows; a duplicated series distorts
             # every frequency/aggregate a strategy computes on it.
+            started = time.perf_counter()
             deduped = rows.drop_duplicates(ignore_index=True)
-            if len(deduped) < len(rows):
-                duplicate_rows_dropped[dataset] = int(len(rows) - len(deduped))
+            deduplicate_seconds = time.perf_counter() - started
+            duplicate_count = int(len(rows) - len(deduped))
+            if duplicate_count:
+                duplicate_rows_dropped[dataset] = duplicate_count
                 rows = deduped
             # Screen while the frame is still narrow (its own columns only). A
             # post-union screen materializes a rows × union-columns take that
             # goes super-linear once the wide 2025+ membership datasets enter
             # the window (a ~19M-row union spent hours in one frame[mask]).
+            rows_before_screen = len(rows)
+            started = time.perf_counter()
             rows = self._apply_screen(rows, screen)
-            rows.insert(0, "dataset", dataset)
-            frames.append(rows)
+            screen_seconds = time.perf_counter() - started
+            # Preserve the schema contribution of a non-empty dataset that the
+            # universe screen reduces to zero rows, as the pre-profile path did.
+            if had_visible_rows:
+                rows.insert(0, "dataset", dataset)
+                frames.append(rows)
+            dataset_build_profile[dataset] = {
+                **read_profile,
+                "rows_output": int(len(rows)),
+                "duplicate_rows_dropped": duplicate_count,
+                "screen_rows_dropped": int(rows_before_screen - len(rows)),
+                "total_seconds": round(time.perf_counter() - dataset_started, 3),
+                "phases": {
+                    **read_profile["phases"],
+                    "deduplicate_seconds": round(deduplicate_seconds, 3),
+                    "screen_seconds": round(screen_seconds, 3),
+                },
+            }
         merged = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
         # units="source": heterogeneous unions keep TuShare per-source units —
         # the daily-domain unit contract does NOT extend to same-named fields
         # here (env docs §1.4; raw unit table in data docs §1.2).
-        meta = {"rows": int(len(merged)), "datasets": list(datasets), "units": "source", "availability_rules": rules}
+        meta = {
+            "rows": int(len(merged)),
+            "datasets": list(datasets),
+            "units": "source",
+            "availability_rules": rules,
+            "dataset_build_profile": dataset_build_profile,
+        }
         if duplicate_rows_dropped:
             meta["duplicate_rows_dropped"] = duplicate_rows_dropped
         if nat_counts:
@@ -1311,7 +1339,8 @@ class SnapshotBuilder:
         decision_time: datetime,
         window_start: pd.Timestamp,
         nat_counts: dict[str, int] | None = None,
-    ) -> pd.DataFrame:
+    ) -> tuple[pd.DataFrame, dict[str, object]]:
+        started = time.perf_counter()
         start_day = window_start.strftime("%Y%m%d")
         end_day = decision_time.strftime("%Y%m%d")
         paths = [
@@ -1319,11 +1348,13 @@ class SnapshotBuilder:
             for path in sorted(dataset_dir.rglob("*.parquet"))
             if _partition_overlaps(path.stem, start_day, end_day)
         ]
+        discover_seconds = time.perf_counter() - started
 
-        def load(path: Path) -> tuple[pd.DataFrame | None, int]:
+        def load(path: Path) -> tuple[pd.DataFrame | None, int, int]:
             frame = pd.read_parquet(path)
+            source_rows = len(frame)
             if frame.empty:
-                return None, 0
+                return None, 0, source_rows
             if "available_at" not in frame.columns:
                 raise ValueError(f"{path} has no available_at column; cannot enforce the PIT wall")
             available = to_cn_timestamps(frame["available_at"])
@@ -1332,12 +1363,13 @@ class SnapshotBuilder:
             # an ingestion defect surfaces in the manifest instead of silently.
             nat = int(available.isna().sum())
             keep = frame[(available <= decision_time) & (available >= window_start)]
-            return (keep if not keep.empty else None), nat
+            return (keep if not keep.empty else None), nat, source_rows
 
         # Partition files number in the thousands for daily-partitioned event
         # datasets; parquet decode releases the GIL, so a bounded thread pool
         # cuts the wall while pool.map preserves the sorted partition order
         # (the concat below must stay byte-identical to a serial read).
+        started = time.perf_counter()
         if len(paths) > 1:
             with ThreadPoolExecutor(
                 max_workers=min(_PARTITION_READ_WORKERS, len(paths)), thread_name_prefix="snapshot-read"
@@ -1345,11 +1377,24 @@ class SnapshotBuilder:
                 results = list(pool.map(load, paths))
         else:
             results = [load(path) for path in paths]
-        frames = [frame for frame, _ in results if frame is not None]
-        nat_dropped = sum(nat for _, nat in results)
+        read_filter_seconds = time.perf_counter() - started
+        frames = [frame for frame, _, _ in results if frame is not None]
+        nat_dropped = sum(nat for _, nat, _ in results)
         if nat_counts is not None and nat_dropped:
             nat_counts[dataset_dir.name] = nat_counts.get(dataset_dir.name, 0) + nat_dropped
-        return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+        started = time.perf_counter()
+        merged = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+        concat_seconds = time.perf_counter() - started
+        return merged, {
+            "partition_files": len(paths),
+            "source_rows": int(sum(source_rows for _, _, source_rows in results)),
+            "rows_after_visibility": int(len(merged)),
+            "phases": {
+                "discover_seconds": round(discover_seconds, 3),
+                "read_filter_seconds": round(read_filter_seconds, 3),
+                "concat_seconds": round(concat_seconds, 3),
+            },
+        }
 
     def _build_text(
         self, config: SnapshotConfig, decision_time: datetime, window_start: pd.Timestamp, output_dir: Path
@@ -1381,12 +1426,12 @@ class SnapshotBuilder:
                     source_dirs = sorted(p for p in dataset_dir.glob("src=*") if p.is_dir())
                 source_frames = []
                 for source_dir in source_dirs:
-                    source_rows = self._read_dataset_window(source_dir, decision_time, news_start)
+                    source_rows, _ = self._read_dataset_window(source_dir, decision_time, news_start)
                     if not source_rows.empty:
                         source_frames.append(source_rows.assign(src=source_dir.name.split("=", 1)[1]))
                 rows = pd.concat(source_frames, ignore_index=True) if source_frames else pd.DataFrame()
             else:
-                rows = self._read_dataset_window(dataset_dir, decision_time, window_start)
+                rows, _ = self._read_dataset_window(dataset_dir, decision_time, window_start)
             if rows.empty:
                 continue
             if dataset in {"irm_qa_sh", "irm_qa_sz"}:

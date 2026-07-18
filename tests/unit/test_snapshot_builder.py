@@ -590,6 +590,28 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertIn("daily.parquet", stored["data_profile"]["files"])
             self.assertEqual(stored["data_profile"]["files"]["daily.parquet"]["rows"], len(daily))
             self.assertIn("build_seconds", stored["data_profile"]["files"]["fundamentals.parquet"])
+            event_profiles = stored["domains"]["events"]["dataset_build_profile"]
+            self.assertEqual(set(event_profiles), {"margin_secs", "moneyflow"})
+            self.assertEqual(event_profiles["margin_secs"]["partition_files"], 1)
+            self.assertEqual(event_profiles["margin_secs"]["source_rows"], 1)
+            self.assertEqual(event_profiles["margin_secs"]["rows_after_visibility"], 1)
+            self.assertEqual(event_profiles["margin_secs"]["rows_output"], 1)
+            self.assertEqual(event_profiles["moneyflow"]["source_rows"], 1)
+            self.assertEqual(event_profiles["moneyflow"]["rows_after_visibility"], 0)
+            self.assertEqual(event_profiles["moneyflow"]["rows_output"], 0)
+            for profile in event_profiles.values():
+                self.assertGreaterEqual(profile["total_seconds"], 0)
+                self.assertEqual(
+                    set(profile["phases"]),
+                    {
+                        "discover_seconds",
+                        "read_filter_seconds",
+                        "concat_seconds",
+                        "deduplicate_seconds",
+                        "screen_seconds",
+                    },
+                )
+                self.assertTrue(all(seconds >= 0 for seconds in profile["phases"].values()))
 
     def test_daily_join_filters_each_dataset_by_own_availability(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -927,6 +949,12 @@ class SnapshotBuilderTest(unittest.TestCase):
             macro = pd.read_parquet(out / "macro.parquet")
             self.assertEqual(list(macro["quarter"]), ["2021Q2"])
             self.assertEqual(manifest["domains"]["macro"]["duplicate_rows_dropped"], {"cn_gdp": 1})
+            profile = manifest["domains"]["macro"]["dataset_build_profile"]["cn_gdp"]
+            self.assertEqual(profile["partition_files"], 2)
+            self.assertEqual(profile["source_rows"], 4)
+            self.assertEqual(profile["rows_after_visibility"], 2)
+            self.assertEqual(profile["duplicate_rows_dropped"], 1)
+            self.assertEqual(profile["rows_output"], 1)
 
     def test_stale_audit_status_warns_against_current_generation(self):
         with tempfile.TemporaryDirectory() as tmp:

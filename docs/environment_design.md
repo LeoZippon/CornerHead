@@ -132,6 +132,7 @@ universe.parquet
 - 生产实验从自身固定的 research release 构建，manifest 记录该 committed raw/PIT 湖世代；live 更新不会改变已发布硬链接。首次 pin 非阻塞尝试 updater 共享锁，仅新 generation 需要在锁内发布；本地/测试 raw 仍沿用构建期世代双检。
 - release/pin manifest、hash、generation 或配置的数据源合同异常时 fail-fast，不回退到 live 数据；质量状态仍沿用 execution 域硬门禁、research 域告警的分级规则。
 - 互不依赖的数据域最多两路并行；分钟域仍保持单任务，`intraday` 必须等待 `daily` 的可见交易日完成。
+- 新构建的 `events`/`macro` 域在 snapshot manifest 的 `dataset_build_profile` 中按数据集记录分区数、可见性前后/最终行数、去重与筛选丢弃行数，以及 `discover/read_filter/concat/deduplicate/screen` 分阶段墙钟；这些计数复用构建过程中的现成结果，不增加额外扫描或逐文件日志。该可选诊断不进入 Agent 的轻量 `data_summary.json`，不改变数据字节、PIT 语义、snapshot hash 或缓存键，旧缓存也无需失效重建。
 - Replay 分钟线按日读取、修正并追加为同一个 Parquet 的 row group，不在内存中拼接完整区间。
 - 不预构建 alpha、滚动收益、均线、波动率、综合分数或候选排名。
 - 未进入快照的数据不能由正式策略依赖；需要的派生特征由策略在可见窗口内计算。

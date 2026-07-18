@@ -1765,3 +1765,8 @@
 - 落地 7 项：①Timeview 同 run 分片暂存（硬链接复用，免重复切片编码，行数校验 fail-fast，杀掉 ~34% 回放墙钟的 15/16）；②timeview init 的 RangeIndex 守卫（reset_index 整帧拷贝致 fold_2025Q3 首次回测卡"首日处理"30+ 分钟——现场 py-spy 定位）；③`_read_dataset_window` 分区读取 8 线程化（events 域 47% 构建成本，保持串行字节序）；④Step 预算耗尽收尾提示（STEP_WRAP_UP_PROMPT，镜像 deadline 收尾）；⑤订单流签名 + `behaviorally_identical_validation` advisory；⑥`_compact_fold_history` 增投 exposure/turnover；⑦development_history 增逐 Epoch 冻结 hash 多样性。
 - 决定不做：盘中决策间距放宽（研究者旋钮，改变行为）、跨 run 分片缓存/预归一分钟缓存（新增缓存层）、prefetch 与会话重叠（文档化的刻意串行，substep 墙钟合同有争用风险）、meta 记忆摘要化（dev history 已含 Taste 链）、无改进劝退 nudge（与收尾提示重叠）。
 - 验证：全量 tests/unit 881 passed + 41 subtests（116s）。待补：stash 专项单测（现由行数校验 + 现场端到端复核兜底）。lzp-test23 worker 重启以载入修复，fold_2025Q3 重跑。
+
+2026-07-19 lzp-test23 Q3/Q4 快照构建诊断补强
+
+- 既有缓存证据确认增长集中于决策快照 events：2025-03-31/06-30/09-30 分别为 9.75M/14.03M/19.47M 行，events 构建 323.0/402.2/1104.3s；同期季度 replay 总构建稳定在 249.3/257.8/258.3s。按收益/复杂度权衡，仅给 events/macro 每数据集增加分区、行数与 discover/read_filter/concat/deduplicate/screen 墙钟，复用构建中已有计数，不做逐文件日志、额外扫描、新缓存层或 cache format bump。
+- 诊断只写新构建 snapshot/replay manifest 的可选 `dataset_build_profile`，不进入轻量 data_summary，不改变 Parquet、PIT、snapshot hash/缓存键；旧缓存无需重建。lzp-test23 已推进至 fold_2025Q4 frozen_test，运行 worker 未受改动。验证：snapshot 37 tests、全量 tests/unit 880 tests 通过（111.8s），`git diff --check` clean。
