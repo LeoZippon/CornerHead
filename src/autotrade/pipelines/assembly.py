@@ -61,11 +61,20 @@ def build_pipeline(
     proxies: "ProxyBundle",
 ) -> ExperimentPipeline:
     """Provider + pipeline wiring shared verbatim by every entrypoint."""
+    snapshot_config = config.snapshot_config
     release = pin_research_release(
         experiment_dir=config.experiment_dir,
         raw_dir=args.raw_dir.resolve(),
         fundamental_events_root=args.fundamental_events_root.resolve(),
         fundamental_events_status=args.fundamental_events_status.resolve(),
+        # Every raw dataset directory the snapshot build will read: a release
+        # materialized before these datasets existed must be rejected at pin
+        # time, not crash the first snapshot build.
+        required_raw_datasets=(
+            *snapshot_config.macro_datasets,
+            *snapshot_config.events_datasets,
+            *snapshot_config.text_datasets,
+        ),
     )
     return ExperimentPipeline(
         config,

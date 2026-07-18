@@ -384,11 +384,17 @@ class ProductionPipelineWiringTest(unittest.TestCase):
             ) as pin:
                 pipeline = build_pipeline(config, args, lambda *_args: None, None, proxies)
 
+            snapshot_config = config.snapshot_config
             pin.assert_called_once_with(
                 experiment_dir=config.experiment_dir,
                 raw_dir=source_raw.resolve(),
                 fundamental_events_root=source_events.resolve(),
                 fundamental_events_status=source_status.resolve(),
+                required_raw_datasets=(
+                    *snapshot_config.macro_datasets,
+                    *snapshot_config.events_datasets,
+                    *snapshot_config.text_datasets,
+                ),
             )
             self.assertEqual(pipeline.raw_dir, pinned_raw)
             self.assertEqual(pipeline.snapshots._provider.raw_dir, pinned_raw)

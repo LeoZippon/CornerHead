@@ -64,12 +64,13 @@ class ResearchReleaseTest(unittest.TestCase):
         metadata.write_text('{"row_count": 1}\n', encoding="utf-8")
         return parquet, metadata
 
-    def _pin(self, experiment: str):
+    def _pin(self, experiment: str, required: tuple[str, ...] = ()):
         return pin_research_release(
             experiment_dir=self.root / "experiments" / experiment,
             raw_dir=self.raw,
             fundamental_events_root=self.pit,
             fundamental_events_status=self.status,
+            required_raw_datasets=required,
         )
 
     def test_committed_release_hardlinks_only_parquet_contract_files(self) -> None:
@@ -198,13 +199,40 @@ class ResearchReleaseTest(unittest.TestCase):
         fcntl.flock(held.fileno(), fcntl.LOCK_EX)
         try:
             started = time.monotonic()
-            with self.assertRaisesRegex(RuntimeError, "no immutable release exists"):
+            with self.assertRaisesRegex(RuntimeError, "no immutable release covers"):
                 self._pin("exp1")
             elapsed = time.monotonic() - started
         finally:
             fcntl.flock(held.fileno(), fcntl.LOCK_UN)
             held.close()
         self.assertLess(elapsed, 0.5)
+
+    def test_stale_release_missing_required_datasets_is_not_selected(self) -> None:
+        # A release materialized before a dataset existed must not satisfy an
+        # experiment configured to read it (observed: lzp-test22 pinned a
+        # pre-derivatives release during a nightly update).
+        self._pin("seed")
+        held = self.lock.open("rb")
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+        try:
+            with self.assertRaisesRegex(RuntimeError, r"no immutable release covers.*fut_basic"):
+                self._pin("exp1", required=("daily", "fut_basic"))
+        finally:
+            fcntl.flock(held.fileno(), fcntl.LOCK_UN)
+            held.close()
+
+    def test_pinned_stale_release_fails_actionably_on_resume(self) -> None:
+        self._pin("exp1")
+        with self.assertRaisesRegex(
+            RuntimeError, r"pinned research release gen1 lacks configured raw datasets \['fut_basic'\]"
+        ):
+            self._pin("exp1", required=("fut_basic",))
+
+    def test_fresh_release_with_required_datasets_pins_normally(self) -> None:
+        self._write_raw_pair("fut_basic/exchange=CFFEX", b"registry-v1")
+        release = self._pin("exp1", required=("daily", "fut_basic"))
+        self.assertEqual(release.generation_id, "gen1")
+        self.assertTrue((release.raw_dir / "fut_basic" / "exchange=CFFEX.parquet").exists())
 
     def test_legacy_ledger_without_pin_is_rejected(self) -> None:
         ledger = self.root / "experiments" / "legacy" / "ledgers" / "experiment_ledger.jsonl"

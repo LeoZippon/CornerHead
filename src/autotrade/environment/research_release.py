@@ -62,17 +62,34 @@ class _GlobalRelease:
     source_quality_dir: Path
 
 
+def _require_raw_datasets(raw_dir: Path, required: tuple[str, ...], *, context: str) -> None:
+    # A release materialized before a dataset was added to the lake silently
+    # lacks its directory; the snapshot would only fail deep inside the first
+    # build (observed: lzp-test22 pinned a pre-derivatives release during a
+    # nightly update). Fail at pin time with the remedy instead.
+    missing = [name for name in required if not (raw_dir / name).is_dir()]
+    if missing:
+        raise RuntimeError(
+            f"{context} lacks configured raw datasets {missing}: the release predates these datasets; "
+            "recreate the experiment while the updater is idle (a fresh release will include them), "
+            "or exclude the datasets from the experiment config"
+        )
+
+
 def pin_research_release(
     *,
     experiment_dir: str | Path,
     raw_dir: str | Path,
     fundamental_events_root: str | Path,
     fundamental_events_status: str | Path,
+    required_raw_datasets: tuple[str, ...] = (),
 ) -> ResearchRelease:
     """Pin immutable data inputs for one experiment.
 
     Production mode requires both the cron flock and generation marker.  Data
     roots without that pair retain live-path behavior for local/synthetic tests.
+    ``required_raw_datasets`` are dataset directory names the experiment's
+    snapshot config will read: every returned release must contain them.
     """
 
     experiment_dir = Path(experiment_dir).resolve()
@@ -85,17 +102,24 @@ def pin_research_release(
 
     with _exclusive_flock(experiment_dir / f".{_PIN_DIR_NAME}.lock"):
         if pin_manifest.exists():
-            return _load_experiment_pin(
+            release = _load_experiment_pin(
                 pin_manifest,
                 raw_dir.parent / "research_releases",
                 raw_dir=raw_dir,
                 fundamental_events_root=fundamental_events_root,
                 fundamental_events_status=fundamental_events_status,
             )
+            _require_raw_datasets(
+                release.raw_dir,
+                required_raw_datasets,
+                context=f"pinned research release {release.generation_id or release.raw_dir}",
+            )
+            return release
 
         update_lock = raw_dir.parent.parent / ".runtime" / "tushare" / "locks" / "tushare_update.lock"
         generation_path = raw_dir / _RAW_GENERATION_NAME
         if not update_lock.exists() and not generation_path.exists():
+            _require_raw_datasets(raw_dir, required_raw_datasets, context=f"live raw dir {raw_dir}")
             return ResearchRelease(
                 raw_dir=raw_dir,
                 fundamental_events_root=fundamental_events_root,
@@ -145,6 +169,11 @@ def pin_research_release(
                                 fundamental_events_root,
                                 fundamental_events_status,
                             )
+                    _require_raw_datasets(
+                        shared.raw_dir,
+                        required_raw_datasets,
+                        context=f"research release {shared.generation_id}",
+                    )
                     return _publish_experiment_pin(
                         experiment_dir, shared, quality_source=fundamental_events_status.parent
                     )
@@ -155,11 +184,13 @@ def pin_research_release(
             raw_dir=raw_dir,
             fundamental_events_root=fundamental_events_root,
             fundamental_events_status=fundamental_events_status,
+            required_raw_datasets=required_raw_datasets,
         )
         if shared is None:
             raise RuntimeError(
-                "live research data is unavailable and no immutable release exists; "
-                "bootstrap one release while the generation is committed"
+                "live research data is unavailable and no immutable release covers the configured "
+                f"raw datasets {sorted(required_raw_datasets)}; retry when the updater is idle so a "
+                "fresh release can be pinned"
             )
         return _publish_experiment_pin(
             experiment_dir, shared, quality_source=shared.baseline_quality_dir
@@ -327,10 +358,14 @@ def _select_existing_release(
     raw_dir: Path,
     fundamental_events_root: Path,
     fundamental_events_status: Path,
+    required_raw_datasets: tuple[str, ...] = (),
 ) -> _GlobalRelease | None:
+    def _covers_required(release: _GlobalRelease) -> bool:
+        return all((release.raw_dir / name).is_dir() for name in required_raw_datasets)
+
     if preferred_generation and _SAFE_GENERATION_ID.fullmatch(preferred_generation):
         preferred = _load_global_release(release_root / preferred_generation)
-        if preferred is not None:
+        if preferred is not None and _covers_required(preferred):
             _assert_source_contract(
                 preferred,
                 raw_dir,
@@ -350,7 +385,7 @@ def _select_existing_release(
             candidates.append((str(payload.get("created_at") or ""), path))
     for _, path in sorted(candidates, reverse=True):
         loaded = _load_global_release(path)
-        if loaded is not None and _source_contract_matches(
+        if loaded is not None and _covers_required(loaded) and _source_contract_matches(
             loaded,
             raw_dir,
             fundamental_events_root,
