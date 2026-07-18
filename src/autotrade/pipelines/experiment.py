@@ -192,16 +192,22 @@ class ExperimentPipeline:
         )
 
     @staticmethod
-    def _write_style_rollups(results_root: Path, *prefixes: str) -> str | None:
+    def _write_style_rollups(
+        results_root: Path, *prefixes: str, only: dict[str, str] | None = None
+    ) -> str | None:
         """Aggregate per-window attribution sidecars into ``style_<prefix>.json``.
 
         Advisory analytics: a rollup failure must not discard a finished
         fold/held-out run, so each prefix is attempted independently and any
-        errors are returned for the ledger record instead of raising."""
+        errors are returned for the ledger record instead of raising. ``only``
+        maps a prefix to a single window name: valid attempt windows repeat
+        the same dates with different strategy versions, so the valid rollup
+        must describe the selected window, not a stitch of every attempt."""
         errors: list[str] = []
         for prefix in prefixes:
             try:
-                write_style_rollup(results_root, prefix)
+                window = (only or {}).get(prefix)
+                write_style_rollup(results_root, prefix, windows=(window,) if window else None)
             except Exception as exc:  # noqa: BLE001 - recorded in the ledger by the caller
                 errors.append(f"{prefix}: {type(exc).__name__}: {exc}")
         return "; ".join(errors) or None
@@ -570,7 +576,10 @@ class ExperimentPipeline:
                 docker.stop()
         if environment_progress_hook is not None:
             environment_progress_hook("persistence", None)
-        style_rollup_error = self._write_style_rollups(paths.results, "valid", "test")
+        selected_window = str((selected or {}).get("result_name") or "") or None
+        style_rollup_error = self._write_style_rollups(
+            paths.results, "valid", "test", only={"valid": selected_window} if selected_window else None
+        )
         if self.config.step_tree_enabled and paths.steps.exists():
             link_copytree(paths.steps, self.config.experiment_dir / "steps")
         steps = self._step_summaries(manifest, selected)

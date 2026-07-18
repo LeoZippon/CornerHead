@@ -326,21 +326,29 @@ def replay_style_analysis(
 # ---------------------------------------------------------------------------
 # prefix rollups (pipeline, after a window chain completes)
 # ---------------------------------------------------------------------------
-def write_style_rollup(results_root: Path, prefix: str) -> dict[str, object] | None:
+def write_style_rollup(
+    results_root: Path, prefix: str, windows: tuple[str, ...] | None = None
+) -> dict[str, object] | None:
     """Aggregate ``<prefix>_*`` window sidecars into ``style_<prefix>.json``.
 
     Pure math over the persisted per-window payloads: regression re-runs on
     the chained daily series; exposures merge days-weighted. Returns None
-    (and writes nothing) when no window carries a sidecar.
+    (and writes nothing) when no window carries a sidecar. ``windows``
+    restricts the rollup to named windows: validation windows of one fold
+    overlap the same dates with different strategy versions, so an
+    unrestricted valid rollup stitches a first-seen chimera series instead
+    of describing the accepted strategy.
     """
     results_root = Path(results_root)
     payloads: list[dict[str, object]] = []
-    windows: list[str] = []
+    included: list[str] = []
     for window_dir in sorted(results_root.glob(f"{prefix}_*")):
+        if windows is not None and window_dir.name not in windows:
+            continue
         sidecar = window_dir / "style_analysis.json"
         if window_dir.is_dir() and sidecar.exists():
             payloads.append(json.loads(sidecar.read_text(encoding="utf-8")))
-            windows.append(window_dir.name)
+            included.append(window_dir.name)
     if not payloads:
         return None
 
@@ -396,7 +404,7 @@ def write_style_rollup(results_root: Path, prefix: str) -> dict[str, object] | N
         strategy_total *= 1.0 + value
     rollup = {
         "prefix": prefix,
-        "windows": windows,
+        "windows": included,
         "benchmark": BENCHMARK_TS_CODE,
         "benchmark_regression": regression,
         "style": style,

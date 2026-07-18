@@ -178,6 +178,40 @@ class StyleRollupTest(unittest.TestCase):
             self.assertIsNone(write_style_rollup(results, "valid"))
             self.assertFalse((results / "style_valid.json").exists())
 
+    def test_rollup_windows_restriction_uses_only_named_window(self) -> None:
+        # Valid attempt windows repeat the same dates with different strategy
+        # versions; the restricted rollup must describe only the named window,
+        # never a first-seen stitch across attempts.
+        day = "20240102"
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Path(tmp)
+            for name, ret in (("valid_000", -0.30), ("valid_001", 0.36)):
+                window_dir = results / name
+                window_dir.mkdir()
+                (window_dir / "style_analysis.json").write_text(
+                    json.dumps(
+                        {
+                            "strategy_daily": [[day, ret]],
+                            "benchmark_daily": [[day, 0.005]],
+                            "style": {
+                                "days": 1,
+                                "tilts": {"size": 0.1, "pb": 0.0, "turnover": 0.0},
+                                "industries": [],
+                                "avg_names": 1,
+                                "avg_long_gross": 1000,
+                                "avg_short_gross": 0,
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            rollup = write_style_rollup(results, "valid", windows=("valid_001",))
+            self.assertIsNotNone(rollup)
+            written = json.loads((results / "style_valid.json").read_text(encoding="utf-8"))
+        self.assertEqual(written["windows"], ["valid_001"])
+        self.assertEqual(written["strategy_daily"], [[day, 0.36]])
+        self.assertAlmostEqual(written["compact"]["excess_return"], 0.36 - 0.005, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()
