@@ -768,7 +768,18 @@ async function renderHomePageSilent() {
   grid.replaceWith(fresh);
   const hero = document.getElementById("hero-panel");
   const best = pickBestExperiment(payload.experiments);
-  if (hero && best) hero.replaceWith(heroPanel(best));
+  // Only rebuild the hero when its content actually changed. Replacing it every
+  // poll re-creates the equity host, whose epoch switcher would reset to the
+  // default (latest) epoch and clobber the user's E1/E2 selection.
+  if (hero && best && hero.__heroSig !== heroSignature(best)) hero.replaceWith(heroPanel(best));
+}
+
+/* Everything heroPanel renders that can change between polls; when unchanged the
+   panel (and its selected epoch) is left in place. */
+function heroSignature(item) {
+  const m = item.metrics || {};
+  return [item.experiment_id, item.state, item.worker_alive, equityFingerprint(item),
+    m.mean_test_sharpe, m.epoch_id].join("|");
 }
 
 function experimentCard(item) {
@@ -866,6 +877,7 @@ function equityFingerprint(item) {
 function heroPanel(item) {
   const metrics = item.metrics || {};
   const panel = el("div", { class: "panel hero", id: "hero-panel" });
+  panel.__heroSig = heroSignature(item);
   const charts = el("div", { class: "section-gap" },
     el("h4", {}, "日度累计收益 vs 沪深300（含回撤）"),
     equityHost(item.experiment_id, equityFingerprint(item), { width: 980, height: 240, ddH: 90 }),
