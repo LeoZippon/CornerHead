@@ -1752,3 +1752,9 @@
 - 退役死数据：`data/raw/{slb_sec,slb_sec_detail,stk_auction_c,stk_auction_o}`（合计约 1.29G，6 月已从活动合同移除、当前代码/配置/审计零引用，用户确认永不再用）在 updater 排它锁内整目录迁至 `archive/data_raw/20260718_retired_datasets/`；已有 7 个 research release 的硬链接不受影响，未来 release 不再包含。
 - 清理僵死进程：两个 7-14 遗留的 `tests.unit.test_interactive_pipeline` unittest 进程（挂在 control.json 轮询等待近 4 天）SIGTERM 正常退出。
 - 复核后明确不修（低性价比）：snapshot 全量 hash（实测仅构建期一次，回测逐次只比对字符串）、`_read_dataset_window` 谓词下推（PIT 正确性敏感、构建已被跨实验缓存摊薄）、revision 账本轮转、share_float 全量重建、detailed_return 事件内嵌、reveal 门控中间件化、SIGCHLD 语义、NL 候选摘要——均为"引入代码冗余 > 现实收益"。
+
+2026-07-18 lzp-test23 双修复：fold_2025Q3 快照构建卡死与 valid 风格汇总口径
+
+- fold_2025Q3 备料卡死 4h16m 根因：b652403 引入的板块谱系数据（dc_member 等）7-18 00:39 回填落地、当晨 pin 首次含其全量，12 个月事件域窗口首次覆盖两个整季 2025 数据（~19M 行、dc_member 占 6.5M）；联合后再筛选使 rows×联合宽列的单次 frame[mask] take 进入小时级（py-spy 证实 4h+ 停在 _apply_screen 的 take_nd，RSS 65G）。修复：_build_available_at_domain 逐数据集先筛后并（输出行完全一致，决策快照与回放槽同路径生效）。杀停旧 worker、清 2.0G 残留 staging 后重启，重建峰值 RSS 12G，各域分钟级落盘。
+- fold_2024Q2 "收益 +36.1% 而年化 α 低"结论：非计算错误。逐窗口回归正确（valid_014 α_ann=+1.33、β=2.345、超额 +33.0pp 与账本一致）；低 α 来自 style_valid.json 汇总把同 Fold 15 个验证尝试窗口按首见日期拼接（早期亏损版本主导 → α=-1.29、β=0.535）。现 valid 汇总只取账本选定验证窗口（write_style_rollup 新增 windows 限定），并已重生成 lzp-test23 全部 6 个已记录 Fold 的 style_valid.json，控制台风格卡与 Fold 头条结果一致。
+- 验证：test_style_analysis 6 通过（含新增 windows 限定单测）、test_snapshot_builder 42 通过、test_pipeline_e2e 53 通过；环境/参数文档同步更新。
