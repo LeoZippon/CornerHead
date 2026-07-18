@@ -62,12 +62,19 @@ class _GlobalRelease:
     source_quality_dir: Path
 
 
+def _dataset_dir_populated(path: Path) -> bool:
+    # ≥1 parquet anywhere below (layouts nest: exchange=/ts_code=/trade_date=);
+    # rglob short-circuits at the first hit, so populated dirs cost ~one stat.
+    return path.is_dir() and next(path.rglob("*.parquet"), None) is not None
+
+
 def _require_raw_datasets(raw_dir: Path, required: tuple[str, ...], *, context: str) -> None:
     # A release materialized before a dataset was added to the lake silently
-    # lacks its directory; the snapshot would only fail deep inside the first
-    # build (observed: lzp-test22 pinned a pre-derivatives release during a
-    # nightly update). Fail at pin time with the remedy instead.
-    missing = [name for name in required if not (raw_dir / name).is_dir()]
+    # lacks its directory (or carries an empty one from an interrupted
+    # backfill); the snapshot would only fail deep inside the first build
+    # (observed: lzp-test22 pinned a pre-derivatives release during a nightly
+    # update). Fail at pin time with the remedy instead.
+    missing = [name for name in required if not _dataset_dir_populated(raw_dir / name)]
     if missing:
         raise RuntimeError(
             f"{context} lacks configured raw datasets {missing}: the release predates these datasets; "
@@ -361,7 +368,7 @@ def _select_existing_release(
     required_raw_datasets: tuple[str, ...] = (),
 ) -> _GlobalRelease | None:
     def _covers_required(release: _GlobalRelease) -> bool:
-        return all((release.raw_dir / name).is_dir() for name in required_raw_datasets)
+        return all(_dataset_dir_populated(release.raw_dir / name) for name in required_raw_datasets)
 
     if preferred_generation and _SAFE_GENERATION_ID.fullmatch(preferred_generation):
         preferred = _load_global_release(release_root / preferred_generation)

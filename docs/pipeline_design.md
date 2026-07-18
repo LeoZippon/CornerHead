@@ -438,7 +438,7 @@ experiments/<experiment_id>/
 | `reports/` | reporting 脚本 | 实验图表和汇总 |
 | `hitl/` | 交互式 worker / Web 后端 | HITL 控制面文件与 Fold 分析（见第 5 章） |
 
-快照缓存按内容身份复用同一实验内字节相同的构建结果：
+快照缓存按内容身份跨实验复用字节相同的构建结果：
 
 - 新实验先固定一个 research release：live 可读时按需发布当前 committed generation，更新期立即使用最近完整版本；部署后的首个版本须在 committed 空窗 bootstrap，已有账本但缺少 pin 时拒绝混用数据恢复。
 - 相邻 Fold 可以共享相同决策锚点，多 Epoch 的同一视图也可复用。

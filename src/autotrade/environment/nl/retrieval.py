@@ -301,6 +301,11 @@ class TextRetriever:
     ) -> pd.DataFrame:
         valid = tuple(validate_pattern(pattern) for pattern in patterns)
         combined = "|".join(f"(?:{pattern})" for pattern in valid)
+        # Bound distinct pattern keys: a strategy that varies its pattern per
+        # call would otherwise grow one verdict dict per pattern for the
+        # corpus's lifetime (FIFO eviction; normal strategies reuse one gate).
+        if combined not in corpus.match_cache and len(corpus.match_cache) >= 32:
+            corpus.match_cache.pop(next(iter(corpus.match_cache)))
         cache = corpus.match_cache.setdefault(combined, {})
         pending = visible.loc[[label for label in visible.index if label not in cache]]
         if not pending.empty:

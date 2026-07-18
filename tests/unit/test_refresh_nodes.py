@@ -50,8 +50,8 @@ def _cron_jobs() -> set[str]:
 
 CRONTAB = REPO_ROOT / "ops" / "cron" / "tushare_update.cron"
 
-# A managed crontab line: "MM HH * * <*|dow> ... --job <name> ...".
-_CRON_LINE = re.compile(r"^\s*(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+[\d*]\s+.*--job\s+(\S+)")
+# A managed crontab line: "MM HH * * <*|dow-expr> ... --job <name> ...".
+_CRON_LINE = re.compile(r"^\s*(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+[\d*/,-]+\s+.*--job\s+(\S+)")
 
 
 def _crontab_job_times() -> dict[str, time]:

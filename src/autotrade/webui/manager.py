@@ -120,7 +120,9 @@ class ExperimentManager:
         if not self.experiments_root.is_dir():
             return running
         for entry in self.experiments_root.iterdir():
-            if not entry.is_dir():
+            # Dot-dirs (e.g. the shared .snapshot_cache) are not experiments;
+            # skip them like every other listing does instead of stat-walking.
+            if not entry.is_dir() or entry.name.startswith("."):
                 continue
             state = experiment_state(entry)
             if state.get("state") == "launching" or (

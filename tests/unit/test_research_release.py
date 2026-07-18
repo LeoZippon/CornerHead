@@ -234,6 +234,13 @@ class ResearchReleaseTest(unittest.TestCase):
         self.assertEqual(release.generation_id, "gen1")
         self.assertTrue((release.raw_dir / "fut_basic" / "exchange=CFFEX.parquet").exists())
 
+    def test_empty_required_dataset_dir_is_rejected(self) -> None:
+        # An interrupted backfill leaves the directory present but empty; that
+        # must fail the pin-time contract like a missing directory.
+        (self.raw / "opt_basic").mkdir()
+        with self.assertRaisesRegex(RuntimeError, r"lacks configured raw datasets \['opt_basic'\]"):
+            self._pin("exp1", required=("daily", "opt_basic"))
+
     def test_legacy_ledger_without_pin_is_rejected(self) -> None:
         ledger = self.root / "experiments" / "legacy" / "ledgers" / "experiment_ledger.jsonl"
         ledger.parent.mkdir(parents=True)
