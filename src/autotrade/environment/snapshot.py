@@ -426,9 +426,8 @@ class SnapshotBuilder:
         def build_events(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
             events, meta = self._build_available_at_domain(
-                config.events_datasets, decision_time, events_window_start
+                config.events_datasets, decision_time, events_window_start, screen=screened
             )
-            events = self._apply_screen(events, screened)
             meta = {**meta, "rows": int(len(events))}
             profile = _write_with_profile(
                 output_dir / "events.parquet", events, build_seconds=time.perf_counter() - started
@@ -703,9 +702,8 @@ class SnapshotBuilder:
         def build_events(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
             events, meta = self._build_available_at_domain(
-                config.events_datasets, period_end, window_floor
+                config.events_datasets, period_end, window_floor, screen=screened
             )
-            events = self._apply_screen(events, screened)
             meta = {**meta, "rows": int(len(events))}
             profile = _write_with_profile(
                 output_dir / "events.parquet", events, build_seconds=time.perf_counter() - started
@@ -1255,6 +1253,7 @@ class SnapshotBuilder:
         window_start: pd.Timestamp,
         *,
         lifetime_registries: bool = False,
+        screen: frozenset[str] | None = None,
     ) -> tuple[pd.DataFrame, dict[str, object]]:
         frames: list[pd.DataFrame] = []
         rules: dict[str, str] = {}
@@ -1285,6 +1284,11 @@ class SnapshotBuilder:
             if len(deduped) < len(rows):
                 duplicate_rows_dropped[dataset] = int(len(rows) - len(deduped))
                 rows = deduped
+            # Screen while the frame is still narrow (its own columns only). A
+            # post-union screen materializes a rows × union-columns take that
+            # goes super-linear once the wide 2025+ membership datasets enter
+            # the window (a ~19M-row union spent hours in one frame[mask]).
+            rows = self._apply_screen(rows, screen)
             rows.insert(0, "dataset", dataset)
             frames.append(rows)
         merged = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
