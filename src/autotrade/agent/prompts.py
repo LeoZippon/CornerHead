@@ -229,6 +229,13 @@ PROTOCOL_INSTRUCTION = "\n\n".join(
     (FOLD_ROLE_SECTION, FOLD_ENV_SECTION, FOLD_ACTION_SECTION, FOLD_SUBMIT_CONTRACT, FOLD_PROHIBITIONS)
 )
 
+STEP_WRAP_UP_PROMPT = """\
+正式 Step 预算已用完：本 Fold 不能再进行新的完整验证回测（再次回测会直接终止会话）。请立即收尾：
+1. 重新读取 /mnt/artifacts/steps/tree.txt（若启用）与本 run 的回测记录，确认最佳已完整验证版本；
+2. 若最佳版本不是当前产物，用 step_rollback 恢复本 run 内该已验证节点（本 run 内验证过的 hash 无需重跑回测）；
+3. 运行 modification_check，然后立刻调用 finish_fold。不要再修改策略或开始新的探索。\
+"""
+
 WRAP_UP_PROMPT = """\
 本 Fold 时间即将用完。请立即收尾：
 1. 先重新读取 /mnt/artifacts/steps/tree.txt（若本次运行启用 Step 树）和本 run 的回测记录，确认最佳已完整验证版本——不要凭记忆分类哪个结果是完整验证；

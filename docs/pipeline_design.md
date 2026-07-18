@@ -324,7 +324,7 @@ experiments/<experiment_id>/strategy_artifacts/<epoch_id>/<strategy_artifact_id>
 
 以下输入均写入 `workspace/`，由 Runner 注入。
 
-- compact `development_history.json`：紧凑的逐 Fold 验证摘要、接受/拒绝原因和验证回测明细。
+- compact `development_history.json`：紧凑的逐 Fold 验证摘要（含 exposure/turnover 等过拟合信号）、接受/拒绝原因、验证回测明细，以及逐 Epoch 冻结策略 hash 多样性（识别"收敛教条"导致的零修改冻结坍缩）。
 - `experiment_ledger_full.jsonl`：Agent 可见 development 账本（逐条 `fold` / `meta_learning` 记录，排除 held-out、测试区间调度和测试回放结果）。
 - 元学习记忆：按 Epoch 顺序拼接配置数量的最近会话完整对话和工具日志；设为 0 时关闭。更早的原始记忆不再注入，只通过 Taste 链和紧凑 Fold 历史保留。
 - 上一次 Taste。

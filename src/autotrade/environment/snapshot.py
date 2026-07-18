@@ -51,6 +51,9 @@ from autotrade.environment.research_release import DOMAIN_STATUS_FILES
 from autotrade.environment.runtime import new_id, utc_now_iso
 
 SNAPSHOT_DOMAIN_WORKERS = 2
+# Per-dataset partition fan-in: daily-partitioned event datasets hold thousands
+# of small files whose parquet decode releases the GIL.
+_PARTITION_READ_WORKERS = 8
 _BOARD_TRADING_DATASETS = frozenset(BOARD_TRADING_DATASETS)
 # Instrument registries in the macro domain (contract/bond basics): rows stay
 # valid for the instrument's whole life, so the macro window floor must not
@@ -1311,24 +1314,39 @@ class SnapshotBuilder:
     ) -> pd.DataFrame:
         start_day = window_start.strftime("%Y%m%d")
         end_day = decision_time.strftime("%Y%m%d")
-        frames = []
-        nat_dropped = 0
-        for path in sorted(dataset_dir.rglob("*.parquet")):
-            if not _partition_overlaps(path.stem, start_day, end_day):
-                continue
+        paths = [
+            path
+            for path in sorted(dataset_dir.rglob("*.parquet"))
+            if _partition_overlaps(path.stem, start_day, end_day)
+        ]
+
+        def load(path: Path) -> tuple[pd.DataFrame | None, int]:
             frame = pd.read_parquet(path)
             if frame.empty:
-                continue
+                return None, 0
             if "available_at" not in frame.columns:
                 raise ValueError(f"{path} has no available_at column; cannot enforce the PIT wall")
             available = to_cn_timestamps(frame["available_at"])
             # Unparseable timestamps become NaT and fail both bounds: dropped in
             # the conservative direction (hidden, never leaked), but counted so
             # an ingestion defect surfaces in the manifest instead of silently.
-            nat_dropped += int(available.isna().sum())
+            nat = int(available.isna().sum())
             keep = frame[(available <= decision_time) & (available >= window_start)]
-            if not keep.empty:
-                frames.append(keep)
+            return (keep if not keep.empty else None), nat
+
+        # Partition files number in the thousands for daily-partitioned event
+        # datasets; parquet decode releases the GIL, so a bounded thread pool
+        # cuts the wall while pool.map preserves the sorted partition order
+        # (the concat below must stay byte-identical to a serial read).
+        if len(paths) > 1:
+            with ThreadPoolExecutor(
+                max_workers=min(_PARTITION_READ_WORKERS, len(paths)), thread_name_prefix="snapshot-read"
+            ) as pool:
+                results = list(pool.map(load, paths))
+        else:
+            results = [load(path) for path in paths]
+        frames = [frame for frame, _ in results if frame is not None]
+        nat_dropped = sum(nat for _, nat in results)
         if nat_counts is not None and nat_dropped:
             nat_counts[dataset_dir.name] = nat_counts.get(dataset_dir.name, 0) + nat_dropped
         return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()

@@ -1758,3 +1758,10 @@
 - fold_2025Q3 备料卡死 4h16m 根因：b652403 引入的板块谱系数据（dc_member 等）7-18 00:39 回填落地、当晨 pin 首次含其全量，12 个月事件域窗口首次覆盖两个整季 2025 数据（~19M 行、dc_member 占 6.5M）；联合后再筛选使 rows×联合宽列的单次 frame[mask] take 进入小时级（py-spy 证实 4h+ 停在 _apply_screen 的 take_nd，RSS 65G）。修复：_build_available_at_domain 逐数据集先筛后并（输出行完全一致，决策快照与回放槽同路径生效）。杀停旧 worker、清 2.0G 残留 staging 后重启，重建峰值 RSS 12G，各域分钟级落盘。
 - fold_2024Q2 "收益 +36.1% 而年化 α 低"结论：非计算错误。逐窗口回归正确（valid_014 α_ann=+1.33、β=2.345、超额 +33.0pp 与账本一致）；低 α 来自 style_valid.json 汇总把同 Fold 15 个验证尝试窗口按首见日期拼接（早期亏损版本主导 → α=-1.29、β=0.535）。现 valid 汇总只取账本选定验证窗口（write_style_rollup 新增 windows 限定），并已重生成 lzp-test23 全部 6 个已记录 Fold 的 style_valid.json，控制台风格卡与 Fold 头条结果一致。
 - 验证：test_style_analysis 6 通过（含新增 windows 限定单测）、test_snapshot_builder 42 通过、test_pipeline_e2e 53 通过；环境/参数文档同步更新。
+
+2026-07-18 四路 Opus 评审后的策略生成流程与回放性能优化批次
+
+- 证据（lzp-test22/23 全部 78 次回测 + 6 个 Fold trace + 快照缓存 26 份 manifest）：完整验证 ≈5.85s/交易日，环境开销占 87%（timeview_roll 34%、host 开销 26%、IPC 19%）；回测墙钟占 Fold 总时长 ~75%，其中 ~13% 花在"行为等价"的重复验证；2/6 Fold 因 Step 上限硬终止且未收尾；元学习 Taste 确实主导了 Fold 实现，但看不到 test21 复盘点名的过拟合信号。
+- 落地 7 项：①Timeview 同 run 分片暂存（硬链接复用，免重复切片编码，行数校验 fail-fast，杀掉 ~34% 回放墙钟的 15/16）；②timeview init 的 RangeIndex 守卫（reset_index 整帧拷贝致 fold_2025Q3 首次回测卡"首日处理"30+ 分钟——现场 py-spy 定位）；③`_read_dataset_window` 分区读取 8 线程化（events 域 47% 构建成本，保持串行字节序）；④Step 预算耗尽收尾提示（STEP_WRAP_UP_PROMPT，镜像 deadline 收尾）；⑤订单流签名 + `behaviorally_identical_validation` advisory；⑥`_compact_fold_history` 增投 exposure/turnover；⑦development_history 增逐 Epoch 冻结 hash 多样性。
+- 决定不做：盘中决策间距放宽（研究者旋钮，改变行为）、跨 run 分片缓存/预归一分钟缓存（新增缓存层）、prefetch 与会话重叠（文档化的刻意串行，substep 墙钟合同有争用风险）、meta 记忆摘要化（dev history 已含 Taste 链）、无改进劝退 nudge（与收尾提示重叠）。
+- 验证：全量 tests/unit 881 passed + 41 subtests（116s）。待补：stash 专项单测（现由行数校验 + 现场端到端复核兜底）。lzp-test23 worker 重启以载入修复，fold_2025Q3 重跑。

@@ -479,6 +479,7 @@ def run_main_ctx_replay(
     timeview_enabled: bool = False,
     snapshot_dir: Path | None = None,
     replay_dir: Path | None = None,
+    timeview_stash_dir: Path | None = None,
     on_progress: "Callable[[str, int, int, float, int], None] | None" = None,
 ) -> ReplayResult:
     """Replay the region tick by tick, calling ``main(ctx)`` per tick.
@@ -581,6 +582,7 @@ def run_main_ctx_replay(
             ),
             replay_text_library_dir=(Path(replay_dir) / "text_library") if replay_dir is not None else None,
             incremental_domains={"intraday_1min"} if replay_minute_source is not None else None,
+            stash_dir=timeview_stash_dir,
         )
         if timeview_enabled and snapshot_dir is not None and getattr(main_policy, "paths", None) is not None
         else None

@@ -31,6 +31,7 @@ import shutil
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -132,6 +133,7 @@ class Timeview:
         replay_frames: dict[str, pd.DataFrame],
         replay_text_library_dir: Path | None = None,
         incremental_domains: set[str] | frozenset[str] | None = None,
+        stash_dir: Path | None = None,
     ) -> None:
         self.host_dir = Path(host_dir)
         self.executor = executor
@@ -166,6 +168,7 @@ class Timeview:
                 frozen_file=self.snapshot_dir / filename,
                 replay=replay if replay is not None else pd.DataFrame(),
                 incremental=name in incremental,
+                stash_dir=(Path(stash_dir) / name) if stash_dir is not None else None,
             )
         self._text = _TextView(
             out_index_dir=self.host_dir / "text_index",
@@ -229,14 +232,24 @@ class _DomainView:
         frozen_file: Path,
         replay: pd.DataFrame,
         incremental: bool = False,
+        stash_dir: Path | None = None,
     ) -> None:
         self.name = name
         self.cutoff_key = cutoff_key
         self.out_dir = out_dir
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.incremental = bool(incremental)
+        self._stash_dir = stash_dir
         self._pending: list[_PendingReplayPartition] = []
-        replay = replay.reset_index(drop=True)
+        # Same guard as append_replay_partition: parquet-loaded frames already
+        # carry a clean RangeIndex, and reset_index would copy the whole frame
+        # (a multi-million-row object union costs tens of minutes to copy).
+        if not (
+            isinstance(replay.index, pd.RangeIndex)
+            and replay.index.start == 0
+            and replay.index.step == 1
+        ):
+            replay = replay.reset_index(drop=True)
         # A replay frame can only roll if it carries the row-level available_at the
         # node gate needs; without it the domain stays frozen-only (conservative).
         if replay.empty or "available_at" not in replay.columns:
@@ -365,9 +378,7 @@ class _DomainView:
         if newly.size == 0:
             return False
         newly.sort()  # original frame order: parts read back exactly as the frame slice
-        part = self.replay.iloc[newly].reindex(columns=self._columns)
-        part.to_parquet(self.out_dir / f"part_{self._part_seq:04d}.parquet", index=False)
-        self._part_seq += 1
+        self._write_part(int(newly.size), lambda: self.replay.iloc[newly].reindex(columns=self._columns))
         return True
 
     def _roll_incremental(self, when: pd.Timestamp) -> bool:
@@ -401,11 +412,46 @@ class _DomainView:
         self._pending = pending
         if not newly:
             return False
-        rows = newly[0] if len(newly) == 1 else pd.concat(newly, ignore_index=True)
-        part = rows.reindex(columns=self._columns)
-        part.to_parquet(self.out_dir / f"part_{self._part_seq:04d}.parquet", index=False)
-        self._part_seq += 1
+
+        def build() -> pd.DataFrame:
+            rows = newly[0] if len(newly) == 1 else pd.concat(newly, ignore_index=True)
+            return rows.reindex(columns=self._columns)
+
+        self._write_part(sum(len(frame) for frame in newly), build)
         return True
+
+    def _write_part(self, row_count: int, build: Callable[[], pd.DataFrame]) -> None:
+        """Write the next part, reusing the run-level stash when one is present.
+
+        Within one run the part sequence is deterministic (fixed frozen
+        snapshot, replay frames and refresh-node schedule), and a shorter
+        ``replay_window`` replay is a strict prefix of the full one — so a
+        stashed part written by an earlier backtest is byte-identical and can
+        be hardlinked instead of sliced and re-encoded. The footer row count
+        is still compared against the newly-visible count: any mismatch means
+        the stash does not belong to this replay's inputs and the backtest
+        must fail rather than expose a wrong visibility slice.
+        """
+        name = f"part_{self._part_seq:04d}.parquet"
+        out = self.out_dir / name
+        stash = self._stash_dir / name if self._stash_dir is not None else None
+        if stash is not None and stash.exists():
+            stashed_rows = int(pq.ParquetFile(stash).metadata.num_rows)
+            if stashed_rows != row_count:
+                raise RuntimeError(
+                    f"Timeview stash mismatch for domain {self.name!r} {name}: stashed "
+                    f"{stashed_rows} rows, expected {row_count}"
+                )
+            os.link(stash, out)
+        elif stash is not None:
+            self._stash_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self._stash_dir / f".{name}.{os.getpid()}.tmp"
+            build().to_parquet(tmp, index=False)
+            os.replace(tmp, stash)
+            os.link(stash, out)
+        else:
+            build().to_parquet(out, index=False)
+        self._part_seq += 1
 
     def _newly_visible(self, when: pd.Timestamp) -> np.ndarray:
         if self._cursor is not None:

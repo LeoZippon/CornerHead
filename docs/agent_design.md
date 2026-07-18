@@ -55,7 +55,7 @@ Agent 遵循以下使用原则：
 
 一个 Fold 内可以有多个 Step。Step 是同一 Agent 会话中一次有记录的候选验证迭代；两次 Step 之间可以穿插任意数量的只读探查、修改和调试工具调用。进入下一 Step 不会重启 Agent，也不会创建新的对话上下文。
 
-修改检查和回测会返回非阻断 advisory：未投影的 Parquet 读取、未重新抛出的宽异常、formal Agent 峰值内存，以及多次 `main(ctx)` 后零 action/零订单。它们只帮助 Agent 定位策略问题，不替代 Agent 决策，也不改变 `allowed_to_backtest`、完整验证或冻结资格。
+修改检查和回测会返回非阻断 advisory：未投影的 Parquet 读取、未重新抛出的宽异常、formal Agent 峰值内存，多次 `main(ctx)` 后零 action/零订单，以及订单流与此前某次完整验证完全一致（`behaviorally_identical_validation`——自该版本以来的修改在交易上无效，应复盘或换假设，而不是再付一次完整验证）。它们只帮助 Agent 定位策略问题，不替代 Agent 决策，也不改变 `allowed_to_backtest`、完整验证或冻结资格。
 
 **初始 Step 建议**
 
@@ -80,7 +80,7 @@ Agent 遵循以下使用原则：
 - 收敛阶段先保持已验证表现与可执行性，再减少不必要的代码、文件和复杂度；这是启发式，不是独立验收排序。
 - 临近截止时间时，保留当前最好且已完整验证的产物，尽快完成检查、验证或结束 Fold；当前改动未通过验证时，可用 `step_rollback` 恢复到本 Fold 已验证节点再结束。
 
-**会话稳态防护**（宿主侧，不增加 Agent 交互面）：backtest 观察随 `backtests_*` 一并回显 `steps_used/steps_limit/steps_remaining`（正式 Step 预算）；主对话 provider 调用按剩余截止时间钳制内部重试；连续 3 次 provider 失败触发熔断并以 `llm_unavailable` 结束会话（避免故障提供方烧光调用预算）；provider 返回上下文超长错误时强制执行一次上下文压缩（绕过 token 估计阈值，保留熔断与结构性保护）。`step_rollback` 仅在启用 Step 树的运行中注册为工具。
+**会话稳态防护**（宿主侧，不增加 Agent 交互面）：backtest 观察随 `backtests_*` 一并回显 `steps_used/steps_limit/steps_remaining`（正式 Step 预算）；最后一个预算 Step 的完整验证完成后注入 Step 收尾提示（恢复最佳已验证版本并 `finish_fold`，再次回测才会终止会话）；主对话 provider 调用按剩余截止时间钳制内部重试；连续 3 次 provider 失败触发熔断并以 `llm_unavailable` 结束会话（避免故障提供方烧光调用预算）；provider 返回上下文超长错误时强制执行一次上下文压缩（绕过 token 估计阈值，保留熔断与结构性保护）。`step_rollback` 仅在启用 Step 树的运行中注册为工具。
 
 ## 3. 正式策略产物与策略组织
 

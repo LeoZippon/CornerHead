@@ -9,6 +9,7 @@ return statistics, the order log, and the NL audit trail.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -556,6 +557,17 @@ class BacktestTool:
                                     timeview_enabled=timeview_enabled,
                                     snapshot_dir=snapshot_dir,
                                     replay_dir=replay_dir,
+                                    # Host-only per-run stash (never mounted): identical rolled
+                                    # parts are hardlinked instead of re-encoded across the
+                                    # run's backtests over the same snapshot/replay inputs.
+                                    timeview_stash_dir=(
+                                        self.ctx.paths.root
+                                        / "runtime"
+                                        / "timeview_stash"
+                                        / hashlib.sha256(f"{snapshot_dir}|{replay_dir}".encode()).hexdigest()[:16]
+                                    )
+                                    if timeview_enabled
+                                    else None,
                                     on_progress=_on_progress,
                                 )
                     finally:
@@ -598,10 +610,23 @@ class BacktestTool:
         # no financial artifact lands in the agent-readable results dir.
         style_payload: dict[str, object] = {}
         orders_path = None
+        orders_signature = None
+        identical_orders_to = None
         if not probe:
             order_records = replay.broker.get_trade_detail_data(
                 account_type="STOCK", data_type="ORDER"
             ) + replay.broker.get_trade_detail_data(account_type="CREDIT", data_type="ORDER")
+            orders_signature = _orders_signature(order_records)
+            for prior in self.ctx.manifest.get("backtest_summaries") or []:
+                if (
+                    isinstance(prior, dict)
+                    and prior.get("mode") == "valid"
+                    and prior.get("status") == "ok"
+                    and prior.get("complete_validation")
+                    and prior.get("orders_signature") == orders_signature
+                ):
+                    identical_orders_to = str(prior.get("result_name"))
+                    break
             orders_path = self._write_orders(result_dir, order_records)
             # Broker end-of-day positions per (date, account, ts_code, side): the
             # attribution ground truth (forced closes / bonus shares / hedged legs).
@@ -666,6 +691,18 @@ class BacktestTool:
             else []
         )
         diagnostic_warnings = _diagnostic_warnings(stats, strategy_advisories=strategy_advisories)
+        if identical_orders_to:
+            diagnostic_warnings.append(
+                {
+                    "kind": "behaviorally_identical_validation",
+                    "matches": identical_orders_to,
+                    "detail": (
+                        f"本次完整验证的订单流与 {identical_orders_to} 完全一致："
+                        "自该版本以来的代码修改在交易行为上无效；"
+                        "继续同方向微调前应先复盘差异或更换假设"
+                    ),
+                }
+            )
         if withheld_probe_nl:
             diagnostic_warnings.insert(
                 0,
@@ -773,6 +810,8 @@ class BacktestTool:
                 # only, like the return metrics above.
                 "exposure": stats["exposure"],
                 "weekly_returns": stats["weekly_returns"],
+                "turnover": stats["turnover"],
+                "orders_signature": orders_signature,
                 # Exit-day liquidation completeness: final equity is mark-to-market
                 # either way; leftovers (suspension/limit-lock/T+1) are itemized in
                 # detailed_return.json's unliquidated_positions.
@@ -1101,6 +1140,17 @@ def _strategy_reject_category_counts(value: object) -> dict[str, int]:
         if count > 0:
             counts[category] = counts.get(category, 0) + count
     return dict(sorted(counts.items()))
+
+
+def _orders_signature(orders: list[dict[str, object]]) -> str:
+    """Stable digest of the full order stream.
+
+    Within one run the replay inputs are fixed, so equal digests mean two
+    validations traded identically — byte-different edits can be behaviorally
+    inert, and the agent should learn that without paying another replay."""
+    return hashlib.sha256(
+        json.dumps(orders, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
 
 
 def _diagnostic_warnings(

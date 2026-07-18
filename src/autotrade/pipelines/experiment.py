@@ -984,8 +984,24 @@ class ExperimentPipeline:
 
     def _development_history(self, previous_taste: str) -> dict[str, object]:
         folds = list(latest_fold_records(self.ledger.read("fold")).values())
+        # Doctrine-collapse tell: lzp-test21 epoch_003 froze 13 folds onto 2
+        # distinct strategy hashes under a "convergence" taste. A later meta
+        # session must see the prior epochs' hash diversity to notice it.
+        by_epoch: dict[str, list[object]] = {}
+        for record in folds:
+            by_epoch.setdefault(str(record.get("epoch_id")), []).append(
+                record.get("frozen_combined_artifact_hash")
+            )
+        fold_hash_diversity = {
+            epoch: {
+                "folds": len(hashes),
+                "distinct_strategy_hashes": len({h for h in hashes if h}),
+            }
+            for epoch, hashes in sorted(by_epoch.items())
+        }
         return {
             "fold_backtest_summaries": [_compact_fold_history(record) for record in folds],
+            "fold_hash_diversity": fold_hash_diversity,
             "meta_learning": [_agent_visible_ledger_record(record) for record in self.ledger.read("meta_learning")],
             "previous_taste": previous_taste,
         }
@@ -1536,6 +1552,12 @@ def _compact_fold_history(record: dict[str, object]) -> dict[str, object]:
                         "strategy_exit_fill_count",
                         "liquidation_complete",
                         "benchmark",
+                        # Overfitting tells (lzp-test21 post-mortem): structural
+                        # low exposure and turnover cost drove the held-out loss
+                        # while the dev metrics looked healthy — meta-learning
+                        # must see them, not just returns.
+                        "exposure",
+                        "turnover",
                         "error",
                     )
                     if key in summary

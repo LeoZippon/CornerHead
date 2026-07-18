@@ -57,7 +57,7 @@ from .compact import (
     safe_error_summary,
 )
 from .experiment_facts import build_experiment_facts
-from .prompts import WRAP_UP_PROMPT, build_meta_learning_prompt, build_system_prompt
+from .prompts import STEP_WRAP_UP_PROMPT, WRAP_UP_PROMPT, build_meta_learning_prompt, build_system_prompt
 
 SESSION_MODES = ("fold", "meta_learning")
 TERMINAL_ACTIONS = {"done", "finish_fold"}
@@ -251,6 +251,7 @@ class AgentSessionRunner:
         step_index = 1
         self.ctx.current_step_id = f"step_{step_index:03d}"
         wrap_up_sent = False
+        step_wrap_up_sent = False
         llm_failure_streak = 0
         finish_status = "deadline_timeout"
 
@@ -361,6 +362,12 @@ class AgentSessionRunner:
                         break
                     step_index += 1
                     self.ctx.current_step_id = f"step_{step_index:03d}"
+                    # The last budgeted step must end like the deadline path
+                    # does: with a self-selected best artifact and finish_fold,
+                    # not a hard break that leaves the fold write-unlocked.
+                    if step_index >= self.config.max_steps and not step_wrap_up_sent:
+                        step_wrap_up_sent = True
+                        messages.append({"role": "user", "content": STEP_WRAP_UP_PROMPT})
             if terminal:
                 break
 
@@ -373,6 +380,7 @@ class AgentSessionRunner:
             "llm_calls": llm_calls,
             "steps_used": step_index,
             "wrap_up_sent": wrap_up_sent,
+            "step_wrap_up_sent": step_wrap_up_sent,
             "write_locked": self.ctx.write_locked,
             "context_compactions": self.compactor.compaction_count if self.compactor is not None else 0,
             "context_compaction_calls": self.compactor.compaction_attempts if self.compactor is not None else 0,
