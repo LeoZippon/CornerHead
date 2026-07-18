@@ -1745,3 +1745,10 @@
 2026-07-18 三子代理（Opus 4.8）三原则合规审计与择优修复
 
 - 数据层/环境层/管线控制台三路审计共 10 发现（0 高危）。按"收益/开销"择优落地 6 项：pipeline 设计文档"同一实验内"陈述订正为跨实验；running_experiments 跳过点目录（不再 stat 遍历共享快照缓存）；release 数据集合同拒绝"存在但为空"目录（rglob 短路，兼容嵌套布局）；cron 漂移守卫接受 DOW 区间/列表/步进表达式；NL match_cache 模式键 FIFO 上限 32（防逐 tick 变模式策略无界增长）；Taste 备选方向条款注明服务同一机制假设。4 项经客观评估不改：共享缓存 GC（并发安全机制开销 > 磁盘压力）、周扫新鲜度（既定权衡）、margin 守卫范围（有意限定）、equity≤0 曝光标记（Broker 强平使状态不可达）。全量 tests/unit 880 passed。
+
+2026-07-18 全库通读后的性价比择优修复（存储卫生 + 僵死进程）
+
+- 全库通读（6 份活文档亲读 + 7 路子代理源码/测试/实验全量阅读）后按"收益/引入冗余"评估全部已知问题，仅落地零代码冗余的两项：
+- 退役死数据：`data/raw/{slb_sec,slb_sec_detail,stk_auction_c,stk_auction_o}`（合计约 1.29G，6 月已从活动合同移除、当前代码/配置/审计零引用，用户确认永不再用）在 updater 排它锁内整目录迁至 `archive/data_raw/20260718_retired_datasets/`；已有 7 个 research release 的硬链接不受影响，未来 release 不再包含。
+- 清理僵死进程：两个 7-14 遗留的 `tests.unit.test_interactive_pipeline` unittest 进程（挂在 control.json 轮询等待近 4 天）SIGTERM 正常退出。
+- 复核后明确不修（低性价比）：snapshot 全量 hash（实测仅构建期一次，回测逐次只比对字符串）、`_read_dataset_window` 谓词下推（PIT 正确性敏感、构建已被跨实验缓存摊薄）、revision 账本轮转、share_float 全量重建、detailed_return 事件内嵌、reveal 门控中间件化、SIGCHLD 语义、NL 候选摘要——均为"引入代码冗余 > 现实收益"。
