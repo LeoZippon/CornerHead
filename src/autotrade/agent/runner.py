@@ -87,6 +87,10 @@ class AgentSessionConfig:
     # counts are high safety caps so a many-small-turn session still stays bounded
     # without rewriting the cacheable prefix every turn (which resets the cache).
     max_history_messages: int = 150
+    # A deterministic trim must leave enough space for several normal turns.
+    # Keeping right up to the cap regenerates the summary on every call and
+    # collapses provider prefix-cache reuse after a long session reaches it.
+    trim_message_headroom: int = 30
     trim_token_threshold: int = 60000
     # Code-writing turns need room; reasoning tokens also count against this.
     max_response_tokens: int = 8000
@@ -99,6 +103,10 @@ class AgentSessionConfig:
     tool_result_clear_min_chars: int = 4000
     tool_result_clear_token_threshold: int = 24000
     context_compaction: ContextCompactionConfig = field(default_factory=ContextCompactionConfig)
+
+    def __post_init__(self) -> None:
+        if self.trim_message_headroom < 0:
+            raise ValueError("trim_message_headroom cannot be negative")
 
 
 def _llm_observation(record: dict[str, object]) -> dict[str, object]:
@@ -1118,13 +1126,17 @@ class AgentSessionRunner:
         summary = self._context_summary_payload()
         summary_message = {"role": "user", "content": json.dumps(summary, ensure_ascii=False, default=str)}
         kept_llm_compaction = latest_llm_summary is not None and self.config.max_history_messages >= 4
+        reserved = 3 if kept_llm_compaction else 2  # system + summaries
+        max_tail = max(self.config.max_history_messages - reserved, 0)
+        # Trim in batches instead of dropping only the newest overflow.  The
+        # headroom amortizes this unavoidable prefix rewrite across subsequent
+        # turns while retaining at least one recent raw message when possible.
+        headroom = min(self.config.trim_message_headroom, max(max_tail - 1, 0))
+        keep = max_tail - headroom
+        tail = self._drop_leading_orphan_tools(non_summary[-keep:]) if keep else []
         if kept_llm_compaction:
-            keep = self.config.max_history_messages - 3
-            tail = self._drop_leading_orphan_tools(non_summary[-keep:])
             trimmed = [messages[0], latest_llm_summary, summary_message, *tail]
         else:
-            keep = self.config.max_history_messages - 2
-            tail = self._drop_leading_orphan_tools(non_summary[-keep:])
             trimmed = [messages[0], summary_message, *tail]
         self.ctx.trace.emit(
             "context_summary",
@@ -1134,6 +1146,7 @@ class AgentSessionRunner:
                 "kept_messages": len(trimmed),
                 "dropped_messages": max(len(messages) - len(trimmed), 0),
                 "max_history_messages": self.config.max_history_messages,
+                "trim_message_headroom": headroom,
             },
             step_id=self.ctx.current_step_id,
         )

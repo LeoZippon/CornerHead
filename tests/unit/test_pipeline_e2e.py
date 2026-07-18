@@ -357,6 +357,7 @@ class ExperimentCliTest(unittest.TestCase):
         summary = _session_config_summary(config, compact_enabled=True)
 
         self.assertEqual(summary["trim_token_threshold"], 60000)
+        self.assertEqual(summary["trim_message_headroom"], 30)
         self.assertEqual(summary["tool_result_clear_token_threshold"], 24000)
         self.assertTrue(summary["clear_tool_results"])
 

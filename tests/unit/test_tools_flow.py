@@ -2925,6 +2925,44 @@ def main(ctx):
             events = [event for event in ctx.trace.read_events() if event["event_type"] == "context_summary"]
             self.assertTrue(events)
 
+    def test_deterministic_trim_leaves_cacheable_turn_headroom(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, ctx = build_sandbox(Path(tmp))
+            runner = AgentSessionRunner(
+                ctx,
+                ScriptedLLM([]),
+                AgentSessionConfig(
+                    fold_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+                    max_history_messages=10,
+                    trim_message_headroom=4,
+                    trim_token_threshold=10_000_000,
+                ),
+                fold_info={},
+                acceptance_rules={},
+            )
+            messages = [{"role": "system", "content": "system"}]
+            messages.extend(
+                {"role": "assistant" if index % 2 == 0 else "user", "content": f"message-{index}"}
+                for index in range(10)
+            )
+
+            trimmed = runner._trim(messages)
+
+            self.assertEqual(len(trimmed), 6)
+            events = [event for event in ctx.trace.read_events() if event["event_type"] == "context_summary"]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["trim_message_headroom"], 4)
+            self.assertEqual(events[0]["dropped_messages"], 5)
+
+            expanded = [
+                *trimmed,
+                {"role": "assistant", "content": "next"},
+                {"role": "user", "content": "next-result"},
+            ]
+            self.assertIs(runner._trim(expanded), expanded)
+            events = [event for event in ctx.trace.read_events() if event["event_type"] == "context_summary"]
+            self.assertEqual(len(events), 1)
+
     def test_runner_preserves_llm_compaction_summary_during_deterministic_trim(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))

@@ -124,6 +124,7 @@ def _session_config_summary(config: AgentSessionConfig, *, compact_enabled: bool
         "max_llm_calls": config.max_llm_calls,
         "max_steps": config.max_steps,
         "max_history_messages": config.max_history_messages,
+        "trim_message_headroom": config.trim_message_headroom,
         "trim_token_threshold": config.trim_token_threshold,
         "max_response_tokens": config.max_response_tokens,
         "context_summary_max_items": config.context_summary_max_items,

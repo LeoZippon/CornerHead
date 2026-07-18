@@ -1770,3 +1770,10 @@
 
 - 既有缓存证据确认增长集中于决策快照 events：2025-03-31/06-30/09-30 分别为 9.75M/14.03M/19.47M 行，events 构建 323.0/402.2/1104.3s；同期季度 replay 总构建稳定在 249.3/257.8/258.3s。按收益/复杂度权衡，仅给 events/macro 每数据集增加分区、行数与 discover/read_filter/concat/deduplicate/screen 墙钟，复用构建中已有计数，不做逐文件日志、额外扫描、新缓存层或 cache format bump。
 - 诊断只写新构建 snapshot/replay manifest 的可选 `dataset_build_profile`，不进入轻量 data_summary，不改变 Parquet、PIT、snapshot hash/缓存键；旧缓存无需重建。lzp-test23 已推进至 fold_2025Q4 frozen_test，运行 worker 未受改动。验证：snapshot 37 tests、全量 tests/unit 880 tests 通过（111.8s），`git diff --check` clean。
+
+2026-07-19 lzp-test23 epoch_001 fold_2025Q3 LLM 前缀缓存失效定因与修复
+
+- Q3 并非 API 缓存字面归零，但在第 68/145 次主对话命中 150 条消息上限后实质崩溃：命中前 hit ratio 93.78%（miss 241,480），命中后 34.77%（miss 4,349,230），整体 56.47%；只剩约 27.5K 静态系统前缀持续命中。同期 Q2/Q4 整体为 92.76%/81.64%。145 次请求皆为同一 deepseek-v4-pro、status=ok，无重试故障与语义压缩，排除 provider 路由/过期与异常循环。
+- 根因是确定性 `_trim` 紧贴 150 条上限：首次 `context_summary` 保留 150/显示丢弃 0，之后几乎逐轮重生位于前部的动态摘要，共 76 次，每次都使 provider 无法复用摘要之后的长前缀。Q3 的长自主探索是合法工作负载，只是首个长到持续暴露该缺陷的 Fold。
+- 性价比判定为需修：会话允许 200 次主调用，该问题可重复且 Q3 一次即产生 4.35M 受影响 miss token。最小修复在既有确定性裁剪中批量留出 30 条 headroom（默认保留 system + summary + 118 条最近原始消息），将一次不可避免的前缀重写摊销到多轮；上限、语义压缩、真实 provider 和 Agent 工具协议均不变，不新增缓存层或 API 调用。调高上限、强制语义压缩和应用层缓存的风险/复杂度均高于收益，不采用。
+- 验证：新增回归测试证明首次批量裁剪后的普通后续轮不再重生摘要；专项 3 tests 与全量 tests/unit 881 tests 通过（115.8s）。活跃 lzp-test23 worker 保持在 epoch_002/fold_2024Q1 且未重启，新行为仅在后续新 worker/会话生效。
