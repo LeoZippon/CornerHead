@@ -470,6 +470,7 @@ def build_session_builders(
             acceptance_rules={},
             mode="meta_learning",
             meta_learning_directive=str(ctx.manifest.get("meta_learning_directive", "")),
+            fold_exploration_directive=str(ctx.manifest.get("fold_exploration_directive", "")),
             system_prompt_override=str(ctx.manifest.get("system_prompt_override", "")),
             web_search_providers=web_search_providers,
             compact_proxy=compact_proxy,

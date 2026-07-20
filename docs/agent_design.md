@@ -20,7 +20,7 @@ Fold Agent 负责在单个 Fold 内读取允许的研究输入，探索和验证
 |---|---|---|
 | 智能体 | `Agent` | 在一个 Fold 内读取 Sandbox 数据、编写策略代码、调用受控工具并输出策略产物的模型驱动执行者 |
 | 探索偏好 | `Taste` | 由最近一次元学习会话生成，并注入后续 Fold Agent Prompt，直到下一次元学习触发的高层探索偏好 |
-| 默认 Fold 探索方向 | `fold_exploration_directive` | 创建实验时由研究者可选设置、注入每个普通 Fold 自动装配 Prompt 的长期待检验方向；Agent 可据证据细化、降级或拒绝，不要求堆叠指定技术 |
+| 默认 Fold 探索方向 | `fold_exploration_directive` | 创建实验时由研究者可选设置的长期待检验主线；同时注入 Meta 与每个普通 Fold，Meta 据此形成 Taste，Agent 可据证据细化、降级或拒绝 |
 | 研究者 Fold 指令 | `fold_directive` | HITL 运行中由研究者在单个 Fold 启动前注入的可选探索方向；应表述为待检验假设，且不放宽任何硬约束 |
 | 策略产物 | `strategy_artifact` | 跨 Fold 共享的 `output/` 正式策略产物，根目录固定入口为 `main.py` |
 | 模型参数产物 | `model_artifact` | 跨 Fold 共享的 `models/` 可继承模型产物，用于保存可复现的模型参数和权重 |
@@ -36,17 +36,21 @@ Fold Agent 负责在单个 Fold 内读取允许的研究输入，探索和验证
 
 本章说明 Agent 可见的数据和结果，以及使用工具、网络、NL、Broker 和回测的原则。
 
+Fold 系统 Prompt 采用两层装配：角色、核心执行合同、环境/动作/提交边界组成跨 Fold 字节稳定的前缀；run facts、Step 树、Taste、实验/Fold 指令和阶段策略统一追加在“本 Fold 动态上下文”尾部。这样既提升关键不变量的显著性，也让 provider 前缀缓存可复用完整稳定合同。工具名、字段和参数语义由每轮随请求提供的 native function schema 单源定义，系统 Prompt 只保留跨工具使用原则；详细 `ctx`/Broker 参考保留在只读 `output/README.md`，但位置键、substep、PIT/单位、竞价、离线和完整 Valid 等高风险合同仍直接留在系统 Prompt。Runner 每个会话只装配一次 Prompt，因此不引入 section registry、动态 memoization 或额外读取门。
+
 Agent 遵循以下使用原则：
 
 - 正式策略代码只能依赖当前 `ctx`、`/mnt/snapshot`、`output` 自身和 `/mnt/agent/models`；不得硬编码研究槽、结果槽、宿主路径或测试区间。
 - `workspace/` 是临时探索区，不冻结、不回放、不复制到下一 Fold；`output/` 是正式策略代码来源；`models/` 是可选正式模型参数来源。
 - 正式回放在一次性隔离容器中执行，看不到开发 `workspace`、阶段槽或结果目录；短窗口 Probe 的 `ctx.nl()` 只返回 `withheld_probe`，因此 `runtime_representative=false` 时墙钟不能外推完整 Valid，但 `nl_cost` 的完整窗口逻辑调用投影和 provider 结构上界可用于成本预检；拒单反馈只含未提交原因和粗粒度策略类别，不含市场/资格信息、收益或成交；完整 Valid 保留完整审计。
-- 数据域用途、字段、单位、可见时间、窗口覆盖和路径权限，以本次运行注入的事实摘要与清单为准；先读 `data_profile.unit_contract` 或 `data_summary.json` 的 `unit_contract`。`daily.parquet` 比例是小数（5%=0.05）；`auction.parquet` 的换手为小数、量比为无量纲倍数、流通股本为股；`events.parquet` 的 `moneyflow.*_amount` 是万元（500=人民币 500 万元），`macro.parquet` 的 `index_daily.pct_chg` 是百分数值（5%=5.0）；异构字段按“文件 + dataset + 字段”识别并显式换算，不能按同名列猜单位。
+- 数据域用途、字段、单位、可见时间、窗口覆盖和路径权限，以本次运行的 `data_summary.json` 与清单为准；完整文件明细、单位合同和包/CLI 清单不重复内联进系统 Prompt。`daily.parquet` 比例是小数（5%=0.05）；`auction.parquet` 的换手为小数、量比为无量纲倍数、流通股本为股；`events.parquet` 的 `moneyflow.*_amount` 是万元（500=人民币 500 万元），`macro.parquet` 的 `index_daily.pct_chg` 是百分数值（5%=5.0）；异构字段按“文件 + dataset + 字段”识别并显式换算，不能按同名列猜单位。
 - 工具通过原生 function calling 调用；不要在正文里手写 JSON 动作。先用 `grep/glob/read` 做只读定位，再用受控写工具或 Shell 修改正式产物。
 - 大表先看 Parquet metadata，再用 DuckDB、pyarrow 或 pandas 按列/日期过滤读取；不要在未知规模时直接全量 `pd.read_parquet()`。
 - `ctx.asof_dir`、`ctx.snapshot_dir`、`ctx.model_dir` 和 `ctx.state_dir` 是路径字符串，先用 `Path(str(...))` 转换再拼接；Timeview 是 parts 目录：Pandas 直接读目录，DuckDB 使用 `目录/*.parquet`；空 glob 表示该时点没有可见行。
-- 普通 Fold 不直接调用外部网络、LLM provider、真实券商或安装新包；稳定新依赖由元学习声明并交 Pipeline 构建派生镜像，或把最小可审计源码整理进 `output`。
-- 验证结果、Broker 事件、拒单统计、NL 日志、Step 树和 Barra-lite 归因可用于 Fold 内 development 复盘；Test/Held-out 不直接反馈给 Fold Agent。Meta Agent 可按 Pipeline §3.2 使用已完成 Fold 的 compact Test 指标（含聚合 exposure、turnover 与 trade_count，不含订单或逐日序列）做跨 Fold 诊断，但不能读取原始 Test 或任何 Held-out 信息。
+- 普通 Fold 不直接调用外部网络、LLM provider、真实券商或安装新包。元学习的 `sandbox_environment.json` 只声明 Python/npm/apt 包，不自动下载模型权重、数据或仓库；Taste 只能依赖后续 runtime 已有包和已采纳到可继承 `output`/`models` 的完整文件。
+- 验证结果、Broker 事件、拒单统计、NL 日志、Step 树和 Barra-lite 归因可用于 Fold 内 development 复盘；Test/Held-out 不直接反馈给 Fold Agent。Meta Agent 的 compact Test 指标只用于多 Fold 失效模式诊断，不得按 Test 水平或 Validation/Test 差距排名、选择、回滚产物或参数；所有选择仍以 Validation 与机制证据为准。
+
+- `intraday_trade_days` 只是决策 snapshot 历史分钟回看天数；Valid replay 在分钟源存在时覆盖完整 Validation 区间。Agent 必须分别读 `data_summary.json` 的 `snapshot` 与 `valid` view，不得由前者推断后者。
 - 每次正式回测前都必须通过修改检查；`finish_fold` 只表示 Agent 停止本 Fold 修改，是否冻结仍由 Pipeline 复核。
 - 策略迭代先验证“读取→选股→下单→T+1 主动退出”的最小垂直链路，再逐个加入主要组件；回测观察返回已用、上限和剩余次数。零订单且存在吞宽泛异常或盲竞价分支读取 `ctx.price()` 时会给关联诊断，但不阻止回测或冻结。
 

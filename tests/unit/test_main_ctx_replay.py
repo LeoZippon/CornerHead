@@ -708,7 +708,7 @@ class MainCtxReplayTest(unittest.TestCase):
             policy.validate_main()
             result = run_main_ctx_replay(
                 replay, profile, shortable_codes=frozenset(), main_policy=policy,
-                auction_enabled=False, offsession_tick_minutes=0,
+                offsession_tick_minutes=0,
             )
         obs = json.loads((self.sandbox.paths.workspace / ".state" / "obs.json").read_text(encoding="utf-8"))
         self.assertEqual(obs["cash1"], obs["cash0"])
@@ -759,7 +759,7 @@ class MainCtxReplayTest(unittest.TestCase):
             policy.validate_main()
             result = run_main_ctx_replay(
                 replay, profile, shortable_codes=frozenset({"000002.SZ"}), main_policy=policy,
-                auction_enabled=False, offsession_tick_minutes=0,
+                offsession_tick_minutes=0,
             )
         obs = json.loads((self.sandbox.paths.workspace / ".state" / "sobs.json").read_text(encoding="utf-8"))
         self.assertEqual(obs["pos1"], 0)
@@ -790,7 +790,7 @@ class MainCtxReplayTest(unittest.TestCase):
             run_main_ctx_replay(
                 replay, BrokerProfile(),
                 shortable_codes=frozenset({"000002.SZ"}), main_policy=policy,
-                auction_enabled=False, offsession_tick_minutes=0,
+                offsession_tick_minutes=0,
             )
         obs = json.loads((self.sandbox.paths.workspace / ".state" / "mobs.json").read_text(encoding="utf-8"))
         self.assertEqual(obs["pos_after_short"], 0)
@@ -820,7 +820,7 @@ def main(ctx):
             encoding="utf-8",
         )
         result = self._run_with(
-            _ohlc_replay(), _dense_minutes(), auction_enabled=False,
+            _ohlc_replay(), _dense_minutes(),
             offsession_tick_minutes=0,
         )
         self.assertEqual(result.state_staging_audit, [])
@@ -850,7 +850,7 @@ def main(ctx):
             encoding="utf-8",
         )
         result = self._run_with(
-            _ohlc_replay(), _dense_minutes(), auction_enabled=False,
+            _ohlc_replay(), _dense_minutes(),
             offsession_tick_minutes=0,
         )
         audit = {(record["substep"], record["state_rel"]) for record in result.state_staging_audit or []}
@@ -1666,8 +1666,8 @@ def main(ctx):
         )
 
     def test_close_auction_fills_decision_at_final_bar(self) -> None:
-        # R6: with auction_close_time=14:57, the 14:57 bar's decision fills at the
-        # day's final 15:00 bar's CLOSE (the close auction), labelled "auction". The
+        # The fixed 14:57 decision fills at the day's final 15:00 bar's CLOSE
+        # (the close auction), labelled "auction". The
         # final bar's open (10.5) and close (10.6) differ so the test pins the close.
         main = (
             "def main(ctx):\n"
@@ -1783,7 +1783,7 @@ class DayTickPlanTest(unittest.TestCase):
                 "available_at": "2022-01-04T09:28:36+08:00",
             }]
         )
-        plan = _day_tick_plan(rows, True, "09:15", "09:25", 2, auction_results=auction)
+        plan = _day_tick_plan(rows, 2, auction_results=auction)
         blind = next(t for t in plan if t.minute_key == "09:25")
         self.assertTrue(blind.group.empty)
         result = next(t for t in plan if t.minute_key == "09:29")
@@ -1809,7 +1809,7 @@ class DayTickPlanTest(unittest.TestCase):
             }]
         )
         rows = MinuteMarketData(minutes).rows_for_date("20220104")
-        plan = _day_tick_plan(rows, True, "09:15", "09:25", 5, auction_results=auction)
+        plan = _day_tick_plan(rows, 5, auction_results=auction)
 
         opening = [tick for tick in plan if tick.minute_key == "09:30"]
         self.assertEqual(len(opening), 1)

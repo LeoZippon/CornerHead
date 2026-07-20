@@ -437,6 +437,11 @@ class DefaultsDriftTest(unittest.TestCase):
     run_experiment CLI) must agree; the dataclasses are the source of truth."""
 
     def test_param_defaults_match_domain_dataclasses(self):
+        removed_auction_knobs = {
+            "auction_enabled", "auction_preopen_time", "auction_decision_time", "auction_close_time",
+        }
+        self.assertTrue(removed_auction_knobs.isdisjoint(field_obj.name for field_obj in fields(ExperimentConfig)))
+        self.assertTrue(removed_auction_knobs.isdisjoint(PARAM_DEFAULTS))
         for field_obj in fields(ExperimentConfig):
             if field_obj.name in PARAM_DEFAULTS and field_obj.default is not MISSING:
                 self.assertEqual(PARAM_DEFAULTS[field_obj.name], field_obj.default, field_obj.name)

@@ -1560,7 +1560,7 @@ function directivePanel(detail, session, waiting) {
   // A meta session with no per-session override inherits the experiment-level
   // directive from creation; prefill it so it never needs retyping.
   const inherited = isMeta ? String((detail.params || {}).meta_learning_directive || "") : "";
-  const foldDefault = session.kind === "fold"
+  const foldDefault = (session.kind === "fold" || isMeta)
     ? String((detail.params || {}).fold_exploration_directive || "").trim()
     : "";
   const existing = (control.directives || {})[session.key] ?? "";
@@ -1578,7 +1578,7 @@ function directivePanel(detail, session, waiting) {
     }
     if (foldDefault) {
       panel.append(el("details", { class: "section-gap" },
-        el("summary", { class: "hint" }, "已自动注入实验级默认 Fold 探索方向（展开查看）"),
+        el("summary", { class: "hint" }, "已自动注入实验级默认 Fold 探索方向（Meta 与 Fold 共用）"),
         el("div", { class: "markdown section-gap", style: "white-space:pre-wrap" }, foldDefault),
       ));
     }
@@ -3070,6 +3070,7 @@ function metaResultPanel(detail, session) {
     kvRow("状态", record.status || "—"),
     kvRow("总耗时", foldDurationNode(detail, session)),
     record.meta_learning_directive ? kvRow("注入指令", record.meta_learning_directive) : null,
+    record.fold_exploration_directive ? kvRow("实验探索主线", record.fold_exploration_directive) : null,
     record.sandbox_image_update ? kvRow("沙箱镜像", sandboxImageNode(record.sandbox_image_update)) : null,
   ));
   if (record.taste) {

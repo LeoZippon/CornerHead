@@ -105,9 +105,12 @@ def _visible_timeline(
     is_meta: bool,
 ) -> dict[str, object]:
     replay_policy = _replay_policy(data_summary)
+    snapshot_windows = _snapshot_windows(snapshot_config)
     timeline = {
         "fold_period": fold_period,
-        "snapshot_windows": _snapshot_windows(snapshot_config),
+        "snapshot_windows": snapshot_windows,
+        "decision_snapshot_intraday_lookback_trade_days": snapshot_windows.get("intraday_trade_days"),
+        "validation_replay_intraday_scope": "full_visible_validation_period_when_source_minutes_exist",
         "replay_policy": replay_policy,
     }
     if is_meta:
@@ -308,13 +311,7 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             "corporate_actions": profile.get("corporate_actions"),
             "dividend_tax_rate": profile.get("dividend_tax_rate"),
             "execution_lag_bars": manifest.get("execution_lag_bars"),
-            # The prompt points the Agent at these facts for its daily schedule;
-            # every knob that changes which ticks decide/are orderable belongs here.
             "intraday_decision_minutes": manifest.get("intraday_decision_minutes"),
-            "auction_enabled": manifest.get("auction_enabled"),
-            "auction_preopen_time": manifest.get("auction_preopen_time"),
-            "auction_decision_time": manifest.get("auction_decision_time"),
-            "auction_close_time": manifest.get("auction_close_time"),
             "afterhours_decision_time": manifest.get("afterhours_decision_time"),
             "offsession_tick_minutes": manifest.get("offsession_tick_minutes"),
             "timeview_enabled": manifest.get("timeview_enabled"),
@@ -380,6 +377,7 @@ def _runtime_tool_facts(
                     if is_meta and str(network or "none") != "none"
                     else "blocked_unless_runtime_env_enables_network"
                 ),
+                "sandbox_environment_scope": "python_npm_apt_packages_only_no_weights_data_or_repositories",
             },
         }
     )
@@ -415,6 +413,9 @@ def _meta_learning_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             "sample_window_only": True,
             "backtest_allowed": False,
             "meta_learning_directive_present": bool(str(manifest.get("meta_learning_directive") or "").strip()),
+            "fold_exploration_directive_present": bool(
+                str(manifest.get("fold_exploration_directive") or "").strip()
+            ),
         }
     )
 

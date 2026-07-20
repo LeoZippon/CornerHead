@@ -215,8 +215,9 @@ class PhasePromptTest(unittest.TestCase):
         # Framed as a hypothesis that never relaxes hard constraints.
         self.assertIn("研究假设", with_directive)
         directive_idx = with_directive.index("研究者本 Fold 指令")
-        self.assertLess(with_directive.index("# 环境与配置"), directive_idx)
-        self.assertLess(directive_idx, with_directive.index("# 动作与流程"))
+        dynamic_idx = with_directive.index("# 本 Fold 动态上下文")
+        self.assertLess(with_directive.index("# 动作与流程"), dynamic_idx)
+        self.assertLess(dynamic_idx, directive_idx)
         # Whitespace-only directives collapse to the no-section prompt.
         self.assertEqual(build_system_prompt(**base, fold_directive="  \n"), without)
 
@@ -234,6 +235,62 @@ class PhasePromptTest(unittest.TestCase):
         self.assertIn("自主提出可证伪假设", prompt)
         self.assertLess(prompt.index("实验级默认 Fold 探索方向"), prompt.index("研究者本 Fold 指令"))
 
+    def test_fold_prompt_keeps_static_contract_before_dynamic_context(self):
+        marker = "# 本 Fold 动态上下文"
+        first = build_system_prompt(
+            fold_info={"fold_id": "first"},
+            acceptance_rules={"min_return": 0.0},
+            taste_prompt="方向 A",
+            fold_exploration_directive="长期假设 A",
+            fold_directive="当前假设 A",
+        )
+        second = build_system_prompt(
+            fold_info={"fold_id": "second"},
+            acceptance_rules={"min_return": 0.1},
+            phase="convergence",
+            taste_prompt="方向 B",
+            fold_exploration_directive="长期假设 B",
+            fold_directive="当前假设 B",
+        )
+
+        first_prefix, first_context = first.split(marker, 1)
+        second_prefix, second_context = second.split(marker, 1)
+        self.assertEqual(first_prefix, second_prefix)
+        self.assertNotEqual(first_context, second_context)
+        section_order = [
+            first.index("# 核心执行合同"),
+            first.index("# 环境与配置"),
+            first.index("# 动作与流程"),
+            first.index("## 提交合同"),
+            first.index("## 禁止事项"),
+            first.index(marker),
+        ]
+        self.assertEqual(section_order, sorted(section_order))
+        for contract in (
+            "ctx.state_dir",
+            "ctx.substep",
+            "sellable_quantity",
+            "`intraday_trade_days` 只限制决策 snapshot",
+            "参与 09:30 开盘集合竞价",
+            "完整 Valid",
+        ):
+            self.assertIn(contract, first_prefix)
+        self.assertNotIn("| `shell` |", first_prefix)
+
+    def test_prompt_contracts_distinguish_replay_resources_test_and_auction(self):
+        fold_prompt = build_system_prompt(fold_info={"fold_id": "f"}, acceptance_rules={})
+        meta_prompt = build_meta_learning_prompt()
+
+        for prompt in (fold_prompt, meta_prompt):
+            self.assertIn("`intraday_trade_days` 只限制决策 snapshot", prompt)
+            self.assertIn("`valid`", prompt.lower())
+            self.assertIn("`09:15`", prompt)
+            self.assertIn("`09:25`", prompt)
+        self.assertIn("不得按 Test 指标或 Validation/Test 差距", meta_prompt)
+        self.assertIn("不得要求普通 Fold 下载", meta_prompt)
+        self.assertIn("参与开盘集合竞价必须在 `09:15`", meta_prompt)
+        self.assertIn("Taste 中要求下载/安装", fold_prompt)
+
     def test_fold_strategy_interfaces_are_inside_action_section(self):
         prompt = build_system_prompt(fold_info={"fold_id": "f"}, acceptance_rules={})
 
@@ -243,7 +300,8 @@ class PhasePromptTest(unittest.TestCase):
         self.assertGreater(api_idx, action_idx)
         self.assertGreater(action_idx, environment_idx)
         self.assertIn("ctx.broker.cancel", prompt[api_idx:])
-        self.assertIn("stale_pending_gt_1m", prompt[api_idx:])
+        self.assertIn("ctx.broker.pending", prompt[api_idx:])
+        self.assertIn("output/README.md", prompt[api_idx:])
 
     def test_experiment_facts_replace_raw_fold_schedule(self):
         manifest = {
@@ -311,6 +369,8 @@ class PhasePromptTest(unittest.TestCase):
                 "epoch_id": "epoch_001",
                 "meta_learning_id": "epoch_001_after_fold_003",
                 "trigger_after_folds": 3,
+                "fold_exploration_directive": "event graph",
+                "execution_lag_bars": 2,
             },
             data_summary={"unit_contract": unit_contract},
         )
@@ -322,6 +382,9 @@ class PhasePromptTest(unittest.TestCase):
         self.assertFalse(meta_facts["visibility_policy"]["heldout_visible"])
         self.assertEqual(meta_facts["identity"]["meta_learning_id"], "epoch_001_after_fold_003")
         self.assertEqual(meta_facts["identity"]["trigger_after_folds"], 3)
+        self.assertTrue(meta_facts["meta_learning"]["fold_exploration_directive_present"])
+        self.assertNotIn("auction_preopen_time", meta_facts["broker_replay"])
+        self.assertNotIn("auction_decision_time", meta_facts["broker_replay"])
 
         fold_prompt = build_system_prompt(fold_info={"fold_id": "f"}, acceptance_rules={})
         meta_prompt = build_meta_learning_prompt()
@@ -447,6 +510,9 @@ class PhasePromptTest(unittest.TestCase):
         action_idx = prompt.index("# 动作与流程")
         self.assertGreater(facts_idx, environment_idx)
         self.assertLess(facts_idx, action_idx)
+        self.assertNotIn('"data_profile"', prompt)
+        self.assertNotIn('"python_packages"', prompt)
+        self.assertIn("数据文件明细、单位合同、包/CLI 清单和静态路径表不内联", prompt)
 
     def test_run_manifest_public_view_redacts_test_schedule(self):
         with tempfile.TemporaryDirectory() as tmp:

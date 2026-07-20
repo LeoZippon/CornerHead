@@ -48,6 +48,10 @@ from autotrade.environment.sandbox import hide_snapshot_slots_from_agent
 from autotrade.environment.state_staging import StateStager
 from autotrade.environment.timeview import Timeview
 
+_AUCTION_PREOPEN_TIME = "09:15"
+_AUCTION_DECISION_TIME = "09:25"
+_AUCTION_CLOSE_TIME = "14:57"
+
 
 class BacktestError(RuntimeError):
     """A formal backtest step failed; the error is explicit, never silent."""
@@ -464,10 +468,6 @@ def run_main_ctx_replay(
     replay_intraday_1min: pd.DataFrame | None = None,
     replay_minute_source: ParquetMinuteReplaySource | None = None,
     replay_auction_results: pd.DataFrame | None = None,
-    auction_enabled: bool = True,
-    auction_preopen_time: str | None = "09:15",
-    auction_decision_time: str = "09:25",
-    auction_close_time: str | None = "14:57",
     afterhours_decision_time: str | None = None,
     execution_lag_bars: int = 2,
     offsession_tick_minutes: int = 30,
@@ -501,14 +501,14 @@ def run_main_ctx_replay(
     09:30/15:00 fallback is synthesized.
 
     The tick grid spans the whole day on the same ``main(ctx)`` entry, so the loop
-    drives both backtest and live. ``auction_enabled`` leads each day with a 09:15
-    info tick (no price, fills at the 09:30 opening auction) and a blind 09:25
-    submission tick (no price, fills at the first continuous bar). A captured
+    drives both backtest and live. Every day starts with a fixed 09:15 info tick
+    (no price, fills at the 09:30 opening auction) and a blind 09:25 submission
+    tick (no price, fills at the first continuous bar). A captured
     ``stk_auction`` result wakes ``main(ctx)`` only at its observed availability;
     pre-open result ticks are research-only, while arrivals after 09:30 wake the
-    corresponding real bar. ``auction_close_time`` (e.g.
-    14:57) makes that bar's decision fill at the day's final bar (the 15:00 close
-    auction). These batch-auction fills are labelled ``price_label="auction"``.
+    corresponding real bar. The fixed 14:57 decision fills at the day's final
+    bar (the 15:00 close auction). These batch-auction fills are labelled
+    ``price_label="auction"``.
     ``afterhours_decision_time`` (None = off) appends the after-hours fixed-price
     tick (盘后固定价格交易, e.g. 15:05): the strategy sees the day's close prints
     and its orders settle immediately at the official close for board-eligible
@@ -649,9 +649,8 @@ def run_main_ctx_replay(
             minute_rows = minute_rows_with_daily_fallback(replay_daily, trade_date, minute_seed)
             if not minute_rows.empty:
                 plan = _day_tick_plan(
-                    minute_rows, auction_enabled, auction_preopen_time, auction_decision_time,
-                    execution_lag_bars, offsession_tick_minutes=offsession_tick_minutes,
-                    close_auction_time=auction_close_time,
+                    minute_rows, execution_lag_bars,
+                    offsession_tick_minutes=offsession_tick_minutes,
                     afterhours_time=afterhours_decision_time,
                     auction_results=auction_results_by_date.get(str(trade_date)),
                 )
@@ -956,13 +955,9 @@ def _offsession_keys(start_min: int, end_min: int, step_minutes: int) -> list[st
 
 def _day_tick_plan(
     minute_rows: pd.DataFrame,
-    auction_enabled: bool,
-    preopen_time: str | None,
-    decision_time: str,
     execution_lag_bars: int,
     *,
     offsession_tick_minutes: int = 15,
-    close_auction_time: str | None = "14:57",
     afterhours_time: str | None = None,
     auction_results: pd.DataFrame | None = None,
 ) -> list[_Tick]:
@@ -970,14 +965,14 @@ def _day_tick_plan(
     orders reach the book at (``activate_index``).
 
     A decision on real bar *i* activates at *i + execution_lag_bars*; a bar with no
-    such later bar (near the close) yields ``activate_index=None``. With
-    ``auction_enabled`` two pre-open ticks lead the day: a ``preopen_time`` (09:15)
-    info tick with no bars (``ctx.price`` is None) activating at the first real bar
-    (the 09:30 opening auction), and a blind ``decision_time`` (09:25) tick. An
+    such later bar (near the close) yields ``activate_index=None``. Two fixed
+    pre-open ticks lead the day: a 09:15 info tick with no bars (``ctx.price`` is
+    None) activating at the first real bar (the 09:30 opening auction), and a blind
+    09:25 tick. An
     observed ``stk_auction`` result can add a source-backed pre-open tick or wake
-    the corresponding real minute after continuous trading begins. ``close_auction_time`` (e.g.
-    14:57) makes that bar's decision activate at the day's final bar (the 15:00 close
-    auction) instead of the default lag. ``offsession_tick_minutes`` (0 = off) adds a
+    the corresponding real minute after continuous trading begins. The fixed 14:57
+    decision activates at the day's final bar (the 15:00 close auction) instead of
+    the default lag. ``offsession_tick_minutes`` (0 = off) adds a
     research-only grid outside the session: off-session ticks never fill orders. The
     explicit pre-open auction ticks and close-auction tick have fixed activations
     independent of ``execution_lag_bars``. ``afterhours_time`` (e.g. 15:05) appends
@@ -993,34 +988,29 @@ def _day_tick_plan(
     plan: list[_Tick] = []
     # Off-session grid frame: the session starts at the earliest pre-open tick and
     # ends at the last real bar; ticks outside [open, close] are research-only.
-    session_open = preopen_time if (auction_enabled and preopen_time) else (decision_time if auction_enabled else real_keys[0])
+    session_open = _AUCTION_PREOPEN_TIME
     open_min, close_min = minute_sort(session_open), minute_sort(real_keys[-1])
     # Pre-open off-session ticks are research/state only. Actual auction order
     # entry starts at the explicit pre-open auction tick below.
     for key in _offsession_keys(0, open_min, offsession_tick_minutes):
         plan.append(_Tick(key, empty_minute_rows(), None, False, False, True))
-    if auction_enabled:
-        if preopen_time:
-            # 09:15 blind pre-open order clears in the 09:30 opening call auction (single
-            # price, no slippage): is_auction=True.
-            plan.append(_Tick(preopen_time, empty_minute_rows(), 0, False, True))
-        # The exchange has matched by 09:25, but this project's TuShare source does
-        # not publish the full result until 09:27-09:29. Keep this order-entry tick
-        # blind; never reconstruct its price from the future 09:30/09:31 minute bar.
-        plan.append(_Tick(decision_time, empty_minute_rows(), min(1, n - 1), False, False))
-        auction_ticks, auction_wake_keys = _auction_result_ticks(
-            auction_results,
-            real_keys=real_keys,
-        )
-        plan.extend(auction_ticks)
-    else:
-        auction_wake_keys = set()
-    # Clamp the lag to the day's bar count so short/daily-fallback days (e.g. the
-    # 09:30+15:00 synthesis) still trade even with auctions disabled: >=1 preserves
-    # next-bar execution; <=n-1 lets the first decision reach the last bar.
+    # 09:15 blind pre-open orders clear in the 09:30 opening call auction (single
+    # price, no slippage): is_auction=True.
+    plan.append(_Tick(_AUCTION_PREOPEN_TIME, empty_minute_rows(), 0, False, True))
+    # The exchange has matched by 09:25, but this project's TuShare source does
+    # not publish the full result until 09:27-09:29. Keep this order-entry tick
+    # blind; never reconstruct its price from the future 09:30/09:31 minute bar.
+    plan.append(_Tick(_AUCTION_DECISION_TIME, empty_minute_rows(), min(1, n - 1), False, False))
+    auction_ticks, auction_wake_keys = _auction_result_ticks(
+        auction_results,
+        real_keys=real_keys,
+    )
+    plan.extend(auction_ticks)
+    # Clamp the lag to the day's bar count: >=1 preserves next-bar execution;
+    # <=n-1 lets the first decision reach the last bar on short/fallback days.
     lag = max(1, min(execution_lag_bars, n - 1))
     for index, key in enumerate(real_keys):
-        if close_auction_time and key == str(close_auction_time) and index < n - 1:
+        if key == _AUCTION_CLOSE_TIME and index < n - 1:
             # Close call auction: this bar's decision fills at the day's final bar's
             # CLOSE (the 15:00 print), not its open.
             plan.append(_Tick(key, groups[key], n - 1, True, True, is_close_auction=True))

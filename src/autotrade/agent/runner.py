@@ -173,6 +173,7 @@ class AgentSessionRunner:
                 if system_prompt_override.strip()
                 else build_meta_learning_prompt(
                     experiment_directive=meta_learning_directive,
+                    fold_exploration_directive=fold_exploration_directive,
                     experiment_facts=experiment_facts,
                 )
             )

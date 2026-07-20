@@ -543,10 +543,6 @@ class BacktestTool:
                                     main_policy=policy,
                                     replay_minute_source=minute_source,
                                     replay_auction_results=replay_auction,
-                                    auction_enabled=bool(manifest.get("auction_enabled", True)),
-                                    auction_preopen_time=manifest.get("auction_preopen_time", "09:15"),
-                                    auction_decision_time=str(manifest.get("auction_decision_time", "09:25")),
-                                    auction_close_time=(manifest.get("auction_close_time", "14:57") or None),
                                     # No fallback default: manifests predating the knob replay
                                     # without the after-hours tick (frozen-eval reproducibility).
                                     afterhours_decision_time=(manifest.get("afterhours_decision_time") or None),

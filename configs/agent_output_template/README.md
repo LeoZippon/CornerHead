@@ -16,9 +16,10 @@ files. Temporary training files stay in `/mnt/agent/workspace/`.
 
 ## Data units are part of the strategy contract
 
-Read `data_profile.unit_contract` in the injected experiment facts or
-`/mnt/artifacts/data_summary.json` before writing thresholds or combining
-domains. `daily.parquet` is normalized: prices are CNY/share, volume and share
+Read `/mnt/artifacts/data_summary.json` and its `unit_contract` before writing
+thresholds or combining domains. The system prompt intentionally keeps only
+critical unit examples; this run-specific file is authoritative. `daily.parquet`
+is normalized: prices are CNY/share, volume and share
 fields are shares, amount/market-value fields are CNY, and `pct_chg`, turnover,
 and ratio fields are decimals (`5%=0.05`, `-9.5%=-0.095`). Heterogeneous
 research unions retain source units and must be interpreted by the tuple
@@ -72,8 +73,10 @@ The Environment calls `main(ctx)` across the WHOLE day on a 24h tick grid (intra
 bars at 1-minute granularity plus a configurable off-session grid for research/state
 only), so the same loop also drives live trading. Do not submit new broker orders
 from ordinary off-session ticks. To prepare a pre-open order, write the plan to
-`ctx.state_dir` inside an off-session `ctx.substep`, then submit from the blind 09:15/09:25
-ticks or a later live-bar tick. An observed auction-result tick between 09:25 and 09:30 is research-only. A 14:57 close-auction tick fills at the
+`ctx.state_dir` inside an off-session `ctx.substep`. Submit at blind 09:15 only
+when the order should participate in the 09:30 opening auction; a new 09:25
+order instead enters matching at the first continuous bar with taker slippage.
+An observed auction-result tick between 09:25 and 09:30 is research-only. A 14:57 close-auction tick fills at the
 15:00 close. The after-hours fixed-price tick (default 15:05, when enabled) shows the
 confirmed close in `ctx.bars` and settles orders **immediately at that close** (no
 slippage, no lag; a limit worse than the close is an invalid submission) — only for
@@ -129,8 +132,9 @@ valid without a current price.
 
 Anchor heavy work on a **fixed daily schedule**, like a real trader's routine: the
 sample `research()` gates on `ctx.cur_time` to run its screen once per day in a
-pre-open window (e.g. `08:00`), then submits at `09:15`/`09:25`, manages intraday on a
-fixed cadence, and wraps up by `14:57` — rather than screening on every tick.
+pre-open window (e.g. `08:00`), then deliberately chooses 09:15 opening-auction
+submission or 09:25/continuous-bar entry, manages intraday on a fixed cadence,
+and wraps up by `14:57` — rather than screening on every tick.
 
 ## `ctx.broker` quick reference
 

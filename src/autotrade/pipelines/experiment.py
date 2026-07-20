@@ -326,10 +326,6 @@ class ExperimentPipeline:
         new knob is added once (these manifests are the Agent-visible PIT contract)."""
         return {
             "per_call_timeout_seconds": self.config.per_call_timeout_seconds,
-            "auction_enabled": self.config.auction_enabled,
-            "auction_preopen_time": self.config.auction_preopen_time,
-            "auction_decision_time": self.config.auction_decision_time,
-            "auction_close_time": self.config.auction_close_time,
             "afterhours_decision_time": self.config.afterhours_decision_time,
             "offsession_tick_minutes": self.config.offsession_tick_minutes,
             "intraday_decision_minutes": self.config.intraday_decision_minutes,
@@ -828,6 +824,7 @@ class ExperimentPipeline:
                 "modification_constraints": replace(
                     self.config.regularization_constraints, is_initial_artifact=not has_parent
                 ).to_record(),
+                **self._replay_config_fields(),
                 "fold_deadline_at": deadline.isoformat(),
                 # Agent-facing manifest: expose sandbox mount paths, not host paths.
                 # The raw experiment ledger dir is not mounted; the agent reads the
@@ -844,6 +841,7 @@ class ExperimentPipeline:
                 "meta_learning_directive": (
                     self.config.meta_learning_directive if directive_override is None else directive_override
                 ).strip(),
+                "fold_exploration_directive": self.config.fold_exploration_directive.strip(),
                 "system_prompt_override": system_prompt_override.strip(),
                 "web_search_engines": [],
             },
@@ -980,6 +978,7 @@ class ExperimentPipeline:
                     "agent_session_summary": session_summary if isinstance(session_summary, dict) else None,
                     "agent_trace_ref": str(agent_trace_ref) if agent_trace_ref.exists() else None,
                     "meta_learning_directive": manifest.get("meta_learning_directive"),
+                    "fold_exploration_directive": manifest.get("fold_exploration_directive"),
                     "system_prompt_overridden": bool(manifest.get("system_prompt_override")),
                     "web_search_engines": manifest.get("web_search_engines"),
                     "sandbox_image_update": sandbox_image_update,
@@ -1742,6 +1741,7 @@ def _agent_visible_ledger_record(
         "taste_chars",
         "agent_session_summary",
         "meta_learning_directive",
+        "fold_exploration_directive",
         "web_search_engines",
         "input_window",
         "validation_period",

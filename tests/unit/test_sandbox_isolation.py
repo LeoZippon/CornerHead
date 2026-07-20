@@ -900,14 +900,20 @@ class MetaLearningSessionTest(unittest.TestCase):
                 acceptance_rules={},
                 mode="meta_learning",
                 meta_learning_directive="Explore intraday liquidity shock reversal.",
+                fold_exploration_directive="Explore event propagation with graphs and language evidence.",
             )
 
             self.assertIn("# 实验级探索方向（用户注入）", runner.system_prompt)
             self.assertIn("Explore intraday liquidity shock reversal.", runner.system_prompt)
+            self.assertIn("实验级默认 Fold 探索方向（用户注入）", runner.system_prompt)
+            self.assertIn("Explore event propagation with graphs and language evidence.", runner.system_prompt)
             self.assertIn("不是已验证结论", runner.system_prompt)
             self.assertIn("用 `shell` 调用 Python", runner.system_prompt)
             self.assertIn("git", runner.system_prompt)
             self.assertIn("hf", runner.system_prompt)
+            self.assertIn("不得要求普通 Fold 下载", runner.system_prompt)
+            self.assertIn("所有产物与参数选择只依据 Validation", runner.system_prompt)
+            self.assertIn("`09:25` 新单已以首根连续交易 bar 撮合", runner.system_prompt)
 
     def test_meta_learning_prompt_describes_default_network_without_secret_values(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -922,7 +928,7 @@ class MetaLearningSessionTest(unittest.TestCase):
             )
 
             self.assertIn("## 运行环境、联网与代理", runner.system_prompt)
-            self.assertIn("元学习 Fold 是唯一可配置联网的阶段", runner.system_prompt)
+            self.assertIn("元学习联网只用于当前会话的资料研究", runner.system_prompt)
             self.assertIn("/mnt/artifacts/runtime_env.json", runner.system_prompt)
             self.assertIn("GITHUB_TOKEN", runner.system_prompt)
             self.assertIn("HF_TOKEN", runner.system_prompt)

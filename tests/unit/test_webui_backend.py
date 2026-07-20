@@ -240,6 +240,11 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(fields["fold_exploration_directive"]["type"], "text")
         self.assertEqual(fields["fold_exploration_directive"]["default"], "")
         self.assertTrue(fields["fold_exploration_directive"]["wide"])
+        self.assertTrue(
+            {"auction_enabled", "auction_preopen_time", "auction_decision_time", "auction_close_time"}
+            .isdisjoint(fields)
+        )
+        self.assertIn("固定 09:15/09:25/14:57", fields["intraday_decision_minutes"]["help"])
         self.assertTrue(all(field.get("help") for field in fields.values()))
 
     def test_period_options_and_defaults_from_calendar(self) -> None:
@@ -1461,6 +1466,8 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(meta.status_code, 200)
         self.assertIn("研究流动性冲击", meta.json()["prompt"])
+        self.assertIn("实验级默认 Fold 探索方向（用户注入）", meta.json()["prompt"])
+        self.assertIn("持续检验事件冲击沿关系网络的传播。", meta.json()["prompt"])
         heldout = self.client.post(
             "/api/experiments/exp_hitl/prompt-preview", json={"session_key": "heldout"}
         )

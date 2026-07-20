@@ -43,6 +43,7 @@ def build_prompt_preview(experiment_dir: Path, session_key: str, directive: str)
     if kind == "meta_learning":
         prompt = build_meta_learning_prompt(
             experiment_directive=directive.strip() or str(param("meta_learning_directive") or ""),
+            fold_exploration_directive=str(param("fold_exploration_directive") or ""),
         )
     else:
         epoch_id = str(entry.get("epoch_id") or "epoch_001")

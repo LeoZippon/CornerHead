@@ -1,3 +1,24 @@
+2026-07-20 固定竞价合同与冗余配置清理
+
+- 全量核对 196 份持久化 run/host manifest（含 Sandbox 副本共 408 处 JSON 字段）后，四项配置唯一取值始终为 `True / 09:15 / 09:25 / 14:57`；9 份实验 `params.json`、CLI、HITL defaults 和新建实验前端均无覆盖入口，确认它们只是重复传递固定市场合同。
+- 删除 `ExperimentConfig` 的 `auction_enabled`、`auction_preopen_time`、`auction_decision_time`、`auction_close_time`，并移除 manifest、Agent facts、runtime 公开视图、正式回测和 benchmark 的对应 plumbing；回放引擎固定保留 09:15→开盘竞价、09:25→首根连续 bar、14:57→15:00 收盘竞价语义，不新增兼容分支。
+- 前端参数 schema 继续不暴露这些字段，并在日内决策粒度帮助文案明确固定时点；活文档、Prompt 样例和负向回归同步。轻量独立审计未发现高价值遗漏或行为回归。
+- 定向 215 tests、独立审计 136+9 tests、全量 896 tests（123.058s）、前端语法、Prompt 双次导出（SHA-256 `5e20e948...cbe67b0`）及 `git diff --check` 通过；未启动或修改真实实验。
+
+2026-07-20 Fold Prompt 稳定前缀与核心合同重构
+
+- 参考本地 Claude Code Prompt 装配并经独立高需求审计确认，只采纳“稳定协议前置、动态上下文置尾、工具 schema 单源”三项；不引入 section registry、memoization、provider 专属 cache marker、附件系统或额外 Agent 读取门。
+- Fold Prompt 新增前置核心执行合同，保留 Test/PIT/单位、position 键、substep/state、竞价/延迟/T+1、离线资源和完整 Valid/hash 收尾；工具参数表、18 行路径表、罕用 Broker 细节和样例下沉到现有 native schema/只读 README。稳定协议由 21,520 缩至 15,466 字符。
+- run facts、Step 树、Taste、实验/Fold 指令和阶段策略统一追加到“本 Fold 动态上下文”；不同事实、指令、验收规则和 phase 的 Prompt 在该边界前逐字节相同。lzp-test24 实际 Q1 资料重构渲染约 32,487→26,203 字符（原始记录为 64,276）。
+- 定向 187 tests、全量 896 tests（122.034s）、Prompt 双次导出（SHA-256 `83ab3874...b5abf2c`）和 `git diff --check` 通过；文本/装配变更不需要 Docker 或真实实验，未改动运行中实验状态。
+
+2026-07-20 lzp-test26 Meta 主题与系统 Prompt 合同修复
+
+- Agent Trace 确认 `fold_exploration_directive` 只进入普通 Fold，lzp-test26 首个 Meta manifest/Prompt 完全缺失“事件驱动 + 知识图谱 + GNN + 自然语言”主线。现已将该指令独立透传至 Meta manifest/账本、Runner、Prompt 预览与运行事实，不与单会话 `meta_learning_directive` 混合。
+- 精简修正四项提示合同：普通 Fold 不得下载/安装外部模型；compact Test 只作多 Fold 失效诊断，所有产物/参数选择仍只看 Validation；`intraday_trade_days` 只限制决策 snapshot，不限制完整 Valid replay；09:15 参与开盘集合竞价，09:25 新单进入首根连续 bar。不新增模型下载器或脆弱的 Taste 关键词拦截。
+- 完数据 profile、单位表、包/CLI 清单和静态路径仍保留在可审计 JSON，但不再重复内联进系统 Prompt。lzp-test26 实际 Meta Prompt 重构渲染从 40,196 字符降至约 17,216（-57.2%），同时包含主题与全部修正合同。
+- 定向 186 tests 与全量 895 tests（121.457s）通过；Python/JS 语法、Prompt 双次导出（SHA-256 `f9f05620...8aaf27`）、`git diff --check` 通过。验证前后可用内存均为 421GiB，GPU 占用未变。未修改/重启 lzp-test26 或任何实验状态。
+
 2026-07-20 历史 Fold 重跑回退与分区安全审计
 
 - 回退未提交的“任意历史 Fold 重跑并删除其后结果”组合功能，恢复低复杂度边界：只允许重跑最新完成 Fold；更早历史修正继续走独立回滚，再按正常排程前进。前端、控制面、测试和活文档同步移除该入口与语义。

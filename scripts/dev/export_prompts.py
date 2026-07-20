@@ -195,6 +195,8 @@ SAMPLE_META_MANIFEST = {
     "taste_output": "/mnt/agent/workspace/taste.md",
     "web_search_engines": ["tavily", "semantic_scholar"],
     "meta_learning_directive": "",
+    "fold_exploration_directive": "示例：持续探索事件冲击沿公司关系网络传播形成的可交易定价时滞。",
+    "execution_lag_bars": 2,
     "sandbox_runtime": {
         "active_env_passthrough": ["GITHUB_TOKEN", "HF_TOKEN"],
         "active_env_aliases": [
@@ -269,14 +271,18 @@ def render() -> str:
         ("防过拟合构件（DEFAULT_ANTI_OVERFIT_PROMPT，注入“阶段策略与防过拟合”，两阶段都生效）", DEFAULT_ANTI_OVERFIT_PROMPT),
         ("收敛构件（DEFAULT_CONVERGENCE_PROMPT，仅收敛期注入“阶段策略与防过拟合”）", DEFAULT_CONVERGENCE_PROMPT),
         (
-            "元学习 Agent System Prompt（基础模板）",
-            build_meta_learning_prompt(experiment_facts=SAMPLE_META_FACTS),
+            "元学习 Agent System Prompt（含默认 Fold 探索方向示例）",
+            build_meta_learning_prompt(
+                experiment_facts=SAMPLE_META_FACTS,
+                fold_exploration_directive=str(SAMPLE_META_MANIFEST["fold_exploration_directive"]),
+            ),
         ),
         (
-            "元学习 Agent System Prompt（含实验级探索方向示例）",
+            "元学习 Agent System Prompt（含默认 Fold 与当前 Meta 指令示例）",
             build_meta_learning_prompt(
                 experiment_facts=SAMPLE_META_FACTS,
                 experiment_directive="示例：优先评估分钟级流动性冲击后的反转假设，并说明是否值得进入后续 Fold。",
+                fold_exploration_directive=str(SAMPLE_META_MANIFEST["fold_exploration_directive"]),
             ),
         ),
         ("NL Sub Agent 系统提示词（SUB_AGENT_SYSTEM_PROMPT）", SUB_AGENT_SYSTEM_PROMPT),

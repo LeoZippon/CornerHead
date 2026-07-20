@@ -566,10 +566,14 @@ class PipelineEndToEndTest(unittest.TestCase):
             # The shared replay-config block (_replay_config_fields) is present in the
             # fold manifest (and, identically, in the held-out manifest).
             for key in (
-                "execution_lag_bars", "auction_enabled", "offsession_tick_minutes",
+                "execution_lag_bars", "offsession_tick_minutes",
                 "backtest_max_seconds_per_decision", "nl_max_calls_per_backtest", "timeview_enabled",
             ):
                 self.assertIn(key, host_run_manifest)
+            for key in (
+                "auction_enabled", "auction_preopen_time", "auction_decision_time", "auction_close_time",
+            ):
+                self.assertNotIn(key, host_run_manifest)
             self.assertTrue((run_dir / "runtime_env.json").exists())
             self.assertTrue((run_dir / "data_summary.json").exists())
             self.assertTrue((run_dir / "agent_trace.jsonl").exists())
@@ -711,7 +715,7 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertIs(captured["timeview_enabled"], False)
             self.assertEqual(captured["nl_max_calls_per_decision_day"], 7)
             self.assertEqual(captured["nl_max_calls_per_backtest"], 19)
-            self.assertEqual(captured["auction_decision_time"], config.auction_decision_time)
+            self.assertNotIn("auction_decision_time", captured)
 
     def test_agent_visible_data_summary_and_trace_opaque_fold_id(self):
         # data_summary.json and agent_trace.jsonl are both agent-readable, so the
@@ -1449,11 +1453,18 @@ class PipelineEndToEndTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             directive = "Explore liquidity shock reversal under minute replay."
-            config = make_config(tmp, meta_learning_directive=directive)
+            fold_direction = "Explore event propagation with graphs and language evidence."
+            config = make_config(
+                tmp,
+                meta_learning_directive=directive,
+                fold_exploration_directive=fold_direction,
+            )
             captured: dict[str, object] = {}
 
             def inspect_meta_learner(ctx: ToolContext) -> None:
                 captured["manifest_directive"] = ctx.manifest.get("meta_learning_directive")
+                captured["fold_exploration_directive"] = ctx.manifest.get("fold_exploration_directive")
+                captured["manifest_keys"] = set(ctx.manifest.data)
                 (ctx.paths.workspace / "taste.md").write_text("directive checked", encoding="utf-8")
 
             pipeline = ExperimentPipeline(
@@ -1469,8 +1480,14 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertIsNone(frozen)
             self.assertEqual(taste, "directive checked")
             self.assertEqual(captured["manifest_directive"], directive)
+            self.assertEqual(captured["fold_exploration_directive"], fold_direction)
+            self.assertTrue(
+                {"auction_enabled", "auction_preopen_time", "auction_decision_time", "auction_close_time"}
+                .isdisjoint(captured["manifest_keys"])
+            )
             meta = pipeline.ledger.read("meta_learning")[0]
             self.assertEqual(meta["meta_learning_directive"], directive)
+            self.assertEqual(meta["fold_exploration_directive"], fold_direction)
 
     def test_meta_learning_public_entry_forwards_user_question_hook(self):
         with tempfile.TemporaryDirectory() as tmp:

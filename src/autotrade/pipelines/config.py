@@ -281,17 +281,6 @@ class ExperimentConfig:
     # Backtests are timed independently of the fold reasoning deadline; this caps
     # how many a fold may run (so the deadline-exclusion can't be abused).
     max_backtests_per_fold: int = 30
-    # Pre-open auction: replay injects pre-open decision ticks per day. The 09:15
-    # info tick exposes no price and gives a ~10-minute decision window; 09:25 is
-    # also blind because the data source lands later. Orders placed at 09:15 fill
-    # at 09:30; 09:25 orders fill at the first continuous bar.
-    # Set auction_preopen_time=None to drop 09:15.
-    auction_enabled: bool = True
-    auction_preopen_time: str | None = "09:15"
-    auction_decision_time: str = "09:25"
-    # Close call-auction decision tick: a decision at this time fills at the day's
-    # final bar (15:00 close auction). Set None to drop it.
-    auction_close_time: str | None = "14:57"
     # After-hours fixed-price tick (盘后固定价格交易, 15:05-15:30 at the closing
     # price): the strategy sees the confirmed close and its orders settle
     # immediately at that price for board-eligible codes (STAR since 2019-07,

@@ -99,7 +99,7 @@ _FIELDS: list[dict[str, object]] = [
      "choices": [],  # filled at request time with experiments that have ≥1 recorded fold
      "help": "留空=从空白模板开始。选择后，新实验的首个 Fold 以该实验最新冻结的策略产物（output+models）为父产物起步；创建时拷贝并哈希校验，源实验之后删除也不受影响。"},
     {"key": "fold_exploration_directive", "group": "基本与排程", "label": "默认 Fold 探索方向", "type": "text", "wide": True,
-     "help": "可选。作为实验级待检验方向注入每个普通 Fold 的自动装配系统提示词；详情页中的单 Fold 指令仍可追加更具体的局部假设。"},
+     "help": "可选。作为实验级待检验主线注入 Meta 与每个普通 Fold；Meta 据此形成 Taste，详情页仍可追加单会话假设。"},
     # 运行控制（HITL）
     {"key": "initial_control_mode", "group": "运行控制", "label": "初始运行模式", "type": "choice",
      "choices": ["manual", "step", "auto"],
@@ -211,7 +211,7 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "offsession_tick_minutes", "group": "回放执行", "label": "盘外研究 tick 间距（分钟）", "type": "int", "advanced": True,
      "help": "24h 网格中盘外时段调用 main(ctx) 的间距（默认 30）；0 关闭盘外 tick（盘外不下单）。"},
     {"key": "intraday_decision_minutes", "group": "回放执行", "label": "日内决策粒度（分钟）", "type": "int",
-     "help": "普通日内 bar 上 main(ctx) 的调用间距（默认 1 = 每分钟）。Broker 仍逐分钟撮合、竞价与盘外 tick 不受影响；调大可大幅缩短回测耗时，但降低日内反应粒度。"},
+     "help": "普通日内 bar 上 main(ctx) 的调用间距（默认 1 = 每分钟）。Broker 仍逐分钟撮合，固定 09:15/09:25/14:57 竞价时点与盘外 tick 不受影响；调大可大幅缩短回测耗时，但降低日内反应粒度。"},
     {"key": "execution_lag_bars", "group": "回放执行", "label": "执行滞后（bar 数）", "type": "int", "advanced": True,
      "help": "决策 bar 到撮合 bar 的固定滞后，模拟实盘提交延迟。"},
     {"key": "decision_max_sim_minutes", "group": "回放执行", "label": "substep 预算上限（分钟）", "type": "float", "optional": True, "advanced": True,

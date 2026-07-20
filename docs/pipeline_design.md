@@ -333,6 +333,7 @@ experiments/<experiment_id>/strategy_artifacts/<epoch_id>/<strategy_artifact_id>
 - 上一次 Taste。
 - 当前父策略产物和父模型参数产物。
 - 实验级 `meta_learning_directive`：研究者在实验启动前可选注入的探索方向，写入 run manifest 和 meta-learning 账本。
+- 实验级 `fold_exploration_directive`：创建实验时设置的长期 Fold 探索主线；Meta 同样可见，用于形成与主题一致的 Taste。
 - `run_manifest.json` 的 `experiment_parameters`：Fold 周期、数据窗口、验收规则、Broker profile、deadline、Step tree 和 Sandbox 资源等实验级参数；未来测试和 held-out 调度只保存在宿主审计账本。
 - 元学习会话使用与即将运行的 Fold Agent 相同的可见数据：`/mnt/snapshot` 与 `/mnt/snapshots/{train,valid}`；Test/Held-out 原始数据不进入元学习可见输入（绑定与可见性规则见 `environment_design.md` §1.2）。
 - `/mnt/artifacts/runtime_env.json`：Sandbox Python 包、CLI 工具、网络/安装策略和资源摘要。
@@ -345,7 +346,7 @@ experiments/<experiment_id>/strategy_artifacts/<epoch_id>/<strategy_artifact_id>
 
 - 非空 `workspace/taste.md`。
 - 可选的小幅正则化策略产物和模型参数产物。
-- 可选依赖声明只接受 Python、apt 和 npm 包列表，以及说明文本；不接受 Shell 命令、URL、Token 或缓存路径。
+- 可选依赖声明只接受 Python、apt 和 npm 包列表，以及说明文本；不下载模型权重、数据或仓库，不接受 Shell 命令、URL、Token 或缓存路径。
 - 有效声明以当前 Fold 镜像为基础构建派生镜像，并在末尾执行 import 烟测。成功后，后续 Fold 与 held-out 使用派生镜像。
 - 构建失败显式终止，不回退旧环境。生效镜像身份写入账本，恢复进程据此继续继承；旧派生镜像只做不影响活跃运行的尽力清理。
 - meta-learning run manifest 和 canonical `artifacts/run_<id>/agent_trace.jsonl`。
@@ -360,16 +361,18 @@ experiments/<experiment_id>/strategy_artifacts/<epoch_id>/<strategy_artifact_id>
 
 - 元学习使用独立 run/session，不复用普通 Fold Agent 会话。
 - 实验级 `meta_learning_directive` 只进入元学习 Prompt，不直接进入普通 Fold Agent；元学习必须把它当作待检验假设，可采纳、细化、降级或拒绝，并在 Taste 中给出可执行方向。
-- 实验级 `fold_exploration_directive` 只进入每个普通 Fold 的自动装配 Prompt，与 Taste 和单 Fold 指令分别保留；它是长期待检验方向，不是固定实现要求。Agent 可按证据选择最小可行验证、降级或拒绝无收益路线。完整 Prompt 覆盖按其既有“原样替代自动装配”合同处理，使用覆盖时研究者自行保留所需方向。
+- 实验级 `fold_exploration_directive` 分别进入 Meta 和每个普通 Fold 的自动装配 Prompt，与 Meta 会话指令、Taste 和单 Fold 指令分别保留。Meta 以它为 Taste 主线；Meta/Fold 都可按证据选择最小可证伪实现、降级或拒绝，但不能无证据换成无关主题。完整 Prompt 覆盖仍原样替代自动装配内容。
 - 网页搜索和抓取只在元学习开放，普通 Fold 断网。抓取只读取公开网页，不替代三个规定研究视角的搜索完成要求；默认直连，显式请求才使用代理。
-- 元学习 Sandbox 默认通过桥接网络访问公网，以支持源码、包和模型资源探索。
+- 元学习 Sandbox 默认通过桥接网络访问公网，仅用于当前会话的研究。工作区下载不自动继承；Taste 不得要求断网的普通 Fold 下载模型/仓库/数据或安装包。
 - 宿主中存在代码仓库或模型仓库凭据时，它们是默认透传候选；研究者还可显式追加允许的环境变量名。运行记录只保存实际注入的变量名，不保存值。
 - 托管代理只在配置存在时按会话启动，默认不接管 Shell 命令；代理凭据和正文不得进入 Prompt、清单或账本。完整网络边界见 Environment。
 - 元学习先读数据摘要，再只读检查可见快照的 schema、覆盖、行数、关键空值和单位。大表先查 metadata，之后按列和日期抽样或聚合。
 - 启用联网搜索时，元学习结束前必须完成金融/量化/经济、自然科学/工程、哲学/方法论三类视角的非空检索，并收敛为可执行的简洁 Taste。引擎限流、失败或返回空结果时，应换引擎或重试同一视角。
 - Pipeline 只在真实 Runner summary 显示 `meta_learning_done` 且 `taste.md` 非空时采纳 Taste 或正则化改动；否则 fail-fast，不沿用旧 Taste 伪装本轮完成。
 - Taste 是后续 Fold Agent 实现策略的重要指导输入。注入 Fold Prompt 前只保留方向性约束，不保存细粒度实现方案；它应提示 NL 证据的前视、召回和解析风险，以及是否把 NL 作为主信号、辅助过滤或风险降权。
-- 元学习可以读取 development 摘要、当前父产物和已完成 Fold 的 compact 冻结测试指标，以 Validation/Test 差距和跨 Fold 稳定性作诊断；单一测试结果不能作为调参或泛化证明。
+- 元学习可以读取 development 摘要、当前父产物和已完成 Fold 的 compact 冻结测试指标，但仅用于多 Fold 失效模式和稳定性诊断。不得按 Test 水平或 Validation/Test 差距排名、选择、回滚产物，也不得据此选参数、因子、阈值或模型；选择只依据 Validation 与机制证据。
+
+- `intraday_trade_days` 仅限制决策 snapshot 的历史分钟回看；Valid/Test replay 在分钟源存在时分别覆盖完整 Fold 区间。Meta/Fold 必须按 `data_summary.json` 的 view 分开判断，不得由 snapshot 天数推断 replay 覆盖。
 - 元学习不能读取 Test 原始数据、测试排程/日志/明细或任何 held-out 信息。
 - 元学习不能运行正式 backtest 来反复调参。
 - Taste 注入下一次触发前的 Fold Prompt，只能保留跨 Fold 的可迁移结论和反证条件，不能复制逐 Fold 测试数值、身份、区间或任何 held-out 明细。
@@ -505,7 +508,7 @@ experiments/<experiment_id>/
 **run manifest 约定**
 
 - 初始模板只记录稳定 `template_ref` 和 `initial_template_hash`，不记录宿主 `configs/agent_output_template` 绝对路径；修改检查使用 sandbox 内只读 `parent_output` 作为基线。
-- 元学习 run manifest 通过 `experiment_parameters` 汇总同一组实验级参数，并记录唯一会话身份、触发前已完成 Fold 数，以及即将运行 Fold 的可见决策输入和验证回放 snapshot id/hash；不记录 Test 或 held-out 排程与结果。
+- 元学习 run manifest 通过 `experiment_parameters` 汇总同一组实验级参数，并记录唯一会话身份、触发前已完成 Fold 数、`fold_exploration_directive`、实际 Broker/回放时点配置，以及即将运行 Fold 的可见决策输入和验证回放 snapshot id/hash；不记录 Test 或 held-out 排程与结果。
 - CLI 装配的真实 Agent 运行还会写入 `agent_session_config` 和 `llm_config_summary`，用于审计上下文压缩阈值、最大调用数和模型配置；这些字段不包含 API key。
 
 ### 4.2 报告与结果口径
