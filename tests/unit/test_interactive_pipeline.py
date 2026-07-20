@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -183,16 +184,22 @@ class FakePipeline:
         )
 
     # -- pipeline surface ---------------------------------------------------
-    def run_meta_learning(self, *, epoch_id, parent, previous_taste="", visible_fold=None, directive_override=None,
+    def run_meta_learning(self, *, epoch_id, meta_learning_id=None, trigger_after_folds=0, parent,
+                          previous_taste="", visible_fold=None, directive_override=None,
                           system_prompt_override="", user_question_hook=None, agent_ready_hook=None,
                           environment_progress_hook=None):
-        self.calls.append(("meta", epoch_id, previous_taste, directive_override, system_prompt_override))
+        meta_id = str(meta_learning_id or epoch_id)
+        self.calls.append((
+            "meta", epoch_id, previous_taste, directive_override, system_prompt_override,
+            meta_id, trigger_after_folds, visible_fold.fold_id if visible_fold else None,
+            parent.artifact_id if parent else None,
+        ))
         if agent_ready_hook is not None:
             agent_ready_hook()
         if environment_progress_hook is not None:
             environment_progress_hook("meta_finalize", None)
-        taste = f"taste-{epoch_id}"
-        meta_dir = Path(self.config.experiment_dir) / "meta_learning" / epoch_id
+        taste = f"taste-{meta_id}"
+        meta_dir = Path(self.config.experiment_dir) / "meta_learning" / meta_id
         meta_dir.mkdir(parents=True, exist_ok=True)
         (meta_dir / "taste.md").write_text(taste + "\n", encoding="utf-8")
         self.ledger.append(
@@ -200,8 +207,10 @@ class FakePipeline:
                 "record_type": "meta_learning",
                 "experiment_id": self.config.experiment_id,
                 "epoch_id": epoch_id,
-                "fold_id": f"{epoch_id}_meta_learning",
-                "run_id": f"run_meta_{epoch_id}",
+                "meta_learning_id": meta_id,
+                "trigger_after_folds": trigger_after_folds,
+                "fold_id": f"{meta_id}_meta_learning",
+                "run_id": f"run_meta_{meta_id}",
                 "status": "taste_only" if parent is None else "taste_only_kept_parent",
                 "taste_path": str(meta_dir / "taste.md"),
                 "meta_learning_directive": directive_override or "",
@@ -329,6 +338,41 @@ class InteractiveRunnerTest(unittest.TestCase):
         status = read_status(self.hitl_dir / STATUS_NAME)
         self.assertEqual(status["state"], "completed")
         self.assertEqual(status["completed_sessions"], 4)
+
+    def test_interval_meta_is_causal_unique_and_resumable(self) -> None:
+        config = replace(self.config, meta_learning_fold_interval=1)
+        pipeline = FakePipeline(config)
+        self._control(mode="auto")
+
+        result = self._runner(pipeline).run(TRADING_DAYS)
+
+        self.assertEqual([call[0] for call in pipeline.calls], ["meta", "fold", "meta", "fold", "heldout"])
+        first_meta, first_fold, periodic_meta, second_fold = pipeline.calls[:4]
+        self.assertEqual(first_meta[5:9], ("epoch_001", 0, "fold_2022Q1", None))
+        self.assertEqual(periodic_meta[5:9], (
+            "epoch_001_after_fold_001", 1, "fold_2022Q2", "strategy_epoch_001_fold_2022Q1"
+        ))
+        self.assertEqual(periodic_meta[2], "taste-epoch_001")
+        self.assertEqual(first_fold[3], "taste-epoch_001")
+        self.assertEqual(second_fold[3], "taste-epoch_001_after_fold_001")
+        self.assertEqual(result["final_strategy_artifact"], "strategy_epoch_001_fold_2022Q2")
+
+        schedule = json.loads((self.hitl_dir / SCHEDULE_NAME).read_text(encoding="utf-8"))["sessions"]
+        self.assertEqual(
+            [session["key"] for session in schedule],
+            [
+                "epoch_001/meta_learning",
+                "epoch_001/fold_2022Q1",
+                "epoch_001/meta_learning_after_fold_001",
+                "epoch_001/fold_2022Q2",
+                "heldout",
+            ],
+        )
+        self.assertEqual(len(pipeline.ledger.read("meta_learning")), 2)
+
+        resumed = FakePipeline(config)
+        self.assertEqual(self._runner(resumed).run(TRADING_DAYS)["heldout_runs"], 0)
+        self.assertEqual(resumed.calls, [])
 
     def test_fold_data_prefetch_finishes_before_fold_execution(self) -> None:
         pipeline = FakePipeline(self.config)
@@ -1029,6 +1073,7 @@ class ResolveOptionsTest(unittest.TestCase):
                     "commission_bps": 2.5,
                     "max_total_holdings": 15,
                     "max_single_name_weight": 0.2,
+                    "fold_exploration_directive": "持续检验事件冲击的关系网络传播。",
                 },
                 repo_root,
             )
@@ -1046,6 +1091,7 @@ class ResolveOptionsTest(unittest.TestCase):
         self.assertEqual(config.broker_profile.commission_bps, 2.5)
         self.assertEqual(config.broker_profile.max_total_holdings, 15)
         self.assertEqual(config.broker_profile.max_single_name_weight, 0.2)
+        self.assertEqual(config.fold_exploration_directive, "持续检验事件冲击的关系网络传播。")
         # Defaults untouched elsewhere.
         self.assertEqual(config.broker_profile.slippage_bps, 5.0)
         self.assertEqual(config.backtest_max_seconds_per_decision, 1800.0)

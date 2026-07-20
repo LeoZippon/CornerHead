@@ -14,6 +14,19 @@ reproducible model parameters such as `.json`, `.joblib`, `.pkl`, `.npy`,
 `.npz`, `.pt`, `.pth`, `.onnx`, `.safetensors`, `.cbm`, `.ubj`, or `.model`
 files. Temporary training files stay in `/mnt/agent/workspace/`.
 
+## Data units are part of the strategy contract
+
+Read `data_profile.unit_contract` in the injected experiment facts or
+`/mnt/artifacts/data_summary.json` before writing thresholds or combining
+domains. `daily.parquet` is normalized: prices are CNY/share, volume and share
+fields are shares, amount/market-value fields are CNY, and `pct_chg`, turnover,
+and ratio fields are decimals (`5%=0.05`, `-9.5%=-0.095`). Heterogeneous
+research unions retain source units and must be interpreted by the tuple
+(file, `dataset`, column): `events.parquet` moneyflow `*_amount` is 万元
+(`500` = CNY 5m), while `macro.parquet` `index_daily.pct_chg` is a percent-number
+(`5%=5.0`, do not multiply by 100 again). Verify and explicitly convert any
+unlabelled source unit before using it in a signal or threshold.
+
 ## `main(ctx)` is called every replay tick
 
 Formal backtests replay the region tick by tick and call:

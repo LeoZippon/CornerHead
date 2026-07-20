@@ -26,6 +26,7 @@ add_repo_src(__file__)
 from _cli import (
     EXPERIMENT_META_REBUILD_HELP,
     add_acceptance_arguments,
+    add_fold_exploration_directive_arguments,
     add_meta_directive_arguments,
     add_meta_sandbox_arguments,
     add_model_arguments,
@@ -40,6 +41,7 @@ from _cli import (
     build_snapshot_config,
     build_web_search_providers,
     require_generic_period_args,
+    resolve_fold_exploration_directive,
     resolve_meta_learning_directive,
 )
 # Re-exported for the pipeline e2e test, which imports it from this module.
@@ -83,6 +85,15 @@ def build_parser(repo_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--heldout-first-quarter")
     parser.add_argument("--heldout-last-quarter")
     parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument(
+        "--meta-learning-fold-interval",
+        type=int,
+        default=0,
+        help=(
+            "Additional within-Epoch Meta cadence in completed Folds; 0 keeps only the "
+            "mandatory Epoch-start session, N>0 runs Meta after every N Folds before the next Fold."
+        ),
+    )
     add_snapshot_window_arguments(parser, verbose_help=True)
     parser.add_argument(
         "--max-fold-minutes",
@@ -112,6 +123,7 @@ def build_parser(repo_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--local-dev", action="store_true", help="Use the local executor for development/tests only.")
     parser.add_argument("--no-thinking", action="store_true", help="Disable provider reasoning mode for Agent and NL calls.")
     add_meta_directive_arguments(parser, verbose_help=True)
+    add_fold_exploration_directive_arguments(parser, verbose_help=True)
     add_web_search_arguments(parser, verbose_help=True)
     add_meta_sandbox_arguments(parser, verbose_help=True, disable_rebuild_help=EXPERIMENT_META_REBUILD_HELP)
     return parser
@@ -122,6 +134,7 @@ def main() -> int:
     parser = build_parser(repo_root)
     args = parser.parse_args()
     meta_learning_directive = resolve_meta_learning_directive(parser, args)
+    fold_exploration_directive = resolve_fold_exploration_directive(parser, args)
     first_test_period, last_test_period, heldout_first_period, heldout_last_period = _resolve_period_args(args, parser)
 
     snapshot_config = build_snapshot_config(args)
@@ -149,6 +162,8 @@ def main() -> int:
         nl_failure_policy=args.nl_failure_policy,
         convergence_start_epoch=args.convergence_start_epoch,
         meta_learning_directive=meta_learning_directive,
+        fold_exploration_directive=fold_exploration_directive,
+        meta_learning_fold_interval=args.meta_learning_fold_interval,
         step_tree_enabled=not args.disable_step_tree,
         acceptance=AcceptanceRules(
             min_return=args.min_return,

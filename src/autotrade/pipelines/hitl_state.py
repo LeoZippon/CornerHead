@@ -29,6 +29,7 @@ from autotrade.environment.sandbox import SandboxSpec
 from autotrade.environment.snapshot import SnapshotConfig
 
 from .config import AcceptanceRules, ExperimentConfig
+from .meta_schedule import meta_learning_id, meta_learning_trigger_counts, meta_session_key
 
 HITL_DIR_NAME = "hitl"
 PARAMS_NAME = "params.json"
@@ -98,6 +99,7 @@ PARAM_DEFAULTS: dict[str, object] = {
     "screen_boards": (),
     "max_fold_minutes": 20,
     "convergence_start_epoch": 3,
+    "meta_learning_fold_interval": 0,
     "disable_step_tree": False,
     "nl_failure_policy": "return_error_with_audit",
     # Session / replay budgets (ExperimentConfig fields, no CLI dests).
@@ -141,6 +143,7 @@ PARAM_DEFAULTS: dict[str, object] = {
     "local_dev": False,
     "no_thinking": False,
     "meta_learning_directive": "",
+    "fold_exploration_directive": "",
     "web_search_engines": ("tavily", "semantic_scholar"),
     "tavily_api_key_env": "TAVILY_API_KEY",
     "semantic_scholar_api_key_env": "SEMANTIC_SCHOLAR_API_KEY",
@@ -626,10 +629,6 @@ def status_pid_alive(status: Mapping[str, object]) -> bool:
 # ---------------------------------------------------------------------------
 # session keys and schedule projection
 # ---------------------------------------------------------------------------
-def meta_session_key(epoch_id: str) -> str:
-    return f"{epoch_id}/meta_learning"
-
-
 def fold_session_key(epoch_id: str, fold_id: str) -> str:
     return f"{epoch_id}/{fold_id}"
 
@@ -640,10 +639,22 @@ def _epoch_ids(epochs: int) -> list[str]:
 
 def build_session_plan(config: ExperimentConfig, folds, heldout, *, meta_enabled: bool) -> list[dict[str, object]]:
     sessions: list[dict[str, object]] = []
+    meta_triggers = set(
+        meta_learning_trigger_counts(len(folds), config.meta_learning_fold_interval)
+    )
     for epoch_id in _epoch_ids(config.epochs):
-        if meta_enabled:
-            sessions.append({"key": meta_session_key(epoch_id), "kind": "meta_learning", "epoch_id": epoch_id})
-        for fold in folds:
+        for fold_index, fold in enumerate(folds):
+            if meta_enabled and fold_index in meta_triggers:
+                sessions.append(
+                    {
+                        "key": meta_session_key(epoch_id, fold_index),
+                        "kind": "meta_learning",
+                        "epoch_id": epoch_id,
+                        "meta_learning_id": meta_learning_id(epoch_id, fold_index),
+                        "trigger_after_folds": fold_index,
+                        "before_fold_id": fold.fold_id,
+                    }
+                )
             sessions.append(
                 {
                     "key": fold_session_key(epoch_id, fold.fold_id),

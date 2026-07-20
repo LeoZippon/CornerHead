@@ -30,6 +30,7 @@ from autotrade.agent.prompts import (
     build_system_prompt,
 )
 from autotrade.environment.explore import EXPLORE_SYSTEM_PROMPT
+from autotrade.environment.features.units import AGENT_UNIT_CONTRACT
 from autotrade.environment.nl.engine import FINAL_AFTER_TOOL_BUDGET, SUB_AGENT_SYSTEM_PROMPT
 from autotrade.pipelines.fold_analysis import FOLD_ANALYSIS_SYSTEM_PROMPT
 
@@ -118,6 +119,7 @@ SAMPLE_RUNTIME_ENV = {
 }
 SAMPLE_DATA_SUMMARY = {
     "kind": "fold",
+    "unit_contract": AGENT_UNIT_CONTRACT,
     "large_table_guidance": [
         "events.parquet、text_index.parquet、intraday_1min.parquet 先查 metadata；需要抽样或聚合时再用 DuckDB count/limit 或按列读取。"
     ],
@@ -176,8 +178,11 @@ SAMPLE_META_MANIFEST = {
     **SAMPLE_MANIFEST,
     "kind": "meta_learning",
     "fold_id": "epoch_001_meta_learning",
+    "meta_learning_id": "epoch_001",
+    "trigger_after_folds": 0,
     "experiment_parameters": {
         "fold_period": "quarter",
+        "meta_learning_fold_interval": 0,
         "snapshot_config": SAMPLE_MANIFEST["snapshot_config"],
         "broker_profile": SAMPLE_MANIFEST["broker_profile"],
     },
@@ -255,6 +260,7 @@ def render() -> str:
                 experiment_facts=SAMPLE_EXPERIMENT_FACTS,
                 step_tree_enabled=True,
                 taste_prompt="优先探索可迁移的价格-成交量结构；谨慎处理单一题材经验。",
+                fold_exploration_directive="示例：持续探索事件冲击沿公司关系网络传播形成的可交易定价时滞。",
                 fold_directive="示例：本 Fold 优先检验行业中性化后的动量残差；若与验证证据冲突可降级。",
             ),
         ),

@@ -6,6 +6,7 @@
 #   webui_stack.sh status       show component states + end-to-end health
 #   webui_stack.sh ensure       start whatever is down (cron keepalive target)
 #   webui_stack.sh sync         push static SPA assets to the frontend server
+#   webui_stack.sh deploy       sync SPA + recycle API, preserving tunnel/workers
 #   webui_stack.sh install-cron install the keepalive crontab block (ensure + @reboot)
 #
 # The console API binds a Unix socket inside the 0700 run dir — the hub is a
@@ -30,7 +31,7 @@ TUNNEL_PID="$RUN_DIR/tunnel.pid"
 CRON_BEGIN="# BEGIN CornerHead webui stack"
 CRON_END="# END CornerHead webui stack"
 mkdir -p "$RUN_DIR" "$LOG_DIR"
-chmod 700 "$RUN_DIR"   # the access-control boundary for the console socket
+chmod 700 "$RUN_DIR" "$LOG_DIR"   # socket and logs may contain experiment details
 
 # alive PIDFILE PATTERN — the pid must exist AND its cmdline must match PATTERN,
 # so a stale pidfile whose pid number was recycled after a reboot reads as DOWN.
@@ -52,16 +53,29 @@ rotate_log() {
 }
 
 start_console() {
+    local pid
     if alive "$CONSOLE_PID" run_webui; then say "console: already running (pid $(cat "$CONSOLE_PID"))"; return; fi
     rm -f "$SOCK"   # a stale socket file from a crashed console blocks the bind
     # 9>&-: long-lived children must not inherit the ensure.lock fd, or they
     # hold the lock forever and every later stack operation times out.
     nohup "$PY" "$REPO/scripts/webui/run_webui.py" --uds "$SOCK" \
         >> "$LOG_DIR/console.log" 2>&1 9>&- &
-    echo $! > "$CONSOLE_PID"
-    sleep 1
-    if alive "$CONSOLE_PID" run_webui; then echo "console: started (pid $(cat "$CONSOLE_PID"), uds $SOCK)"
-    else rm -f "$CONSOLE_PID"; echo "console: FAILED to start (died immediately — see $LOG_DIR/console.log)"; return 1; fi
+    pid=$!
+    echo "$pid" > "$CONSOLE_PID"
+    for _ in {1..50}; do
+        if alive "$CONSOLE_PID" run_webui \
+            && curl -sf -m 1 --unix-socket "$SOCK" "http://console/api/health" > /dev/null; then
+            echo "console: started (pid $(cat "$CONSOLE_PID"), uds $SOCK)"
+            return
+        fi
+        alive "$CONSOLE_PID" run_webui || break
+        sleep 0.1
+    done
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -f "$CONSOLE_PID"
+    echo "console: FAILED health check (see $LOG_DIR/console.log)"
+    return 1
 }
 
 start_tunnel() {
@@ -80,6 +94,24 @@ start_tunnel() {
 stop_one() { # name pidfile pattern
     if alive "$2" "$3"; then kill "$(cat "$2")" 2>/dev/null || true; echo "$1: stopped"; else echo "$1: not running"; fi
     rm -f "$2"
+}
+
+restart_console() {
+    local pid=""
+    if alive "$CONSOLE_PID" run_webui; then
+        pid="$(cat "$CONSOLE_PID")"
+        kill "$pid" 2>/dev/null || true
+        for _ in {1..50}; do
+            alive "$CONSOLE_PID" run_webui || break
+            sleep 0.1
+        done
+        if alive "$CONSOLE_PID" run_webui; then
+            echo "console: FAILED to stop gracefully (pid $pid)" >&2
+            return 1
+        fi
+    fi
+    rm -f "$CONSOLE_PID"
+    start_console
 }
 
 status() {
@@ -144,6 +176,7 @@ case "${1:-}" in
             rotate_log "$LOG_DIR/console.log"; rotate_log "$LOG_DIR/keepalive.log"
             start_console; start_tunnel ;;
     sync)   sync_static ;;
+    deploy) grab_lock; sync_static; restart_console; start_tunnel ;;
     install-cron) install_cron ;;
-    *) echo "usage: $0 {start|stop|status|ensure|sync|install-cron}"; exit 2 ;;
+    *) echo "usage: $0 {start|stop|status|ensure|sync|deploy|install-cron}"; exit 2 ;;
 esac

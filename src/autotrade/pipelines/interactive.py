@@ -65,6 +65,13 @@ from .hitl_state import (
     status_pid_alive,
     write_control,
 )
+from .meta_schedule import (
+    meta_learning_id,
+    meta_learning_trigger_counts,
+    meta_record_id,
+    meta_record_session_key,
+)
+
 
 class ExperimentStopped(SessionInterrupt):
     """Raised at a gate when the controller requested a durable stop.
@@ -141,6 +148,8 @@ def build_config_from_options(options: SimpleNamespace, *, repo_root: Path) -> E
         nl_failure_policy=str(options.nl_failure_policy),
         convergence_start_epoch=int(options.convergence_start_epoch),
         meta_learning_directive=str(options.meta_learning_directive),
+        fold_exploration_directive=str(options.fold_exploration_directive),
+        meta_learning_fold_interval=int(options.meta_learning_fold_interval),
         meta_memory_max_epochs=int(options.meta_memory_max_epochs),
         step_tree_enabled=not bool(options.disable_step_tree),
         record_failed_attempts=bool(options.record_failed_attempts),
@@ -250,106 +259,96 @@ class InteractiveExperimentRunner:
         # through to held-out with the latest frozen artifact.
         skip_now = lambda: parent is not None and read_control(self.control_path).skip_to_heldout  # noqa: E731
         skipping = False
+        meta_triggers = set(
+            meta_learning_trigger_counts(len(folds), self.config.meta_learning_fold_interval)
+        )
         for epoch_id in _epoch_ids(self.config.epochs):
             if skipping:
                 break
-            if meta_enabled:
-                key = meta_session_key(epoch_id)
-                restored = meta_records.get(epoch_id)
-                if restored is not None:
-                    parent, taste_prompt = self._restore_meta(restored, parent)
-                elif skip_now():
-                    skipping = True
-                    break
-                else:
-                    # A killed meta run may have frozen its regularized artifact
-                    # before the ledger append; refuse to guess (docs §5.2).
-                    meta_candidate = (
-                        Path(self.config.experiment_dir) / "strategy_artifacts" / epoch_id
-                        / f"strategy_{epoch_id}_meta_learning"
-                    )
-                    if meta_candidate.exists():
-                        raise RuntimeError(
-                            f"orphan frozen meta-learning artifact without a ledger record: {meta_candidate}; "
-                            "inspect and remove it manually before resuming this epoch"
+            for fold_index, fold in enumerate(folds):
+                if meta_enabled and fold_index in meta_triggers:
+                    meta_id = meta_learning_id(epoch_id, fold_index)
+                    key = meta_session_key(epoch_id, fold_index)
+                    restored = meta_records.get(meta_id)
+                    if restored is not None:
+                        parent, taste_prompt = self._restore_meta(restored, parent)
+                    elif skip_now():
+                        skipping = True
+                        break
+                    else:
+                        # A killed Meta run may have frozen its regularized
+                        # artifact before the ledger append; refuse to guess.
+                        meta_candidate = (
+                            Path(self.config.experiment_dir) / "strategy_artifacts" / epoch_id
+                            / f"strategy_{meta_id}_meta_learning"
                         )
-                    if prefetch_pool is not None:
-                        # The first fold's data-cache entries share keys with the
-                        # Meta build: warming them behind the researcher's approval
-                        # wait removes the serial ~7-minute prep observed after
-                        # approval (no sandbox/container is created here).
-                        pregate_control = read_control(self.control_path)
-                        first_fold = next(
-                            (
-                                candidate for candidate in folds
-                                if _fold_needs_run(
-                                    fold_records.get((epoch_id, candidate.fold_id)),
-                                    pregate_control.rerun_sessions.get(
-                                        fold_session_key(epoch_id, candidate.fold_id)
-                                    ),
-                                )
-                            ),
-                            None,
+                        if meta_candidate.exists():
+                            raise RuntimeError(
+                                "orphan frozen meta-learning artifact without a ledger record: "
+                                f"{meta_candidate}; inspect and remove it manually before resuming"
+                            )
+                        if prefetch_pool is not None:
+                            # Warm the exact upcoming Fold while waiting at the
+                            # Meta gate; both runs share the same snapshot keys.
+                            pregate_control = read_control(self.control_path)
+                            fold_key = fold_session_key(epoch_id, fold.fold_id)
+                            if _fold_needs_run(
+                                fold_records.get((epoch_id, fold.fold_id)),
+                                pregate_control.rerun_sessions.get(fold_key),
+                            ):
+                                job_key = (epoch_id, fold.fold_id)
+                                if job_key not in early_prefetches:
+                                    early_prefetches[job_key] = prefetch_pool.submit(
+                                        prefetch_method, fold
+                                    )
+                        directive = self._gate(key, phase="meta_learning", epoch_id=epoch_id)
+                        control = read_control(self.control_path)
+                        agent_ready_hook = None
+                        if prefetch_pool is not None:
+
+                            def agent_ready_hook(
+                                upcoming_fold=fold,
+                                upcoming_epoch=epoch_id,
+                            ) -> None:
+                                # Start only after the Meta container and
+                                # ToolContext are ready, preserving its view.
+                                live_control = read_control(self.control_path)
+                                if live_control.request is not None:
+                                    return
+                                fold_key = fold_session_key(upcoming_epoch, upcoming_fold.fold_id)
+                                if not _fold_needs_run(
+                                    fold_records.get((upcoming_epoch, upcoming_fold.fold_id)),
+                                    live_control.rerun_sessions.get(fold_key),
+                                ):
+                                    return
+                                job_key = (upcoming_epoch, upcoming_fold.fold_id)
+                                if job_key not in early_prefetches:
+                                    early_prefetches[job_key] = prefetch_pool.submit(
+                                        prefetch_method, upcoming_fold
+                                    )
+
+                        self.status.set(
+                            state="running_session", phase="meta_learning", session_key=key,
+                            epoch_id=epoch_id, fold_id=None, run_id=None, trace_path=None,
+                            session_started_at=utc_now_iso(), fold_deadline_at=None,
                         )
-                        if first_fold is not None:
-                            job_key = (epoch_id, first_fold.fold_id)
-                            if job_key not in early_prefetches:
-                                early_prefetches[job_key] = prefetch_pool.submit(
-                                    prefetch_method, first_fold
-                                )
-                    directive = self._gate(key, phase="meta_learning", epoch_id=epoch_id)
-                    control = read_control(self.control_path)
-                    agent_ready_hook = None
-                    if prefetch_pool is not None:
+                        parent, taste_prompt = self.pipeline.run_meta_learning(
+                            epoch_id=epoch_id,
+                            meta_learning_id=meta_id,
+                            trigger_after_folds=fold_index,
+                            parent=parent,
+                            previous_taste=taste_prompt,
+                            visible_fold=fold,
+                            directive_override=directive if directive.strip() else None,
+                            system_prompt_override=control.prompt_overrides.get(key, ""),
+                            user_question_hook=self._user_question_hook(key),
+                            agent_ready_hook=agent_ready_hook,
+                            environment_progress_hook=self._environment_progress_hook,
+                        )
+                        self._clear_environment_progress()
+                    completed += 1
+                    self.status.set(completed_sessions=completed)
 
-                        def agent_ready_hook() -> None:
-                            # Start only after the Meta container and ToolContext
-                            # are ready, so its visible snapshot remains unchanged.
-                            # In gated modes this also hides preparation behind
-                            # Meta reasoning and the later researcher decision.
-                            live_control = read_control(self.control_path)
-                            if live_control.request is not None:
-                                return
-
-                            def needs_run(fold) -> bool:
-                                record = fold_records.get((epoch_id, fold.fold_id))
-                                rerun_id = live_control.rerun_sessions.get(
-                                    fold_session_key(epoch_id, fold.fold_id)
-                                )
-                                return record is None or (
-                                    rerun_id is not None
-                                    and str(record.get("rerun_id") or "") != rerun_id
-                                )
-
-                            fold = next((candidate for candidate in folds if needs_run(candidate)), None)
-                            if fold is None:
-                                return
-                            job_key = (epoch_id, fold.fold_id)
-                            if job_key not in early_prefetches:
-                                early_prefetches[job_key] = prefetch_pool.submit(
-                                    prefetch_method, fold
-                                )
-
-                    self.status.set(
-                        state="running_session", phase="meta_learning", session_key=key,
-                        epoch_id=epoch_id, fold_id=None, run_id=None, trace_path=None,
-                        session_started_at=utc_now_iso(), fold_deadline_at=None,
-                    )
-                    parent, taste_prompt = self.pipeline.run_meta_learning(
-                        epoch_id=epoch_id,
-                        parent=parent,
-                        previous_taste=taste_prompt,
-                        visible_fold=folds[0] if folds else None,
-                        directive_override=directive if directive.strip() else None,
-                        system_prompt_override=control.prompt_overrides.get(key, ""),
-                        user_question_hook=self._user_question_hook(key),
-                        agent_ready_hook=agent_ready_hook,
-                        environment_progress_hook=self._environment_progress_hook,
-                    )
-                    self._clear_environment_progress()
-                completed += 1
-                self.status.set(completed_sessions=completed)
-            for fold in folds:
                 key = fold_session_key(epoch_id, fold.fold_id)
                 restored = fold_records.get((epoch_id, fold.fold_id))
                 rerun_id = read_control(self.control_path).rerun_sessions.get(key)
@@ -359,14 +358,34 @@ class InteractiveExperimentRunner:
                     and str(restored.get("rerun_id") or "") != rerun_id
                 )
                 if needs_rerun:
-                    recorded = [f.fold_id for f in folds if fold_records.get((epoch_id, f.fold_id)) is not None]
-                    if recorded and fold.fold_id != recorded[-1]:
-                        # Same wall the console enforces: rerunning a non-latest
-                        # fold would splice new content under later folds that
-                        # already consumed the old chain.
+                    current_position = next(
+                        index for index, session in enumerate(sessions) if session.get("key") == key
+                    )
+                    later_recorded = next(
+                        (
+                            str(session.get("key"))
+                            for session in sessions[current_position + 1 :]
+                            if (
+                                session.get("kind") == "fold"
+                                and fold_records.get(
+                                    (str(session.get("epoch_id")), str(session.get("fold_id")))
+                                )
+                                is not None
+                            )
+                            or (
+                                session.get("kind") == "meta_learning"
+                                and meta_records.get(
+                                    str(session.get("meta_learning_id") or session.get("epoch_id"))
+                                )
+                                is not None
+                            )
+                        ),
+                        None,
+                    )
+                    if later_recorded is not None:
                         raise RuntimeError(
-                            f"rerun requested for {fold.fold_id} but the latest recorded fold is "
-                            f"{recorded[-1]}; roll back to {fold.fold_id} first"
+                            f"rerun requested for {key}, but later session {later_recorded} already "
+                            f"consumed its frozen chain; roll back to {key} first"
                         )
                 if restored is not None and not needs_rerun:
                     parent = self._artifact_from_fold_record(restored)
@@ -494,6 +513,8 @@ class InteractiveExperimentRunner:
         for record in self.pipeline.ledger.read(record_type):
             if record_type == "fold":
                 latest[(str(record.get("epoch_id")), str(record.get("fold_id")))] = record
+            elif record_type == "meta_learning":
+                latest[meta_record_id(record)] = record
             else:
                 latest[str(record.get("epoch_id"))] = record
         return latest
@@ -519,6 +540,7 @@ class InteractiveExperimentRunner:
                 expected_hash=str(record.get("frozen_strategy_artifact_hash")),
                 model_path=path.with_name(f"{artifact_id}.models"),
                 expected_model_hash=str(record.get("frozen_model_artifact_hash")),
+                requires_validation=True,
             )
         return parent, taste
 
@@ -556,6 +578,7 @@ class InteractiveExperimentRunner:
         expected_hash: str,
         model_path: Path | None,
         expected_model_hash: str,
+        requires_validation: bool = False,
     ) -> FrozenArtifact:
         if not path.is_dir():
             raise RuntimeError(f"resume failed: frozen artifact directory missing: {path}")
@@ -578,6 +601,7 @@ class InteractiveExperimentRunner:
             artifact_hash=expected_hash,
             model_path=model_path if model_path and model_path.is_dir() else None,
             model_artifact_hash=expected_model_hash,
+            requires_validation=requires_validation,
         )
 
     def _step_gate_hook(self, key: str):

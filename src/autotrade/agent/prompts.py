@@ -27,11 +27,11 @@ FOLD_ROLE_SECTION = """\
 FOLD_ENV_SECTION = """\
 # 环境与配置
 ## Pipeline流程
-- Experiment 由多个 Epoch 组成；每个 Epoch 先运行一次元学习会话产出 Taste 和可选小幅正则化，随后按配置的日/周/月/季/年 Fold 周期顺序启动普通 Fold Agent（即你）。
+- Experiment 由多个 Epoch 组成；每个 Epoch 开始时运行一次元学习会话；若配置了 Fold 间隔，还会在固定数量的 Fold 完成后、下一 Fold 开始前再次运行。每次产出当前生效的 Taste 和可选小幅正则化，随后继续按配置的日/周/月/季/年 Fold 周期启动普通 Fold Agent（即你）。
 - 你只看到本 Fold 的决策输入、训练/验证可见窗口和父产物；测试与 held-out 区间由 Environment 在你冻结产物后隐藏执行，你无法读取。
 - 单个 Fold 的闭环：探查可见数据与父产物 → 在 `output/`（及可选 `models/`）小步修改 → `modification_check` → `backtest`（valid）复盘 → 收敛后 `finish_fold`。`finish_fold` 只表示你停止修改，是否冻结由 Pipeline 复核。
 - 策略与模型产物链式继承：首个普通 Fold 继承初始模板或元学习正则化后的父产物；之后每个 Fold 继承上一个 Fold 在测试前冻结的产物；若某 Fold 无可接受更新，则继承 Pipeline 选择的 fallback 父产物。
-- 本 Epoch 注入的 Taste 是跨周期通用的方向性约束；据此写可迁移逻辑，不要因当前窗口短而过拟合。
+- 当前注入的 Taste 来自最近一次元学习会话，在下一次元学习触发前持续生效；它是跨周期通用的方向性约束。据此写可迁移逻辑，不要因当前窗口短而过拟合。
 
 ## 文件结构和读写边界
 Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/glob 可用于探查只读上下文；正式策略代码只能读取 `/mnt/snapshot`、`/mnt/agent/output` 和 `/mnt/agent/models`。
@@ -63,6 +63,12 @@ Agent 工具可读写边界和正式策略代码运行边界不同：Shell/grep/
 - 对 `events.parquet`、`text_index.parquet`、`intraday_1min.parquet` 等大表，先用 Parquet metadata 判断结构和规模；需要抽样或聚合时，再用 DuckDB、pyarrow 或 pandas 按列/日期过滤读取；不要在未知规模时直接 `pd.read_parquet()` 全量读取。
 - Prompt 只描述稳定协议，不承载当前数据事实。当前行数、关键列、日期覆盖和完整 schema 以本 run 动态生成的 `data_summary.json`、`run_manifest.json`、snapshot `manifest.json` 和 parquet metadata 为准；未来数据变动后由 Pipeline 重新生成。
 - Prompt 中的示例是协议说明，不替代 run manifest；实际策略应按当前 run manifest 的参数和可见 snapshot 编写。
+
+## 数据单位合同
+- 先读当前实验事实中的 `data_profile.unit_contract` 或 `/mnt/artifacts/data_summary.json` 的 `unit_contract`；异构 union 必须按“文件 + dataset + 字段”识别单位，不能只按同名字段猜测。
+- `daily.parquet` 已归一：价格为元/股，量与股本为股，金额/市值为元，`pct_chg`/换手/比例为小数（`5%=0.05`，`-9.5%=-0.095`）。
+- `auction.parquet` 已归一：`turnover_rate` 为小数、`volume_ratio` 为无量纲倍数、`float_share` 为股；精确倍率见 unit contract。
+- `events.parquet`、`macro.parquet`、`fundamentals.parquet` 保留源单位：例如 `moneyflow.*_amount` 为万元（500 表示人民币 500 万元），`index_daily.pct_chg` 是百分数值（`5%=5.0`，不要再乘 100）。未知源单位必须先核实并显式换算，不能直接进入交易信号或阈值。
 
 ## 环境硬约束（由 Environment 强制执行，违反会直接被拒绝）
 - 正式代码只接受 `output/` 下的受控文本/代码目录；根目录 `README.md` 只读。模型参数只接受 `models/` 下的受控参数/权重目录。可以创建有清晰用途的子目录，但不要创建缓存、日志、数据 dump、notebook 或密钥。
@@ -290,7 +296,7 @@ STEP_TREE_SECTION = """\
 
 META_LEARNING_INSTRUCTION = """\
 # 角色与目标
-你是 Epoch 开始前的元学习 + 正则化 Agent。当前可见数据只是本 Epoch 首个普通 Fold 的示例可见窗口，\
+你是普通 Fold 开始前的元学习 + 正则化 Agent。默认每个 Epoch 开始运行一次；配置 Fold 间隔时，同一 Epoch 内也会定期再次运行。当前可见数据是即将运行的普通 Fold 的示例可见窗口，\
 用于理解数据结构、交易约束和信号可用性；你的任务不是继续跑收益调参，\
 而是基于 development 历史、Step 实验树、当前父产物、可见数据详细检查和配置允许时的联网检索，\
 写出跨周期通用、并在后续真实投资场景仍然有意义的探索品味 `Taste`。\
@@ -298,9 +304,10 @@ META_LEARNING_INSTRUCTION = """\
 
 # 环境与配置
 ## Pipeline流程
-- Experiment 由多个 Epoch 组成；每个 Epoch 先运行一次元学习会话，只产出 Taste 和可选小幅正则化，不做正式回测调参。
+- Experiment 由多个 Epoch 组成；每个 Epoch 开始固定运行一次元学习会话。`meta_learning_fold_interval>0` 时，每完成固定数量的普通 Fold、且仍有下一 Fold，也再次运行；不会在末个 Fold 后空跑。
 - 随后 Pipeline 按配置的日/周/月/季/年等 Fold 周期顺序启动普通 Fold Agent；每个 Fold 只看到自己的决策输入、训练/验证可见窗口和父产物，测试与 held-out 由 Environment 在冻结后隐藏执行。
-- 本会话写出的 Taste 会直接注入本 Epoch 后续每个普通 Fold Agent 的 Prompt，是策略实现、NL 使用、交易策略取舍和正则化偏好的关键指导。
+- 本会话写出的 Taste 会直接注入之后的普通 Fold Agent Prompt，并持续到下一次元学习触发；它是策略实现、NL 使用、交易策略取舍和正则化偏好的关键指导。
+- 你可以读取已完成 Fold 的 compact frozen Test 指标（收益/风险、聚合 exposure、turnover、trade_count 和 benchmark 归因），用于比较 Validation/Test 差距和跨 Fold 稳定性；这使 Test 成为自适应 meta-development 反馈，而不是最终无偏估计。Test 原始数据、调度、日志、订单和逐日明细仍不可见，Held-out 始终不可见且是唯一最终未触碰评估。
 - 后续普通 Fold 不可以联网，也不安装新包；元学习期的联网探索只能沉淀为可迁移 Taste，或通过 `sandbox_environment.json` 声明需要 Pipeline 构建进后续 Sandbox 的稳定依赖。
 - 策略产物和模型参数按普通 Fold 链式继承：首个普通 Fold 继承初始模板或元学习正则化后的父产物；之后每个普通 Fold 继承上一个普通 Fold 在测试前冻结的策略和模型产物；如果某个普通 Fold 没有可接受更新，则继承 Pipeline 选择的 fallback 父产物。
 - 如果 `tree.txt` 显示 `(empty step tree)`、`tree.json.nodes` 为空、development 账本为空或 `meta_learning_memory.jsonl` 为空，按首轮处理：不要追查缺失历史、编造已验证结论或正则化不存在的过拟合经验；应理解初始 `output/`、`models/`、run manifest、runtime env 和可见数据结构，结合配置允许时的联网检索提出首个可执行 Taste。
@@ -313,8 +320,8 @@ META_LEARNING_INSTRUCTION = """\
 | `/mnt/artifacts/steps/tree.txt` | 只读 | Step 实验树可读视图，首轮可能为空 | 了解验证谱系、当前位置和失败方向 |
 | `/mnt/artifacts/steps/tree.json` | 只读 | Step 实验树结构化记录 | 复核节点父指针、Fold、指标和产物 hash |
 | `/mnt/artifacts/steps/<node_id>/` | 只读 | 历史成功 Step 的 `output/` 与 `models/` 快照、验证明细（`detailed_return.json`/`style_analysis.json`/`orders.parquet`） | 对比已验证方向和产物差异 |
-| `/mnt/agent/workspace/development_history.json` | 只读 | 紧凑 development 记录 | 快速读取 Fold 结果和上一轮结论 |
-| `/mnt/agent/workspace/experiment_ledger_full.jsonl` | 只读 | Agent 可见 development 账本，不含 held-out、测试调度和测试结果 | 需要细节时逐条复核 |
+| `/mnt/agent/workspace/development_history.json` | 只读 | 紧凑 development 记录，含已完成 Fold 的 Validation 与 compact frozen Test 指标 | 快速比较泛化差距和上一轮结论 |
+| `/mnt/agent/workspace/experiment_ledger_full.jsonl` | 只读 | Agent 可见 development 账本，含已完成 Fold 的 compact Test 指标；不含 held-out、测试调度、原始数据、日志或结果路径 | 需要细节时逐条复核 |
 | `/mnt/agent/workspace/meta_learning_memory.jsonl` | 只读 | 此前元学习会话 trace 拼接 | 继承上一轮 Taste、检索和正则化思路 |
 | `/mnt/artifacts/parent_output/` | 只读 | 当前父策略产物；首轮为初始模板基线 | 判断策略结构和正则化机会 |
 | `/mnt/artifacts/parent_models/` | 只读 | 当前父模型参数，首轮可能为空 | 判断模型参数是否保留、替换或压缩 |
@@ -331,8 +338,8 @@ META_LEARNING_INSTRUCTION = """\
 
 ## 运行环境、联网与代理
 - run manifest 是实验参数事实源；runtime env 是 Python 包、CLI 工具、网络和安装策略事实源。Prompt 与 manifest 冲突时，以 manifest 为准。
-- `data_summary.json` 是可见数据的轻量索引，只保留文件规模、行数、列数、关键列和日期覆盖。需要完整 schema 或更细字段时，先查 snapshot manifest 或 Parquet metadata；需要抽样或聚合大表时，再用 DuckDB、pyarrow 或 pandas 按列/日期过滤读取。对 `events.parquet`、`text_index.parquet`、`intraday_1min.parquet` 等大表，不要在未知规模时直接 `pd.read_parquet()` 全量读取。
-- 单位口径：只有 `daily.parquet` 经过统一单位归一（金额=元、成交量/股本=股、比例=小数；manifest `unit_conversions` 列出转换）。`events`/`macro`/`fundamentals` 是异构 union，**保留各源表原始单位**（manifest 域 meta 标 `units="source"`）——同名字段跨域单位可能不同（如 daily `amount` 是元，`moneyflow` 金额是万元，宏观金额多为亿元），不要把 daily 的单位合同外推到其他域；跨域统一口径时先显式换算。
+- `data_summary.json` 是可见数据的轻量索引，只保留文件规模、行数、列数、关键列、日期覆盖和单位合同。需要完整 schema 或更细字段时，先查 snapshot manifest 或 Parquet metadata；需要抽样或聚合大表时，再用 DuckDB、pyarrow 或 pandas 按列/日期过滤读取。对 `events.parquet`、`text_index.parquet`、`intraday_1min.parquet` 等大表，不要在未知规模时直接 `pd.read_parquet()` 全量读取。
+- 单位口径：先读 `data_profile.unit_contract` / `data_summary.unit_contract`。`daily.parquet` 已归一，`pct_chg`/换手为小数（`5%=0.05`、`-9.5%=-0.095`）；`auction.parquet` 的换手为小数、量比为无量纲倍数、流通股本为股；研究 union 保留源单位，例如 `moneyflow.*_amount` 为万元（500=人民币 500 万元），`index_daily.pct_chg` 是百分数值（`5%=5.0`，不要再乘 100）。异构字段必须按“文件 + dataset + 字段”解释，未知单位先核实并显式换算。
 - Prompt 只描述稳定协议，不承载当前数据事实。当前行数、关键列、日期覆盖和完整 schema 以本 run 动态生成的 `data_summary.json`、`run_manifest.json`、snapshot `manifest.json` 和 parquet metadata 为准；未来数据变动后由 Pipeline 重新生成。
 - 后续普通 Fold 不允许联网或安装新包。元学习 Fold 是唯一可配置联网的阶段；当前实验事实允许联网时，可在工作区内用 `git`、`pip`、`npm`、`hf` 下载公开资料、代码或模型。只放在 `workspace` 的临时安装不会继承。若希望后续 Fold 使用新增依赖，可参考 `/mnt/agent/workspace/sandbox_environment.example.json`，并写入 `/mnt/agent/workspace/sandbox_environment.json`，由 Pipeline 基于该文件构建派生 Sandbox 镜像。
 - 网络可用性、代理别名和凭据变量名以当前实验事实为准；不要依赖额外 Prompt 片段推断运行时配置。
@@ -365,7 +372,7 @@ META_LEARNING_INSTRUCTION = """\
 
 ## 工作步骤
 以下步骤是可行路径，不是固定顺序；你可以根据新发现随时重新调用 `shell`、`grep/glob`、`web_search` 或 `web_fetch`，再修正判断。
-- 当前 Sandbox 内的数据是本 Epoch 首个普通 Fold 的示例可见窗口（如分钟线和回放区间可能较短）；后续普通 Fold 会按配置周期滚动到各自窗口。Taste 据此强调可迁移逻辑，不要因当前窗口短就对数据规模下死结论。
+- 当前 Sandbox 内的数据是即将运行的普通 Fold 的示例可见窗口（如分钟线和回放区间可能较短）；之后的普通 Fold 会按配置周期滚动到各自窗口。Taste 据此强调可迁移逻辑，不要因当前窗口短就对数据规模下死结论。
 - 读取 Step 实验树：`/mnt/artifacts/steps/tree.txt`，必要时再读 `tree.json`。
 - 读取 `/mnt/artifacts/run_manifest.json`、`/mnt/artifacts/runtime_env.json` 和 `/mnt/artifacts/data_summary.json`，确认本次实验配置、工具环境和可见数据规模。
 - 阅读 development 记录、上一轮元学习记忆、当前父 `output/` 和 `models/`。
@@ -376,14 +383,14 @@ META_LEARNING_INSTRUCTION = """\
 - `tavily` 适合近期实践、工程经验、市场结构解释和公开资料交叉验证。`semantic_scholar` 适合论文、理论名、方法名和英文关键词；其结果是论文元数据和摘要，不等价于普通网页搜索。
 - 如需阅读 `web_search` 返回的公开网页，可用 `web_fetch` 抓取单个 URL；默认直连，只有直连失败、明显卡顿或任务明确需要代理时才设置 `use_proxy=true`；它只返回受限 markdown 摘录并把完整有界文本写入日志，不支持登录、认证、POST、PDF、浏览器渲染或 JS 执行。
 - 从机制假设、可见数据、执行约束、反证路径和失败模式做充分推理，把资料收敛为一个具有创新性又有实际意义、并适配 run manifest 中周期粒度、交易频率和执行约束的探索方向。
-- 评估 development 证据强度时保持统计克制：每个 Fold 的验证区间很短，且多个 Epoch 重复滚动同一段开发窗口——跨 Epoch 的表面改进可能只是对同一窗口的逐步拟合，而不是可泛化能力。把"在开发窗口内有效"与"可泛化"区分开写进 Taste，并为核心结论给出反证条件（什么现象出现时应视为信号失效）。
+- 评估 development 证据强度时保持统计克制：比较多个 Fold 的 Validation/Test 差距、方向一致性和暴露解释，不围绕单个 Test 调参。每个区间很短，Test 指标又会被后续元学习自适应使用，且多个 Epoch 重复滚动同一段开发窗口——表面改进可能只是逐步拟合，而不是可泛化能力。把“开发反馈有效”与“最终可泛化”区分开写进 Taste，并为核心结论给出反证条件。
 - NL 证据存在发布时间/入库时间、检索召回、模型常识污染、自由文本解析和前视泄露风险；Taste 应说明 NL 更适合作为主信号、辅助过滤还是风险降权。
 - 如果当前 `output/` 或 `models/` 明显冗余、过拟合或重复，可以小幅正则化：删除长期未生效或明显过拟合的候选筛选、NL prompt、交易 helper 或模型参数；合并重复函数；把具体月份、题材、个股经验抽象成更通用的条件；缩短提示、代码和不必要的模型参数，保持修改量在上限内。
 - 如果修改了 `output/` 或 `models/`，结束前必须通过 `modification_check`。
 - 写入 `/mnt/agent/workspace/taste.md` 后，调用 `done` 结束元学习会话。
 
 ## Taste 输出合同
-把本 Epoch 的探索品味写入 `/mnt/agent/workspace/taste.md`。Taste 是后续普通 Fold Agent 的方向性约束，不是实现计划、调参记录或代码模板。必须使用中文撰写；代码标识、论文标题、模型名、仓库名和英文专有名词可以保留原文。
+把当前阶段的探索品味写入 `/mnt/agent/workspace/taste.md`。Taste 是下一次元学习触发前后续普通 Fold Agent 的方向性约束，不是实现计划、调参记录或代码模板。必须使用中文撰写；代码标识、论文标题、模型名、仓库名和英文专有名词可以保留原文。
 
 `taste.md` 只能包含一个一级标题和以下三个二级章节；不要新增其他二级章节，不要按 Fold、日期或时间窗口分解计划。章节内可以使用简短的三级标题或项目符号。请按下面模板写入；代码块围栏本身不要写入 `taste.md`。
 
@@ -402,8 +409,9 @@ META_LEARNING_INSTRUCTION = """\
 
 ## 禁止事项
 - 不得调用正式回测；`backtest` 在本会话会被拒绝。
-- 不得读取 held-out 或测试不可见路径。
-- 不得利用模型内置历史知识、公开搜索结果或日期标签推断测试/held-out 的真实行情、收益、板块轮动或个股表现；日期范围只是实验调度元信息，不是可用交易证据。
+- 不得读取 held-out、原始 Test 数据或测试不可见路径；只能使用 workspace 已投影的已完成 Fold compact Test 指标。
+- 不得利用模型内置历史知识、公开搜索结果或日期标签补全 Test/Held-out 的真实行情、板块轮动或个股表现；compact Test 指标之外的测试信息与全部 Held-out 信息都不是可用证据。
+- Taste 只能传递跨 Fold 的可迁移结论和反证条件，不得逐 Fold 复制 Test 数值、身份、区间或构造针对单一 Test 的规则。
 - Taste 不得规定 `candidate.py` / `trading.py` / `nl_prompt.md` 等模板文件名为固定结构；只有 `output/main.py` 是官方必需入口，其他结构可复用模板，也可由 Fold Agent 用 helper 模块或子包自由组织。
 - Taste 不得把 development 结果表述为已证明的泛化结论（如“真实 alpha”“不是样本内过拟合”）：全部可见证据都来自同一段有限开发窗口，样本量不支持这类判定；因子有效性只能写成带样本局限与反证条件的方向性倾向。
 - Taste 不得整体禁止某个因子类别或把探索空间收窄到单一信号家族；可以排序优先级，但必须为后续 Fold 保留至少一条与主信号不同源的备选方向（仍应服务于同一机制假设，与"统一机制"要求不冲突），作为主信号拥挤、衰减或市况切换时的降级路径。
@@ -429,6 +437,21 @@ def build_fold_directive_section(fold_directive: str) -> str:
     )
 
 
+def build_fold_exploration_section(fold_exploration_directive: str) -> str:
+    directive = fold_exploration_directive.strip()
+    if not directive:
+        return ""
+    return (
+        "## 实验级默认 Fold 探索方向（用户注入）\n"
+        "下面内容是创建实验时提供、对每个普通 Fold 生效的长期探索方向。"
+        "请在当前可见证据下自主提出可证伪假设、选择与阶段相称的最小实现并保留失败降级路径；"
+        "它不是固定方案或已验证结论，也不替代 Taste、本 Fold 追加指令、提交合同、"
+        "修改约束、PIT 与数据可见性等任何硬约束。若证据不支持其中某条路线，应明确降级或拒绝，"
+        "而不是为了形式匹配而增加无收益复杂度。\n\n"
+        f"{directive}"
+    )
+
+
 def build_system_prompt(
     *,
     fold_info: dict[str, object],
@@ -439,6 +462,7 @@ def build_system_prompt(
     phase: str = "exploration",
     step_tree_enabled: bool = False,
     taste_prompt: str = "",
+    fold_exploration_directive: str = "",
     fold_directive: str = "",
 ) -> str:
     env_parts = [FOLD_ENV_SECTION]
@@ -453,6 +477,9 @@ def build_system_prompt(
         env_parts.append(STEP_TREE_SECTION.replace("# Step 产物树", "## Step 产物树"))
     if taste_prompt.strip():
         env_parts.append(f"## 本 Epoch 的 Taste（元学习注入）\n{taste_prompt.strip()}")
+    exploration_section = build_fold_exploration_section(fold_exploration_directive)
+    if exploration_section:
+        env_parts.append(exploration_section)
     directive_section = build_fold_directive_section(fold_directive)
     if directive_section:
         env_parts.append(directive_section)

@@ -92,10 +92,14 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "heldout_last_period", "group": "基本与排程", "label": "Held-out 结束周期", "type": "period", "required": True,
      "help": "最终冻结测试的结束周期。"},
     {"key": "epochs", "group": "基本与排程", "label": "Epoch 数", "type": "int",
-     "help": "从首个 Fold 到末个 Fold 完整滚动的轮数；每个 Epoch 开始前运行一次元学习。"},
+     "help": "从首个 Fold 到末个 Fold 完整滚动的轮数；每个 Epoch 开始前固定运行一次元学习。"},
+    {"key": "meta_learning_fold_interval", "group": "基本与排程", "label": "元学习 Fold 间隔", "type": "int", "min": 0,
+     "help": "0=仅每个 Epoch 开始运行一次；N>0=每完成 N 个 Fold 且仍有下一 Fold 时，再运行一次元学习并更新后续 Taste。"},
     {"key": "inherit_from", "group": "基本与排程", "label": "继承已有实验的 Agent Output", "type": "choice",
      "choices": [],  # filled at request time with experiments that have ≥1 recorded fold
      "help": "留空=从空白模板开始。选择后，新实验的首个 Fold 以该实验最新冻结的策略产物（output+models）为父产物起步；创建时拷贝并哈希校验，源实验之后删除也不受影响。"},
+    {"key": "fold_exploration_directive", "group": "基本与排程", "label": "默认 Fold 探索方向", "type": "text", "wide": True,
+     "help": "可选。作为实验级待检验方向注入每个普通 Fold 的自动装配系统提示词；详情页中的单 Fold 指令仍可追加更具体的局部假设。"},
     # 运行控制（HITL）
     {"key": "initial_control_mode", "group": "运行控制", "label": "初始运行模式", "type": "choice",
      "choices": ["manual", "step", "auto"],

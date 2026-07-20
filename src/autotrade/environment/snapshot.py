@@ -8,10 +8,10 @@ Builds the seven domain files plus universe and manifest for one decision time:
 
 Every row satisfies ``available_at <= decision_time``. Datasets whose raw rows
 carry an ``available_at`` column (events/macro/text/minute) are filtered on it;
-the daily core uses the dataset contracts. The unit contract (CNY, shares,
-decimals) covers the DAILY domain only — every conversion is recorded in the
-manifest; events/macro/fundamentals/text keep TuShare per-source units and
-their domain meta carries ``units="source"`` (env docs §1.4). Replay slots
+the daily core uses the dataset contracts. The normalized trading-file unit
+contract covers daily, minute and auction data — every conversion is recorded
+in the manifest; events/macro/fundamentals/text keep TuShare per-source units
+and their domain meta carries ``units="source"`` (env docs §1.4). Replay slots
 (valid/test) are built separately and are NOT PIT-filtered: they are the
 replay regions read only by backtest_tool.
 """
@@ -46,7 +46,7 @@ from autotrade.environment.data.contracts import CN_TZ
 from autotrade.environment.data.pit import yyyymmdd
 from autotrade.environment.features.auction import apply_open_auction_correction
 from autotrade.environment.features.fundamental_events import FUNDAMENTAL_EVENT_DATASETS, read_fundamental_events
-from autotrade.environment.features.units import normalize_daily_units
+from autotrade.environment.features.units import normalize_auction_units, normalize_daily_units
 from autotrade.environment.research_release import DOMAIN_STATUS_FILES
 from autotrade.environment.runtime import new_id, utc_now_iso
 
@@ -914,10 +914,12 @@ class SnapshotBuilder:
             auction["available_at_rule"] = [availability[str(day)][1] for day in auction["trade_date"]]
             auction = auction[list(self._AUCTION_COLUMNS)]
             auction = auction.sort_values(["trade_date", "session", "ts_code"]).reset_index(drop=True)
+        auction, conversions = normalize_auction_units(auction)
         metadata: dict[str, object] = {
             "rows": int(len(auction)),
             "datasets": ["stk_auction"],
-            "units": "vol=股, amount=元",
+            "units": "unit_contract",
+            "unit_conversions": conversions,
             "clearing_price_fields": {"open": "price", "close": "15:00 bar close"},
             "precoverage_fallback": "labelled 09:30 minute proxy; Shenzhen vol/amount use configured correction",
             "price_quality": price_quality,
@@ -1163,7 +1165,7 @@ class SnapshotBuilder:
             "coverage_end": visible_dates[-1],
             "trade_dates": visible_dates,
             "visible_trade_dates_by_dataset": visible_by_dataset,
-            "units": "unit_contract",  # the only domain the unit contract covers
+            "units": "unit_contract",
             "unit_conversions": conversions,
             "availability_rule": "per-dataset daily contracts; joins include only partitions visible at the decision time",
         }

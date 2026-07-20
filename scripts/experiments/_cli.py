@@ -65,6 +65,16 @@ def resolve_meta_learning_directive(parser: argparse.ArgumentParser, args: argpa
     return args.meta_learning_directive
 
 
+def resolve_fold_exploration_directive(parser: argparse.ArgumentParser, args: argparse.Namespace) -> str:
+    if args.fold_exploration_directive and args.fold_exploration_directive_file:
+        parser.error(
+            "pass only one of --fold-exploration-directive or --fold-exploration-directive-file"
+        )
+    if args.fold_exploration_directive_file:
+        return args.fold_exploration_directive_file.read_text(encoding="utf-8")
+    return args.fold_exploration_directive
+
+
 def require_generic_period_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Non-quarter fold periods have no safe defaults: demand explicit labels.
 
@@ -206,7 +216,7 @@ def add_web_search_arguments(parser: argparse.ArgumentParser, *, verbose_help: b
         choices=("tavily", "semantic_scholar"),
         default=("tavily", "semantic_scholar"),
         help=_opt_help(
-            "Search engines exposed to Epoch-start meta-learning; the Agent chooses an engine per query.",
+            "Search engines exposed to every meta-learning session; the Agent chooses an engine per query.",
             verbose_help,
         ),
     )
@@ -225,7 +235,7 @@ def add_meta_sandbox_arguments(
         choices=("none", "bridge", "host"),
         default="bridge",
         help=_opt_help(
-            "Docker network mode for Epoch-start meta-learning only; default bridge gives direct internet. "
+            "Docker network mode for meta-learning sessions only; default bridge gives direct internet. "
             "Ordinary folds stay on the base sandbox spec.",
             verbose_help,
         ),
@@ -290,7 +300,7 @@ def add_meta_directive_arguments(parser: argparse.ArgumentParser, *, verbose_hel
         "--meta-learning-directive",
         default="",
         help=_opt_help(
-            "Optional experiment-level research direction injected into the Epoch-start meta-learning prompt.",
+            "Optional experiment-level research direction injected into each meta-learning prompt.",
             verbose_help,
         ),
     )
@@ -299,6 +309,27 @@ def add_meta_directive_arguments(parser: argparse.ArgumentParser, *, verbose_hel
         type=Path,
         help=_opt_help(
             "Optional UTF-8 text file whose content is injected as the meta-learning research direction.",
+            verbose_help,
+        ),
+    )
+
+
+def add_fold_exploration_directive_arguments(
+    parser: argparse.ArgumentParser, *, verbose_help: bool
+) -> None:
+    parser.add_argument(
+        "--fold-exploration-directive",
+        default="",
+        help=_opt_help(
+            "Optional experiment-level exploration direction injected into every ordinary Fold prompt.",
+            verbose_help,
+        ),
+    )
+    parser.add_argument(
+        "--fold-exploration-directive-file",
+        type=Path,
+        help=_opt_help(
+            "Optional UTF-8 text file whose content is injected into every ordinary Fold prompt.",
             verbose_help,
         ),
     )

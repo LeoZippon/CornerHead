@@ -904,7 +904,8 @@ function heroPanel(item) {
 
 function confirmRevealTests(experimentId) {
   showModal("揭示测试结果", el("div", {},
-    el("p", {}, "揭示后本实验封存：不能再批准会话、重跑、回滚、逐 Step 放行或注入任何指令（研究者一旦看到样本外结果，之后的每个决定都不再是样本外的）。"),
+    el("p", {}, "Fold Test 在各 Fold 冻结时是样本外评估，之后仅通过受控的 compact 指标投影成为 Meta-development 反馈；Held-out 才是唯一最终未触碰评估。"),
+    el("p", {}, "人工揭示会打开不受控的明细反馈通道，因此揭示后本实验封存：不能再批准会话、重跑、回滚、逐 Step 放行或注入任何指令。"),
     el("p", {}, "查看/停止/删除仍然可用。此操作不可撤销。"),
   ), [
     el("button", { class: "btn", onclick: closeModal }, "取消"),
@@ -1011,6 +1012,7 @@ function fieldGrid(fields, inputs) {
 function fieldNode(field, inputs) {
   const wrap = el("div", { class: "field" });
   if (field.key === "gpu_count") wrap.classList.add("field-wide", "gpu-field");
+  if (field.wide === true) wrap.classList.add("field-wide");
   // multi defaults to a full row (long chip lists); "wide": false opts a short
   // chip group into a normal grid cell so it can share a row (e.g. 板块范围).
   if (field.type === "multi" && field.wide !== false) wrap.classList.add("field-wide");
@@ -1404,7 +1406,7 @@ function controlBar(detail) {
     bar.append(el("button", {
       class: "btn danger",
       onclick: () => {
-        showModal("强制终止", el("p", {}, "立即向 worker 发送 SIGTERM。正在运行的 Fold 会被中断且不写入账本（恢复时将重跑该 Fold）。确定？"), [
+        showModal("强制终止", el("p", {}, "立即向 worker 发送 SIGTERM。未落账的当前会话会被中断并撤销批准；恢复后先回到待批准状态，可重新编辑、预览并批准 Prompt。确定？"), [
           el("button", { class: "btn", onclick: closeModal }, "取消"),
           el("button", {
             class: "btn danger",
@@ -1413,9 +1415,11 @@ function controlBar(detail) {
               // The request blocks through the 10s SIGTERM grace; say so up
               // front, then report the actual outcome from the response.
               toast("正在终止 worker（优雅退出宽限最长约 10 秒）…");
-              send({ action: "terminate" }, (result) => result.escalated
+              send({ action: "terminate" }, (result) => `${result.escalated
                 ? `已强制终止（SIGKILL，pid ${result.terminated_pid}）`
-                : `worker 已优雅退出（pid ${result.terminated_pid}）`);
+                : `worker 已优雅退出（pid ${result.terminated_pid}）`}${result.approval_revoked_session
+                ? "；未完成会话已退回待批准"
+                : ""}`);
             },
           }, "强制终止"),
         ]);
@@ -1477,7 +1481,11 @@ function sessionListPanel(detail, selectedKey) {
     },
       el("span", { class: `dot ${dotClass}` }),
       el("span", { class: "label" },
-        session.kind === "fold" ? String(session.fold_id || "").replace("fold_", "Fold ") : KIND_LABELS[session.kind] || session.kind),
+        session.kind === "fold"
+          ? String(session.fold_id || "").replace("fold_", "Fold ")
+          : session.kind === "meta_learning" && Number(session.trigger_after_folds || 0) > 0
+          ? `元学习（${session.trigger_after_folds} Fold 后）`
+          : KIND_LABELS[session.kind] || session.kind),
       ret,
     );
     list.append(item);
@@ -1552,19 +1560,30 @@ function directivePanel(detail, session, waiting) {
   // A meta session with no per-session override inherits the experiment-level
   // directive from creation; prefill it so it never needs retyping.
   const inherited = isMeta ? String((detail.params || {}).meta_learning_directive || "") : "";
+  const foldDefault = session.kind === "fold"
+    ? String((detail.params || {}).fold_exploration_directive || "").trim()
+    : "";
   const existing = (control.directives || {})[session.key] ?? "";
   const approved = (control.approved_sessions || []).includes(session.key);
-  const textarea = el("textarea", { class: "directive", placeholder: "可选：为该会话注入研究方向 / 优化假设……" });
+  const textarea = el("textarea", { class: "directive", placeholder: foldDefault
+    ? "可选：仅为本 Fold 追加更具体的局部假设……"
+    : "可选：为该会话注入研究方向 / 优化假设……" });
   textarea.value = existing || inherited;
   const panel = el("div", { class: "panel" },
-    el("h4", {}, isMeta ? "元学习指令（本 Epoch）" : session.kind === "heldout" ? "Held-out 启动" : "本 Fold 研究者指令"),
+    el("h4", {}, isMeta ? "元学习指令（当前阶段）" : session.kind === "heldout" ? "Held-out 启动" : "本 Fold 研究者指令"),
   );
   if (session.kind !== "heldout") {
     if (isMeta && inherited && !existing) {
-      panel.append(el("div", { class: "hint" }, "已预填创建实验时的元学习探索方向；不修改则按原方向执行，可直接编辑覆盖本 Epoch。"));
+      panel.append(el("div", { class: "hint" }, "已预填实验级元学习探索方向；不修改则按原方向执行，可编辑覆盖当前元学习阶段。"));
+    }
+    if (foldDefault) {
+      panel.append(el("details", { class: "section-gap" },
+        el("summary", { class: "hint" }, "已自动注入实验级默认 Fold 探索方向（展开查看）"),
+        el("div", { class: "markdown section-gap", style: "white-space:pre-wrap" }, foldDefault),
+      ));
     }
     panel.append(textarea, el("div", { class: "hint warn" },
-      "指令会注入系统提示词并记入账本。请勿写入测试期/Held-out 结果或具体日历日期——那会破坏 walk-forward 的样本外有效性。"));
+      "指令会注入系统提示词并记入账本。已完成 Fold 的 Test 只由系统向 Meta 投影 compact 指标；请勿人工写入 Test/Held-out 明细或具体日历日期，以免绕过受控反馈边界。"));
   }
   const buttons = el("div", { class: "control-bar section-gap" });
   const send = (payload, note) => sendControlAction(detail.experiment_id, payload, note);
@@ -2254,7 +2273,7 @@ function traceEventNode(event) {
 
 /* Re-run the latest recorded fold with a revised directive / system prompt. */
 function rerunPanel(detail, session) {
-  const alive = detail.worker_alive;
+  const alive = detail.worker_alive || detail.state === "launching";
   const panel = el("div", { class: "panel section-gap" },
     el("h4", { class: "subsection-title" }, "重跑本 Fold（最新完成）"),
     el("div", { class: "hint" },
@@ -2298,11 +2317,11 @@ function rerunPanel(detail, session) {
    every later ledger record is dropped (frozen dirs archived, ledger backed
    up server-side) and the run resumes from the next fold. */
 function rollbackPanel(detail, session) {
-  const alive = detail.worker_alive;
+  const alive = detail.worker_alive || detail.state === "launching";
   const panel = el("div", { class: "panel section-gap" },
     el("h4", { class: "subsection-title" }, "回滚到此 Fold"),
     el("div", { class: "hint" },
-      "把实验进度回退到本 Fold 刚完成时：其后所有 Fold、后续 Epoch 元学习与全部 Held-out 账本记录将被移除（原账本自动备份、冻结产物归档到 _archive，可人工找回），随后从下一个 Fold 继续（人工控制模式下等待批准，可先修改指令/提示词）。"),
+      "把实验进度回退到本 Fold 刚完成时：其后所有 Fold、元学习会话与全部 Held-out 账本记录将被移除（原账本自动备份、冻结产物归档到 _archive，可人工找回），随后从下一个会话继续（人工控制模式下等待批准，可先修改指令/提示词）。"),
   );
   const bar = el("div", { class: "control-bar section-gap" });
   if (alive) {
@@ -2703,6 +2722,12 @@ function foldResultPanel(detail, session) {
       el("div", { class: "markdown", style: "white-space:pre-wrap" }, record.fold_directive),
     ));
   }
+  if (record.fold_exploration_directive) {
+    panel.append(el("details", { class: "section-gap" },
+      el("summary", { class: "mode-note", style: "cursor:pointer" }, "实验级默认 Fold 探索方向"),
+      el("div", { class: "markdown", style: "white-space:pre-wrap" }, record.fold_exploration_directive),
+    ));
+  }
   if ((record.steps || []).length) {
     const table = el("table", { class: "data section-gap" },
       el("tr", {}, el("th", {}, "Step"), el("th", {}, "状态"), el("th", {}, "收益"),
@@ -2835,9 +2860,9 @@ function loadFoldExtras(experimentId, epochId, foldId) {
     if (audit.test_result) {
       const test = audit.test_result;
       wrap.append(el("details", { class: "test-audit section-gap" },
-        el("summary", {}, "测试期结果（事后审计 — 谨慎查看）"),
+        el("summary", {}, "测试期结果（Meta-development 审计 — 谨慎查看）"),
         el("div", { class: "hint warn" },
-          "以下是本 Fold 冻结后在测试区间的样本外结果，仅供事后审计。请勿把测试期表现写入后续 Fold 指令，否则该实验的样本外结论将失效。"),
+          "本结果在该 Fold 冻结时是样本外评估，之后其 compact 指标可由系统提供给 Meta，因而属于自适应开发证据而非最终未触碰估计。人工明细只在实验封存后揭示；Held-out 才是最终未触碰评估。"),
         el("table", { class: "kv" },
           kvRow("测试收益", el("span", { class: numClass(test.total_return) }, fmtPct(test.total_return))),
           kvRow("测试 Sharpe", test.sharpe !== undefined && test.sharpe !== null ? Number(test.sharpe).toFixed(2) : "—"),
@@ -3038,7 +3063,9 @@ function sandboxImageNode(update) {
 
 function metaResultPanel(detail, session) {
   const record = session.record || {};
-  const panel = el("div", { class: "panel section-gap" }, el("h4", {}, `元学习结果 — ${session.epoch_id}`));
+  const trigger = Number(session.trigger_after_folds || record.trigger_after_folds || 0);
+  const label = trigger > 0 ? `${session.epoch_id} / ${trigger} Fold 后` : session.epoch_id;
+  const panel = el("div", { class: "panel section-gap" }, el("h4", {}, `元学习结果 — ${label}`));
   panel.append(el("table", { class: "kv" },
     kvRow("状态", record.status || "—"),
     kvRow("总耗时", foldDurationNode(detail, session)),
@@ -3046,7 +3073,7 @@ function metaResultPanel(detail, session) {
     record.sandbox_image_update ? kvRow("沙箱镜像", sandboxImageNode(record.sandbox_image_update)) : null,
   ));
   if (record.taste) {
-    panel.append(el("h4", { class: "section-gap" }, "Taste（注入本 Epoch 全部 Fold）"), renderMarkdown(record.taste));
+    panel.append(el("h4", { class: "section-gap" }, "Taste（注入后续 Fold，直到下一次元学习）"), renderMarkdown(record.taste));
   }
   return panel;
 }

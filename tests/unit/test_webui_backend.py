@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
 from autotrade.environment.runtime import write_json_atomic
-from autotrade.pipelines.hitl_state import PARAM_DEFAULTS, ControlState, write_control
+from autotrade.pipelines.hitl_state import PARAM_DEFAULTS, ControlState, read_control, write_control
 from autotrade.webui.manager import ExperimentManager, ManagerError
 from autotrade.webui.server import create_app
 from autotrade.webui.traces import read_trace_page, read_trace_tail, trace_stats
@@ -82,6 +82,9 @@ class WebuiBackendTest(unittest.TestCase):
         strategy_dir = experiment_dir / "strategy_artifacts" / "epoch_001" / "strategy_epoch_001_fold_2022Q1"
         strategy_dir.mkdir(parents=True)
         (strategy_dir / "main.py").write_text("def main(ctx):\n    pass\n", encoding="utf-8")
+        taste_path = experiment_dir / "meta_learning" / "epoch_001" / "taste.md"
+        taste_path.parent.mkdir(parents=True)
+        taste_path.write_text("fixture-taste\n", encoding="utf-8")
         _write_ledger(
             experiment_dir,
             [
@@ -92,6 +95,7 @@ class WebuiBackendTest(unittest.TestCase):
                     "fold_id": "epoch_001_meta_learning",
                     "run_id": "run_meta",
                     "status": "taste_only",
+                    "taste_path": str(taste_path),
                 },
                 {
                     "record_type": "fold",
@@ -199,6 +203,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertIn("ACTIVE_SESSION_STATES.has(status.state)", script.text)
         self.assertIn("当前 Step 策略分析（可选，仅基于验证期证据）", script.text)
         self.assertIn("Fold 策略分析（可选，仅基于验证期证据）", script.text)
+        self.assertIn("重跑本 Fold（最新完成）", script.text)
         self.assertNotIn("DeepSeek 分析", script.text)
 
     def test_parameter_schema_defaults_track_worker_defaults(self) -> None:
@@ -230,6 +235,11 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(fields["first_test_period"]["type"], "string")
         # Filled per-epoch on the detail page instead of at creation.
         self.assertNotIn("meta_learning_directive", fields)
+        self.assertEqual(fields["meta_learning_fold_interval"]["default"], 0)
+        self.assertEqual(fields["meta_learning_fold_interval"]["min"], 0)
+        self.assertEqual(fields["fold_exploration_directive"]["type"], "text")
+        self.assertEqual(fields["fold_exploration_directive"]["default"], "")
+        self.assertTrue(fields["fold_exploration_directive"]["wide"])
         self.assertTrue(all(field.get("help") for field in fields.values()))
 
     def test_period_options_and_defaults_from_calendar(self) -> None:
@@ -405,12 +415,14 @@ class WebuiBackendTest(unittest.TestCase):
                         "heldout_first_period": "2023Q1",
                         "heldout_last_period": "2023Q1",
                         "epochs": 2,
+                        "fold_exploration_directive": "持续检验事件冲击沿关系网络的传播。",
                     }
                 },
             )
         self.assertEqual(response.status_code, 200, response.text)
         params = json.loads((self.experiments_root / "exp_new" / "hitl" / "params.json").read_text(encoding="utf-8"))
         self.assertEqual(params["epochs"], 2)
+        self.assertEqual(params["fold_exploration_directive"], "持续检验事件冲击沿关系网络的传播。")
         self.assertTrue(params["work_root"].endswith("/.runtime/sandboxes/exp_new"))
         control = json.loads(
             (self.experiments_root / "exp_new" / "hitl" / "control.json").read_text(encoding="utf-8")
@@ -530,6 +542,10 @@ class WebuiBackendTest(unittest.TestCase):
         )
         self.assertEqual(wrong.status_code, 400)
         self.assertIn("只能重跑最新完成的 Fold", wrong.json()["detail"])
+        automatic = self.client.post(
+            "/api/experiments/exp_hitl/control", json={"action": "set_mode", "mode": "auto"}
+        )
+        self.assertEqual(automatic.status_code, 200, automatic.text)
         with patch.object(ExperimentManager, "start_worker", return_value={"spawned_pid": 7}):
             ok = self.client.post(
                 "/api/experiments/exp_hitl/control",
@@ -539,6 +555,7 @@ class WebuiBackendTest(unittest.TestCase):
         control = ok.json()["control"]
         self.assertIn("epoch_001/fold_2022Q1", control["rerun_sessions"])
         self.assertNotIn("epoch_001/fold_2022Q1", control["approved_sessions"])
+        self.assertEqual(control["mode"], "manual")
 
     def test_skip_to_heldout_and_gpu_count_controls(self) -> None:
         with patch.object(ExperimentManager, "start_worker", return_value={"spawned_pid": 5}):
@@ -778,16 +795,141 @@ class WebuiBackendTest(unittest.TestCase):
 
         from autotrade.pipelines.hitl_state import proc_start_ticks
 
+        session_key = "epoch_001/meta_learning_after_fold_001"
+        hitl_dir = self.experiments_root / "exp_hitl" / "hitl"
+        schedule_path = hitl_dir / "schedule.json"
+        schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
+        schedule["sessions"].insert(
+            2,
+            {
+                "key": session_key,
+                "kind": "meta_learning",
+                "epoch_id": "epoch_001",
+                "meta_learning_id": "epoch_001_after_fold_001",
+                "trigger_after_folds": 1,
+                "before_fold_id": "fold_2022Q2",
+            },
+        )
+        write_json_atomic(schedule_path, schedule)
+        automatic = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_mode", "mode": "auto"},
+        )
+        self.assertEqual(automatic.status_code, 200, automatic.text)
+        approved = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "approve", "session_key": session_key, "directive": "旧方向"},
+        )
+        self.assertEqual(approved.status_code, 200, approved.text)
         proc = subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
         try:
             write_json_atomic(
-                self.experiments_root / "exp_hitl" / "hitl" / "status.json",
-                {"pid": proc.pid, "pid_start_ticks": proc_start_ticks(proc.pid), "state": "running_session"},
+                hitl_dir / "status.json",
+                {
+                    "pid": proc.pid,
+                    "pid_start_ticks": proc_start_ticks(proc.pid),
+                    "state": "running_session",
+                    "session_key": session_key,
+                },
             )
             manager = ExperimentManager(self.repo_root, self.experiments_root)
             result = manager.control("exp_hitl", "terminate")
             self.assertEqual(result["terminated_pid"], proc.pid)
             self.assertFalse(result["escalated"])  # plain sleep dies on SIGTERM
+            self.assertEqual(result["approval_revoked_session"], session_key)
+            control = read_control(hitl_dir / "control.json")
+            self.assertNotIn(session_key, control.approved_sessions)
+            self.assertEqual(control.directives[session_key], "旧方向")
+            self.assertEqual(control.mode, "manual")
+
+            revised = "Within this experiment, explore event-driven strategies built upon knowledge graphs, GNNs and natural language analysis."
+            preview = self.client.post(
+                "/api/experiments/exp_hitl/prompt-preview",
+                json={"session_key": session_key, "directive": revised},
+            )
+            self.assertEqual(preview.status_code, 200, preview.text)
+            self.assertIn(revised, preview.json()["prompt"])
+            reapproved = self.client.post(
+                "/api/experiments/exp_hitl/control",
+                json={"action": "approve", "session_key": session_key, "directive": revised},
+            )
+            self.assertEqual(reapproved.status_code, 200, reapproved.text)
+            self.assertIn(session_key, reapproved.json()["control"]["approved_sessions"])
+            self.assertEqual(reapproved.json()["control"]["directives"][session_key], revised)
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_terminate_preserves_approval_for_a_settled_session(self) -> None:
+        import subprocess
+        import sys as _sys
+
+        from autotrade.pipelines.hitl_state import proc_start_ticks
+
+        session_key = "epoch_001/fold_2022Q1"
+        hitl_dir = self.experiments_root / "exp_hitl" / "hitl"
+        automatic = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "set_mode", "mode": "auto"},
+        )
+        self.assertEqual(automatic.status_code, 200, automatic.text)
+        self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "approve", "session_key": session_key, "directive": "已完成方向"},
+        )
+        proc = subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        try:
+            write_json_atomic(
+                hitl_dir / "status.json",
+                {
+                    "pid": proc.pid,
+                    "pid_start_ticks": proc_start_ticks(proc.pid),
+                    "state": "running_session",
+                    "session_key": session_key,
+                },
+            )
+            result = ExperimentManager(self.repo_root, self.experiments_root).control(
+                "exp_hitl", "terminate"
+            )
+            self.assertNotIn("approval_revoked_session", result)
+            control = read_control(hitl_dir / "control.json")
+            self.assertIn(session_key, control.approved_sessions)
+            self.assertEqual(control.mode, "auto")
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_terminate_auto_session_without_explicit_approval_still_waits_for_reapproval(self) -> None:
+        import subprocess
+        import sys as _sys
+
+        from autotrade.pipelines.hitl_state import proc_start_ticks
+
+        session_key = "epoch_001/fold_2022Q2"
+        hitl_dir = self.experiments_root / "exp_hitl" / "hitl"
+        automatic = self.client.post(
+            "/api/experiments/exp_hitl/control", json={"action": "set_mode", "mode": "auto"}
+        )
+        self.assertEqual(automatic.status_code, 200, automatic.text)
+        self.assertNotIn(session_key, automatic.json()["control"]["approved_sessions"])
+        proc = subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        try:
+            write_json_atomic(
+                hitl_dir / "status.json",
+                {
+                    "pid": proc.pid,
+                    "pid_start_ticks": proc_start_ticks(proc.pid),
+                    "state": "running_session",
+                    "session_key": session_key,
+                },
+            )
+            result = ExperimentManager(self.repo_root, self.experiments_root).control(
+                "exp_hitl", "terminate"
+            )
+            self.assertEqual(result["approval_revoked_session"], session_key)
+            control = read_control(hitl_dir / "control.json")
+            self.assertEqual(control.mode, "manual")
+            self.assertNotIn(session_key, control.approved_sessions)
         finally:
             proc.kill()
             proc.wait()
@@ -949,9 +1091,17 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertIn("launched_at", status)
         self.assertEqual(status["completed_sessions"], 2)
         self.assertEqual(experiment_state(experiment_dir)["state"], "launching")
-        # While launching: no double spawn, no resume, no delete.
+        # While launching: no double spawn, destructive history mutation, or delete.
         with self.assertRaisesRegex(ManagerError, "启动中"):
             manager.start_worker("exp_hitl")
+        with self.assertRaisesRegex(ManagerError, "停止运行中的 worker"):
+            manager.control(
+                "exp_hitl", "rerun_fold", session_key="epoch_001/fold_2022Q1"
+            )
+        with self.assertRaisesRegex(ManagerError, "停止运行中的 worker"):
+            manager.control(
+                "exp_hitl", "rollback_fold", session_key="epoch_001/fold_2022Q1"
+            )
         with self.assertRaisesRegex(ManagerError, "live worker"):
             manager.delete_experiment("exp_hitl")
         self.assertIn("exp_hitl", manager.running_experiments())
@@ -1290,6 +1440,10 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertIn("attachment", response.headers.get("content-disposition", ""))
 
     def test_prompt_preview_embeds_directive_and_guards_heldout(self) -> None:
+        params_path = self.experiments_root / "exp_hitl" / "hitl" / "params.json"
+        params = json.loads(params_path.read_text(encoding="utf-8"))
+        params["fold_exploration_directive"] = "持续检验事件冲击沿关系网络的传播。"
+        write_json_atomic(params_path, params)
         fold = self.client.post(
             "/api/experiments/exp_hitl/prompt-preview",
             json={"session_key": "epoch_001/fold_2022Q2", "directive": "试试低波动组合"},
@@ -1298,6 +1452,8 @@ class WebuiBackendTest(unittest.TestCase):
         prompt = fold.json()["prompt"]
         self.assertIn("研究者本 Fold 指令（用户注入）", prompt)
         self.assertIn("试试低波动组合", prompt)
+        self.assertIn("实验级默认 Fold 探索方向（用户注入）", prompt)
+        self.assertIn("持续检验事件冲击沿关系网络的传播。", prompt)
         self.assertNotIn("test_period", prompt)  # preview mirrors the runtime redaction
         meta = self.client.post(
             "/api/experiments/exp_hitl/prompt-preview",
@@ -1313,6 +1469,114 @@ class WebuiBackendTest(unittest.TestCase):
             "/api/experiments/exp_hitl/prompt-preview", json={"session_key": "nope"}
         )
         self.assertEqual(missing.status_code, 404)
+
+    def test_periodic_meta_records_are_unique_causal_and_block_consumed_fold_reruns(self) -> None:
+        experiment_dir = self.experiments_root / "exp_hitl"
+        hitl = experiment_dir / "hitl"
+        base_taste = experiment_dir / "meta_learning" / "epoch_001" / "taste.md"
+        periodic_taste = (
+            experiment_dir / "meta_learning" / "epoch_001_after_fold_001" / "taste.md"
+        )
+        base_taste.parent.mkdir(parents=True, exist_ok=True)
+        periodic_taste.parent.mkdir(parents=True, exist_ok=True)
+        base_taste.write_text("base-taste", encoding="utf-8")
+        periodic_taste.write_text("periodic-taste", encoding="utf-8")
+
+        records = [
+            json.loads(line)
+            for line in (experiment_dir / "ledgers" / "experiment_ledger.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        records.extend(
+            [
+                {
+                    "record_type": "meta_learning",
+                    "experiment_id": "exp_hitl",
+                    "epoch_id": "epoch_001",
+                    "meta_learning_id": "epoch_001",
+                    "trigger_after_folds": 0,
+                    "fold_id": "epoch_001_meta_learning",
+                    "run_id": "run_meta_base_latest",
+                    "status": "taste_only",
+                    "taste_path": str(base_taste),
+                },
+                {
+                    "record_type": "meta_learning",
+                    "experiment_id": "exp_hitl",
+                    "epoch_id": "epoch_001",
+                    "meta_learning_id": "epoch_001_after_fold_001",
+                    "trigger_after_folds": 1,
+                    "fold_id": "epoch_001_after_fold_001_meta_learning",
+                    "run_id": "run_meta_periodic",
+                    "status": "taste_only_kept_parent",
+                    "taste_path": str(periodic_taste),
+                },
+            ]
+        )
+        _write_ledger(experiment_dir, records)
+        schedule = json.loads((hitl / "schedule.json").read_text(encoding="utf-8"))
+        schedule["sessions"].insert(
+            2,
+            {
+                "key": "epoch_001/meta_learning_after_fold_001",
+                "kind": "meta_learning",
+                "epoch_id": "epoch_001",
+                "meta_learning_id": "epoch_001_after_fold_001",
+                "trigger_after_folds": 1,
+                "before_fold_id": "fold_2022Q2",
+            },
+        )
+        write_json_atomic(hitl / "schedule.json", schedule)
+
+        detail = self.client.get("/api/experiments/exp_hitl").json()
+        meta_sessions = [session for session in detail["sessions"] if session["kind"] == "meta_learning"]
+        self.assertEqual(len(meta_sessions), 2)
+        self.assertEqual(
+            [session["record"]["run_id"] for session in meta_sessions],
+            ["run_meta_base_latest", "run_meta_periodic"],
+        )
+        q1_prompt = self.client.post(
+            "/api/experiments/exp_hitl/prompt-preview",
+            json={"session_key": "epoch_001/fold_2022Q1"},
+        ).json()["prompt"]
+        q2_prompt = self.client.post(
+            "/api/experiments/exp_hitl/prompt-preview",
+            json={"session_key": "epoch_001/fold_2022Q2"},
+        ).json()["prompt"]
+        self.assertIn("base-taste", q1_prompt)
+        self.assertNotIn("periodic-taste", q1_prompt)
+        self.assertIn("periodic-taste", q2_prompt)
+
+        rerun = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "rerun_fold", "session_key": "epoch_001/fold_2022Q1"},
+        )
+        self.assertEqual(rerun.status_code, 400)
+        self.assertIn("后续元学习会话", rerun.json()["detail"])
+
+    def test_fold_prompt_preview_waits_for_nearest_pending_meta(self) -> None:
+        hitl = self.experiments_root / "exp_hitl" / "hitl"
+        schedule = json.loads((hitl / "schedule.json").read_text(encoding="utf-8"))
+        schedule["sessions"].insert(
+            2,
+            {
+                "key": "epoch_001/meta_learning_after_fold_001",
+                "kind": "meta_learning",
+                "epoch_id": "epoch_001",
+                "meta_learning_id": "epoch_001_after_fold_001",
+                "trigger_after_folds": 1,
+            },
+        )
+        write_json_atomic(hitl / "schedule.json", schedule)
+
+        response = self.client.post(
+            "/api/experiments/exp_hitl/prompt-preview",
+            json={"session_key": "epoch_001/fold_2022Q2"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("nearest preceding Meta", response.json()["detail"])
 
     def test_dataset_coverage_reads_partition_bounds(self) -> None:
         from autotrade.webui.registry import dataset_coverage

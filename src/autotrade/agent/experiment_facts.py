@@ -51,6 +51,8 @@ def build_experiment_facts(
                 "experiment_id": manifest.get("experiment_id"),
                 "run_id": manifest.get("run_id"),
                 "epoch_id": manifest.get("epoch_id"),
+                "meta_learning_id": manifest.get("meta_learning_id") if is_meta else None,
+                "trigger_after_folds": manifest.get("trigger_after_folds") if is_meta else None,
                 "session_kind": kind,
                 "fold_sequence_or_opaque_id": _opaque_fold_ref(manifest.get("fold_id")),
                 "phase": None if is_meta else manifest.get("phase"),
@@ -64,7 +66,10 @@ def build_experiment_facts(
         "visibility_policy": {
             "train_visible": True,
             "valid_visible": True,
+            # Raw Test data remains unmounted. Meta alone receives compact
+            # metrics from already-completed frozen Fold tests via workspace.
             "test_visible": False,
+            "historical_frozen_test_metrics_visible": is_meta,
             "heldout_visible": False,
             "hidden_schedule_redacted": True,
             "formal_strategy_read_roots": ["/mnt/snapshot", "/mnt/agent/output", "/mnt/agent/models"],
@@ -243,6 +248,7 @@ def _data_profile_facts(data_summary: Mapping[str, object], *, include_dates: bo
     return _compact_mapping(
         {
             "views": compact_views,
+            "unit_contract": data_summary.get("unit_contract"),
             "large_table_guidance": data_summary.get("large_table_guidance"),
         }
     )
@@ -397,7 +403,7 @@ def _meta_learning_facts(manifest: Mapping[str, object]) -> dict[str, object]:
     return _compact_mapping(
         {
             "taste_output_path": manifest.get("taste_output") or "/mnt/agent/workspace/taste.md",
-            "taste_injected_scope": "current_epoch_fold_prompts",
+            "taste_injected_scope": "subsequent_fold_prompts_until_next_meta_trigger",
             "development_inputs": {
                 key: value
                 for key, value in development_inputs.items()
@@ -453,5 +459,3 @@ def _compact_mapping(value: Mapping[str, object]) -> dict[str, object]:
             continue
         compact[str(key)] = item
     return compact
-
-

@@ -27,7 +27,7 @@ FINAL_EVAL_WALL_CAP_MULTIPLIER = 3.0
 # Increment only when the cached snapshot/replay on-disk contract changes.
 # Source revisions (including Git HEAD) are intentionally not cache inputs:
 # harmless code changes should not invalidate every expensive data view.
-SNAPSHOT_CACHE_FORMAT_VERSION = 3
+SNAPSHOT_CACHE_FORMAT_VERSION = 5
 
 
 class SnapshotProvider(Protocol):
@@ -362,8 +362,16 @@ class ExperimentConfig:
     # (fewer modifications while holding returns, down to zero changes).
     convergence_start_epoch: int = 3
     # Optional experiment-level research direction injected only into the
-    # Epoch-start meta-learning prompt.
+    # active meta-learning prompt.
     meta_learning_directive: str = ""
+    # Optional experiment-level exploration direction injected into every
+    # automatically assembled ordinary Fold prompt. Per-Fold HITL directives
+    # remain a separate, additive control surface.
+    fold_exploration_directive: str = ""
+    # Preserve the Epoch-start Meta session. A positive value additionally
+    # triggers Meta after every N completed Folds, before the next Fold; 0
+    # disables the within-Epoch triggers.
+    meta_learning_fold_interval: int = 0
     # Raw prior meta-learning traces handed to the next meta session are bounded
     # to the most recent N epochs (0 disables raw memory). Unbounded concatenation
     # grows O(epochs^2); older sessions persist via the Taste chain and the
@@ -375,7 +383,7 @@ class ExperimentConfig:
     broker_profile: BrokerProfile = field(default_factory=BrokerProfile)
     # Each sandbox container is limited to ~10% of host CPU/RAM by default.
     sandbox_spec: SandboxSpec = field(default_factory=SandboxSpec.from_host_fraction)
-    # Optional override used only by Epoch-start meta-learning runs. Ordinary
+    # Optional override used only by meta-learning runs. Ordinary
     # Fold and held-out runs keep ``sandbox_spec`` so production backtests stay
     # offline unless explicitly configured otherwise.
     meta_learning_sandbox_spec: SandboxSpec | None = None
@@ -432,10 +440,20 @@ class ExperimentConfig:
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be a positive finite number, got {getattr(self, name)!r}")
-        for name in ("finalize_before_deadline_seconds", "offsession_tick_minutes", "meta_memory_max_epochs"):
+        for name in (
+            "finalize_before_deadline_seconds",
+            "offsession_tick_minutes",
+            "meta_memory_max_epochs",
+            "meta_learning_fold_interval",
+        ):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be a non-negative finite number, got {getattr(self, name)!r}")
+        if int(self.meta_learning_fold_interval) != self.meta_learning_fold_interval:
+            raise ValueError(
+                "meta_learning_fold_interval must be a non-negative integer, "
+                f"got {self.meta_learning_fold_interval!r}"
+            )
         for name in (
             "decision_max_sim_minutes", "backtest_final_eval_max_seconds_per_decision",
             "backtest_final_eval_max_seconds_per_trading_day", "nl_max_calls_per_backtest",
@@ -472,6 +490,9 @@ class FrozenArtifact:
     artifact_hash: str
     model_path: Path | None
     model_artifact_hash: str
+    # Meta may regularize code/models without backtesting. The next ordinary
+    # Fold must validate that lineage before it can be used as fallback/Test.
+    requires_validation: bool = False
 
 
 @dataclass

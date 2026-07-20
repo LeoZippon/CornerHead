@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Mapping
 
+from autotrade.environment.features.units import AGENT_UNIT_CONTRACT
 from autotrade.environment.runtime import utc_now_iso
 
 LARGE_TABLE_ROW_THRESHOLD = 1_000_000
@@ -89,6 +90,7 @@ def write_agent_data_summary(
         "generated_at": utc_now_iso(),
         "kind": kind,
         "fold_id": fold_id,
+        "unit_contract": AGENT_UNIT_CONTRACT,
         "large_table_guidance": list(LARGE_TABLE_GUIDANCE),
         "views": {},
     }
@@ -239,7 +241,16 @@ def _compact_domains(domains: object) -> dict[str, dict[str, object]]:
             continue
         compact[str(name)] = {
             key: value.get(key)
-            for key in ("rows", "datasets", "coverage_start", "coverage_end", "files", "skipped")
+            for key in (
+                "rows",
+                "datasets",
+                "coverage_start",
+                "coverage_end",
+                "files",
+                "skipped",
+                "units",
+                "unit_conversions",
+            )
             if key in value
         }
     return compact

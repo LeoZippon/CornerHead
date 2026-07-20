@@ -419,6 +419,17 @@ class ExperimentConfigValidationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = make_config(Path(tmp))
             self.assertEqual(config.first_test_period, "2022Q1")
+            self.assertEqual(config.meta_learning_fold_interval, 0)
+            self.assertEqual(config.fold_exploration_directive, "")
+
+    def test_meta_learning_fold_interval_is_a_non_negative_integer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for value in (-1, math.nan, math.inf, 1.5):
+                with self.subTest(value=value):
+                    with self.assertRaisesRegex(ValueError, "meta_learning_fold_interval"):
+                        make_config(root, meta_learning_fold_interval=value)
+            self.assertEqual(make_config(root, meta_learning_fold_interval=3).meta_learning_fold_interval, 3)
 
 
 class DefaultsDriftTest(unittest.TestCase):

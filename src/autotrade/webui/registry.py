@@ -18,6 +18,7 @@ from typing import Mapping
 
 from autotrade.pipelines.fold_analysis import analysis_paths
 from autotrade.pipelines.ledger import latest_fold_records, latest_heldout_records
+from autotrade.pipelines.meta_schedule import meta_record_id, meta_record_session_key
 from autotrade.pipelines.hitl_state import (
     ANALYSIS_DIR_NAME,
     CONTROL_NAME,
@@ -196,7 +197,7 @@ def summarize_experiment(experiment_dir: Path) -> dict[str, object]:
         meta = [record for record in records if record.get("record_type") == "meta_learning"]
         schedule = read_json(experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME)
         sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else None
-        completed_sessions = len(folds) + len({str(m.get("epoch_id")) for m in meta}) + (1 if heldout else 0)
+        completed_sessions = len(folds) + len({meta_record_id(record) for record in meta}) + (1 if heldout else 0)
         status = state.get("status") or {}
         revealed = test_results_revealed(experiment_dir)
         summary.update(
@@ -315,7 +316,9 @@ def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, o
     records = read_ledger_records(experiment_dir)
     fold_map = latest_fold_records(records)
     meta_map = {
-        str(record.get("epoch_id")): record for record in records if record.get("record_type") == "meta_learning"
+        meta_record_id(record): record
+        for record in records
+        if record.get("record_type") == "meta_learning"
     }
     heldout_records = latest_heldout_records(records)
     schedule = read_json(hitl_dir / SCHEDULE_NAME)
@@ -334,7 +337,7 @@ def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, o
                     entry["record"] = guarded_fold_view(record)
                     entry["analysis_available"] = analysis_available(hitl_dir, epoch_id, str(entry.get("fold_id")))
             elif kind == "meta_learning":
-                record = meta_map.get(epoch_id)
+                record = meta_map.get(str(entry.get("meta_learning_id") or epoch_id))
                 if record is not None:
                     entry["record"] = _public_meta_view(record)
             elif kind == "heldout":
@@ -348,7 +351,11 @@ def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, o
             if kind not in ("fold", "meta_learning", "heldout"):
                 continue  # attempt_failed etc. are audit evidence, not sessions
             entry: dict[str, object] = {
-                "key": f"{record.get('epoch_id')}/{record.get('fold_id')}",
+                "key": (
+                    meta_record_session_key(record)
+                    if kind == "meta_learning"
+                    else f"{record.get('epoch_id')}/{record.get('fold_id')}"
+                ),
                 "kind": kind,
                 "epoch_id": record.get("epoch_id"),
                 "fold_id": record.get("fold_id"),

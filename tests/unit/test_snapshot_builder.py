@@ -39,9 +39,9 @@ def build_raw(raw: Path) -> None:
         write(
             raw / "daily_basic" / f"trade_date={trade_date}.parquet",
             pd.DataFrame([
-                {"trade_date": trade_date, "ts_code": "000001.SZ", "turnover_rate": 2.0, "pe": 10.0,
+                {"trade_date": trade_date, "ts_code": "000001.SZ", "turnover_rate": 2.0, "dv_ttm": 3.0, "pe": 10.0,
                  "total_share": 100.0, "total_mv": 1000.0, "close": 10.5, "circ_mv": 2_000_000.0},
-                {"trade_date": trade_date, "ts_code": "000010.SZ", "turnover_rate": 1.0, "pe": 30.0,
+                {"trade_date": trade_date, "ts_code": "000010.SZ", "turnover_rate": 1.0, "dv_ttm": 1.5, "pe": 30.0,
                  "total_share": 10.0, "total_mv": 100.0, "close": 3.2, "circ_mv": 80_000.0},
             ]),
         )
@@ -523,6 +523,7 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(daily.loc[0, "amount"], 1050000.0)  # 千元 -> 元
             self.assertAlmostEqual(daily.loc[0, "pct_chg"], 0.05)
             self.assertAlmostEqual(daily.loc[0, "turnover_rate"], 0.02)
+            self.assertAlmostEqual(daily.loc[0, "dv_ttm"], 0.03)
 
             intraday = pd.read_parquet(out / "intraday_1min.parquet")
             self.assertIn("auction_correction_rule", intraday.columns)
@@ -543,11 +544,26 @@ class SnapshotBuilderTest(unittest.TestCase):
                 float(after_auction.loc[after_auction["trade_date"] == "20211008", "price"].iloc[0]),
                 10.02,
             )
+            auction_row = after_auction.loc[after_auction["trade_date"] == "20211008"].iloc[0]
+            self.assertAlmostEqual(float(auction_row["turnover_rate"]), 0.0001)
+            self.assertAlmostEqual(float(auction_row["volume_ratio"]), 1.2)
+            self.assertEqual(float(auction_row["float_share"]), 3_000_000_000.0)
             self.assertEqual(
-                after_auction.loc[
-                    after_auction["trade_date"] == "20211008", "available_at_rule"
-                ].iloc[0],
+                auction_row["available_at_rule"],
                 "observed:test_capture",
+            )
+            after_manifest = load_snapshot_manifest(after_out)
+            self.assertEqual(after_manifest["domains"]["auction"]["units"], "unit_contract")
+            self.assertEqual(
+                after_manifest["domains"]["auction"]["unit_conversions"],
+                [
+                    {"column": "turnover_rate", "factor": 0.01, "rule": "percent->decimal"},
+                    {
+                        "column": "float_share",
+                        "factor": 10_000.0,
+                        "rule": "ten_thousand_shares->shares",
+                    },
+                ],
             )
 
             events = pd.read_parquet(out / "events.parquet")

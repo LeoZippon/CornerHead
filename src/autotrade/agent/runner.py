@@ -124,7 +124,7 @@ class AgentSessionRunner:
     """Drives one Agent session against the Environment tools.
 
     ``mode="fold"`` is the normal validation session; ``mode="meta_learning"``
-    runs the Epoch-start Taste/regularization session, where backtest/finish_fold
+    runs a Taste/regularization session, where backtest/finish_fold
     are rejected and the session ends with a ``done`` action.
     """
 
@@ -141,6 +141,7 @@ class AgentSessionRunner:
         phase: str = "exploration",
         step_tree_enabled: bool = False,
         taste_prompt: str = "",
+        fold_exploration_directive: str = "",
         fold_directive: str = "",
         system_prompt_override: str = "",
         meta_learning_directive: str = "",
@@ -189,6 +190,8 @@ class AgentSessionRunner:
                 prompt_kwargs["convergence_prompt"] = convergence_prompt
             if taste_prompt:
                 prompt_kwargs["taste_prompt"] = taste_prompt
+            if fold_exploration_directive:
+                prompt_kwargs["fold_exploration_directive"] = fold_exploration_directive
             if fold_directive:
                 prompt_kwargs["fold_directive"] = fold_directive
             # HITL: a researcher-edited prompt replaces the assembled one wholesale

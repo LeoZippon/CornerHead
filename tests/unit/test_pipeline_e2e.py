@@ -25,6 +25,8 @@ from autotrade.pipelines import (
     build_fold_schedule,
 )
 from autotrade.pipelines.folds import heldout_periods, period_bounds, quarter_bounds
+from autotrade.pipelines.meta_schedule import meta_learning_trigger_counts
+from autotrade.pipelines.experiment import _agent_visible_ledger_record
 from autotrade.pipelines.assembly import _session_config_summary
 from scripts.experiments._cli import (
     EXPERIMENT_META_REBUILD_HELP,
@@ -107,6 +109,11 @@ def make_config(tmp: Path, **overrides) -> ExperimentConfig:
 
 
 class FoldScheduleTest(unittest.TestCase):
+    def test_meta_learning_interval_keeps_epoch_start_and_avoids_trailing_run(self):
+        self.assertEqual(meta_learning_trigger_counts(8, 0), (0,))
+        self.assertEqual(meta_learning_trigger_counts(8, 3), (0, 3, 6))
+        self.assertEqual(meta_learning_trigger_counts(8, 8), (0,))
+
     def test_fold_2022q1_matches_documented_windows(self):
         folds = build_fold_schedule("2022Q1", "2022Q2", TRADING_DAYS)
         first = folds[0]
@@ -419,7 +426,26 @@ class PipelineEndToEndTest(unittest.TestCase):
                     "finish_reason": "fold_finished",
                     "run_manifest_ref": str(manifest_path),
                     "validation_result": {"total_return": 0.1},
-                    "test_result": {"total_return": 0.2},
+                    "test_result": {
+                        "total_return": 0.2,
+                        "sharpe": 0.4,
+                        "turnover": 1.25,
+                        "trade_count": 7,
+                        "exposure": {
+                            "avg_gross": 0.35,
+                            "max_gross": 0.8,
+                            "zero_position_days": 2,
+                            "replay_days": 60,
+                            "daily": [0.1, 0.2],
+                        },
+                        "result_path": "/secret/test/result",
+                        "orders": [{"ts_code": "000001.SZ"}],
+                        "benchmark": {
+                            "label": "000300.SH",
+                            "excess_return": 0.03,
+                            "raw_daily_returns": [0.1],
+                        },
+                    },
                     "verbose_agent_trace": ["not for meta history"],
                 }
             )
@@ -432,7 +458,27 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertTrue(compact["fold_id"].startswith("fold_ref_"))
             self.assertNotEqual(compact["fold_id"], "fold_2022Q1")
             self.assertEqual(compact["backtest_summaries"][0]["total_return"], 0.1)
-            self.assertNotIn("test_result", compact)
+            self.assertEqual(
+                compact["test_result"],
+                {
+                    "total_return": 0.2,
+                    "sharpe": 0.4,
+                    "trade_count": 7,
+                    "turnover": 1.25,
+                    "benchmark": {"label": "000300.SH", "excess_return": 0.03},
+                    "exposure": {
+                        "avg_gross": 0.35,
+                        "max_gross": 0.8,
+                        "zero_position_days": 2,
+                        "replay_days": 60,
+                    },
+                },
+            )
+            self.assertNotIn("test_result", _agent_visible_ledger_record(pipeline.ledger.read("fold")[0]))
+            rendered_test = json.dumps(compact["test_result"], ensure_ascii=False)
+            self.assertNotIn("result_path", rendered_test)
+            self.assertNotIn("orders", rendered_test)
+            self.assertNotIn("raw_daily_returns", rendered_test)
             self.assertNotIn("large_internal_field", compact["backtest_summaries"][0])
 
     def test_single_epoch_runs_meta_learning_before_fold_and_heldout(self):
@@ -481,6 +527,9 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertIn("code_diff_lines", record["steps"][0]["modification_delta_summary"])
             self.assertGreater(record["validation_result"]["total_return"], 0.0)
             self.assertGreater(record["test_result"]["total_return"], 0.0)
+            self.assertIn("exposure", record["test_result"])
+            self.assertIn("turnover", record["test_result"])
+            self.assertIn("trade_count", record["test_result"])
 
             frozen_dir = Path(record["frozen_strategy_artifact_path"])
             self.assertTrue((frozen_dir / "manifest.json").exists())
@@ -564,6 +613,30 @@ class PipelineEndToEndTest(unittest.TestCase):
             data_summary = captured_meta["data_summary"]
             self.assertEqual(data_summary["kind"], "meta_learning")
             self.assertNotIn("schema_version", data_summary)
+            self.assertEqual(
+                data_summary["unit_contract"]["daily.parquet"]["conversion_factors"]["dv_ttm"],
+                0.01,
+            )
+            self.assertEqual(
+                data_summary["unit_contract"]["auction.parquet"]["conversion_factors"],
+                {"turnover_rate": 0.01, "float_share": 10_000.0},
+            )
+            self.assertEqual(
+                data_summary["unit_contract"]["auction.parquet"]["volume_ratio"],
+                "dimensionless ratio; 1.2=1.2x",
+            )
+            self.assertEqual(
+                data_summary["unit_contract"]["events.parquet"]["datasets"]["moneyflow"]["*_amount"],
+                "10k_CNY; 500 means CNY 5m",
+            )
+            self.assertIn(
+                "not an exhaustive",
+                data_summary["unit_contract"]["coverage"]["source_unions"],
+            )
+            self.assertIn(
+                "cross-dataset calculation",
+                data_summary["unit_contract"]["unknown_source_unit_policy"],
+            )
             self.assertIn("large_table_guidance", data_summary)
             self.assertEqual(sorted(data_summary["views"]), ["snapshot", "train", "valid"])
             self.assertNotIn("test", data_summary["views"])
@@ -839,6 +912,68 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertTrue(parent_ids)
             self.assertTrue(all(pid.startswith("strategy_ref_") for pid in parent_ids))
 
+    def test_batch_interval_meta_uses_upcoming_fold_and_updates_only_later_folds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(
+                tmp,
+                first_test_period="2022Q1",
+                last_test_period="2022Q2",
+                meta_learning_fold_interval=1,
+            )
+            meta_seen: list[dict[str, object]] = []
+            fold_tastes: list[tuple[str, str]] = []
+
+            def meta_learner(ctx: ToolContext) -> None:
+                meta_seen.append(
+                    {
+                        "id": ctx.manifest.get("meta_learning_id"),
+                        "trigger": ctx.manifest.get("trigger_after_folds"),
+                        "visible_fold": (ctx.manifest.get("meta_learning_visible_fold") or {}).get("fold_id"),
+                        "parent": ctx.manifest.get("parent_strategy_artifact_id"),
+                    }
+                )
+                (ctx.paths.workspace / "taste.md").write_text(
+                    f"taste-{ctx.manifest.get('meta_learning_id')}", encoding="utf-8"
+                )
+
+            def agent_factory(ctx, fold, manifest):
+                fold_tastes.append((fold.fold_id, str(manifest.get("taste_prompt") or "")))
+                return ScriptedFoldAgent(ctx)
+
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                agent_factory,
+                proxy=ScriptedLLM([]),
+                meta_learner=meta_learner,
+            )
+            pipeline.run(TRADING_DAYS)
+
+            self.assertEqual(
+                meta_seen,
+                [
+                    {"id": "epoch_001", "trigger": 0, "visible_fold": "fold_2022Q1", "parent": None},
+                    {
+                        "id": "epoch_001_after_fold_001",
+                        "trigger": 1,
+                        "visible_fold": "fold_2022Q2",
+                        "parent": "strategy_epoch_001_fold_2022Q1",
+                    },
+                ],
+            )
+            self.assertEqual(
+                fold_tastes,
+                [
+                    ("fold_2022Q1", "taste-epoch_001"),
+                    ("fold_2022Q2", "taste-epoch_001_after_fold_001"),
+                ],
+            )
+            self.assertEqual(
+                [record["meta_learning_id"] for record in pipeline.ledger.read("meta_learning")],
+                ["epoch_001", "epoch_001_after_fold_001"],
+            )
+
     def test_meta_learning_injects_full_records_and_prior_epoch_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -872,7 +1007,7 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertNotIn("fold_2022Q1", epoch2_ledger)
             self.assertIn("meta_learning", epoch2_ledger)
             self.assertNotIn("heldout", epoch2_ledger)
-            self.assertNotIn("test_result", epoch2_ledger)
+            self.assertIn('"test_result"', epoch2_ledger)
             self.assertNotIn("test_period", epoch2_ledger)
             self.assertNotIn("test_decision_time", epoch2_ledger)
             self.assertNotIn("agent_trace_ref", epoch2_ledger)
@@ -940,6 +1075,41 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertNotIn("meta-mark-2", memory)
             self.assertIn("meta-mark-3", memory)
             self.assertIn("meta-mark-4", memory)
+
+    def test_prior_meta_learning_logs_use_latest_prior_session_per_epoch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp, meta_memory_max_epochs=1)
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, fold, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+            )
+            for meta_id, trigger, marker in (
+                ("epoch_001", 0, "epoch-start"),
+                ("epoch_001_after_fold_001", 1, "periodic-latest"),
+            ):
+                run_dir = config.experiment_dir / "artifacts" / f"run_{meta_id}"
+                run_dir.mkdir(parents=True)
+                trace = run_dir / "agent_trace.jsonl"
+                trace.write_text(json.dumps({"marker": marker}) + "\n", encoding="utf-8")
+                pipeline.ledger.append(
+                    {
+                        "record_type": "meta_learning",
+                        "experiment_id": config.experiment_id,
+                        "epoch_id": "epoch_001",
+                        "meta_learning_id": meta_id,
+                        "trigger_after_folds": trigger,
+                        "fold_id": f"{meta_id}_meta_learning",
+                        "run_id": f"run_{meta_id}",
+                        "agent_trace_ref": str(trace),
+                    }
+                )
+
+            memory = pipeline._prior_meta_learning_logs("epoch_001_after_fold_002")
+            self.assertNotIn("epoch-start", memory)
+            self.assertIn("periodic-latest", memory)
 
     def test_snapshot_builds_are_cached_within_an_experiment(self):
         calls = {"decision": 0, "replay": 0}
@@ -1118,6 +1288,79 @@ class PipelineEndToEndTest(unittest.TestCase):
                 experiment_tree.current_node_id,
             )
 
+    def test_unvalidated_meta_regularization_cannot_become_fold_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            config = make_config(tmp)
+            fold = build_fold_schedule("2022Q1", "2022Q1", TRADING_DAYS)[0]
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, spec, manifest: ScriptedFoldAgent(ctx),
+                proxy=ScriptedLLM([]),
+            )
+            validated = pipeline.run_fold(fold, epoch_id="epoch_001", parent=None).frozen
+
+            def regularize(ctx: ToolContext) -> None:
+                strategy = ctx.paths.agent_output / "main.py"
+                strategy.write_text(
+                    strategy.read_text(encoding="utf-8") + "\n# meta regularization\n",
+                    encoding="utf-8",
+                )
+                (ctx.paths.workspace / "taste.md").write_text(
+                    "validate this regularization before reuse", encoding="utf-8"
+                )
+
+            pipeline.meta_learner = regularize
+            meta_parent, _ = pipeline.run_meta_learning(
+                epoch_id="epoch_002", parent=validated, visible_fold=fold
+            )
+            self.assertIsNotNone(meta_parent)
+            self.assertTrue(meta_parent.requires_validation)
+
+            class IdleAgent:
+                def run(self) -> dict[str, object]:
+                    return {"finish_status": "deadline_timeout"}
+
+            pipeline_idle = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, spec, manifest: IdleAgent(),
+                proxy=ScriptedLLM([]),
+            )
+            with self.assertRaisesRegex(RuntimeError, "Meta-regularized parent"):
+                pipeline_idle.run_fold(fold, epoch_id="epoch_002", parent=meta_parent)
+
+            class ValidateParentThenDivergeAgent:
+                def __init__(self, ctx: ToolContext) -> None:
+                    self.ctx = ctx
+
+                def run(self) -> dict[str, object]:
+                    ModificationCheckTool(self.ctx).run()
+                    BacktestTool(self.ctx).run(mode="valid")
+                    strategy = self.ctx.paths.agent_output / "main.py"
+                    strategy.write_text(
+                        strategy.read_text(encoding="utf-8") + "\n# unvalidated later idea\n",
+                        encoding="utf-8",
+                    )
+                    ModificationCheckTool(self.ctx).run()
+                    return {"finish_status": "deadline_timeout"}
+
+            pipeline_validate = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                lambda ctx, spec, manifest: ValidateParentThenDivergeAgent(ctx),
+                proxy=ScriptedLLM([]),
+            )
+            fallback = pipeline_validate.run_fold(fold, epoch_id="epoch_003", parent=meta_parent)
+            self.assertEqual(fallback.fold_status, "no_update")
+            self.assertFalse(fallback.frozen.requires_validation)
+
+            # Once accepted by a complete ordinary-Fold Validation, the same
+            # lineage behaves identically in-process and after ledger resume.
+            later = pipeline_idle.run_fold(fold, epoch_id="epoch_004", parent=fallback.frozen)
+            self.assertEqual(later.fold_status, "no_valid_backtest")
+
     def test_two_epochs_do_not_collide_in_step_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -1169,6 +1412,38 @@ class PipelineEndToEndTest(unittest.TestCase):
             self.assertEqual(tree["current_node_id"], tree["nodes"][-1]["node_id"])
             self.assertIn("epoch_001__fold_ref_", captured["rendered"])
             self.assertNotIn("2022Q1", captured["rendered"])
+
+    def test_default_fold_exploration_direction_reaches_every_fold_manifest_and_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            default_direction = "持续检验事件冲击沿关系网络传播形成的定价时滞。"
+            session_direction = "本 Fold 先比较行业边与概念边。"
+            config = make_config(tmp, fold_exploration_directive=default_direction)
+            captured: dict[str, object] = {}
+
+            def agent_factory(ctx, fold, manifest):
+                captured.update(manifest)
+                return ScriptedFoldAgent(ctx)
+
+            pipeline = ExperimentPipeline(
+                config,
+                FakeSnapshotProvider(),
+                agent_factory,
+                proxy=ScriptedLLM([]),
+            )
+            fold = build_fold_schedule("2022Q1", "2022Q1", TRADING_DAYS)[0]
+            pipeline.run_fold(
+                fold,
+                epoch_id="epoch_001",
+                parent=None,
+                fold_directive=session_direction,
+            )
+
+            self.assertEqual(captured["fold_exploration_directive"], default_direction)
+            self.assertEqual(captured["fold_directive"], session_direction)
+            record = pipeline.ledger.read("fold")[0]
+            self.assertEqual(record["fold_exploration_directive"], default_direction)
+            self.assertEqual(record["fold_directive"], session_direction)
 
     def test_meta_learning_directive_is_recorded_in_manifest_and_ledger(self):
         with tempfile.TemporaryDirectory() as tmp:

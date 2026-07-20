@@ -24,6 +24,7 @@ from autotrade.pipelines.hitl_state import (
     CONTROL_NAME,
     HITL_DIR_NAME,
     PARAMS_NAME,
+    SCHEDULE_NAME,
     STATUS_NAME,
     ControlState,
     read_control,
@@ -34,9 +35,10 @@ from autotrade.pipelines.hitl_state import (
     write_control,
     write_json_atomic,
 )
+from autotrade.pipelines.meta_schedule import meta_record_session_key
 
 from .params_schema import HIDDEN_KEYS
-from .registry import ACTIVE_STATES, experiment_state, resolve_experiment_dir
+from .registry import ACTIVE_STATES, experiment_state, read_ledger_records, resolve_experiment_dir
 
 MAX_RUNNING_EXPERIMENTS = 5
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
@@ -84,6 +86,92 @@ def _reclaim_sandbox_containers(experiment_id: str) -> list[str]:
         return containers
     except (OSError, subprocess.SubprocessError):
         return []
+
+
+def _signal_worker_group(pid: int, sig: signal.Signals) -> None:
+    """Signal the worker's dedicated process group, falling back to its PID."""
+
+    try:
+        os.killpg(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        os.kill(pid, sig)
+
+
+def _require_session_reapproval(control: ControlState, session_key: str) -> bool:
+    """Make a session wait at the existing editable approval gate."""
+
+    changed = session_key in control.approved_sessions
+    control.approved_sessions = tuple(key for key in control.approved_sessions if key != session_key)
+    if control.mode == "auto":
+        control.mode = "manual"
+        changed = True
+    return changed
+
+
+def _session_is_settled(
+    experiment_dir: Path,
+    session_key: str,
+    control: ControlState,
+) -> bool:
+    """Whether the scheduled session has a durable successful ledger record."""
+
+    schedule = read_json(experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME)
+    sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
+    session = next(
+        (item for item in sessions if isinstance(item, dict) and str(item.get("key")) == session_key),
+        None,
+    )
+    if session is None:
+        return False
+    records = read_ledger_records(experiment_dir)
+    kind = str(session.get("kind") or "")
+    if kind == "meta_learning":
+        return any(
+            record.get("record_type") == "meta_learning"
+            and meta_record_session_key(record) == session_key
+            for record in records
+        )
+    if kind == "fold":
+        matching = [
+            record
+            for record in records
+            if record.get("record_type") == "fold"
+            and str(record.get("epoch_id")) == str(session.get("epoch_id"))
+            and str(record.get("fold_id")) == str(session.get("fold_id"))
+        ]
+        if not matching:
+            return False
+        rerun_id = control.rerun_sessions.get(session_key)
+        return rerun_id is None or str(matching[-1].get("rerun_id") or "") == rerun_id
+    if kind == "heldout":
+        periods = session.get("periods") if isinstance(session.get("periods"), list) else []
+        planned = {
+            str(period.get("label"))
+            for period in periods
+            if isinstance(period, dict) and period.get("label")
+        }
+        completed = {
+            str(record.get("fold_id") or "").removeprefix("heldout_")
+            for record in records
+            if record.get("record_type") == "heldout"
+        }
+        return planned <= completed
+    return False
+
+
+def _revoke_unsettled_session_approval(
+    experiment_dir: Path,
+    session_key: str,
+    control: ControlState,
+) -> str | None:
+    """Return an interrupted session to its editable approval gate."""
+
+    if not session_key or _session_is_settled(experiment_dir, session_key, control):
+        return None
+    if not _require_session_reapproval(control, session_key):
+        return None
+    write_control(experiment_dir / HITL_DIR_NAME / CONTROL_NAME, control)
+    return session_key
 
 
 # Once test results are revealed the researcher's knowledge can steer any
@@ -443,7 +531,7 @@ class ExperimentManager:
             if not session_key:
                 raise ManagerError("rollback_fold requires session_key")
             state = experiment_state(experiment_dir)
-            if state.get("worker_alive"):
+            if state.get("worker_alive") or state.get("state") == "launching":
                 raise ManagerError("先停止运行中的 worker（停止/强制终止）再回滚")
             summary = self._rollback_to_fold(experiment_dir, session_key, control)
             control.request = None
@@ -455,13 +543,13 @@ class ExperimentManager:
                 raise ManagerError("rerun_fold requires session_key")
             self._validate_rerun_target(experiment_dir, session_key)
             state = experiment_state(experiment_dir)
-            if state.get("worker_alive"):
+            if state.get("worker_alive") or state.get("state") == "launching":
                 raise ManagerError("先停止运行中的 worker（停止/强制终止）再重跑该 Fold")
             control.rerun_sessions[session_key] = uuid.uuid4().hex[:12]
             # The re-run must be re-approved (prompt edits land first) and its
             # step gating starts afresh: stale step_go would auto-release the
             # first N step holds, stale per-step directives would replay.
-            control.approved_sessions = tuple(k for k in control.approved_sessions if k != session_key)
+            _require_session_reapproval(control, session_key)
             control.step_go.pop(session_key, None)
             for mapping in (control.step_directives, control.user_replies):
                 for key in list(mapping):
@@ -475,7 +563,7 @@ class ExperimentManager:
             # for the pid to die (bounded), then resume via the ledger.
             status = read_status(hitl_dir / STATUS_NAME)
             if status_pid_alive(status):
-                os.kill(int(status["pid"]), signal.SIGTERM)
+                _signal_worker_group(int(status["pid"]), signal.SIGTERM)
                 import time as _time
 
                 deadline = _time.monotonic() + 30.0
@@ -483,6 +571,7 @@ class ExperimentManager:
                     _time.sleep(0.5)
                 if status_pid_alive(read_status(hitl_dir / STATUS_NAME)):
                     raise ManagerError("worker 未在 30s 内退出；请稍后重试或强制终止后手动恢复")
+            _reclaim_sandbox_containers(experiment_id)
             return {"restarted": True, **self.start_worker(experiment_id)}
         elif action == "terminate":
             # Graceful first, then guaranteed: the worker's SIGTERM handler
@@ -494,8 +583,9 @@ class ExperimentManager:
             if not status_pid_alive(status):
                 raise ManagerError("no live worker to terminate")
             pid = int(status["pid"])
+            session_key = str(status.get("session_key") or "")
             try:
-                os.kill(pid, signal.SIGTERM)
+                _signal_worker_group(pid, signal.SIGTERM)
             except ProcessLookupError as exc:  # exited between check and signal
                 raise ManagerError("worker 已退出") from exc
             import time as _time
@@ -503,12 +593,18 @@ class ExperimentManager:
             deadline = _time.monotonic() + 10.0
             while _time.monotonic() < deadline:
                 if not status_pid_alive(read_status(hitl_dir / STATUS_NAME)):
-                    return {"terminated_pid": pid, "escalated": False}
+                    reclaimed = _reclaim_sandbox_containers(experiment_id)
+                    result: dict[str, object] = {
+                        "terminated_pid": pid,
+                        "escalated": False,
+                        "reclaimed_containers": reclaimed,
+                    }
+                    revoked = _revoke_unsettled_session_approval(experiment_dir, session_key, control)
+                    if revoked is not None:
+                        result["approval_revoked_session"] = revoked
+                    return result
                 _time.sleep(0.5)
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                os.kill(pid, signal.SIGKILL)
+            _signal_worker_group(pid, signal.SIGKILL)
             reclaimed = _reclaim_sandbox_containers(experiment_id)
             # SIGKILL leaves no worker to stamp a terminal state; without this
             # the page shows a stale running state until pid-liveness kicks in
@@ -516,17 +612,23 @@ class ExperimentManager:
             status = read_status(hitl_dir / STATUS_NAME)
             status.update({"state": "terminated", "error": None, "terminated_at": utc_now_iso()})
             write_json_atomic(hitl_dir / STATUS_NAME, status)
-            return {"terminated_pid": pid, "escalated": True, "reclaimed_containers": reclaimed}
+            result = {"terminated_pid": pid, "escalated": True, "reclaimed_containers": reclaimed}
+            revoked = _revoke_unsettled_session_approval(experiment_dir, session_key, control)
+            if revoked is not None:
+                result["approval_revoked_session"] = revoked
+            return result
         else:
             raise ManagerError(f"unknown control action: {action!r}")
         write_control(control_path, control)
         return {"control": control.to_record()}
 
-    def _rollback_to_fold(self, experiment_dir: Path, session_key: str, control: ControlState) -> dict[str, object]:
+    def _rollback_to_fold(
+        self, experiment_dir: Path, session_key: str, control: ControlState
+    ) -> dict[str, object]:
         """Make ``session_key`` the experiment's frontier again.
 
         Drops every ledger record AFTER the target fold (later folds, later
-        epochs' meta_learning, and ALL held-out records — they reflect the
+        meta-learning sessions, and ALL held-out records — they reflect the
         discarded frontier), archives the dropped records' frozen artifact
         dirs (so resume neither trips the orphan check nor collides in
         _freeze), and backs up the original ledger next to it. The target
@@ -542,14 +644,21 @@ class ExperimentManager:
         target_epoch, target_fold = session_key.split("/", 1)
         if (target_epoch, target_fold) not in latest_fold_records(read_ledger_records(experiment_dir)):
             raise ManagerError("目标 Fold 还没有账本记录，无法回滚到它")
-        dropped_fold_keys = set(fold_keys[fold_keys.index(session_key) + 1 :])
+        target_position = next(index for index, item in enumerate(sessions) if item.get("key") == session_key)
+        dropped_planned = sessions[target_position + 1 :]
+        dropped_fold_keys = {
+            str(item.get("key")) for item in dropped_planned if item.get("kind") == "fold"
+        }
+        dropped_meta_keys = {
+            str(item.get("key")) for item in dropped_planned if item.get("kind") == "meta_learning"
+        }
 
         def _dropped(record: dict[str, object]) -> bool:
             kind = record.get("record_type")
             if kind == "fold":
                 return f"{record.get('epoch_id')}/{record.get('fold_id')}" in dropped_fold_keys
             if kind == "meta_learning":
-                return str(record.get("epoch_id")) > target_epoch
+                return meta_record_session_key(record) in dropped_meta_keys
             return kind == "heldout"
 
         ledger_path = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
@@ -572,44 +681,54 @@ class ExperimentManager:
         if not dropped_records:
             raise ManagerError("该 Fold 之后没有任何账本记录（Fold/元学习/Held-out），无需回滚")
 
-        stamp = utc_now_iso().replace("-", "").replace(":", "")[:13]
+        stamp = (
+            utc_now_iso().replace("-", "").replace(":", "")[:15]
+            + f"_{uuid.uuid4().hex[:8]}"
+        )
         archive_root = experiment_dir / "strategy_artifacts" / "_archive" / f"rollback_{stamp}"
+        backup = ledger_path.with_name(f"experiment_ledger.rollback_{stamp}.jsonl")
+        shutil.copy2(ledger_path, backup)
         archived: list[str] = []
+        candidates: list[Path] = []
         for record in dropped_records:
-            candidates: list[Path] = []
-            for field_name in ("frozen_strategy_artifact_path", "frozen_model_artifact_path"):
-                raw = record.get(field_name)
-                if raw:
-                    candidates.append(Path(str(raw)))
-            if record.get("record_type") == "meta_learning" and record.get("frozen_strategy_artifact_id"):
+            kind = record.get("record_type")
+            owns_fold_artifact = kind == "fold" and record.get("fold_status") in (None, "frozen")
+            owns_meta_artifact = kind == "meta_learning" and record.get("status") == "meta_regularized"
+            if owns_fold_artifact or owns_meta_artifact:
+                for field_name in ("frozen_strategy_artifact_path", "frozen_model_artifact_path"):
+                    raw = record.get(field_name)
+                    if raw:
+                        candidates.append(Path(str(raw)))
+            if owns_meta_artifact and record.get("frozen_strategy_artifact_id"):
                 base = experiment_dir / "strategy_artifacts" / str(record.get("epoch_id"))
                 artifact_id = str(record.get("frozen_strategy_artifact_id"))
                 candidates.extend([base / artifact_id, base / f"{artifact_id}.models"])
-            for path in candidates:
-                if not path.is_dir():
-                    continue
-                archive_root.mkdir(parents=True, exist_ok=True)
-                dest = archive_root / path.name
-                suffix = 1
-                while dest.exists():
-                    dest = archive_root / f"{path.name}.{suffix}"
-                    suffix += 1
-                shutil.move(str(path), str(dest))
-                archived.append(str(path))
+        artifact_root = (experiment_dir / "strategy_artifacts").resolve()
+        for path in candidates:
+            if not path.is_dir():
+                continue
+            resolved = path.resolve()
+            if resolved == artifact_root or not resolved.is_relative_to(artifact_root):
+                raise ManagerError(f"账本中的冻结产物路径越出当前实验目录，拒绝回滚：{path}")
+        for path in candidates:
+            if not path.is_dir():
+                continue
+            archive_root.mkdir(parents=True, exist_ok=True)
+            dest = archive_root / path.name
+            suffix = 1
+            while dest.exists():
+                dest = archive_root / f"{path.name}.{suffix}"
+                suffix += 1
+            shutil.move(str(path), str(dest))
+            archived.append(str(path))
 
         pruned_nodes = self._prune_step_tree(experiment_dir, dropped_fold_keys, archive_root)
 
-        backup = ledger_path.with_name(f"experiment_ledger.rollback_{stamp}.jsonl")
-        shutil.copy2(ledger_path, backup)
         tmp = ledger_path.with_name(f".{ledger_path.name}.rollback.tmp")
         tmp.write_text("".join(f"{line}\n" for line in kept_lines), encoding="utf-8")
         os.replace(tmp, ledger_path)
 
-        dropped_session_keys = dropped_fold_keys | {"heldout"} | {
-            f"{record.get('epoch_id')}/meta_learning"
-            for record in dropped_records
-            if record.get("record_type") == "meta_learning"
-        }
+        dropped_session_keys = dropped_fold_keys | dropped_meta_keys | {"heldout"}
         control.approved_sessions = tuple(k for k in control.approved_sessions if k not in dropped_session_keys)
         for key in list(control.rerun_sessions):
             if key in dropped_session_keys:
@@ -698,12 +817,31 @@ class ExperimentManager:
         fold_keys = [str(s.get("key")) for s in sessions if s.get("kind") == "fold"]
         if session_key not in fold_keys:
             raise ManagerError(f"{session_key!r} is not a fold session")
-        recorded = latest_fold_records(read_ledger_records(experiment_dir))
+        records = read_ledger_records(experiment_dir)
+        recorded = latest_fold_records(records)
         recorded_keys = [key for key in fold_keys if tuple(key.split("/", 1)) in recorded]
         if not recorded_keys:
             raise ManagerError("该实验还没有已完成的 Fold 可重跑")
         if session_key != recorded_keys[-1]:
             raise ManagerError(f"只能重跑最新完成的 Fold（{recorded_keys[-1]}）——更早的 Fold 已被后续继承")
+        target_position = next(index for index, item in enumerate(sessions) if item.get("key") == session_key)
+        recorded_meta_keys = {
+            meta_record_session_key(record)
+            for record in records
+            if record.get("record_type") == "meta_learning"
+        }
+        later_meta = next(
+            (
+                str(item.get("key"))
+                for item in sessions[target_position + 1 :]
+                if item.get("kind") == "meta_learning" and str(item.get("key")) in recorded_meta_keys
+            ),
+            None,
+        )
+        if later_meta is not None:
+            raise ManagerError(
+                f"后续元学习会话 {later_meta} 已继承该 Fold；请先回滚到目标 Fold 再重跑"
+            )
 
     def _validate_parent_override(self, experiment_dir: Path, session_key: str, node_id: str) -> None:
         """The override target must be a fold session and the node a restorable snapshot.

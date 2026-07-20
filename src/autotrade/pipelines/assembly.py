@@ -448,6 +448,7 @@ def build_session_builders(
             phase=str(manifest_data.get("phase", "exploration")),
             step_tree_enabled=bool(manifest_data.get("step_tree_enabled", False)),
             taste_prompt=str(manifest_data.get("taste_prompt", "")),
+            fold_exploration_directive=str(manifest_data.get("fold_exploration_directive", "")),
             fold_directive=str(manifest_data.get("fold_directive", "")),
             system_prompt_override=str(manifest_data.get("system_prompt_override", "")),
             compact_proxy=compact_proxy,

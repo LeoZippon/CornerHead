@@ -119,7 +119,8 @@ MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
 **部署命令**（均在计算主机上执行）：
 
 - 首次/幂等 provisioning：`bash ops/webui/frontend_setup.sh`（创建用户、写 authorized_keys、装 nginx 配置）。
-- UI 资产更新后同步：`ops/webui/webui_stack.sh sync`（tar-over-ssh，归一化属主与权限）。
+- 完整控制台更新：`ops/webui/webui_stack.sh deploy`（先同步静态 SPA，再只回收控制台 API并等待本地 Unix-socket 健康检查通过；保留反向隧道和独立实验 worker）。
+- 仅 UI 资产更新时可用 `ops/webui/webui_stack.sh sync`（tar-over-ssh，归一化属主与权限）。Python/API/schema 变更不能只运行 `sync`，必须使用 `deploy` 让长驻进程重新加载代码。
 
 ### 1.3 保活、启动流程与故障排查
 
@@ -129,9 +130,10 @@ MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
 
 | 命令 | 作用 |
 |---|---|
-| `start` / `stop` / `status` | 启停控制台 API（uvicorn，Unix socket `.runtime/webui/console.sock`）与 autossh 反向隧道；status 含前端端到端健康检查 |
+| `start` / `stop` / `status` | 启停控制台 API（uvicorn，Unix socket `.runtime/webui/console.sock`）与 autossh 反向隧道；start 在返回前等待本地 API 健康，status 含前端端到端健康检查；`.runtime/webui` 与 `logs/webui` 均为 `0700` |
 | `ensure` | 缺什么补什么（keepalive 目标，幂等） |
 | `sync` | 推送静态 SPA 到前端 |
+| `deploy` | 推送静态 SPA，并优雅重启控制台 API；保持隧道和实验 worker 不动 |
 | `install-cron` | 安装托管 crontab 块：`*/2` 分钟 `ensure` + `@reboot` |
 
 保活分三层：
@@ -170,7 +172,8 @@ Host cornerhead
 | 浏览器打不开 localhost:8888 | Mac 侧隧道未建立：重跑 `ssh -N cornerhead`；确认私钥对应已授权公钥 |
 | 页面能开、API 返回 503“计算主机离线” | 计算主机→前端隧道断：在计算主机 `ops/webui/webui_stack.sh status`，通常等 2 分钟 keepalive 自愈 |
 | status 显示 console DOWN | 看 `logs/webui/console.log`；`webui_stack.sh ensure` 拉起 |
-| UI 是旧版本 | 忘记同步静态资产：`webui_stack.sh sync` 后强刷浏览器 |
+| UI 文案/样式是旧版本 | 忘记同步静态资产：`webui_stack.sh sync`；资产响应禁用持久缓存，普通刷新即可 |
+| 新参数/API 字段不可见 | 长驻 API 仍加载旧 Python schema：`webui_stack.sh deploy`；随后用 `status` 验证端到端健康 |
 
 ## 2. QMT 状态与目标架构
 
@@ -582,4 +585,4 @@ scp order.json qmt-node:C:/xquant/inbox/.order.json.tmp
 **研究控制台决策提醒**
 
 - 交互式 worker 的状态迁移钩子（`FEISHU_*` bot）在进入需要人工决策的状态时向群推送：会话等待批准（waiting_user）、Step 门控挂起（waiting_step_user，附验证收益）、Agent 提问（waiting_user_reply，附问题原文）、实验失败（failed，附错误）。凭据缺失时自动禁用；推送线程 best-effort，永不阻塞或破坏 worker。
-- 强制终止反馈：SIGKILL 升级后管理端在 status.json 落 `terminated` 终态（控制台徽标「已强制终止」，可恢复续跑）；终止按钮先提示"正在终止（宽限约 10 秒）"，完成后按实际结果提示优雅退出或强杀。
+- 强制终止反馈：worker 在独立进程组内，SIGTERM/SIGKILL 作用于整组；优雅退出后也按实验标签回收残留 Sandbox 容器。SIGKILL 升级后管理端在 status.json 落 `terminated` 终态（控制台徽标「已强制终止」，可恢复续跑）；终止按钮先提示"正在终止（宽限约 10 秒）"，完成后按实际结果提示优雅退出或强杀。若被终止的当前计划会话尚未落业务账本，管理端同时撤销该会话批准、保留可编辑的指令/Prompt 草稿；即使 auto 会话原本没有显式批准项，也切到 `manual`，恢复后必定回到待批准状态。已落账会话和普通暂停不撤销，也不改变模式。

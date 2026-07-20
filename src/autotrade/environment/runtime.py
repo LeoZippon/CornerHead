@@ -369,8 +369,9 @@ def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
     """Return the public manifest view mounted at /mnt/artifacts.
 
     The in-memory and host audit manifest keep the full schedule and frozen
-    test details for orchestration. Agent-visible files only carry training /
-    validation facts so meta learning cannot accidentally consume test feedback.
+    Test details for orchestration. Agent-visible manifests carry no raw Test
+    schedule or result; Meta receives separately whitelisted historical metrics
+    from completed Folds through its workspace projection.
     """
 
     record = json.loads(json.dumps(sanitize_for_log(data), ensure_ascii=False, default=str))
@@ -381,6 +382,8 @@ def _agent_visible_manifest(data: dict[str, object]) -> dict[str, object]:
         for key in (
             "experiment_id",
             "epoch_id",
+            "meta_learning_id",
+            "trigger_after_folds",
             "run_id",
             "conversation_id",
             "kind",

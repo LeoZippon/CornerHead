@@ -45,6 +45,7 @@ _RECORD_FIELDS = (
     "step_id",
     "steps",
     "validation_result",
+    "fold_exploration_directive",
     "fold_directive",
     "frozen_strategy_artifact_id",
 )

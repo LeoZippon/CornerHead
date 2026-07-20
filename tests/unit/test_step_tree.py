@@ -220,6 +220,20 @@ class PhasePromptTest(unittest.TestCase):
         # Whitespace-only directives collapse to the no-section prompt.
         self.assertEqual(build_system_prompt(**base, fold_directive="  \n"), without)
 
+    def test_default_fold_exploration_direction_is_additive_and_preserves_autonomy(self):
+        prompt = build_system_prompt(
+            fold_info={"fold_id": "f"},
+            acceptance_rules={},
+            fold_exploration_directive="持续检验事件冲击的图传播。",
+            fold_directive="本 Fold 先做行业边消融。",
+        )
+        self.assertIn("实验级默认 Fold 探索方向（用户注入）", prompt)
+        self.assertIn("持续检验事件冲击的图传播。", prompt)
+        self.assertIn("研究者本 Fold 指令（用户注入）", prompt)
+        self.assertIn("本 Fold 先做行业边消融。", prompt)
+        self.assertIn("自主提出可证伪假设", prompt)
+        self.assertLess(prompt.index("实验级默认 Fold 探索方向"), prompt.index("研究者本 Fold 指令"))
+
     def test_fold_strategy_interfaces_are_inside_action_section(self):
         prompt = build_system_prompt(fold_info={"fold_id": "f"}, acceptance_rules={})
 
@@ -281,6 +295,40 @@ class PhasePromptTest(unittest.TestCase):
         self.assertNotIn("test_period", prompt)
         self.assertNotIn("test_decision_time", prompt)
         self.assertNotIn("20220101..20220331", prompt)
+
+    def test_unit_contract_and_test_visibility_are_explicit_by_agent_kind(self):
+        unit_contract = {
+            "daily.parquet": {"pct_chg_turnover_dv": "decimal; 5%=0.05"},
+            "events.parquet": {"moneyflow.*_amount": "10k_CNY; CNY 5m=500"},
+        }
+        fold_facts = build_experiment_facts(
+            manifest={"kind": "fold", "fold_id": "fold_x"},
+            data_summary={"unit_contract": unit_contract},
+        )
+        meta_facts = build_experiment_facts(
+            manifest={
+                "kind": "meta_learning",
+                "epoch_id": "epoch_001",
+                "meta_learning_id": "epoch_001_after_fold_003",
+                "trigger_after_folds": 3,
+            },
+            data_summary={"unit_contract": unit_contract},
+        )
+
+        self.assertEqual(fold_facts["data_profile"]["unit_contract"], unit_contract)
+        self.assertFalse(fold_facts["visibility_policy"]["historical_frozen_test_metrics_visible"])
+        self.assertTrue(meta_facts["visibility_policy"]["historical_frozen_test_metrics_visible"])
+        self.assertFalse(meta_facts["visibility_policy"]["test_visible"])
+        self.assertFalse(meta_facts["visibility_policy"]["heldout_visible"])
+        self.assertEqual(meta_facts["identity"]["meta_learning_id"], "epoch_001_after_fold_003")
+        self.assertEqual(meta_facts["identity"]["trigger_after_folds"], 3)
+
+        fold_prompt = build_system_prompt(fold_info={"fold_id": "f"}, acceptance_rules={})
+        meta_prompt = build_meta_learning_prompt()
+        for prompt in (fold_prompt, meta_prompt):
+            self.assertIn("5%=0.05", prompt)
+            self.assertIn("500", prompt)
+            self.assertIn("5%=5.0", prompt)
 
     def test_fold_facts_opaque_parent_artifact_id(self):
         # Frozen artifact ids embed the raw fold label of the fold that produced

@@ -1,3 +1,18 @@
+2026-07-20 历史 Fold 重跑回退与分区安全审计
+
+- 回退未提交的“任意历史 Fold 重跑并删除其后结果”组合功能，恢复低复杂度边界：只允许重跑最新完成 Fold；更早历史修正继续走独立回滚，再按正常排程前进。前端、控制面、测试和活文档同步移除该入口与语义。
+- 三路只读审计分别覆盖控制面/产物完整性、Agent/评估边界、运维/性能。修复真实高优先级缺口：auto 会话强制终止后可绕过重批、auto 模式最新 Fold 重跑不进入可编辑批准门、`launching` 窗口仍允许回滚/重跑；未增加新状态机或交互实体。
+- 以低复杂度补齐四项有利防线：Meta 正则化产物在下一普通 Fold 完整 Validation 通过前不得作为 fallback/Test，通过后清除临时门槛且连续运行/恢复语义一致；回滚先唯一备份 ledger 并校验产物目录归属；worker 按独立进程组终止并回收残留容器；控制台日志目录私有且部署等待 UDS 健康。未引入守护进程、自动 GC、额外数据扫描或常驻监控。
+- 全量 894 tests（最终 121.893s）、Python/JS/Bash 语法、Prompt 双次导出（SHA-256 `665f61fe...a0bbe3a8`）和 `git diff --check` 通过。仅部署 SPA/API：console PID 774113、tunnel PID 828388；`lzp-test24` 保持 stopped/manual，`lzp-test25` 保持 waiting_user/step。
+- 仓库外仍有一个需宿主管理员处理的高风险：共享机 root 运行的旧 `cloudflared` 把认证材料放在进程参数中。未读取/记录该材料，也未越权停止进程；应确认用途后停用旧进程并轮换凭据，改用权限受控的凭据文件或服务配置。
+
+2026-07-20 lzp-test24 缓存污染恢复与默认 Fold 探索方向
+
+- `epoch_001/fold_2024Q2` 在安装父策略时因 Q1 冻结产物内新增 `__pycache__/candidate.cpython-311.pyc` fail-fast；仅删除该生成目录后，产物 hash 恢复为账本原值 `sha256:1ab0334ac1e4ec12dc96adc96afbeedb697137abeb95aa6bcce646861b5afc8f`。保留完整性拒绝，不加入掩盖污染的自动清理；宿主分析应使用 `python -B` 或 `PYTHONDONTWRITEBYTECODE=1`。
+- 新建实验弹窗增加可选“默认 Fold 探索方向”；配置、CLI、Prompt 预览/运行装配、manifest/账本和详情展示全链路透传，与单 Fold 追加指令分离。Prompt 明确它是可证伪方向，Agent 可据证据降级或拒绝，完整系统 Prompt 覆盖语义不变。
+- 为既有 `lzp-test24` 向 Q2 及其余 14 个 Fold 注入“事件驱动 + 知识图谱 + GNN”详细方向，经控制台恢复并批准 Q2 后切回自动模式；新 run `run_397dc3e9f048` 正常运行、心跳新鲜且 Trace 已产生 96 个事件，冻结产物和当前 Sandbox 均无 `__pycache__`。
+- 相关模块 189 tests 与全量 892 tests 通过；Python/前端语法、Prompt 导出幂等和 `git diff --check` 通过；控制台本地 API 与前端端到端健康。
+
 2026-07-14 Fold 结果过渡布局与策略软诊断（fix/auction-pit-performance）
 
 - 修复 Fold 账本已写、后分析未结束时实时 Trace 与结果卡无间距；验收警告按收益百分比/Sharpe 两位小数显示，旧账本由前端只读格式化。
@@ -1785,3 +1800,29 @@
 - 性价比结论：不新增全局静态调用图、调度器或跨 run 缓存。坏热路径只存在于实验沙箱且已回滚，现有 `phase_seconds`、data-load timing 与 `orders_signature` 已足够定位；新增系统代码会增加噪声、失效面和与真实环境的偏差。最小处置是在当前 `d813958` worker 上重跑，并通过 directive 要求 Probe 后看阶段耗时、完整回放 >900s 视为异常、重 I/O 只在稀疏 tick 执行、订单签名相同即回滚或换假设。
 - 原 Q2 落账后 worker 已自动进入 Q3；为避免链式推进，先发 stop、未在备料阶段及时生效后用受支持 terminate 优雅 SIGTERM（无 SIGKILL），Q3 未产生账本或冻结产物。随后重跑 Q2 为 `run_99a60a001cd2`（PID 1264264）。Probe 为 24.9s/3 日与 41.7s/5 日；首个真实完整验证 `valid_002` 回放 523.981s、发布全程 550.070s，覆盖 57 个分钟分区/43.02M 行，宿主 99.3s、分钟归一化 53.3s、策略 151.4s、Timeview 95.8s，全部回到 Q1 尺度且远低于 900s 门槛。验证后 worker 保持运行，由 Agent 自主继续 Fold。
 - 仓库只补本次可审计记录，不改执行代码；文档批次以 `git diff --check` 验证，未为纯文档变更运行单元测试。`origin` 仅指向新仓库 `git@github.com:LeoZippon/CornerHead.git`。
+
+2026-07-19 显式单位合同 + Meta Test 反馈 + Fold 间隔元学习
+
+- Agent 事实与 `data_summary` 新增按“文件 + dataset + 字段”识别的紧凑单位合同，Prompt/模板/活文档同步给出可执行例子：daily 比例为小数、moneyflow 金额为万元、index_daily 涨跌幅为百分数值。审计发现 `daily_basic.dv_ttm` 漏归一，现与 `dv_ratio` 一致按 0.01 转为小数；snapshot cache format 升至 v4，防止旧缓存按 100 倍不同口径复用。
+- 仅 Meta Agent 的显式 workspace 投影新增已完成 Fold 的 compact frozen Test 白名单指标，用于 Validation/Test 差距和跨 Fold 稳定性诊断；Fold Agent 不可见，Test 原始数据/排程/snapshot/路径/订单/Trace/Broker/NL 明细仍隔离，Held-out 仍是唯一最终未触碰评估。Prompt 禁止单 Fold Test 调参及把具体 Test 数值/身份/区间写入 Taste。
+- 新增 `meta_learning_fold_interval`（默认 0）：保留每 Epoch 起始 Meta；N>0 时每完成 N 个 Fold 且仍有下一 Fold再触发，Taste 只影响后续 Fold。批量/HITL 排程、唯一会话身份、恢复、记忆、前端详情、Prompt 预览、重跑和回滚均按同一因果顺序更新；末 Fold 后不空跑，默认行为不变。
+- 三路只读审计复核 Test 隔离、单位和周期排程，并修复回滚误归档共享父产物与 Prompt 预览越过未完成 Meta 复用旧 Taste 两个边界。验证：223 项扩展专项与全量 `tests/unit` 889 项通过（115.057s，Docker 条件满足并真实运行容器 Fold/沙箱生命周期测试）；`py_compile`、`node --check`、Prompt 双次导出哈希一致和 `git diff --check` 通过。未重启或修改任何运行中实验。
+
+2026-07-20 单位文档边界评估与控制台部署修复
+
+- 结论：不建立全 raw 表逐列单位百科；标识/文本/类别/无量纲字段无需重复供应商 schema，且人工全量表会漂移。保持风险分层：归一化 Agent 文件完整声明，异构 union 维护已用于交易或易跨表误用的高风险字段族，未映射 source 字段在核实并换算前禁止进入绝对阈值/跨表算术；新字段进入正式研究时必须同批补合同、数据文档和测试。
+- 间隔选项不可见由双重部署陈旧导致：远端 `app.js` 未同步，且 7-18 启动的 uvicorn 仍持有旧 `params_schema`。已同步 SPA、只重启 console API（实验列表为空，tunnel PID 保持 828388），远端 API 现返回“元学习 Fold 间隔”默认 0，远端/本地 app.js SHA-256 一致。新增 `webui_stack.sh deploy` 一步完成静态同步+API 优雅回收，保持 tunnel/独立 worker 不动；部署文档补齐静态与 Python/schema 更新边界。
+- 验证：WebUI+Pipeline 107 tests passed（52.272s）；`bash -n`、`node --check`、Prompt 双次导出哈希 `b0db0910...87d3` 一致、`git diff --check` 和真实 `deploy` 端到端健康检查通过。
+
+2026-07-20 auction 完整单位合同与 Test 聚合诊断补齐
+
+- `stk_auction` 实表核对确认 `turnover_rate` 是百分数值、`float_share` 与 raw `daily_basic.float_share` 同为万股、`volume_ratio` 已是无量纲倍数。为保持“归一化文件完整声明”真实有效，snapshot 现把前两者分别乘 `0.01`/`10000`，量比不变；Agent unit contract、manifest `unit_conversions`、Prompt 与活文档同步声明全部字段。snapshot cache format v4→v5，禁止新旧 auction 字节口径混用。
+- Fold ledger 的紧凑指标 allowlist 新增 `trade_count`、`turnover` 与四项聚合 `exposure`（avg/max gross、空仓日、回放日）。后续 Meta 可据此解释低仓位与交易强度；订单、逐日 exposure/收益、结果路径和其他 Test 明细仍被投影层剔除，Fold Agent 与 Held-out 边界不变。
+- 验证：真实 20260717 auction 单日 smoke check 与 manifest 倍率一致；专项 93 tests、全量 `tests/unit` 889 tests（114.303s）通过；`py_compile`、Prompt 双次导出哈希 `fcd5faf5...c53`、`git diff --check` 通过。前后可用 RAM 均约 427GiB，GPU 未参与；未启动或重启实验。
+
+2026-07-20 强制终止未落账会话的批准恢复修复
+
+- 强制终止现以确定性 schedule + 业务 ledger 判定当前会话是否已落账；只有未落账且已批准的当前会话会从 `approved_sessions` 移除，指令/完整 Prompt 草稿保留。原为 `auto` 时同时转为 `manual`，确保恢复后真正进入“等待批准”；已落账会话保持批准和模式不变，普通暂停/停止/重启语义不变。
+- 控制台确认文案与终止结果提示同步更新；回归测试覆盖未完成 periodic Meta 的撤销→预览新指令→重新批准，以及已落账 Fold 不撤销的竞态边界。WebUI 已通过 `deploy` 更新，console PID 4058977、tunnel PID 828388，端到端健康。
+- 现场核查时 `lzp-test24` 的首个 Meta 已在部署前完成落账并进入 `epoch_001/fold_2024Q1`，故未篡改历史记录或强杀有效 Fold。实验已切到 `manual`，下一 Meta `epoch_001/meta_learning_after_fold_001` 已通过前端 API 预览并保存英文新方向、保持未批准；当前 Fold PID 3977272 持续运行。
+- 验证：相关 98 tests 通过，全量 `tests/unit` 890 tests（116.969s）通过；`py_compile`、`node --check`、`git diff --check` 通过。结束时可用 RAM 407GiB，GPU 占用未由本任务改变。

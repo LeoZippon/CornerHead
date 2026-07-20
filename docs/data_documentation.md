@@ -62,7 +62,7 @@ flowchart LR
     RAW --> RELEASE["research release\n实验固定的数据世代"]
     PIT --> RELEASE
     STATUS --> RELEASE
-    RELEASE --> SNAP["Environment PIT snapshot\n裸数据窗口 + daily 单位归一 + 可见性过滤"]
+    RELEASE --> SNAP["Environment PIT snapshot\n裸数据窗口 + 交易文件单位归一 + 可见性过滤"]
     SNAP --> AGENT[Agent / backtest]
 ```
 
@@ -87,6 +87,9 @@ flowchart LR
 | `stk_mins.amount` | 元 |
 | `daily_basic.total_share/float_share/free_share` | 万股 |
 | `daily_basic.total_mv/circ_mv` | 万元 |
+| `stk_auction.turnover_rate` | 百分数值；`0.5` 表示 0.5% |
+| `stk_auction.volume_ratio` | 无量纲量比；`1.2` 表示 1.2 倍 |
+| `stk_auction.float_share` | 万股；与 `daily_basic.float_share` 同源口径 |
 | `bak_daily.amount` | 万元；和 `daily.amount` 比较时乘以 10 |
 | 财报主表金额字段 | 元 |
 | `forecast_vip` 利润预测字段 | 万元 |
@@ -97,7 +100,19 @@ flowchart LR
 
 `bak_basic` 不含 `vol` / `amount`，不能用于成交量或成交额口径对齐。
 
-数据层只记录和审计原始单位，不改写原始字段。daily 的单位归一和其他研究域的源单位使用规则见 Environment 的“单位合同”。
+数据层只记录和审计原始单位，不改写原始字段。daily、分钟和竞价交易文件的单位归一，以及其他研究域的源单位使用规则见 Environment 的“单位合同”。
+
+**单位文档的完整性边界**
+
+不维护“仓库全部 raw 表 × 全部字段”的人工逐列单位抄录。大量字段是标识、日期、文本、类别或无量纲计数；其余源表 schema 会随供应商扩展。完整复制官方字段表会快速漂移，并把真正危险的跨源换算淹没在低价值文本中。
+
+单位合同按使用风险分层：
+
+1. Agent 直接使用的归一化文件必须完整声明字段族和换算因子；当前 `daily.parquet`、`intraday_1min.parquet` 和 `auction.parquet` 属于这一层。
+2. `events.parquet`、`macro.parquet`、`fundamentals.parquet` 等异构 source union 保留源单位，只显式维护已进入交易研究或容易跨表误用的高风险字段族。规则必须用“文件 + `dataset` + 字段”定位，不能靠同名列。
+3. 仅 raw 留档、文本、标识、类别和未进入数值研究的字段，以本地审计中的官方引用和供应商字段合同为准，不重复抄写到 Agent Prompt。
+
+未映射的 source 字段不是“默认无量纲”：在核实上游合同并显式换算前，不得用于绝对阈值或跨数据集算术。某个新字段族一旦进入正式策略研究，同一变更必须补齐 Agent `unit_contract`、本节关键规则和回归测试。实际运行的优先级为：归一化 snapshot 合同与 `unit_conversions` > 本仓库 dataset-specific 规则 > 上游官方字段合同；观测数值范围只能用于校验，不能反向猜单位。
 
 ### 1.3 基础研究数据
 

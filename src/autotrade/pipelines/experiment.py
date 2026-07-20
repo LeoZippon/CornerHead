@@ -53,6 +53,7 @@ from .config import (
 )
 from .folds import FoldSpec, build_fold_schedule, heldout_periods
 from .ledger import ExperimentLedger, latest_fold_records
+from .meta_schedule import meta_learning_id, meta_learning_trigger_counts, meta_record_id
 
 
 class FrozenArtifactMutatedError(RuntimeError):
@@ -161,17 +162,21 @@ class ExperimentPipeline:
         parent: FrozenArtifact | None = None
         taste_prompt = ""
         epoch_id = ""
-        first_visible_fold = folds[0] if folds else None
         for epoch_index in range(1, self.config.epochs + 1):
             epoch_id = f"epoch_{epoch_index:03d}"
-            if self.meta_learner is not None:
-                parent, taste_prompt = self.run_meta_learning(
-                    epoch_id=epoch_id,
-                    parent=parent,
-                    previous_taste=taste_prompt,
-                    visible_fold=first_visible_fold,
-                )
-            for fold in folds:
+            meta_triggers = set(
+                meta_learning_trigger_counts(len(folds), self.config.meta_learning_fold_interval)
+            )
+            for fold_index, fold in enumerate(folds):
+                if self.meta_learner is not None and fold_index in meta_triggers:
+                    parent, taste_prompt = self.run_meta_learning(
+                        epoch_id=epoch_id,
+                        meta_learning_id=meta_learning_id(epoch_id, fold_index),
+                        trigger_after_folds=fold_index,
+                        parent=parent,
+                        previous_taste=taste_prompt,
+                        visible_fold=fold,
+                    )
                 outcome = self.run_fold(fold, epoch_id=epoch_id, parent=parent, taste_prompt=taste_prompt)
                 parent = outcome.frozen
         if parent is None:
@@ -302,6 +307,7 @@ class ExperimentPipeline:
             "step_tree_enabled": self.config.step_tree_enabled,
             "record_failed_attempts": self.config.record_failed_attempts,
             "convergence_start_epoch": self.config.convergence_start_epoch,
+            "meta_learning_fold_interval": self.config.meta_learning_fold_interval,
             "max_fold_minutes": self.config.max_fold_minutes,
             "max_steps_per_fold": self.config.max_steps_per_fold,
             "finalize_before_deadline_seconds": self.config.finalize_before_deadline_seconds,
@@ -493,6 +499,9 @@ class ExperimentPipeline:
                 **self._replay_config_fields(),
                 "sandbox_spec": self._active_sandbox_spec.to_record(),
                 "taste_prompt": taste_prompt,
+                # Experiment-level direction from creation; every ordinary Fold
+                # receives it independently of optional per-session guidance.
+                "fold_exploration_directive": self.config.fold_exploration_directive.strip(),
                 # Researcher-injected per-fold direction (HITL). Prompt-level input
                 # like taste_prompt: recorded for audit, never hashed into artifacts.
                 "fold_directive": fold_directive.strip(),
@@ -605,6 +614,7 @@ class ExperimentPipeline:
                     "researcher_wait_seconds": round(researcher_wait_seconds, 1),
                     **fold.to_record(),
                     "parent_strategy_artifact_id": parent.artifact_id if parent else None,
+                    "fold_exploration_directive": self.config.fold_exploration_directive.strip() or None,
                     "fold_directive": fold_directive.strip() or None,
                     "system_prompt_overridden": bool(system_prompt_override.strip()),
                     "rerun_id": rerun_id,
@@ -647,12 +657,14 @@ class ExperimentPipeline:
             test_summary=test_summary,
         )
 
-    # ---- epoch-start meta learning + regularization ----
+    # ---- scheduled meta learning + regularization ----
 
     def run_meta_learning(
         self,
         *,
         epoch_id: str,
+        meta_learning_id: str | None = None,
+        trigger_after_folds: int = 0,
         parent: FrozenArtifact | None,
         previous_taste: str = "",
         visible_fold: FoldSpec | None = None,
@@ -664,11 +676,18 @@ class ExperimentPipeline:
     ) -> tuple[FrozenArtifact | None, str]:
         if self.meta_learner is None:
             raise RuntimeError("no meta learner configured")
+        meta_id = str(meta_learning_id or epoch_id)
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", meta_id):
+            raise ValueError(f"invalid meta_learning_id: {meta_id!r}")
+        if trigger_after_folds < 0:
+            raise ValueError("trigger_after_folds must be non-negative")
         run_id = new_id("run")
         try:
             return self._run_meta_learning_impl(
                 run_id=run_id,
                 epoch_id=epoch_id,
+                meta_learning_id=meta_id,
+                trigger_after_folds=trigger_after_folds,
                 parent=parent,
                 previous_taste=previous_taste,
                 visible_fold=visible_fold,
@@ -680,7 +699,7 @@ class ExperimentPipeline:
             )
         except Exception as exc:
             self._record_attempt_failure(
-                epoch_id=epoch_id, fold_id=f"{epoch_id}_meta_learning", run_id=run_id, exc=exc
+                epoch_id=epoch_id, fold_id=f"{meta_id}_meta_learning", run_id=run_id, exc=exc
             )
             raise
 
@@ -689,6 +708,8 @@ class ExperimentPipeline:
         *,
         run_id: str,
         epoch_id: str,
+        meta_learning_id: str,
+        trigger_after_folds: int,
         parent: FrozenArtifact | None,
         previous_taste: str = "",
         visible_fold: FoldSpec | None = None,
@@ -699,6 +720,7 @@ class ExperimentPipeline:
         environment_progress_hook=None,
     ) -> tuple[FrozenArtifact | None, str]:
         run_started = time.monotonic()
+        meta_fold_id = f"{meta_learning_id}_meta_learning"
         sandbox, docker = self._start_sandbox(run_id, kind="meta_learning")
         paths = sandbox.paths
         has_parent = parent is not None
@@ -731,7 +753,7 @@ class ExperimentPipeline:
         write_agent_data_summary(
             paths.data_summary,
             kind="meta_learning",
-            fold_id=_agent_visible_ref(f"{epoch_id}_meta_learning", prefix="fold_ref"),
+            fold_id=_agent_visible_ref(meta_fold_id, prefix="fold_ref"),
             views=(
                 {
                     "snapshot": (paths.current_snapshot, "/mnt/snapshot"),
@@ -748,11 +770,11 @@ class ExperimentPipeline:
             json.dumps(self._development_history(previous_taste), ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
-        # Full raw development records (every fold/meta record). Held-out is
-        # excluded and, in any case, is never appended before development ends.
+        # Compact Agent-visible development records. Held-out is excluded; Fold
+        # Test results pass only through the explicit metric whitelist below.
         ledger_full_path = paths.workspace / "experiment_ledger_full.jsonl"
         ledger_records = [
-            _agent_visible_ledger_record(record)
+            _agent_visible_ledger_record(record, include_frozen_test_metrics=True)
             for record in self.ledger.read()
             if record.get("record_type") != "heldout"
         ]
@@ -763,18 +785,20 @@ class ExperimentPipeline:
             ),
             encoding="utf-8",
         )
-        # Concatenate the full dialogue/tool logs of every prior epoch's
-        # meta-learning session. (The previous wiring read this epoch's own
-        # not-yet-written trace, so the memory was always empty.)
+        # Keep the latest prior Meta dialogue/tool trace per recent Epoch. This
+        # includes the immediate same-Epoch periodic predecessor without making
+        # raw memory grow with every interval trigger.
         memory_path = paths.workspace / "meta_learning_memory.jsonl"
-        memory_path.write_text(self._prior_meta_learning_logs(epoch_id), encoding="utf-8")
+        memory_path.write_text(self._prior_meta_learning_logs(meta_learning_id), encoding="utf-8")
         deadline = datetime.now(timezone.utc) + timedelta(minutes=self.config.max_fold_minutes)
-        fold_id = f"{epoch_id}_meta_learning"
+        fold_id = meta_fold_id
         manifest = RunManifest.create(
             paths.run_manifest,
             {
                 "experiment_id": self.config.experiment_id,
                 "epoch_id": epoch_id,
+                "meta_learning_id": meta_learning_id,
+                "trigger_after_folds": trigger_after_folds,
                 "fold_id": fold_id,
                 "run_id": run_id,
                 "conversation_id": new_id("conv"),
@@ -881,11 +905,12 @@ class ExperimentPipeline:
                 paths.agent_output,
                 paths.model_artifacts,
                 epoch_id=epoch_id,
-                artifact_id=f"strategy_{epoch_id}_meta_learning",
+                artifact_id=f"strategy_{meta_learning_id}_meta_learning",
                 parent=parent,
                 fold_id=fold_id,
                 run_id=run_id,
                 step="meta_learning",
+                requires_validation=True,
             )
             status = "meta_regularized"
         elif has_parent and check.get("allowed_to_backtest"):
@@ -900,7 +925,7 @@ class ExperimentPipeline:
                 paths.workspace / SANDBOX_ENVIRONMENT_REQUEST_NAME,
                 base_spec=self._active_sandbox_spec,
                 experiment_id=self.config.experiment_id,
-                epoch_id=epoch_id,
+                epoch_id=meta_learning_id,
                 experiment_dir=self.config.experiment_dir,
                 manifest=manifest,
                 use_docker=self.config.use_docker,
@@ -911,7 +936,7 @@ class ExperimentPipeline:
         except RuntimeError as exc:
             sandbox_image_update = manifest.get("sandbox_image_update")
             sandbox_image_error = exc
-        meta_dir = self.config.experiment_dir / "meta_learning" / epoch_id
+        meta_dir = self.config.experiment_dir / "meta_learning" / meta_learning_id
         meta_dir.mkdir(parents=True, exist_ok=True)
         if taste:
             (meta_dir / "taste.md").write_text(taste + "\n", encoding="utf-8")
@@ -926,6 +951,8 @@ class ExperimentPipeline:
                     "record_type": "meta_learning",
                     "experiment_id": self.config.experiment_id,
                     "epoch_id": epoch_id,
+                    "meta_learning_id": meta_learning_id,
+                    "trigger_after_folds": trigger_after_folds,
                     "fold_id": fold_id,
                     "run_id": run_id,
                     # Same boundary as a regular Fold, excluding external
@@ -1000,26 +1027,43 @@ class ExperimentPipeline:
             for epoch, hashes in sorted(by_epoch.items())
         }
         return {
-            "fold_backtest_summaries": [_compact_fold_history(record) for record in folds],
+            "evaluation_contract": {
+                "validation": "Fold selection and iteration evidence",
+                "frozen_test": "compact completed-Fold metrics are adaptive meta-development feedback",
+                "heldout": "never visible; sole final untouched evaluation",
+            },
+            "fold_backtest_summaries": [
+                _compact_fold_history(record, include_frozen_test_metrics=True) for record in folds
+            ],
             "fold_hash_diversity": fold_hash_diversity,
-            "meta_learning": [_agent_visible_ledger_record(record) for record in self.ledger.read("meta_learning")],
+            "meta_learning": [
+                _agent_visible_ledger_record(record, include_frozen_test_metrics=True)
+                for record in self.ledger.read("meta_learning")
+            ],
             "previous_taste": previous_taste,
         }
 
-    def _prior_meta_learning_logs(self, current_epoch_id: str) -> str:
-        """Concatenated agent_trace logs of the most recent meta-learning sessions
-        before ``current_epoch_id`` (ordered by epoch, bounded by
-        ``meta_memory_max_epochs``; older epochs persist only through the Taste
-        chain and the compact fold history)."""
-        current_index = _epoch_index(current_epoch_id)
+    def _prior_meta_learning_logs(self, current_meta_learning_id: str) -> str:
+        """Latest prior Meta trace from each of the most recent N Epochs.
+
+        Periodic sessions in the current Epoch are eligible, so the immediate
+        predecessor remains visible without allowing raw-memory growth to
+        multiply by the number of interval triggers.
+        """
         chunks: list[str] = []
-        records = sorted(
-            self.ledger.read("meta_learning"),
-            key=lambda item: _epoch_index(str(item.get("epoch_id", ""))),
-        )
-        records = [r for r in records if _epoch_index(str(r.get("epoch_id", ""))) < current_index]
         keep = max(0, self.config.meta_memory_max_epochs)
-        records = records[-keep:] if keep else []
+        if not keep:
+            return ""
+        latest_by_epoch: dict[str, dict[str, object]] = {}
+        epoch_order: list[str] = []
+        for record in self.ledger.read("meta_learning"):
+            if meta_record_id(record) == current_meta_learning_id:
+                continue
+            epoch = str(record.get("epoch_id") or "")
+            if epoch not in latest_by_epoch:
+                epoch_order.append(epoch)
+            latest_by_epoch[epoch] = record
+        records = [latest_by_epoch[epoch] for epoch in epoch_order[-keep:]]
         for record in records:
             trace = self._meta_learning_trace_ref(record)
             if not trace.exists():
@@ -1313,6 +1357,30 @@ class ExperimentPipeline:
             return frozen, "frozen", [], accept_warnings, selected
 
         if parent is not None:
+            if parent.requires_validation:
+                parent_validation = next(
+                    (
+                        summary
+                        for summary in reversed(complete_runs)
+                        if str(summary.get("artifact_hash")) == parent.artifact_hash
+                        and str(summary.get("model_artifact_hash")) == parent.model_artifact_hash
+                    ),
+                    None,
+                )
+                parent_hard_reasons = (
+                    self.config.acceptance.evaluate(parent_validation)[0]
+                    if parent_validation is not None
+                    else ["no matching complete Validation"]
+                )
+            else:
+                parent_hard_reasons = []
+            if parent_hard_reasons:
+                raise RuntimeError(
+                    "Meta-regularized parent has no acceptable complete Validation in this Fold; "
+                    f"refusing unvalidated fallback: {parent_hard_reasons}"
+                )
+            if parent.requires_validation:
+                parent = replace(parent, requires_validation=False)
             # No accepted update: reuse the parent artifact; the fold counts as not improved.
             # finish_fold read-locks output/ and models/ (and the Docker agent's
             # subuid may own files inside) — make them deletable again or the
@@ -1365,6 +1433,7 @@ class ExperimentPipeline:
         step: object,
         expected_hash: str | None = None,
         expected_model_hash: str | None = None,
+        requires_validation: bool = False,
     ) -> FrozenArtifact:
         dest = self.config.experiment_dir / "strategy_artifacts" / epoch_id / artifact_id
         model_dest = self.config.experiment_dir / "strategy_artifacts" / epoch_id / f"{artifact_id}.models"
@@ -1397,6 +1466,7 @@ class ExperimentPipeline:
             "source_run_id": run_id,
             "source_fold_id": fold_id,
             "source_step_id": step,
+            "requires_validation": requires_validation,
             "created_at": utc_now_iso(),
         }
         (dest / "manifest.json").write_text(
@@ -1408,6 +1478,7 @@ class ExperimentPipeline:
             artifact_hash=digest,
             model_path=model_dest,
             model_artifact_hash=model_digest,
+            requires_validation=requires_validation,
         )
 
     def _step_summaries(self, manifest: RunManifest, selected: dict[str, object] | None) -> list[dict[str, object]]:
@@ -1499,11 +1570,68 @@ def _metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
         "max_drawdown",
         "margin_secs_reject_count",
         "order_count",
+        "trade_count",
+        "turnover",
         # Compact Barra-lite block (benchmark/excess return, beta, size tilt)
         # from the backtest tool — descriptive attribution per step.
         "benchmark",
     )
-    return {key: summary.get(key) for key in keys if key in summary}
+    metrics = {key: summary.get(key) for key in keys if key in summary}
+    exposure = summary.get("exposure")
+    if isinstance(exposure, dict):
+        metrics["exposure"] = {
+            key: exposure.get(key)
+            for key in ("avg_gross", "max_gross", "zero_position_days", "replay_days")
+            if key in exposure
+        }
+    return metrics
+
+
+def _agent_visible_metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
+    """Compact metric projection safe for Meta workspace history."""
+
+    metrics = _metrics(summary)
+    if metrics is None:
+        return None
+    metrics = {
+        key: value
+        for key, value in metrics.items()
+        if key in {"benchmark", "exposure"}
+        or (isinstance(value, (int, float)) and not isinstance(value, bool))
+    }
+    benchmark = metrics.get("benchmark")
+    if isinstance(benchmark, dict):
+        metrics["benchmark"] = {
+            key: benchmark.get(key)
+            for key in ("label", "benchmark_return", "excess_return", "beta", "n_days", "size_tilt")
+            if key in benchmark
+            and (
+                (key == "label" and isinstance(benchmark.get(key), str))
+                or (
+                    key != "label"
+                    and isinstance(benchmark.get(key), (int, float))
+                    and not isinstance(benchmark.get(key), bool)
+                )
+            )
+        }
+    else:
+        metrics.pop("benchmark", None)
+    exposure = metrics.get("exposure")
+    if isinstance(exposure, dict):
+        compact_exposure = {
+            key: exposure.get(key)
+            for key in ("avg_gross", "max_gross", "zero_position_days", "replay_days")
+            if key in exposure
+            and isinstance(exposure.get(key), (int, float))
+            and not isinstance(exposure.get(key), bool)
+        }
+        if compact_exposure:
+            metrics["exposure"] = compact_exposure
+        else:
+            metrics.pop("exposure", None)
+    else:
+        metrics.pop("exposure", None)
+    return metrics
 
 
 def _check_has_changes(check: dict[str, object]) -> bool:
@@ -1523,7 +1651,9 @@ def _check_has_changes(check: dict[str, object]) -> bool:
     )
 
 
-def _compact_fold_history(record: dict[str, object]) -> dict[str, object]:
+def _compact_fold_history(
+    record: dict[str, object], *, include_frozen_test_metrics: bool = False
+) -> dict[str, object]:
     manifest = _read_json(Path(str(record.get("run_manifest_ref", ""))))
     backtests = []
     if isinstance(manifest.get("backtest_summaries"), list):
@@ -1563,7 +1693,7 @@ def _compact_fold_history(record: dict[str, object]) -> dict[str, object]:
                     if key in summary
                 }
             )
-    return {
+    compact = {
         "epoch_id": record.get("epoch_id"),
         "fold_id": _agent_visible_ref(record.get("fold_id"), prefix="fold_ref"),
         "fold_status": record.get("fold_status"),
@@ -1573,9 +1703,16 @@ def _compact_fold_history(record: dict[str, object]) -> dict[str, object]:
         "accept_warnings": record.get("accept_warnings"),
         "backtest_summaries": backtests,
     }
+    if include_frozen_test_metrics and record.get("record_type") == "fold":
+        compact["test_result"] = _agent_visible_metrics(
+            record.get("test_result") if isinstance(record.get("test_result"), dict) else None
+        )
+    return compact
 
 
-def _agent_visible_ledger_record(record: dict[str, object]) -> dict[str, object]:
+def _agent_visible_ledger_record(
+    record: dict[str, object], *, include_frozen_test_metrics: bool = False
+) -> dict[str, object]:
     public = json.loads(json.dumps(record, ensure_ascii=False, default=str))
     if not isinstance(public, dict):
         return {}
@@ -1583,6 +1720,8 @@ def _agent_visible_ledger_record(record: dict[str, object]) -> dict[str, object]
         "record_type",
         "experiment_id",
         "epoch_id",
+        "meta_learning_id",
+        "trigger_after_folds",
         "run_id",
         "parent_strategy_artifact_id",
         "finish_reason",
@@ -1609,6 +1748,10 @@ def _agent_visible_ledger_record(record: dict[str, object]) -> dict[str, object]
         "valid_decision_time",
     }
     public = {key: value for key, value in public.items() if key in allowed}
+    if include_frozen_test_metrics and record.get("record_type") == "fold":
+        public["test_result"] = _agent_visible_metrics(
+            record.get("test_result") if isinstance(record.get("test_result"), dict) else None
+        )
     if "fold_id" in record:
         public["fold_id"] = _agent_visible_ref(record.get("fold_id"), prefix="fold_ref")
     for key in ("parent_strategy_artifact_id", "frozen_strategy_artifact_id"):
