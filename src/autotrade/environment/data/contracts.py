@@ -7,6 +7,37 @@ from zoneinfo import ZoneInfo
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
+# ---------------------------------------------------------------------------
+# Raw-lake research contract. The environment owns these values (they define
+# how PIT consumers interpret the lake); the ingest adapter under
+# ``autotrade.data_sources`` imports them so both sides cannot drift.
+# ---------------------------------------------------------------------------
+
+# From this deployment date onward a missing observed stk_auction availability
+# must fall back to the sidecar fetch time, not the historical 09:29 imputation.
+STK_AUCTION_OBSERVED_AVAILABILITY_START = "20260713"
+# TuShare amount/vol can differ from the quoted cent price through rounding.
+# Half one stock tick accepts the full local history while rejecting grossly
+# inconsistent clearing truth.
+STK_AUCTION_PRICE_ABS_TOLERANCE = 0.005
+
+# Datasets forming the board-trading (打板) research domain in the raw lake.
+BOARD_TRADING_DATASETS = [
+    "kpl_list",
+    "kpl_concept_cons",
+    "dc_index",
+    "dc_member",
+    "limit_step",
+    "limit_cpt_list",
+    "limit_list_ths",
+    "top_list",
+    "top_inst",
+    "hm_list",
+    "hm_detail",
+    "ths_hot",
+    "dc_hot",
+]
+
 
 @dataclass(frozen=True)
 class DatasetContract:

@@ -14,7 +14,7 @@ from __future__ import annotations
 from autotrade.environment.artifacts import ArtifactError, artifact_hash, model_artifact_hash
 from autotrade.environment.runtime import covering_complete_validation, utc_now_iso
 
-from .backtest import BacktestTool, _make_formal_artifacts_readonly, _restore_formal_artifacts_writable
+from .backtest import BacktestTool, make_formal_artifacts_readonly, restore_formal_artifacts_writable
 from .base import ActionSpec, PHASE_TRAIN_VALID, ToolContext, ToolError
 from .modification_check import ModificationCheckTool
 
@@ -49,7 +49,7 @@ class FinishFoldTool:
             # cannot race modification_check / contract_check. Restore on any
             # rejection; keep read-only on success.
             locked = True
-            _make_formal_artifacts_readonly(self.ctx.paths)
+            make_formal_artifacts_readonly(self.ctx.paths)
             self.ctx.write_locked = True
 
             last = self.ctx.manifest.get("last_modification_check")
@@ -103,7 +103,7 @@ class FinishFoldTool:
         except Exception:
             self.ctx.write_locked = previous_write_locked
             if locked and not previous_write_locked:
-                _restore_formal_artifacts_writable(self.ctx.paths)
+                restore_formal_artifacts_writable(self.ctx.paths)
             raise
 
 

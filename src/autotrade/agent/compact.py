@@ -18,7 +18,7 @@ from hashlib import sha256
 from typing import Any
 
 from autotrade.environment.llm.proxy import LLMProxy, ProviderResponse
-from autotrade.environment.nl.extraction import ExtractionError, extract_json_object
+from autotrade.environment.llm.extraction import ExtractionError, extract_json_object
 from autotrade.environment.runtime import sanitize_for_log
 
 

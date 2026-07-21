@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from autotrade.environment.style_analysis import (
+from autotrade.environment.replay.style import (
     _benchmark_regression,
     daily_returns_from_curve,
     replay_style_analysis,

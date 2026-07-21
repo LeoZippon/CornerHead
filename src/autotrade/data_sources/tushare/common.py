@@ -17,6 +17,14 @@ from typing import Any, Iterable
 import pandas as pd
 import requests
 
+# Raw-lake research contract values are owned by the environment's PIT layer;
+# the ingest adapter imports them so producer and consumer cannot drift.
+from autotrade.environment.data.contracts import (
+    BOARD_TRADING_DATASETS,
+    STK_AUCTION_OBSERVED_AVAILABILITY_START,
+    STK_AUCTION_PRICE_ABS_TOLERANCE,
+)
+
 from .io import append_jsonl, append_jsonl_unique, file_sha256, has_pagination_probe, parquet_meta, parquet_rows, read_many, write_parquet
 
 
@@ -88,14 +96,6 @@ MACRO_CONTEXT_STATUS_PATH = "results/data_quality/macro_context_status.json"
 EVENT_FLOW_STATUS_PATH = "results/data_quality/event_flow_status.json"
 
 BOARD_TRADING_STATUS_PATH = "results/data_quality/board_trading_status.json"
-
-# From this deployment date onward a missing observed stk_auction availability
-# must fall back to the sidecar fetch time, not the historical 09:29 imputation.
-STK_AUCTION_OBSERVED_AVAILABILITY_START = "20260713"
-# TuShare amount/vol can differ from the quoted cent price through rounding.
-# Half one stock tick accepts the full local history while rejecting grossly
-# inconsistent clearing truth.
-STK_AUCTION_PRICE_ABS_TOLERANCE = 0.005
 
 # Child-process contract: validation/polling ended before any raw write began.
 # The cron runner may restore the previous committed generation and retry later.
@@ -200,22 +200,6 @@ EVENT_FLOW_DATASETS = [
     "repurchase",
     "share_float",
     "block_trade",
-]
-
-BOARD_TRADING_DATASETS = [
-    "kpl_list",
-    "kpl_concept_cons",
-    "dc_index",
-    "dc_member",
-    "limit_step",
-    "limit_cpt_list",
-    "limit_list_ths",
-    "top_list",
-    "top_inst",
-    "hm_list",
-    "hm_detail",
-    "ths_hot",
-    "dc_hot",
 ]
 
 BOARD_TRADING_DEFAULT_DATASETS = list(BOARD_TRADING_DATASETS)

@@ -19,7 +19,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
-from autotrade.environment.style_analysis import BENCHMARK_LABEL, daily_returns_from_curve
+from autotrade.environment.replay.style import BENCHMARK_LABEL, daily_returns_from_curve
 
 
 # ---------------------------------------------------------------------------

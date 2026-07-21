@@ -21,7 +21,7 @@ from autotrade.environment.llm.proxy import (
     tool_call,
     tool_call_response,
 )
-from autotrade.environment.explore import ExploreSubAgentEngine
+from autotrade.agent.explore import ExploreSubAgentEngine
 from autotrade.environment.runtime import AgentTraceWriter, RunManifest
 from autotrade.environment.sandbox import LocalSandbox, SandboxLifecycleFatal
 from autotrade.environment.tools.base import SessionInterrupt
@@ -1497,7 +1497,7 @@ def main(ctx):
             pd.testing.assert_frame_equal(filtered.reset_index(drop=True), expected)
 
     def test_probe_skips_legacy_null_typed_empty_auction_before_filtering(self):
-        from autotrade.environment.tools.backtest import _read_replay_auction
+        from autotrade.environment.tools.backtest import read_replay_auction
 
         with tempfile.TemporaryDirectory() as tmp:
             replay_dir = Path(tmp)
@@ -1505,7 +1505,7 @@ def main(ctx):
                 replay_dir / "auction.parquet", index=False
             )
 
-            loaded = _read_replay_auction(
+            loaded = read_replay_auction(
                 replay_dir,
                 trade_dates=("20241008", "20241231"),
             )

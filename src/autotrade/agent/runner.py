@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from autotrade.environment.explore import ExploreSubAgentEngine
+from .explore import ExploreSubAgentEngine
 from autotrade.environment.llm.proxy import LLMProxy, LLMProxyError, ProviderResponse
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.tools import (

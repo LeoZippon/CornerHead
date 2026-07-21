@@ -37,7 +37,7 @@ from autotrade.environment.sandbox_images import (
     maybe_rebuild_sandbox_image,
     write_sandbox_environment_example,
 )
-from autotrade.environment.style_analysis import write_style_rollup
+from autotrade.environment.replay.style import write_style_rollup
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import PHASE_FROZEN, BacktestTool, ModificationCheckTool, ToolContext
 from autotrade.environment.tools.finish_fold import cleanup_agent_processes
