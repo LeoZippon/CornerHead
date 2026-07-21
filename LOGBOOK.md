@@ -1,3 +1,10 @@
+2026-07-21 全仓一致性复扫与层边界依赖倒置
+
+- 逐类复扫代码/文档/日志/质量产物。核实三个真实边界问题并修复：Environment 反向依赖 TuShare（snapshot/broker 引 tushare.common/io）——竞价容差、观测起始日、打板数据集清单移入 environment/data/contracts.py、sidecar 读取移入 data/pit.py，ingest 适配层反向引用环境合同，environment 现零 data_sources 依赖并新增边界守卫测试；explore.py 迁至 agent/（唯一消费方为主会话 Runner）；style_analysis.py 迁至 replay/style.py。补充发现 nl/extraction.py 实为 provider 响应解析且 NL 栈从未使用，迁至 llm/extraction.py。
+- 跨模块下划线私有导入全部转正：backtest 的 formal 产物只读开关（finish_fold 使用）与 read_replay_auction/nl_call_budget（replay_benchmark 使用）；脚本自带 _optional_float。判定为不改的项：timeview/sandbox 两个 _link_or_copy 语义不同（copyfile 覆盖 vs copy2 copytree 回调）、三个原子写各对应 JSON/文本/parquet 三种内容、broker/driver 动作表重复受 stdlib-only 驱动边界约束、experiment/interactive 循环形态属行为重构不在本次范围。
+- 运行产物核查：results/data_quality 八份 JSON 全部通过自身 v2 reader 校验，修正账本 15,135 行 35 字段全同构、抽样 event_id 全唯一，无需修复；六份设计文档共享统一骨架（相关边界/职责边界/术语说明/导航/编号章节），仅小节深度随内容量差异，判定合规；parameters_reference 一处旧模块简称更新。日志布局统一：qmt_live_monitor.log 迁入 logs/qmt/（脚本与部署文档同步），39 份已删实验遗留的 webui 会话日志归档（archive/logs/20260721_webui_session_logs.tar.gz，SHA-256 `e2070efb...`）后清除，logs/ 现仅 qmt/tushare/webui 三个已文档化目录。
+- 验证：compileall 通过；双向导入顺序冒烟（data_sources↔environment.data 无环）通过；全量 tests/ 920 tests + 45 subtests（158.25s，含新增边界守卫）通过；Prompt 双次导出 SHA-256 保持 `821a608b...c4d6a3fe`；`git diff --check` 通过。合并入 main 后控制台已重新 deploy。
+
 2026-07-21 分支合流至 main 与单主干化
 
 - 经用户确认合流：工作主干 fix/case-study-remediation（领先 origin/main 301 提交）合并入 main，三方基底与 origin/main 树逐字节一致故零冲突；PR #1（environment 重构）改基至 main 后合并（79598d6）。GitHub 默认分支切换为 main，此后只维护 main。
