@@ -5,6 +5,7 @@
 import argparse
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -1215,7 +1216,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             patch.object(cron_update.os, "chdir"),
             patch.object(cron_update, "read_state", return_value={}),
             patch.object(cron_update, "write_state", side_effect=written_state.append),
-            patch.object(cron_update, "append_dispatch"),
             patch.object(cron_update, "acquire_lock", side_effect=AssertionError("must not lock")),
         ):
             self.assertEqual(cron_update.main(), 0)
@@ -1275,7 +1275,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             patch.object(cron_update.os, "chdir"),
             patch.object(cron_update, "read_state", return_value={}),
             patch.object(cron_update, "write_state", side_effect=written_state.append),
-            patch.object(cron_update, "append_dispatch"),
             patch.object(cron_update, "acquire_lock", return_value=FakeLock()),
             patch.object(
                 cron_update,
@@ -1376,10 +1375,34 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn("scripts/data/tushare_audit.py event-flow", command_text[3])
         self.assertIn("--end-date 20260531", command_text[3])
         self.assertIn("scripts/data/tushare_audit.py board-trading", command_text[4])
-        self.assertIn("--include-text", command_text[5])
-        self.assertIn("--text-end-date 20260531", command_text[5])
+        self.assertIn("scripts/data/tushare_audit.py text", command_text[5])
+        self.assertIn("--end-date 20260531", command_text[5])
         self.assertTrue(all("--start-date 20200101" in text for text in command_text))
         self.assertTrue(all("--raw-dir raw" in text for text in command_text))
+
+    def test_cron_run_log_retention_preserves_state_link_and_unrelated_files(self):
+        log_root = self.root / "logs" / "tushare" / "cron"
+        log_root.mkdir(parents=True)
+        stale = log_root / "tushare_cron_stale.log"
+        referenced = log_root / "tushare_cron_referenced.log"
+        fresh = log_root / "tushare_cron_fresh.log"
+        unrelated = log_root / "notes.txt"
+        for path in (stale, referenced, fresh, unrelated):
+            path.write_text("record\n", encoding="utf-8")
+        baseline = stale.stat().st_mtime
+        os.utime(fresh, (baseline + 14 * 86400, baseline + 14 * 86400))
+        state = {"job": {"log_path": str(referenced)}}
+
+        with patch.object(cron_update, "RUN_LOG_ROOT", log_root):
+            cron_update.prune_run_logs(
+                state,
+                now=baseline + (cron_update.RUN_LOG_RETENTION_DAYS + 1) * 86400,
+            )
+
+        self.assertFalse(stale.exists())
+        self.assertTrue(referenced.exists())
+        self.assertTrue(fresh.exists())
+        self.assertTrue(unrelated.exists())
 
     def test_cron_full_audit_can_use_open_date_for_event_flow(self):
         trade_cal = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"
@@ -1407,7 +1430,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertIn("scripts/data/tushare_audit.py event-flow", command_text[3])
         self.assertIn("--end-date 20260618", command_text[3])
-        self.assertIn("--text-end-date 20260621", command_text[5])
+        self.assertIn("scripts/data/tushare_audit.py text", command_text[5])
+        self.assertIn("--end-date 20260621", command_text[5])
 
     def test_cron_update_job_can_use_rolling_start_lookback(self):
         config_path = self.root / "schedule.json"
@@ -2050,7 +2074,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertTrue((self.root / "sentinel_events.jsonl").exists())
         summary = json.loads((self.root / "sentinel_summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["status"], "warning")
-        self.assertEqual(summary["revision_events"], 1)
+        self.assertEqual(summary["metadata"]["totals"]["revision_events"], 1)
         self.assertTrue(pd.read_parquet(path).equals(original))
 
     def test_revision_history_sample_reports_numeric_deltas_without_overwriting_raw(self):
@@ -2087,7 +2111,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             self.assertEqual(audit.audit_revision_history_sample(args), 0)
 
         summary = json.loads((self.root / "history_summary.json").read_text(encoding="utf-8"))
-        adj = next(item for item in summary["datasets"] if item["dataset"] == "adj_factor")
+        adj = summary["findings"][0]["details"]
+        self.assertEqual(adj["dataset"], "adj_factor")
         self.assertEqual(summary["status"], "warning")
         self.assertEqual(adj["revision_partitions"], 1)
         self.assertEqual(adj["changed_columns"], {"adj_factor": 1})
@@ -2161,6 +2186,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
 
         self.assertIsNotNone(event)
+        self.assertEqual(tuple(event), common.REVISION_EVENT_FIELDS)
+        self.assertEqual(event["schema_version"], common.REVISION_EVENT_SCHEMA_VERSION)
+        self.assertEqual(event["record_type"], "revision_event")
+        self.assertIsNone(event["write_action"])
         self.assertEqual(event["changed_keys"], 2)
         self.assertEqual(event["added_keys"], 1)
         self.assertEqual(event["removed_keys"], 1)
@@ -2489,7 +2518,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         summary = json.loads((self.root / "sentinel_error_summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["status"], "error")
-        self.assertEqual(summary["errors"], 1)
+        self.assertEqual(summary["metadata"]["totals"]["api_errors"], 1)
 
     def test_revision_sentinel_warns_on_missing_local_partition(self):
         self._write_trade_cal("20200102")
@@ -2513,7 +2542,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         summary = json.loads((self.root / "sentinel_missing_summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["status"], "warning")
-        self.assertEqual(summary["missing_local_dates"], 1)
+        self.assertEqual(summary["metadata"]["totals"]["missing_local_dates"], 1)
 
     def test_revision_sentinel_marks_required_remote_zero_as_error(self):
         self._write_trade_cal("20200102")
@@ -2540,7 +2569,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         summary = json.loads((self.root / "sentinel_zero_summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["status"], "error")
-        self.assertEqual(summary["remote_zero_dates"], 1)
+        self.assertEqual(summary["metadata"]["totals"]["remote_zero_dates"], 1)
 
     def test_revision_sentinel_default_ledger_for_temp_raw_stays_local(self):
         self._write_trade_cal("20200102")

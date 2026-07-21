@@ -1868,3 +1868,9 @@
 - 正式修正写入改为带内核文件锁的 `event_id` 唯一追加；每进程首次扫描当前 40.5MiB 账本实测 0.36s，之后只增量读取尾部，不引入 sidecar 索引、数据库、守护进程或定时清理。revision sentinel 与 revision-aware writer 共用该边界，重复探测仍打印告警但不重复落账。
 - 修复 `write_share_float_union()` 被单测直接调用时绕过 ledger resolver 的路径，临时 raw 根现始终落本地账本。6 月 4/19 日的 14 份 `results/data_quality/process/` 一次性排查产物已有日志结论且无消费者，已删除并移除空目录。
 - 验证：TuShare 数据层 89 tests 通过；全量 `tests/unit` 906 tests（162.175s）通过。两轮测试前后正式账本 SHA-256 均为 `6e2afa72e7e80001f5c28fb19555a438b473e09c3e188a92d0507e4e94d38be3`，证明测试未再污染正式账本；`py_compile` 与 `git diff --check` 通过。
+
+2026-07-20 数据质量结构统一与运行日志收敛
+
+- `results/data_quality` 的八份 JSON 统一为九字段 schema v1 envelope，finding 与 dataset summary 也固定外层字段；revision ledger 的 15,135 行统一为 35 字段事件记录，`event_id` 全唯一。文本审计拆为真正的 text-only 命令，`text_evidence_status.json` 从 75 条/123KiB 降至 20 条/24KiB，夜间全审计实跑由 21m23s 降至 15m49s（约快 26%），各域质量状态不变。
+- TuShare 运行日志归入 `logs/tushare/{cron,dispatch.log,cron_backups}`，详细日志保留 14 天且保护 state 引用；WebUI 关闭逐请求 access log，资源探针改为紧凑 GPU 行。旧日志已可恢复归档后清理，`logs/` 从 74MiB 降至 29MiB；crontab 已重装到新路径。
+- 恢复包：data-quality 迁移前归档 SHA-256 `54a940e7...e7a802`，日志归档 SHA-256 `611f1d88...66f45`。验证：canonical `tests/` 911 passed + 45 subtests（156.42s），focused 197 passed，`git diff --check` clean；正式报告/账本逐记录 schema 校验全部通过。

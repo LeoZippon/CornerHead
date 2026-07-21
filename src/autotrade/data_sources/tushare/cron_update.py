@@ -23,7 +23,8 @@ from .common import NO_MUTATION_RETRY_EXIT_CODE, normalize_date_key, read_many
 DEFAULT_CONFIG = Path("configs/tushare_update_schedule.json")
 RUNTIME_ROOT = Path(".runtime/tushare")
 STATE_PATH = RUNTIME_ROOT / "cron_state.json"
-DISPATCH_LOG_PATH = Path("logs/tushare_cron_dispatch.log")
+RUN_LOG_ROOT = Path("logs/tushare/cron")
+RUN_LOG_RETENTION_DAYS = 14
 DEFAULT_LOCK_WAIT_SECONDS = 900
 # Job operations that mutate the raw/PIT lake and therefore publish a new
 # generation on success; audit-only jobs must not churn snapshot cache keys.
@@ -224,21 +225,10 @@ def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
         [
             ctx.python,
             "scripts/data/tushare_audit.py",
-            "base",
-            "--include-text",
+            "text",
             "--start-date",
             ctx.start_date,
-            "--bak-start-date",
-            ctx.start_date,
             "--end-date",
-            ctx.end_date,
-            "--fundamental-start-date",
-            ctx.start_date,
-            "--fundamental-end-date",
-            ctx.end_date,
-            "--text-start-date",
-            ctx.start_date,
-            "--text-end-date",
             text_end_date,
             "--raw-dir",
             raw_dir,
@@ -611,10 +601,23 @@ def mark_raw_generation_dirty(raw_dir: Path, transaction: dict, *, error: str) -
     _write_raw_generation_file(raw_dir, payload)
 
 
-def append_dispatch(message: str) -> None:
-    DISPATCH_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with DISPATCH_LOG_PATH.open("a", encoding="utf-8") as handle:
-        handle.write(message.rstrip() + "\n")
+def prune_run_logs(state: dict, *, now: float | None = None) -> None:
+    """Bound dedicated cron-run logs while retaining every state-linked run."""
+    if not RUN_LOG_ROOT.exists():
+        return
+    referenced = {
+        Path(str(item.get("log_path"))).resolve()
+        for item in state.values()
+        if isinstance(item, dict) and item.get("log_path")
+    }
+    cutoff = (time.time() if now is None else now) - RUN_LOG_RETENTION_DAYS * 86400
+    for path in RUN_LOG_ROOT.glob("tushare_cron_*.log"):
+        try:
+            if path.is_file() and path.resolve() not in referenced and path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            # Retention is best-effort and must never block a market-data job.
+            continue
 
 
 def run_probe(command: list[str], log_handle) -> None:
@@ -629,7 +632,14 @@ def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path, *, lo
     returncodes: list[int] = []
     with log_path.open("a", encoding="utf-8") as log:
         log.write(f"started_at={started}\njob={ctx.job_name}\nstart_date={ctx.start_date}\nend_date={ctx.end_date}\ntimezone={ctx.timezone_name}\n")
-        run_probe(["nvidia-smi"], log)
+        run_probe(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,memory.used,memory.total,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            log,
+        )
         run_probe(["free", "-h"], log)
         for index, command in enumerate(commands, start=1):
             log.write(f"\n$ {' '.join(command)}\n")
@@ -656,7 +666,14 @@ def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path, *, lo
             if process.returncode != 0 and ctx.job.get("fail_fast", True):
                 log.write(f"fail_fast=true; skipped_remaining_commands={len(commands) - index}\n")
                 break
-        run_probe(["nvidia-smi"], log)
+        run_probe(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,memory.used,memory.total,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            log,
+        )
         run_probe(["free", "-h"], log)
         log.write(f"returncodes={returncodes}\n")
         log.write(f"finished_at={utc_now()}\n")
@@ -682,7 +699,7 @@ def main() -> int:
     ctx = build_context(args)
     commands = build_job_commands(ctx)
     timestamp = datetime.now(ZoneInfo(ctx.timezone_name)).strftime("%Y%m%d_%H%M%S")
-    log_path = Path("logs") / f"tushare_cron_{ctx.job_name}_{ctx.end_date}_{timestamp}.log"
+    log_path = RUN_LOG_ROOT / f"tushare_cron_{ctx.job_name}_{ctx.end_date}_{timestamp}.log"
     payload = {
         "job": ctx.job_name,
         "start_date": ctx.start_date,
@@ -701,6 +718,7 @@ def main() -> int:
 
     os.chdir(ctx.repo_root)
     state = read_state()
+    prune_run_logs(state)
     if ctx.job.get("only_if_sse_open_date") and not is_sse_open_date(
         ctx.repo_root,
         ctx.config.get("default_raw_dir", "data/raw"),
@@ -719,7 +737,6 @@ def main() -> int:
         }
         write_state(state)
         message = json.dumps({**state[ctx.job_name], "job": ctx.job_name}, ensure_ascii=False)
-        append_dispatch(f"{utc_now()} {message}")
         print(message)
         return 0
     job_state = state.get(ctx.job_name, {})
@@ -727,7 +744,6 @@ def main() -> int:
     generation_committed = str(generation.get("state", GENERATION_COMMITTED)) == GENERATION_COMMITTED
     if should_skip_completed(ctx, args, job_state, payload) and generation_committed:
         message = json.dumps({"status": "skipped_already_ok", **payload}, ensure_ascii=False)
-        append_dispatch(f"{utc_now()} {message}")
         print(message)
         return 0
 
@@ -750,7 +766,6 @@ def main() -> int:
         }
         write_state(state)
         message = json.dumps({**state[ctx.job_name], "job": ctx.job_name}, ensure_ascii=False)
-        append_dispatch(f"{utc_now()} {message}")
         print(message)
         return 1
 
@@ -762,7 +777,6 @@ def main() -> int:
         generation_committed = str(generation.get("state", GENERATION_COMMITTED)) == GENERATION_COMMITTED
         if should_skip_completed(ctx, args, job_state, payload) and generation_committed:
             message = json.dumps({"status": "skipped_already_ok_after_lock", **payload}, ensure_ascii=False)
-            append_dispatch(f"{utc_now()} {message}")
             print(message)
             return 0
         transaction = None
@@ -814,7 +828,6 @@ def main() -> int:
         }
         write_state(state)
         message = json.dumps({**state[ctx.job_name], "job": ctx.job_name}, ensure_ascii=False)
-        append_dispatch(f"{utc_now()} {message}")
         print(message)
         return returncode
     finally:

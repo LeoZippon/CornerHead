@@ -152,6 +152,7 @@ MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
 - 受管控制台以 `-B`、`PYTHONDONTWRITEBYTECODE=1` 和仓库外空 cache prefix 启动；它及其分离 worker 不读取或写入仓库内 `.pyc`，运行行为不依赖残留的 timestamp cache。手工分析仍应遵守同一原则，尤其不得直接导入冻结策略目录。
 - 日常检查保持静默，只记录实际拉起、轮转和失败。
 - 控制台与保活日志超过 10 MB 后轮转，保留一代。
+- 控制台关闭逐请求 access log；启动、告警、异常和 traceback 仍写入 `logs/webui/console.log`，前端健康轮询不再淹没有效诊断。
 
 时间显示约定：后端一律存 UTC ISO 时间戳；WebUI 前端统一按 UTC+8（Asia/Shanghai）渲染显示。
 

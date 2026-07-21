@@ -8,6 +8,8 @@ import json
 
 import pandas as pd
 
+from autotrade.data_quality import build_quality_report, summarize_datasets, write_quality_report
+
 from autotrade.environment.data.contracts import CN_TZ
 from autotrade.environment.data.pit import yyyymmdd
 
@@ -172,8 +174,6 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
     expected_months = set(_month_keys_between(config.start_date, config.end_date))
     checks: list[dict[str, object]] = []
     total_rows = 0
-    errors = 0
-    warnings = 0
     for dataset in datasets:
         files = sorted(
             path for path in (root / dataset).glob("available_month=*.parquet")
@@ -183,11 +183,9 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
         missing_months = sorted(expected_months - file_months)
         if not files:
             checks.append({"severity": "warning", "check": f"{dataset}_partitions", "message": "no PIT event partitions", "details": {"missing_months": missing_months}})
-            warnings += 1
             continue
         if missing_months:
             checks.append({"severity": "warning", "check": f"{dataset}_missing_months", "message": "missing PIT event months in requested audit window", "details": {"missing_months": missing_months[:24], "missing_month_count": len(missing_months)}})
-            warnings += 1
         rows = 0
         unparseable = 0
         wrong_partition = 0
@@ -209,7 +207,6 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
             missing = {"dataset", "ts_code", "available_at", "available_at_rule", "available_month", "business_key", "source_path", "source_hash", "source_row_id"} - set(df.columns)
             if missing:
                 checks.append({"severity": "error", "check": f"{dataset}_schema", "message": f"missing columns in {path}", "details": {"missing": sorted(missing)}})
-                errors += 1
                 continue
             parsed = pd.to_datetime(df["available_at"], errors="coerce", utc=True).dt.tz_convert(CN_TZ)
             unparseable += int(parsed.isna().sum())
@@ -250,10 +247,6 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
             or backdated_available_at or sidecar_hash_mismatch
             else "warning" if duplicate_keys or blank_source_hash else "info"
         )
-        if severity == "error":
-            errors += 1
-        elif severity == "warning":
-            warnings += 1
         checks.append({
             "severity": severity,
             "check": f"{dataset}_pit_events",
@@ -278,13 +271,20 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
         })
     if require_partitions and total_rows == 0:
         checks.append({"severity": "error", "check": "fundamental_events_partitions", "message": "no PIT event rows found for required audit window", "details": {"start_date": config.start_date, "end_date": config.end_date}})
-        errors += 1
-    status = "error" if errors else "warning" if warnings else "ok"
-    report = {"status": status, "errors": errors, "warnings": warnings, "rows": total_rows, "checks": checks}
+    report = build_quality_report(
+        report_type="fundamental_events",
+        scope={
+            "data_root": str(root.resolve()),
+            "start_date": config.start_date,
+            "end_date": config.end_date,
+            "datasets": list(datasets),
+        },
+        findings=checks,
+        datasets=summarize_datasets(checks, datasets),
+        metadata={"rows": total_rows, "require_partitions": bool(require_partitions)},
+    )
     if output:
-        output_path = Path(output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        write_quality_report(output, report)
     return report
 
 

@@ -596,7 +596,8 @@ class SnapshotBuilder:
             report = json.loads(self.fundamental_events_status.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ValueError(f"invalid PIT fundamental events status JSON: {self.fundamental_events_status}") from exc
-        errors = int(report.get("errors", 0) or 0)
+        counts = report.get("finding_counts") or {}
+        errors = int(counts.get("error", report.get("errors", 0)) or 0)
         status = str(report.get("status", "")).lower()
         if status == "error" or errors > 0:
             raise ValueError(

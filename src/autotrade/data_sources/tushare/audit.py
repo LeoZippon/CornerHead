@@ -21,6 +21,8 @@ else:
     from . import common as core
     from .common import *  # noqa: F401,F403
 
+from autotrade.data_quality import build_quality_report, summarize_datasets, write_quality_report
+
 def audit_trade_date_dataset(raw_dir: Path, spec: TradeDateDataset, expected_dates: set[str], add) -> None:
     files = sorted((raw_dir / spec.api_name).glob("trade_date=*.parquet"))
     file_dates = {partition_date(path): path for path in files}
@@ -632,55 +634,87 @@ def audit_revision_history_sample(args: argparse.Namespace) -> int:
         and item["missing_local_partitions"] == 0
         and item["remote_zero_partitions"] == 0
     ]
-    status = "error" if any(item["errors"] or item["remote_zero_partitions"] for item in dataset_reports) else "warning" if any(item["revision_partitions"] or item["structural_issue_partitions"] or item["missing_local_partitions"] for item in dataset_reports) else "ok"
-    report = {
-        "schema_version": 1,
-        "audit": "revision_history_sample",
-        "status": status,
-        "scope": "trade_date_partitioned_active_tushare_interfaces",
-        "raw_mutation": "none",
-        "start_date": args.start_date,
-        "end_date": args.end_date,
-        "sample_per_year": args.sample_per_year,
-        "seed": seed,
-        "sampled_trade_dates_by_year": selected_by_year,
-        "sampled_trade_dates": sampled_dates,
-        "groups": sorted(groups),
-        "events_output": str(events_output),
-        "datasets": dataset_reports,
-        "most_changed_interfaces": [
+    findings = []
+    for item in dataset_reports:
+        severity = (
+            "error"
+            if item["errors"] or item["remote_zero_partitions"]
+            else "warning"
+            if item["revision_partitions"]
+            or item["structural_issue_partitions"]
+            or item["missing_local_partitions"]
+            else "info"
+        )
+        findings.append(
             {
-                "dataset": item["dataset"],
-                "group": item["group"],
-                "revision_partitions": item["revision_partitions"],
-                "revision_rate": item["revision_rate"],
-                "changed_keys": item["changed_keys"],
-                "added_keys": item["added_keys"],
-                "removed_keys": item["removed_keys"],
-                "changed_columns_top": sorted(item["changed_columns"].items(), key=lambda pair: pair[1], reverse=True)[:8],
+                "severity": severity,
+                "check": f"{item['dataset']}_revision_history",
+                "message": f"{item['dataset']} stratified source-revision checks",
+                "details": item,
             }
-            for item in most_changed[:12]
-            if item["revision_partitions"] or item["changed_keys"] or item["added_keys"] or item["removed_keys"]
-        ],
-        "stable_interfaces": stable,
-        "structural_issue_interfaces": [
-            {
-                "dataset": item["dataset"],
-                "group": item["group"],
-                "structural_issue_partitions": item["structural_issue_partitions"],
-                "sample": item["revision_samples"][:3],
-            }
-            for item in dataset_reports
-            if item["structural_issue_partitions"]
-        ],
-        "by_year": by_year,
-        "caveats": [
-            "This command checks active trade-date partitioned interfaces only. Macro, fundamental, text month/day source, and share_float union need their own month/period/code sampling plans.",
-            "Required trade-date interfaces returning zero rows are counted as remote_zero instead of source revisions.",
-            "Missing local partition with non-empty remote response is reported as a local gap, not a source revision.",
-        ],
-    }
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        )
+    report = build_quality_report(
+        report_type="revision_history_sample",
+        scope={
+            "data_root": str(raw_dir),
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+            "datasets": [item["dataset"] for item in dataset_reports],
+            "groups": sorted(groups),
+        },
+        findings=findings,
+        datasets=summarize_datasets(
+            findings, (item["dataset"] for item in dataset_reports)
+        ),
+        metadata={
+            "raw_mutation": "none",
+            "sample_per_year": args.sample_per_year,
+            "seed": seed,
+            "sampled_trade_dates_by_year": selected_by_year,
+            "sampled_trade_dates": sampled_dates,
+            "events_output": str(events_output),
+            "most_changed_interfaces": [
+                {
+                    "dataset": item["dataset"],
+                    "group": item["group"],
+                    "revision_partitions": item["revision_partitions"],
+                    "revision_rate": item["revision_rate"],
+                    "changed_keys": item["changed_keys"],
+                    "added_keys": item["added_keys"],
+                    "removed_keys": item["removed_keys"],
+                    "changed_columns_top": sorted(
+                        item["changed_columns"].items(),
+                        key=lambda pair: pair[1],
+                        reverse=True,
+                    )[:8],
+                }
+                for item in most_changed[:12]
+                if item["revision_partitions"]
+                or item["changed_keys"]
+                or item["added_keys"]
+                or item["removed_keys"]
+            ],
+            "stable_interfaces": stable,
+            "structural_issue_interfaces": [
+                {
+                    "dataset": item["dataset"],
+                    "group": item["group"],
+                    "structural_issue_partitions": item["structural_issue_partitions"],
+                    "sample": item["revision_samples"][:3],
+                }
+                for item in dataset_reports
+                if item["structural_issue_partitions"]
+            ],
+            "by_year": by_year,
+            "caveats": [
+                "This command checks active trade-date partitioned interfaces only. Macro, fundamental, text month/day source, and share_float union need their own month/period/code sampling plans.",
+                "Required trade-date interfaces returning zero rows are counted as remote_zero instead of source revisions.",
+                "Missing local partition with non-empty remote response is reported as a local gap, not a source revision.",
+            ],
+        },
+    )
+    status = report["status"]
+    write_quality_report(output, report)
     print(f"revision history sample status={status} datasets={len(dataset_reports)} dates={len(sampled_dates)} output={output} events={events_output}")
     return 1 if status == "error" and args.fail_on_error else 0
 
@@ -762,29 +796,50 @@ def audit_revision_sentinel(args: argparse.Namespace) -> int:
             "error_sample": errors[:10],
         })
 
-    has_error = bool(total_errors or total_remote_zero)
-    has_warning = bool(events or total_missing_local or total_no_effective_checks)
-    status = "error" if has_error else "warning" if has_warning else "ok"
-    report = {
-        "schema_version": 1,
-        "status": status,
-        "audit": "revision_sentinel",
-        "start_date": args.start_date,
-        "end_date": args.end_date,
-        "sample_size": args.sample_size,
-        "seed": args.seed or args.end_date,
-        "raw_dir": str(raw_dir),
-        "revision_ledger": str(ledger),
-        "revision_events": len(events),
-        "missing_local_dates": total_missing_local,
-        "remote_zero_dates": total_remote_zero,
-        "errors": total_errors,
-        "datasets_without_effective_checks": total_no_effective_checks,
-        "datasets": dataset_reports,
-        "revision_event_sample": events[:20],
-    }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    findings = []
+    for item in dataset_reports:
+        severity = (
+            "error"
+            if item["errors"] or item["remote_zero_dates"]
+            else "warning"
+            if item["revision_events"] or item["missing_local_dates"] or item["no_effective_checks"]
+            else "info"
+        )
+        findings.append(
+            {
+                "severity": severity,
+                "check": f"{item['dataset']}_revision_sentinel",
+                "message": f"{item['dataset']} sampled source-revision checks",
+                "details": item,
+            }
+        )
+    report = build_quality_report(
+        report_type="revision_sentinel",
+        scope={
+            "data_root": str(raw_dir),
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+            "datasets": datasets,
+        },
+        findings=findings,
+        datasets=summarize_datasets(findings, datasets),
+        metadata={
+            "revision_ledger": str(ledger),
+            "sample_size": args.sample_size,
+            "seed": args.seed or args.end_date,
+            "totals": {
+                "revision_events": len(events),
+                "missing_local_dates": total_missing_local,
+                "remote_zero_dates": total_remote_zero,
+                "api_errors": total_errors,
+                "datasets_without_effective_checks": total_no_effective_checks,
+            },
+            "revision_event_sample": events[:20],
+        },
+    )
+    status = report["status"]
+    has_error = status == "error"
+    write_quality_report(output, report)
     print(f"revision sentinel status={status} events={len(events)} errors={total_errors} remote_zero={total_remote_zero} no_effective_checks={total_no_effective_checks} output={output} ledger={ledger}")
     return 1 if has_error or (events and args.fail_on_revision) else 0
 
@@ -856,38 +911,37 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
         "allow_missing_codes": args.allow_missing_codes,
     })
 
-    counts = {level: sum(1 for item in findings if item["severity"] == level) for level in ("error", "warning", "info")}
-    status = status_severity(counts)
-    report = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "raw_dir": str(raw_dir),
-        "scope": {
+    report = build_quality_report(
+        report_type="intraday_minutes",
+        scope={
+            "data_root": str(raw_dir),
             "start_date": args.start_date,
             "end_date": args.end_date,
-            "dataset": args.output_dataset,
+            "datasets": [args.output_dataset],
             "expected_codes_source": args.expected_codes_source,
         },
-        "status": status,
-        "finding_counts": counts,
-        "datasets": summarize_dataset_status(findings),
-        "findings": findings,
-        "unit_rules": {
-            args.output_dataset: {
-                "source": f"derived from {STK_MINS_DATASET} or daily incremental {STK_MINS_API_NAME}",
-                "partition": "one full-market parquet per trade_date",
-                "vol": "shares",
-                "amount": "CNY",
-                "available_at": "bar close time from trade_time",
-            }
+        findings=findings,
+        datasets=summarize_dataset_status(findings),
+        metadata={
+            "unit_rules": {
+                args.output_dataset: {
+                    "source": f"derived from {STK_MINS_DATASET} or daily incremental {STK_MINS_API_NAME}",
+                    "partition": "one full-market parquet per trade_date",
+                    "vol": "shares",
+                    "amount": "CNY",
+                    "available_at": "bar close time from trade_time",
+                }
+            },
+            "conclusions": [
+                "The date-organized minute store is the preferred research/live-update layout for PIT daily replay.",
+                "The stock-year source store remains the historical download and traceability layer.",
+                "Rows must still be filtered by available_at <= decision_time inside PIT snapshot construction.",
+            ],
         },
-        "conclusions": [
-            "The date-organized minute store is the preferred research/live-update layout for PIT daily replay.",
-            "The stock-year source store remains the historical download and traceability layer.",
-            "Rows must still be filtered by available_at <= decision_time inside PIT snapshot construction.",
-        ],
-    }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    )
+    counts = report["finding_counts"]
+    status = report["status"]
+    write_quality_report(output, report)
     print(f"intraday by-date audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
     return 1 if counts["error"] else 0
 
@@ -1003,28 +1057,29 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
         "expected_ratios": {"vol": "minute shares / daily hands ~= 100", "amount": "minute CNY / daily thousand CNY ~= 1000"},
     })
 
-    counts = {level: sum(1 for item in findings if item["severity"] == level) for level in ("error", "warning", "info")}
-    status = status_severity(counts)
-    report = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "raw_dir": str(raw_dir),
-        "scope": {
+    report = build_quality_report(
+        report_type="auction_alignment",
+        scope={
+            "data_root": str(raw_dir),
             "start_date": args.start_date,
             "end_date": args.end_date,
+            "datasets": [args.output_dataset, "stk_auction", "daily"],
             "trade_dates_checked": trade_dates,
             "output_dataset": args.output_dataset,
         },
-        "status": status,
-        "finding_counts": counts,
-        "findings": findings,
-        "conclusions": [
-            "Raw minute files are not modified by this audit.",
-            "Historical 09:30 minute auction bars should be corrected in the Environment snapshot layer when they are used as a proxy for live stk_auction.",
-            "Full-day minute sums should still align with daily units after the documented share/hand and CNY/thousand-CNY conversions.",
-        ],
-    }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        findings=findings,
+        datasets=summarize_dataset_status(findings),
+        metadata={
+            "conclusions": [
+                "Raw minute files are not modified by this audit.",
+                "Historical 09:30 minute auction bars should be corrected in the Environment snapshot layer when they are used as a proxy for live stk_auction.",
+                "Full-day minute sums should still align with daily units after the documented share/hand and CNY/thousand-CNY conversions.",
+            ]
+        },
+    )
+    counts = report["finding_counts"]
+    status = report["status"]
+    write_quality_report(output, report)
     print(f"auction alignment audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
     return 1 if counts["error"] else 0
 
@@ -1164,7 +1219,8 @@ def audit_fundamental_dataset(raw_dir: Path, spec: FundamentalDataset, expected:
         "missing_sample": missing[:20],
         "extra_sample": extra[:20],
         "zero_sample": zero_values[:20],
-        "exact_common_limit_row_count_partitions": exact_limit_values[:20],
+        "exact_common_limit_row_count_partitions": len(exact_limit_values),
+        "exact_limit_sample": exact_limit_values[:20],
     }
     add("error" if not files or missing else "warning" if exact_limit_values else "info", f"{spec.api_name}_partitions", f"{spec.api_name} fundamental partition checks", details)
     key_details = audit_fundamental_keys(files, spec)
@@ -1982,12 +2038,53 @@ def audit_text_completeness(raw_dir: Path, args: argparse.Namespace, add) -> Non
         "datasets": datasets,
         "start_date": args.text_start_date,
         "end_date": text_end,
-        "pit_rules": text_pit_rules(),
+        "dataset_pit_rules": text_pit_rules(),
     })
     for dataset in datasets:
         spec = TEXT_SPECS[dataset]
         expected = expected_text_paths(raw_dir, spec, args.text_start_date, text_end, args)
         audit_text_dataset(raw_dir, spec, expected, add)
+
+
+def audit_text_only(args: argparse.Namespace) -> int:
+    repo_root = Path.cwd().resolve()
+    raw_dir = (repo_root / args.raw_dir).resolve()
+    output = (repo_root / (args.output or TEXT_EVIDENCE_STATUS_PATH)).resolve()
+    findings: list[dict[str, Any]] = []
+
+    def add(severity: str, check: str, message: str, details: dict[str, Any] | None = None) -> None:
+        findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
+
+    datasets = selected_integrated_text_datasets(args)
+    audit_integrated_filesystem(raw_dir, datasets, add)
+    audit_text_completeness(raw_dir, args, add)
+    report = build_quality_report(
+        report_type="text_evidence",
+        scope={
+            "data_root": str(raw_dir),
+            "start_date": args.text_start_date,
+            "end_date": args.text_end_date,
+            "datasets": datasets,
+        },
+        findings=findings,
+        datasets=summarize_dataset_status(findings),
+        metadata={
+            "pit_rules": text_pit_rules(),
+            "doc_refs": {
+                dataset: INTEGRATED_DOC_REFS[dataset]
+                for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))
+            },
+            "conclusions": [
+                "Text rows remain raw evidence; snapshot construction must apply each source's recorded availability rule.",
+                "Repeated delivery and republication are retained in raw data and deduplicated deterministically in the snapshot layer.",
+            ],
+        },
+    )
+    counts = report["finding_counts"]
+    status = report["status"]
+    write_quality_report(output, report)
+    print(f"text audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
+    return 1 if counts["error"] else 0
 
 def selected_audit_macro_datasets(args: argparse.Namespace) -> list[str]:
     datasets = list(getattr(args, "datasets", None) or MACRO_DATASETS)
@@ -2120,8 +2217,8 @@ def audit_macro_completeness(raw_dir: Path, args: argparse.Namespace, add) -> No
         "eco_country": selected_eco_filter_values(args, "eco_country"),
         "eco_currency": selected_eco_filter_values(args, "eco_currency"),
         "eco_event": selected_eco_filter_values(args, "eco_event"),
-        "pit_rules": macro_pit_rules(),
-        "unit_rules": macro_unit_rules(),
+        "dataset_pit_rules": macro_pit_rules(),
+        "dataset_unit_rules": macro_unit_rules(),
     })
     for dataset in datasets:
         spec = MACRO_SPECS[dataset]
@@ -2154,12 +2251,10 @@ def audit_macro_only(args: argparse.Namespace) -> int:
     datasets = selected_audit_macro_datasets(args)
     audit_integrated_filesystem(raw_dir, datasets, add)
     audit_macro_completeness(raw_dir, args, add)
-    counts = {level: sum(1 for item in findings if item["severity"] == level) for level in ("error", "warning", "info")}
-    status = status_severity(counts)
-    report = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "raw_dir": str(raw_dir),
-        "scope": {
+    report = build_quality_report(
+        report_type="macro_context",
+        scope={
+            "data_root": str(raw_dir),
             "start_date": args.start_date,
             "end_date": args.end_date,
             "datasets": datasets,
@@ -2170,22 +2265,26 @@ def audit_macro_only(args: argparse.Namespace) -> int:
             "eco_currency": selected_eco_filter_values(args, "eco_currency"),
             "eco_event": selected_eco_filter_values(args, "eco_event"),
         },
-        "status": status,
-        "finding_counts": counts,
-        "datasets": summarize_dataset_status(findings),
-        "findings": findings,
-        "unit_rules": macro_unit_rules(),
-        "pit_rules": macro_pit_rules(),
-        "doc_refs": {dataset: INTEGRATED_DOC_REFS[dataset] for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))},
-        "conclusions": [
-            "Macro/global context is stored as raw evidence and regime context; snapshot construction must still apply release-time and event-specific PIT rules.",
-            "Monthly and quarterly macro tables use conservative availability fallbacks until cn_schedule or a more precise source release time is joined.",
-            "Economic-calendar values are heterogeneous by event and should not be turned into numeric signals without event-specific parsing.",
-            "monetary_policy is text/PDF evidence; hash and truncate content before LLM prompts and keep it shadow-only until the trading policy explicitly allows text impact.",
-        ],
-    }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        findings=findings,
+        datasets=summarize_dataset_status(findings),
+        metadata={
+            "unit_rules": macro_unit_rules(),
+            "pit_rules": macro_pit_rules(),
+            "doc_refs": {
+                dataset: INTEGRATED_DOC_REFS[dataset]
+                for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))
+            },
+            "conclusions": [
+                "Macro/global context is stored as raw evidence and regime context; snapshot construction must still apply release-time and event-specific PIT rules.",
+                "Monthly and quarterly macro tables use conservative availability fallbacks until cn_schedule or a more precise source release time is joined.",
+                "Economic-calendar values are heterogeneous by event and should not be turned into numeric signals without event-specific parsing.",
+                "monetary_policy is text/PDF evidence; hash and truncate content before LLM prompts and keep it shadow-only until the trading policy explicitly allows text impact.",
+            ],
+        },
+    )
+    counts = report["finding_counts"]
+    status = report["status"]
+    write_quality_report(output, report)
     print(f"macro audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
     return 1 if counts["error"] else 0
 
@@ -2385,8 +2484,8 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
         "share_float_retained_as_union": bool("share_float" in datasets and share_float_complete_union_exists(raw_dir)),
         "start_date": args.start_date,
         "end_date": args.end_date,
-        "pit_rules": event_pit_rules(),
-        "unit_rules": event_unit_rules(),
+        "dataset_pit_rules": event_pit_rules(),
+        "dataset_unit_rules": event_unit_rules(),
     })
     for dataset in datasets:
         if dataset == "share_float" and share_float_complete_union_exists(raw_dir):
@@ -2397,28 +2496,34 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
     if "share_float" in datasets:
         audit_share_float_complete_union(raw_dir, add)
 
-    counts = {level: sum(1 for item in findings if item["severity"] == level) for level in ("error", "warning", "info")}
-    status = status_severity(counts)
-    report = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "raw_dir": str(raw_dir),
-        "scope": {"start_date": args.start_date, "end_date": args.end_date, "datasets": datasets},
-        "status": status,
-        "finding_counts": counts,
-        "datasets": summarize_dataset_status(findings),
-        "findings": findings,
-        "unit_rules": event_unit_rules(),
-        "pit_rules": event_pit_rules(),
-        "doc_refs": {dataset: INTEGRATED_DOC_REFS[dataset] for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))},
-        "conclusions": [
-            "Event/flow raw data is sparse by design; zero-row event months or block-trade dates are expected for sparse event sources.",
-            "Daily flow tables must still be joined with explicit PIT availability; same-day open decisions cannot use post-close or next-day event/flow values.",
-            "share_float raw partitions and the optional share_float_complete union are audited together; exact 6000-row partitions remain source-cap risks.",
-            "Raw event rows are not deduplicated; downstream evidence/snapshot layers need deterministic event-key and availability rules.",
-        ],
-    }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    report = build_quality_report(
+        report_type="event_flow",
+        scope={
+            "data_root": str(raw_dir),
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+            "datasets": datasets,
+        },
+        findings=findings,
+        datasets=summarize_dataset_status(findings),
+        metadata={
+            "unit_rules": event_unit_rules(),
+            "pit_rules": event_pit_rules(),
+            "doc_refs": {
+                dataset: INTEGRATED_DOC_REFS[dataset]
+                for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))
+            },
+            "conclusions": [
+                "Event/flow raw data is sparse by design; zero-row event months or block-trade dates are expected for sparse event sources.",
+                "Daily flow tables must still be joined with explicit PIT availability; same-day open decisions cannot use post-close or next-day event/flow values.",
+                "share_float raw partitions and the optional share_float_complete union are audited together; exact 6000-row partitions remain source-cap risks.",
+                "Raw event rows are not deduplicated; downstream evidence/snapshot layers need deterministic event-key and availability rules.",
+            ],
+        },
+    )
+    counts = report["finding_counts"]
+    status = report["status"]
+    write_quality_report(output, report)
     print(f"event_flow audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
     return 1 if counts["error"] else 0
 
@@ -2530,35 +2635,41 @@ def audit_board_trading_only(args: argparse.Namespace) -> int:
         "dc_hot_markets": selected_board_dc_hot_markets(args),
         "dc_hot_types": selected_board_dc_hot_types(args),
         "hot_is_new": selected_board_hot_is_new(args),
-        "pit_rules": board_pit_rules(),
-        "unit_rules": board_unit_rules(),
+        "dataset_pit_rules": board_pit_rules(),
+        "dataset_unit_rules": board_unit_rules(),
     })
     for dataset in datasets:
         spec = BOARD_TRADING_SPECS[dataset]
         expected = expected_board_paths(raw_dir, spec, args.start_date, args.end_date, args)
         audit_board_dataset(raw_dir, spec, expected, add)
 
-    counts = {level: sum(1 for item in findings if item["severity"] == level) for level in ("error", "warning", "info")}
-    status = status_severity(counts)
-    report = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "raw_dir": str(raw_dir),
-        "scope": {"start_date": args.start_date, "end_date": args.end_date, "datasets": datasets},
-        "status": status,
-        "finding_counts": counts,
-        "datasets": summarize_dataset_status(findings),
-        "findings": findings,
-        "unit_rules": board_unit_rules(),
-        "pit_rules": board_pit_rules(),
-        "doc_refs": {dataset: INTEGRATED_DOC_REFS[dataset] for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))},
-        "conclusions": [
-            "Board-trading raw data is a dedicated sentiment/event evidence domain for limit-up, ladder, topic, Dragon-Tiger, hot-money, and hot-list signals.",
-            "Most board-trading datasets are only valid after close or the next morning; intraday usage must rely on rank_time or a documented observable timestamp.",
-            "These raw rows complement limit_list_d and minute-derived labels; they do not replace PIT execution constraints built from stk_limit and 1-minute bars.",
-        ],
-    }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    report = build_quality_report(
+        report_type="board_trading",
+        scope={
+            "data_root": str(raw_dir),
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+            "datasets": datasets,
+        },
+        findings=findings,
+        datasets=summarize_dataset_status(findings),
+        metadata={
+            "unit_rules": board_unit_rules(),
+            "pit_rules": board_pit_rules(),
+            "doc_refs": {
+                dataset: INTEGRATED_DOC_REFS[dataset]
+                for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))
+            },
+            "conclusions": [
+                "Board-trading raw data is a dedicated sentiment/event evidence domain for limit-up, ladder, topic, Dragon-Tiger, hot-money, and hot-list signals.",
+                "Most board-trading datasets are only valid after close or the next morning; intraday usage must rely on rank_time or a documented observable timestamp.",
+                "These raw rows complement limit_list_d and minute-derived labels; they do not replace PIT execution constraints built from stk_limit and 1-minute bars.",
+            ],
+        },
+    )
+    counts = report["finding_counts"]
+    status = report["status"]
+    write_quality_report(output, report)
     print(f"board_trading audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
     return 1 if counts["error"] else 0
 
@@ -2785,49 +2896,24 @@ def audit_daily_direct(raw_dir: Path, args: argparse.Namespace, add) -> set[str]
     return trade_dates
 
 def summarize_dataset_status(findings: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    dataset_names = sorted(
-        set(
-            REFERENCE_DATASETS
-            + DAILY_REQUIRED_DATASETS
-            + DAILY_OPTIONAL_DATASETS
-            + FUNDAMENTAL_DATASETS
-            + INTRADAY_DATASETS
-            + EVENT_FLOW_DATASETS
-            + BOARD_TRADING_DATASETS
-            + TEXT_DATASETS
-            + MACRO_DATASETS
-        ),
-        key=len,
-        reverse=True,
+    return summarize_datasets(
+        findings,
+        REFERENCE_DATASETS
+        + DAILY_REQUIRED_DATASETS
+        + DAILY_OPTIONAL_DATASETS
+        + FUNDAMENTAL_DATASETS
+        + INTRADAY_DATASETS
+        + EVENT_FLOW_DATASETS
+        + BOARD_TRADING_DATASETS
+        + TEXT_DATASETS
+        + MACRO_DATASETS,
     )
-    summary: dict[str, dict[str, Any]] = {}
-    for finding in findings:
-        check = str(finding.get("check") or "")
-        dataset = None
-        for name in dataset_names:
-            if check == name or check.startswith(f"{name}_") or check.startswith(f"source_{name}"):
-                dataset = name
-                break
-        if dataset is None:
-            continue
-        item = summary.setdefault(dataset, {"status": "ok", "finding_counts": {"error": 0, "warning": 0, "info": 0}, "checks": []})
-        severity = str(finding.get("severity") or "info")
-        item["finding_counts"][severity] = item["finding_counts"].get(severity, 0) + 1
-        item["checks"].append(check)
-    for item in summary.values():
-        item["status"] = status_severity(item["finding_counts"])
-        item["checks"] = sorted(set(item["checks"]))
-    return dict(sorted(summary.items()))
 
 def default_audit_output(args: argparse.Namespace) -> str:
     include_text = bool(getattr(args, "include_text", False))
     include_intraday = bool(getattr(args, "include_intraday", False))
-    if include_text and include_intraday:
-        raise ValueError("combined audit with both --include-text and --include-intraday requires an explicit --output path")
-    if include_text:
-        return TEXT_EVIDENCE_STATUS_PATH
-    if include_intraday:
-        return INTRADAY_MINUTES_STATUS_PATH
+    if include_text or include_intraday:
+        raise ValueError("combined base audit options require an explicit --output path")
     return BASE_RESEARCH_STATUS_PATH
 
 def audit_unified(args: argparse.Namespace) -> int:
@@ -2892,28 +2978,56 @@ def audit_unified(args: argparse.Namespace) -> int:
         "case_ids": [case.get("case_id") for case in case_studies],
     })
 
-    counts = {level: sum(1 for item in findings if item["severity"] == level) for level in ("error", "warning", "info")}
-    status = status_severity(counts)
-    report = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "raw_dir": str(raw_dir),
-        "status": status,
-        "finding_counts": counts,
-        "datasets": summarize_dataset_status(findings),
-        "findings": findings,
-        "case_studies": case_studies,
-        "unit_rules": integrated_unit_rules(),
-        "doc_refs": INTEGRATED_DOC_REFS,
-        "conclusions": [
-            "Base research audit covers reference, daily market, and fundamental raw data.",
-            "Reference/daily/fundamental raw files are structurally usable when errors are zero, but source and semantic warnings require PIT-aware snapshot construction.",
-            "bak_basic and bak_daily are supplemental snapshots; neither should replace daily/daily_basic as the main daily market data source.",
-            "Raw financial records are intentionally not deduplicated; choose report versions by availability date in the snapshot layer.",
-            "Do not compare amount, market value, or share fields across interfaces until each field is normalized to a common unit.",
-        ],
-    }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    included_domains = ["base_research"]
+    if text_datasets:
+        included_domains.append("text_evidence")
+    if intraday_datasets:
+        included_domains.append("intraday_minutes")
+    report = build_quality_report(
+        report_type="base_research" if len(included_domains) == 1 else "combined_raw_audit",
+        scope={
+            "data_root": str(raw_dir),
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+            "datasets": datasets,
+            "domains": included_domains,
+        },
+        findings=findings,
+        datasets=summarize_dataset_status(findings),
+        metadata={
+            "case_studies": case_studies,
+            "unit_rules": integrated_unit_rules(),
+            "doc_refs": INTEGRATED_DOC_REFS,
+            "windows": {
+                "fundamental": {
+                    "start_date": args.fundamental_start_date,
+                    "end_date": args.fundamental_end_date or args.end_date,
+                },
+                "text": {
+                    "start_date": args.text_start_date,
+                    "end_date": args.text_end_date or args.end_date,
+                }
+                if text_datasets
+                else None,
+                "intraday": {
+                    "start_date": args.intraday_start_date,
+                    "end_date": args.intraday_end_date,
+                }
+                if intraday_datasets
+                else None,
+            },
+            "conclusions": [
+                "Base research audit covers reference, daily market, and fundamental raw data.",
+                "Reference/daily/fundamental raw files are structurally usable when errors are zero, but source and semantic warnings require PIT-aware snapshot construction.",
+                "bak_basic and bak_daily are supplemental snapshots; neither should replace daily/daily_basic as the main daily market data source.",
+                "Raw financial records are intentionally not deduplicated; choose report versions by availability date in the snapshot layer.",
+                "Do not compare amount, market value, or share fields across interfaces until each field is normalized to a common unit.",
+            ],
+        },
+    )
+    counts = report["finding_counts"]
+    status = report["status"]
+    write_quality_report(output, report)
     print(f"audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
     return 1 if counts["error"] else 0
 
@@ -2933,39 +3047,38 @@ def audit_intraday_only(args: argparse.Namespace) -> int:
     if STK_MINS_DATASET in intraday_datasets:
         audit_stk_mins_completeness(raw_dir, args, add)
 
-    counts = {level: sum(1 for item in findings if item["severity"] == level) for level in ("error", "warning", "info")}
-    status = status_severity(counts)
-    report = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "raw_dir": str(raw_dir),
-        "scope": {
-            "intraday_start_date": args.intraday_start_date,
-            "intraday_end_date": args.intraday_end_date,
+    report = build_quality_report(
+        report_type="intraday_minutes",
+        scope={
+            "data_root": str(raw_dir),
+            "start_date": args.intraday_start_date,
+            "end_date": args.intraday_end_date,
+            "datasets": intraday_datasets,
             "intraday_codes": getattr(args, "intraday_codes", None),
             "intraday_max_codes": getattr(args, "intraday_max_codes", None),
-            "datasets": intraday_datasets,
         },
-        "status": status,
-        "finding_counts": counts,
-        "datasets": summarize_dataset_status(findings),
-        "findings": findings,
-        "unit_rules": {
-            STK_MINS_DATASET: {
-                "vol": "shares",
-                "amount": "CNY",
-                "available_at": "source trade_time in Asia/Shanghai; use as bar-close availability",
-                "auction_bars": "opening and closing auction are represented by 09:30 and 15:00 1-minute bars; no separate auction dataset is required for historical intraday minute",
-            }
+        findings=findings,
+        datasets=summarize_dataset_status(findings),
+        metadata={
+            "unit_rules": {
+                STK_MINS_DATASET: {
+                    "vol": "shares",
+                    "amount": "CNY",
+                    "available_at": "source trade_time in Asia/Shanghai; use as bar-close availability",
+                    "auction_bars": "opening and closing auction are represented by 09:30 and 15:00 1-minute bars; no separate auction dataset is required for historical intraday minute",
+                }
+            },
+            "doc_refs": {STK_MINS_DATASET: INTEGRATED_DOC_REFS[STK_MINS_DATASET]},
+            "conclusions": [
+                "Intraday minute data is stored as stock-year Parquet partitions and sidecar metadata under data/raw/stk_mins_1min.",
+                "TuShare stk_mins uses shares for vol and CNY for amount; do not mix it with daily.amount or bak_daily.amount without unit conversion.",
+                "Before stk_auction coverage begins, 09:30 minute rows remain the explicitly labelled opening-auction proxy; 15:00 close is the closing-auction clearing price.",
+            ],
         },
-        "doc_refs": {STK_MINS_DATASET: INTEGRATED_DOC_REFS[STK_MINS_DATASET]},
-        "conclusions": [
-            "Intraday minute data is stored as stock-year Parquet partitions and sidecar metadata under data/raw/stk_mins_1min.",
-            "TuShare stk_mins uses shares for vol and CNY for amount; do not mix it with daily.amount or bak_daily.amount without unit conversion.",
-            "Before stk_auction coverage begins, 09:30 minute rows remain the explicitly labelled opening-auction proxy; 15:00 close is the closing-auction clearing price.",
-        ],
-    }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    )
+    counts = report["finding_counts"]
+    status = report["status"]
+    write_quality_report(output, report)
     print(f"intraday audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
     return 1 if counts["error"] else 0
 
@@ -2986,7 +3099,7 @@ def add_base_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--intraday-datasets", nargs="+", choices=core.INTRADAY_DATASETS + ["stk_mins"])
     parser.add_argument("--intraday-codes", nargs="+")
     parser.add_argument("--intraday-max-codes", type=int)
-    parser.add_argument("--include-text", action="store_true", help="Route the formal output to text evidence status unless combined with intraday.")
+    parser.add_argument("--include-text", action="store_true", help="Include text in an explicitly named temporary combined audit.")
     parser.add_argument("--text-start-date", default="20100101")
     parser.add_argument("--text-end-date")
     parser.add_argument("--text-datasets", nargs="+", choices=core.TEXT_DATASETS, dest="text_datasets")
@@ -2995,7 +3108,7 @@ def add_base_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--probe-api", action="store_true")
     parser.add_argument("--sample-limit", type=int, default=10)
     core.add_runtime_args(parser, min_interval=0.18, timeout=60)
-    parser.add_argument("--output", help="Defaults to a semantic data_quality status file based on included datasets.")
+    parser.add_argument("--output", help=f"Defaults to {core.BASE_RESEARCH_STATUS_PATH}; combined options require an explicit path.")
 
 def add_intraday_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("intraday", help="audit stock-year intraday minute raw data")
@@ -3038,6 +3151,15 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     macro.add_argument("--datasets", nargs="+", choices=core.MACRO_DATASETS)
     core.add_macro_filter_args(macro)
     macro.add_argument("--output", help=f"Defaults to {core.MACRO_CONTEXT_STATUS_PATH}.")
+
+    text = sub.add_parser("text", help="audit only text-evidence raw data")
+    core.add_raw_arg(text)
+    text.add_argument("--start-date", dest="text_start_date", default="20100101")
+    text.add_argument("--end-date", dest="text_end_date", default=date.today().strftime("%Y%m%d"))
+    text.add_argument("--text-datasets", nargs="+", choices=core.TEXT_DATASETS, dest="text_datasets")
+    text.add_argument("--news-src", action="append", default=[])
+    text.add_argument("--major-news-src", action="append", default=[])
+    text.add_argument("--output", help=f"Defaults to {core.TEXT_EVIDENCE_STATUS_PATH}.")
 
 def add_board_parser(sub: argparse._SubParsersAction) -> None:
     board = sub.add_parser("board-trading", help="audit 打板专题 raw data")
@@ -3104,6 +3226,8 @@ def main() -> int:
         return audit_event_flow_only(args)
     if args.command == "macro":
         return audit_macro_only(args)
+    if args.command == "text":
+        return audit_text_only(args)
     if args.command == "board-trading":
         return audit_board_trading_only(args)
     if args.command == "revision-history-sample":

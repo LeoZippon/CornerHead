@@ -377,7 +377,7 @@ TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_sched
 
 runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw/PIT，下载子进程继承同一 flock（经 `TUSHARE_UPDATE_LOCK_HELD` 标记避免重复加锁），避免 runner 异常退出后残留写进程失锁。手工 `tushare_download.py` 对生产 `data/raw` 的写命令同样非阻塞获取该独占锁，锁忙时直接失败而不是与 cron 或发布竞态。任一 raw 或 PIT 落库任务在第一条写命令前把 `data/raw/.raw_generation.json` 标为 `updating`，全部成功后发布新的 `committed` 湖世代；失败为 `dirty`，只能由同 job、区间和命令精确重跑恢复。纯审计任务不改变世代。
 
-盘前两融任务（`cn_preopen_margin_secs_backfill_0903`/`_retry_0913`、`cn_preopen_margin_backfill_0905`/`_retry_0915`）带 `--zero-rows-not-ready`：源端尚未发布（必需数据集返回空响应）是常规事件而非失败——若本次调用没有任何写入，进程以退出码 75 结束（与竞价捕获相同的"无变更可重试"契约），cron 恢复先前 `committed` 世代并记 `not_ready`，由独立命名的重试任务或夜间全量同步补齐；若部分数据集已写入，则正常提交世代并把空分区留给重试任务。历史回补不带该旗标，必需数据集的空响应仍 fail-fast。日志写入 `logs/tushare_cron_<job>_<end_date>_<timestamp>.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
+盘前两融任务（`cn_preopen_margin_secs_backfill_0903`/`_retry_0913`、`cn_preopen_margin_backfill_0905`/`_retry_0915`）带 `--zero-rows-not-ready`：源端尚未发布（必需数据集返回空响应）是常规事件而非失败——若本次调用没有任何写入，进程以退出码 75 结束（与竞价捕获相同的"无变更可重试"契约），cron 恢复先前 `committed` 世代并记 `not_ready`，由独立命名的重试任务或夜间全量同步补齐；若部分数据集已写入，则正常提交世代并把空分区留给重试任务。历史回补不带该旗标，必需数据集的空响应仍 fail-fast。详细运行日志写入 `logs/tushare/cron/tushare_cron_<job>_<end_date>_<timestamp>.log`，保留 14 天（当前 state 引用的每个 job 最后一份日志不删除）；cron 汇总输出写入 `logs/tushare/dispatch.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
 
 实验不直接跟随 live 目录变化：首次启动在锁空闲且 generation committed 时按需发布 `data/research_releases/<generation_id>/`；更新锁忙或 generation 为 `updating` / `dirty` 时立即复用最近完整版本。raw Parquet、配对 sidecar 和 PIT Parquet 使用硬链接，其余小文件与质量状态使用副本，实时目录 `rt_min_live` 不进入版本。发布后所有 Fold、交易日历和恢复运行都读取同一个实验 pin，因此数据更新无需中断实验。部署后须先在 committed 世代完成一次 bootstrap；此前若更新锁正忙会立即失败而非等待。
 
@@ -454,9 +454,10 @@ runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw/P
 
 **报告结构**
 
-- 六个 raw 数据域报告共享生成时间、范围、总体状态、发现列表和数据集摘要等核心信息，但具体字段并不完全一致。
-- 财务事件索引报告采用更小的独立结构，只保证状态、错误、告警、行数和检查结果。
-- 消费方不得假设所有报告存在一套完全相同的扩展字段。
+- 顶层保留报告（六个 raw 数据域、财务事件索引和 revision summary）统一采用 schema v1 的九字段 envelope：`schema_version`、`report_type`、`created_at`、`status`、`scope`、`finding_counts`、`datasets`、`findings`、`metadata`；生产端原子发布完整 JSON。
+- `scope` 固定包含 `data_root`、`start_date`、`end_date`、`datasets`，各报告可补充筛选条件；`datasets.<name>` 固定包含 `status`、`finding_counts`、`checks`。
+- 每条 finding 只包含 `severity`、`check`、`message`、`details`。`check` 是记录判别符，只有 `details` 允许保留该检查真正需要的领域字段；消费方不得跨不同 `check` 猜测同名扩展字段语义。
+- `metadata` 保存单位、PIT 规则、结论、行数、抽样参数等报告专属内容，避免把大量可空扩展字段铺到统一 envelope 上。
 
 存在 `error` 时脚本返回非 0；只有 `warning` 时返回 0，但下游必须显式处理 warning 指向的语义风险。
 
@@ -469,7 +470,7 @@ runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw/P
 | 历史分钟线 | `scripts/data/tushare_audit.py intraday-by-date` | `intraday_minutes_status.json` | 按日文件、必需字段、重复 `(ts_code, trade_time)`、时间解析、09:30/15:00 条 | 正式状态文件用本地分钟覆盖口径；严格 daily 覆盖只做专项排查 |
 | 事件/资金 | `scripts/data/tushare_audit.py event-flow` | `event_flow_status.json` | 日频/公告分区、资金和事件单位、重复业务键、`share_float_complete` 合并结果 | 解禁触顶风险；融资融券标的资格不等于券商券源 |
 | 打板专题 | `scripts/data/tushare_audit.py board-trading` | `board_trading_status.json` | tag/type/market 分区、榜单字段、可见时间、重复键 | 日终标签不能用于盘中；同花顺和 TuShare 涨跌停口径不同 |
-| 文本数据 | `scripts/data/tushare_audit.py base --include-text` | `text_evidence_status.json` | 月/日期/source 分区、时间字段、重复文本键、触顶风险 | 重复推送和转载是 warning；快照层生成本次快照内唯一标识和正文引用 |
+| 文本数据 | `scripts/data/tushare_audit.py text` | `text_evidence_status.json` | 月/日期/source 分区、时间字段、重复文本键、触顶风险 | 只审计文本域，不再复制 base audit；重复推送和转载是 warning，快照层生成本次快照内唯一标识和正文引用 |
 
 分钟线竞价口径专项检查只用于过程排查，不写入顶层状态文件。
 
@@ -579,6 +580,7 @@ results/data_quality/revision_summary.json
 - 单元测试、临时 raw 目录和过程排查目录只写本地 `revision_events.jsonl`，不得污染正式账本。
 - 正式账本不得出现 `/tmp` 路径；测试污染记录属于无效账本输入。
 - `event_id` 是修正内容的稳定语义身份（不含观测时间和下游处理状态）；正式账本只保留同一 `event_id` 的首次观测，重复探测仍可告警但不重复落账。
+- 每行统一为 `schema_version=1`、`record_type=revision_event` 的固定字段集合；只观察、不写 raw 的 sentinel 事件以 `null` 保留 `old_source_hash`、`new_source_hash`、`write_action` 和 `allow_empty_revision_overwrite`，不再通过缺字段表达状态。
 - 分页接口若连续返回重复的非空满页，会 fail fast，避免死循环或重复写入。
 - `stock_basic` 代码加载只接受合法 A 股代码模式 `\d{6}.(SH|SZ|BJ)`。
 - `bak_basic` 审计的预期交易日上限必须截到审计 `end_date`，不能把 `trade_cal` 的未来 lookahead 误报为缺失。

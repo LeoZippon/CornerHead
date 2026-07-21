@@ -517,9 +517,9 @@ def run(
         # filesystem permissions (loopback TCP is reachable by every local
         # user on a shared host). uvicorn chmods the socket itself to 666,
         # so the caller must keep the directory 0700.
-        uvicorn.run(app, uds=str(uds), log_level="info")
+        uvicorn.run(app, uds=str(uds), log_level="info", access_log=False)
     else:
-        uvicorn.run(app, host=host, port=port, log_level="info")
+        uvicorn.run(app, host=host, port=port, log_level="info", access_log=False)
 
 
 __all__ = ["create_app", "run"]

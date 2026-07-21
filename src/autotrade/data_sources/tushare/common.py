@@ -32,6 +32,57 @@ REVISION_EVENTS_PATH = "results/data_quality/revision_events.jsonl"
 
 REVISION_SUMMARY_PATH = "results/data_quality/revision_summary.json"
 
+REVISION_EVENT_SCHEMA_VERSION = 1
+REVISION_EVENT_FIELDS = (
+    "schema_version",
+    "record_type",
+    "event_id",
+    "detected_at",
+    "source",
+    "dataset",
+    "api_name",
+    "partition",
+    "path",
+    "severity",
+    "downstream_status",
+    "key_columns",
+    "old_rows",
+    "new_rows",
+    "changed_keys",
+    "added_keys",
+    "removed_keys",
+    "missing_key_columns_old",
+    "missing_key_columns_new",
+    "duplicate_key_rows_old",
+    "duplicate_key_rows_new",
+    "comparison_issue",
+    "affected_ts_codes",
+    "affected_ts_codes_sample",
+    "changed_keys_sample",
+    "added_keys_sample",
+    "removed_keys_sample",
+    "changed_columns",
+    "changed_columns_sample",
+    "added_rows_sample",
+    "removed_rows_sample",
+    "old_source_hash",
+    "new_source_hash",
+    "write_action",
+    "allow_empty_revision_overwrite",
+)
+_REVISION_EVENT_OPTIONAL_DEFAULTS = {
+    "schema_version": REVISION_EVENT_SCHEMA_VERSION,
+    "record_type": "revision_event",
+    "changed_columns": {},
+    "changed_columns_sample": [],
+    "added_rows_sample": [],
+    "removed_rows_sample": [],
+    "old_source_hash": None,
+    "new_source_hash": None,
+    "write_action": None,
+    "allow_empty_revision_overwrite": None,
+}
+
 MACRO_CONTEXT_STATUS_PATH = "results/data_quality/macro_context_status.json"
 
 EVENT_FLOW_STATUS_PATH = "results/data_quality/event_flow_status.json"
@@ -1642,6 +1693,33 @@ def revision_severity(dataset: str) -> str:
         return "medium"
     return "low"
 
+
+def normalize_revision_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade a revision event to the one fixed JSONL record schema."""
+    unknown = set(event) - set(REVISION_EVENT_FIELDS)
+    if unknown:
+        raise ValueError(f"unknown revision event fields: {sorted(unknown)}")
+    normalized = {
+        key: value.copy() if isinstance(value, (dict, list)) else value
+        for key, value in _REVISION_EVENT_OPTIONAL_DEFAULTS.items()
+    }
+    normalized.update(event)
+    missing = set(REVISION_EVENT_FIELDS) - set(normalized)
+    if missing:
+        raise ValueError(f"missing revision event fields: {sorted(missing)}")
+    return {field: normalized[field] for field in REVISION_EVENT_FIELDS}
+
+
+def revision_event_id(event: dict[str, Any]) -> str:
+    return stable_hash(
+        {
+            key: value
+            for key, value in event.items()
+            if key not in {"schema_version", "record_type", "event_id", "detected_at", "downstream_status"}
+            and value is not None
+        }
+    )
+
 def build_revision_event(
     *,
     dataset: str,
@@ -1666,6 +1744,8 @@ def build_revision_event(
         }
     )
     event = {
+        "schema_version": REVISION_EVENT_SCHEMA_VERSION,
+        "record_type": "revision_event",
         "detected_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "source": source,
         "dataset": dataset,
@@ -1694,13 +1774,13 @@ def build_revision_event(
         "changed_columns_sample": comparison.get("changed_columns_sample", []),
         "added_rows_sample": comparison.get("added_rows_sample", []),
         "removed_rows_sample": comparison.get("removed_rows_sample", []),
+        "old_source_hash": None,
+        "new_source_hash": None,
+        "write_action": None,
+        "allow_empty_revision_overwrite": None,
     }
-    event["event_id"] = stable_hash({
-        key: value
-        for key, value in event.items()
-        if key not in {"detected_at", "downstream_status"}
-    })
-    return event
+    event["event_id"] = revision_event_id(event)
+    return normalize_revision_event(event)
 
 def finalize_revision_event(
     event: dict[str, Any],
@@ -1716,12 +1796,8 @@ def finalize_revision_event(
         "write_action": write_action,
         "allow_empty_revision_overwrite": bool(allow_empty_revision_overwrite),
     })
-    event["event_id"] = stable_hash({
-        key: value
-        for key, value in event.items()
-        if key not in {"detected_at", "downstream_status"}
-    })
-    return event
+    event["event_id"] = revision_event_id(event)
+    return normalize_revision_event(event)
 
 def write_parquet_revision_aware(
     path: Path,

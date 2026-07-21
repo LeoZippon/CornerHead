@@ -106,13 +106,14 @@ def run_audit_fundamental_events(args: argparse.Namespace) -> dict[str, object]:
         output=args.output,
         require_partitions=getattr(args, "require_partitions", False),
     )
+    counts = report["finding_counts"]
     if report["status"] == "error":
-        raise ValueError(f"fundamental event audit failed: errors={report['errors']} output={args.output}")
+        raise ValueError(f"fundamental event audit failed: errors={counts['error']} output={args.output}")
     return {
         "audit_status": report["status"],
-        "errors": report["errors"],
-        "warnings": report["warnings"],
-        "rows": report["rows"],
+        "errors": counts["error"],
+        "warnings": counts["warning"],
+        "rows": report["metadata"]["rows"],
         "output": str(args.output),
     }
 

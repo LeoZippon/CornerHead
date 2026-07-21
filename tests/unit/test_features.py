@@ -237,7 +237,7 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
             tampered.to_parquet(path, index=False)
             report = audit_fundamental_events(output, config)
             self.assertEqual(report["status"], "error")
-            self.assertEqual(report["checks"][-1]["details"]["backdated_available_at_rows"], 1)
+            self.assertEqual(report["findings"][-1]["details"]["backdated_available_at_rows"], 1)
 
     def test_fundamental_events_merge_partial_month_and_replace_complete_month(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -303,7 +303,7 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
             )
 
             self.assertEqual(report["status"], "error")
-            details = report["checks"][-1]["details"]
+            details = report["findings"][-1]["details"]
             self.assertEqual(details["disallowed_available_at_rule_rows"], 1)
             self.assertEqual(details["wrong_source_path_rows"], 1)
 
@@ -317,4 +317,7 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
 
             self.assertEqual(warning_report["status"], "warning")
             self.assertEqual(required_report["status"], "error")
-            self.assertIn("fundamental_events_partitions", [check["check"] for check in required_report["checks"]])
+            self.assertIn(
+                "fundamental_events_partitions",
+                [finding["check"] for finding in required_report["findings"]],
+            )
