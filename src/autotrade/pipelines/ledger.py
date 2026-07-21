@@ -15,6 +15,8 @@ from pathlib import Path
 
 from autotrade.environment.runtime import sanitize_for_log, utc_now_iso
 
+# Stamped on every appended record; bump when the record shape changes.
+LEDGER_RECORD_SCHEMA_VERSION = 1
 RECORD_TYPES = ("fold", "meta_learning", "heldout", "attempt_failed")
 LINK_KEYS = ("experiment_id", "epoch_id", "fold_id", "run_id")
 
@@ -51,7 +53,11 @@ class ExperimentLedger:
         missing = [key for key in LINK_KEYS if not record.get(key)]
         if missing:
             raise ValueError(f"ledger record missing link keys: {missing}")
-        payload = {"recorded_at": utc_now_iso(), **sanitize_for_log(record)}
+        payload = {
+            "schema_version": LEDGER_RECORD_SCHEMA_VERSION,
+            "recorded_at": utc_now_iso(),
+            **sanitize_for_log(record),
+        }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str) + "\n")

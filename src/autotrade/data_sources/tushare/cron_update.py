@@ -66,10 +66,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# The schedule config's schema_version is a real producer/consumer contract:
+# an edit that reshapes the config must bump both this constant and the file,
+# or every runner refuses to start (fail-fast, no silent drift).
+SCHEDULE_CONFIG_SCHEMA_VERSION = 1
+
+
 def load_config(path: Path) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"schedule config not found: {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
+    config = json.loads(path.read_text(encoding="utf-8"))
+    version = config.get("schema_version")
+    if version != SCHEDULE_CONFIG_SCHEMA_VERSION:
+        raise ValueError(
+            f"schedule config schema_version {version!r} != expected "
+            f"{SCHEDULE_CONFIG_SCHEMA_VERSION}; regenerate or migrate {path}"
+        )
+    return config
 
 
 def resolve_sse_open_on_or_before(repo_root: Path, raw_dir: str, target_date: str) -> str:
@@ -552,7 +565,14 @@ def write_raw_generation(raw_dir: Path, *, transaction: dict | None = None) -> d
     if transaction:
         payload["transaction"] = dict(transaction)
     _write_raw_generation_file(raw_dir, payload)
-    print(f"raw generation {payload['generation_id']} published at {raw_dir / '.raw_generation.json'}")
+    # Single-line JSON: everything the runner prints may be teed into the
+    # dispatch log, which is a strict-JSONL contract.
+    print(json.dumps({
+        "note": "raw_generation_published",
+        "generation_id": payload["generation_id"],
+        "path": str(raw_dir / ".raw_generation.json"),
+        "updated_at": utc_now(),
+    }, ensure_ascii=False))
     return payload
 
 
@@ -807,7 +827,8 @@ def _run(args: argparse.Namespace) -> int:
     mutates_lake = ctx.job.get("operation", "update") in MUTATING_OPERATIONS
     raw_dir = ctx.repo_root / ctx.config.get("default_raw_dir", "data/raw")
     if args.dry_run:
-        print(json.dumps({"status": "dry_run", **payload}, ensure_ascii=False, indent=2))
+        # Single-line for the strict-JSONL dispatch contract (pipe to jq to read).
+        print(json.dumps({"status": "dry_run", **payload}, ensure_ascii=False))
         return 0
 
     os.chdir(ctx.repo_root)

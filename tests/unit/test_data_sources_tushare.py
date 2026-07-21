@@ -730,6 +730,36 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             ("20200701", "20200705", "202007"),
         ])
 
+    def test_dup_key_identical_content_records_no_revision_event(self):
+        path = self.raw_dir / "dividend" / "ann_month=202001.parquet"
+        rows = pd.DataFrame([
+            {"ts_code": "000001.SZ", "ann_date": "20200105", "cash_div": 1.0},
+            {"ts_code": "000001.SZ", "ann_date": "20200105", "cash_div": 1.0},  # duplicate business key
+        ])
+        common.write_parquet(path, rows, api_name="dividend", params={}, fields=list(rows.columns), source_hash="h1")
+        ledger = self.root / "dupkey_revision_events.jsonl"
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            did_write = common.write_parquet_revision_aware(
+                path, rows.copy(), api_name="dividend", params={}, fields=list(rows.columns),
+                source_hash="h1", key_columns=["ts_code", "ann_date"], revision_ledger=ledger,
+            )
+        # Identical content with duplicate keys is not a revision: no event, no alert.
+        self.assertTrue(did_write)
+        self.assertFalse(ledger.exists())
+        self.assertNotIn("REVISION_ALERT", output.getvalue())
+
+        changed = rows.copy()
+        changed.loc[1, "cash_div"] = 2.0
+        with redirect_stdout(io.StringIO()):
+            common.write_parquet_revision_aware(
+                path, changed, api_name="dividend", params={}, fields=list(changed.columns),
+                source_hash="h2", key_columns=["ts_code", "ann_date"], revision_ledger=ledger,
+            )
+        event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(event["comparison_issue"], "duplicate_key_rows")
+
     def test_revision_aware_writer_blocks_key_removal_overwrite(self):
         path = self.raw_dir / "forecast_vip" / "ann_month=202001.parquet"
         original = pd.DataFrame([
@@ -1183,6 +1213,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         config_path.write_text(
             json.dumps(
                 {
+                    "schema_version": 1,
                     "timezone": "Asia/Shanghai",
                     "repo_root": str(self.root),
                     "python": "/env/python",
@@ -1236,6 +1267,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         config_path.write_text(
             json.dumps(
                 {
+                    "schema_version": 1,
                     "timezone": "Asia/Shanghai",
                     "repo_root": str(self.root),
                     "python": "/env/python",
@@ -1315,7 +1347,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         selected_job = {"operation": "auction_capture", "skip_if_already_ok": True}
         base_config = {
             "schema_version": 1,
-            "timezone": "Asia/Shanghai",
+            "schema_version": 1,
+                    "timezone": "Asia/Shanghai",
             "repo_root": str(self.root),
             "python": "/env/python",
             "default_start_date": "20200101",
@@ -1525,7 +1558,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             ]
         ).to_parquet(trade_cal, index=False)
         config_path.write_text(json.dumps({
-            "timezone": "Asia/Shanghai",
+            "schema_version": 1,
+                    "timezone": "Asia/Shanghai",
             "repo_root": str(self.root),
             "python": "/env/python",
             "default_raw_dir": "raw",
@@ -1564,7 +1598,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             index=False,
         )
         config_path.write_text(json.dumps({
-            "timezone": "Asia/Shanghai",
+            "schema_version": 1,
+                    "timezone": "Asia/Shanghai",
             "repo_root": str(self.root),
             "python": "/env/python",
             "default_start_date": "20200101",
