@@ -13,12 +13,11 @@ from autotrade.environment.llm.proxy import (
     tool_call as make_tool_call,
     tool_call_response,
 )
+from autotrade.environment.llm import ExtractionError, extract_json_object
 from autotrade.environment.nl import (
-    ExtractionError,
     NLSubAgentConfig,
     NLSubAgentEngine,
     TextRetriever,
-    extract_json_object,
 )
 from autotrade.environment.nl.engine import TEXT_RETRIEVE_SCHEMA, TEXT_RETRIEVE_SPEC
 

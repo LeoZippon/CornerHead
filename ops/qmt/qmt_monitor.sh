@@ -6,7 +6,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON="${QUANT_PYTHON:-$HOME/miniconda3/envs/quant/bin/python}"
 PID_FILE="$REPO_ROOT/.runtime/qmt/monitor.pid"
-LOG_FILE="$REPO_ROOT/logs/qmt_live_monitor.log"
+LOG_FILE="$REPO_ROOT/logs/qmt/qmt_live_monitor.log"
 
 # The pid must exist AND its cmdline must match the monitor script, so a stale
 # pidfile whose pid number was recycled reads as DOWN (webui_stack.sh pattern).

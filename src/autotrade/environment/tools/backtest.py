@@ -46,7 +46,7 @@ from autotrade.environment.identity import agent_visible_ref
 from autotrade.environment.runtime import chmod_tree, new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.data.snapshot import load_snapshot_manifest
 from autotrade.environment.step_tree import StepTree
-from autotrade.environment.style_analysis import replay_style_analysis
+from autotrade.environment.replay.style import replay_style_analysis
 
 from .base import (
     ActionField,
@@ -338,7 +338,7 @@ class BacktestTool:
             data_load["minute_catalog_seconds"] = round(time.monotonic() - load_t0, 6)
             data_load["minutes_seconds"] = 0.0
             load_t0 = time.monotonic()
-            replay_auction = _read_replay_auction(replay_dir, trade_dates=keep)
+            replay_auction = read_replay_auction(replay_dir, trade_dates=keep)
             data_load["auction_seconds"] = round(time.monotonic() - load_t0, 6)
         else:
             keep = None
@@ -354,7 +354,7 @@ class BacktestTool:
             data_load["minute_catalog_seconds"] = round(time.monotonic() - load_t0, 6)
             data_load["minutes_seconds"] = 0.0
             load_t0 = time.monotonic()
-            replay_auction = _read_replay_auction(replay_dir)
+            replay_auction = read_replay_auction(replay_dir)
             data_load["auction_seconds"] = round(time.monotonic() - load_t0, 6)
         data_load.update(
             {
@@ -494,7 +494,7 @@ class BacktestTool:
                         # A single NL call gets a fraction of the decision cap so there is headroom
                         # for the surrounding compute before the per-decision wall cap kills the tick.
                         per_call_timeout_seconds=decision_cap * 0.8,
-                        max_calls=_nl_call_budget(manifest, replay_daily),
+                        max_calls=nl_call_budget(manifest, replay_daily),
                         # When the Timeview is on, ctx.nl() text rolls on the same nodes as the view.
                         replay_dir=replay_dir if timeview_enabled else None,
                         withhold_response=probe,
@@ -1247,7 +1247,7 @@ def _minute_replay_source(
     return source
 
 
-def _read_replay_auction(
+def read_replay_auction(
     replay_dir: Path,
     *,
     trade_dates: tuple[str, ...] | None = None,
@@ -1319,20 +1319,20 @@ def _optional_float(value: object) -> float | None:
 @contextlib.contextmanager
 def _formal_artifacts_readonly(paths, *, restore_writable: bool):
     """Make output/models filesystem-read-only while formal replay imports/runs."""
-    _make_formal_artifacts_readonly(paths)
+    make_formal_artifacts_readonly(paths)
     try:
         yield
     finally:
         if restore_writable:
-            _restore_formal_artifacts_writable(paths)
+            restore_formal_artifacts_writable(paths)
 
 
-def _make_formal_artifacts_readonly(paths) -> None:
+def make_formal_artifacts_readonly(paths) -> None:
     chmod_tree(paths.agent_output, file_mode=0o444, dir_mode=0o555)
     chmod_tree(paths.model_artifacts, file_mode=0o444, dir_mode=0o555)
 
 
-def _restore_formal_artifacts_writable(paths) -> None:
+def restore_formal_artifacts_writable(paths) -> None:
     chmod_tree(paths.agent_output, file_mode=0o666, dir_mode=0o777)
     chmod_tree(paths.model_artifacts, file_mode=0o666, dir_mode=0o777)
     for relpath in READONLY_FILES:
@@ -1341,7 +1341,7 @@ def _restore_formal_artifacts_writable(paths) -> None:
             target.chmod(0o444)
 
 
-def _nl_call_budget(manifest, replay_daily) -> int | None:
+def nl_call_budget(manifest, replay_daily) -> int | None:
     """System NL call quota for this backtest: a daily-average budget of
     ``nl_max_calls_per_decision_day`` over the replay's decision days (the final
     day is reserved for forced liquidation, not new decisions). An explicit

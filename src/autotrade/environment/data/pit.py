@@ -1,12 +1,28 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
 from autotrade.environment.data.contracts import CN_TZ
+
+
+def parquet_meta(path: Path) -> dict[str, Any]:
+    """Read a raw-lake parquet's ``<file>.meta.json`` sidecar (empty if absent).
+
+    The sidecar scheme is part of the raw-lake contract: the ingest adapter
+    writes it, PIT consumers read it through this single helper."""
+    meta_path = path.with_suffix(path.suffix + ".meta.json")
+    if not meta_path.exists():
+        return {}
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def to_cn_timestamps(series: pd.Series) -> pd.Series:

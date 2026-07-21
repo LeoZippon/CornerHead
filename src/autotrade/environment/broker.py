@@ -52,7 +52,7 @@ from typing import Protocol
 
 import pandas as pd
 
-from autotrade.data_sources.tushare.common import STK_AUCTION_PRICE_ABS_TOLERANCE
+from autotrade.environment.data.contracts import STK_AUCTION_PRICE_ABS_TOLERANCE
 from autotrade.environment.broker_core import (
     LOT_SIZE,
     STAR_MIN_LOT_SIZE,

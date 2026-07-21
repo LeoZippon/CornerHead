@@ -55,7 +55,16 @@ from autotrade.environment.nl.service import (
 from autotrade.environment.replay.market import ParquetMinuteReplaySource
 from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, SandboxSpec, link_copytree
 from autotrade.environment.runtime import write_json_atomic
-from autotrade.environment.tools.backtest import _nl_call_budget, _optional_float, _read_replay_auction
+from autotrade.environment.tools.backtest import nl_call_budget, read_replay_auction
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _profile_kwargs(record: dict[str, object]) -> dict[str, object]:
@@ -147,7 +156,7 @@ def main() -> int:
         docker.bind_snapshot_view("valid_decision_input")
         executor = DockerExecutor(docker.container, paths)
         replay_daily = pd.read_parquet(paths.valid / "daily.parquet")
-        replay_auction = _read_replay_auction(paths.valid)
+        replay_auction = read_replay_auction(paths.valid)
         minute_file = paths.valid / "intraday_1min.parquet"
         replay_minutes = (
             pd.read_parquet(minute_file)
@@ -174,7 +183,7 @@ def main() -> int:
                 log_dir=nl_log_dir,
                 failure_policy=str(manifest.get("nl_failure_policy", "return_error_with_audit")),
                 per_call_timeout_seconds=float(manifest.get("backtest_max_seconds_per_decision", 1800.0)) * 0.8,
-                max_calls=_nl_call_budget(manifest, replay_daily),
+                max_calls=nl_call_budget(manifest, replay_daily),
             )
         with MainPolicyRunner(
             executor,

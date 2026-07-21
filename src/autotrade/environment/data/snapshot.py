@@ -36,15 +36,14 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from autotrade.data_quality import read_quality_report
-from autotrade.data_sources.tushare.common import (
+from autotrade.environment.data import PITDataStore, default_tushare_contracts
+from autotrade.environment.data.contracts import (
     BOARD_TRADING_DATASETS,
+    CN_TZ,
     STK_AUCTION_OBSERVED_AVAILABILITY_START,
     STK_AUCTION_PRICE_ABS_TOLERANCE,
 )
-from autotrade.data_sources.tushare.io import parquet_meta
-from autotrade.environment.data import PITDataStore, default_tushare_contracts
-from autotrade.environment.data.contracts import CN_TZ
-from autotrade.environment.data.pit import to_cn_timestamps, yyyymmdd
+from autotrade.environment.data.pit import parquet_meta, to_cn_timestamps, yyyymmdd
 from autotrade.environment.data.auction import apply_open_auction_correction
 from autotrade.environment.data.fundamental_events import FUNDAMENTAL_EVENT_DATASETS, read_fundamental_events
 from autotrade.environment.data.units import normalize_auction_units, normalize_daily_units

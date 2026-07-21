@@ -1874,6 +1874,17 @@ class ArchitectureBoundaryTest(unittest.TestCase):
         ]
         self.assertEqual(offenders, [])
 
+    def test_environment_does_not_import_data_sources(self):
+        # The ingest adapter imports the environment's raw-lake contract
+        # (environment/data/contracts.py), never the reverse.
+        pattern = re.compile(r"^\s*(from|import)\s+autotrade\.data_sources\b", re.MULTILINE)
+        offenders = [
+            str(path)
+            for path in SRC_ENV_DIR.rglob("*.py")
+            if pattern.search(path.read_text(encoding="utf-8"))
+        ]
+        self.assertEqual(offenders, [])
+
 
 if __name__ == "__main__":
     unittest.main()

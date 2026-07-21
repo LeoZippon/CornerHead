@@ -14,6 +14,9 @@ from typing import Any
 import pandas as pd
 import pyarrow.parquet as pq
 
+# The sidecar read contract is owned by the environment's PIT layer.
+from autotrade.environment.data.pit import parquet_meta
+
 
 _unique_jsonl_lock = threading.Lock()
 _unique_jsonl_state: dict[tuple[Path, str], tuple[int, int, int, set[str]]] = {}
@@ -93,16 +96,6 @@ def write_parquet(
         encoding="utf-8",
     )
     os.replace(meta_tmp, meta_path)
-
-
-def parquet_meta(path: Path) -> dict[str, Any]:
-    meta_path = path.with_suffix(path.suffix + ".meta.json")
-    if not meta_path.exists():
-        return {}
-    try:
-        return json.loads(meta_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
 
 
 def append_jsonl(path: Path, payload: dict[str, Any]) -> None:

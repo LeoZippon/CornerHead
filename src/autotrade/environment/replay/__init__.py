@@ -9,6 +9,7 @@ supporting market/result/PIT-view/state modules.
 - ``stats``: ``ReplayResult`` container and return-statistics reducer.
 - ``timeview``: per-tick rolling as-of PIT view over snapshot + replay parts.
 - ``state_staging``: latency-modeled staging of ``ctx.state_dir`` writes.
+- ``style``: Barra-lite benchmark/style attribution over frozen replay outputs.
 
 Modules are imported directly (no re-exports): the engine stack is heavy and
 the driver must stay import-free.
