@@ -25,7 +25,7 @@ https://www.sse.com.cn/services/tradingservice/margin/edu/c/10074042/files/a1f1c
   (浮亏侧折算率按 100% 计——细则规定融资市值低于买入金额、或融券市值高于卖出金额时
   该项按 100% 折算全额扣减。)
 
-The sandbox driver (``main_ctx_driver.py`` — the only module baked into the image) is
+The sandbox driver (``replay/driver.py`` — the only module baked into the image) is
 deliberately stdlib-only and does NO intra-tick fill projection: within a tick the
 agent sees the cash/positions filled as of the ENTERING tick, and the host settles
 the resulting orders on the next tick. There is no in-sandbox broker view projecting

@@ -36,7 +36,7 @@ add_repo_src(__file__)
 import pandas as pd
 
 from autotrade.environment.artifacts import load_strategy_artifact
-from autotrade.environment.replay_stats import compute_return_stats
+from autotrade.environment.replay.stats import compute_return_stats
 from autotrade.environment.broker import (
     BrokerProfile,
     auction_prints_by_date,
@@ -46,13 +46,13 @@ from autotrade.environment.broker import (
 )
 from autotrade.environment.executor import DockerExecutor
 from autotrade.environment.llm import DeepSeekProxy
-from autotrade.environment.main_ctx_engine import MainPolicyRunner, run_main_ctx_replay
+from autotrade.environment.replay.engine import MainPolicyRunner, run_main_ctx_replay
 from autotrade.environment.nl.service import (
     StrategyNLService,
     cleanup_nl_rpc_files,
     prepare_nl_rpc_files,
 )
-from autotrade.environment.replay_market import ParquetMinuteReplaySource
+from autotrade.environment.replay.market import ParquetMinuteReplaySource
 from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, SandboxSpec, link_copytree
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.environment.tools.backtest import _nl_call_budget, _optional_float, _read_replay_auction

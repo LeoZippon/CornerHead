@@ -46,7 +46,7 @@ from autotrade.environment.data.contracts import (
     text_dataset_next_visible_boundary,
     text_dataset_visible_cutoff,
 )
-from autotrade.environment.snapshot import to_cn_timestamps
+from autotrade.environment.data.pit import to_cn_timestamps
 
 _EMPTY_INDICES = np.array([], dtype=np.int64)
 _ROW_AVAILABLE_AT = "row_available_at"

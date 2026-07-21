@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from autotrade.environment.timeview import Timeview
+from autotrade.environment.replay.timeview import Timeview
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 TS = "000001.SZ"
@@ -305,7 +305,7 @@ class TimeviewTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             import duckdb
 
-            from autotrade.environment.snapshot import SnapshotBuilder
+            from autotrade.environment.data.snapshot import SnapshotBuilder
 
             root = Path(tmp)
             snapshot = _frozen_snapshot(root)
@@ -377,7 +377,7 @@ class TimeviewIntradaySchemaTest(unittest.TestCase):
     available_at, and the auction-correction columns are never NaN-backfilled (R19-4)."""
 
     def _minute(self, trade_date: str, available_at: str | None) -> pd.DataFrame:
-        from autotrade.environment.features.auction import apply_open_auction_correction
+        from autotrade.environment.data.auction import apply_open_auction_correction
 
         row = {
             "ts_code": TS,

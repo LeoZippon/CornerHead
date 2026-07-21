@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
-from .experiment_facts import _compact_mapping
+from .experiment_facts import compact_mapping
 
 FOLD_ROLE_SECTION = """\
 # 角色与目标
@@ -474,7 +474,7 @@ def render_experiment_facts_section(experiment_facts: Mapping[str, object]) -> s
     else:
         prompt_facts.pop("runtime_tools", None)
     payload = json.dumps(
-        _compact_mapping(prompt_facts),
+        compact_mapping(prompt_facts),
         ensure_ascii=False,
         sort_keys=True,
         indent=2,

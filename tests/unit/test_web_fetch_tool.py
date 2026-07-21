@@ -9,8 +9,8 @@ from unittest.mock import patch
 from autotrade.agent import AgentSessionConfig, AgentSessionRunner
 from autotrade.environment.llm.proxy import ScriptedLLM, tool_call, tool_call_response
 from autotrade.environment.tools.web_fetch import AgentWebFetchTool
-from autotrade.environment.web_fetch import WebFetchError, WebFetchResult, WebFetchService
-from autotrade.environment.web_fetch import _is_same_host_redirect
+from autotrade.environment.web.fetch import WebFetchError, WebFetchResult, WebFetchService
+from autotrade.environment.web.fetch import _is_same_host_redirect
 
 from .test_tools_flow import build_sandbox
 
@@ -65,7 +65,7 @@ class WebFetchServiceTest(unittest.TestCase):
         service = WebFetchService()
         service._direct_opener = FakeOpener(AssertionError("direct opener should not be used"))  # type: ignore[attr-defined]
         proxy_opener = FakeOpener(FakeHTTPResponse(b"proxied", content_type="text/plain"))
-        with patch("autotrade.environment.web_fetch._build_proxy_opener", return_value=proxy_opener) as build:
+        with patch("autotrade.environment.web.fetch._build_proxy_opener", return_value=proxy_opener) as build:
             with patch("socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 443))]):
                 result = service.fetch("https://example.com", use_proxy=True, proxy_env={"HTTPS_PROXY": "http://proxy.test:8080"})
         build.assert_called_once_with({"HTTPS_PROXY": "http://proxy.test:8080"})

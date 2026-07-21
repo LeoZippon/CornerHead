@@ -157,7 +157,7 @@ class ContextCompactor:
         self.compaction_count += 1
         summary_message = _build_compaction_summary_message(summary_payload, self.compaction_count)
         keep = self.config.keep_recent_messages
-        recent_messages = _drop_leading_orphan_tools(
+        recent_messages = drop_leading_orphan_tools(
             [message for message in messages[1:] if not is_compaction_message(message)][-keep:]
         )
         compacted_messages = [messages[0], summary_message, *recent_messages]
@@ -211,7 +211,7 @@ class ContextCompactor:
         ]
 
 
-def _drop_leading_orphan_tools(seq: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def drop_leading_orphan_tools(seq: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop leading ``tool`` messages left without their ``assistant`` turn."""
     index = 0
     while index < len(seq) and isinstance(seq[index], dict) and seq[index].get("role") == "tool":

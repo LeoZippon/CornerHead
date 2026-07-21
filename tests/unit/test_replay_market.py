@@ -8,7 +8,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from autotrade.environment.replay_market import (
+from autotrade.environment.replay.market import (
     MinuteMarketData,
     ParquetMinuteReplaySource,
     _minute_key,

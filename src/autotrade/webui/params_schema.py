@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from autotrade.environment.snapshot import SnapshotConfig
+from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.pipelines.folds import MIN_REGION_TRADE_DAYS, period_bounds
 from autotrade.pipelines.hitl_state import PARAM_DEFAULTS
 

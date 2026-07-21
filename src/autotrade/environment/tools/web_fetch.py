@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
-from autotrade.environment.web_fetch import WebFetchError, WebFetchService
+from autotrade.environment.web.fetch import WebFetchError, WebFetchService
 
 from .base import ActionField, ActionSpec, ToolContext, agent_visible_tool_result
 

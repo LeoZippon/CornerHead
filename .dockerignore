@@ -1,5 +1,5 @@
 # The sandbox image build context is the repo root only so the Dockerfile can COPY
-# the single trusted runtime module (src/autotrade/environment/main_ctx_driver.py).
+# the single trusted runtime module (src/autotrade/environment/replay/driver.py).
 # Exclude the large data/runtime/vendored trees so the context stays small and fast.
 .git
 data

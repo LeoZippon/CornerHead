@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from autotrade.environment.state_staging import StateStager
+from autotrade.environment.replay.state_staging import StateStager
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 T0 = datetime(2022, 1, 4, 9, 31, tzinfo=CN_TZ)
@@ -191,7 +191,7 @@ class StateStagerTest(unittest.TestCase):
                 when=T0,
             )
             with patch(
-                "autotrade.environment.state_staging._secure_merge_file",
+                "autotrade.environment.replay.state_staging._secure_merge_file",
                 side_effect=OSError(errno.ENOSPC, "disk full"),
             ):
                 with self.assertRaises(OSError) as raised:
@@ -206,7 +206,7 @@ class StateStagerTest(unittest.TestCase):
                 [{"staging_rel": "source/x.txt", "state_rel": "x.txt", "substep": "s", "budget_minutes": 1}],
                 when=T0,
             )
-            with patch("autotrade.environment.state_staging.os.open", wraps=os.open) as opened:
+            with patch("autotrade.environment.replay.state_staging.os.open", wraps=os.open) as opened:
                 stager.merge_ready(T0 + timedelta(minutes=2))
             source_calls = [call for call in opened.call_args_list if call.args[0] == "x.txt"]
             self.assertTrue(source_calls[0].args[1] & os.O_NONBLOCK)
@@ -218,7 +218,7 @@ class StateStagerTest(unittest.TestCase):
                 [{"staging_rel": "source/x.txt", "state_rel": "x.txt", "substep": "s", "budget_minutes": 1}],
                 when=T0,
             )
-            with patch("autotrade.environment.state_staging._MAX_STATE_FILE_BYTES", 3):
+            with patch("autotrade.environment.replay.state_staging._MAX_STATE_FILE_BYTES", 3):
                 self.assertEqual(stager.merge_ready(T0 + timedelta(minutes=2)), 0)
             self.assertEqual(stager.audit()[0]["status"], "rejected_not_regular_file")
 

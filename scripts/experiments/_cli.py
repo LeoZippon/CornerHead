@@ -13,7 +13,7 @@ import argparse
 from pathlib import Path
 
 from autotrade.environment.managed_proxy import META_XRAY_BIN_ENV
-from autotrade.environment.snapshot import SnapshotConfig
+from autotrade.environment.data.snapshot import SnapshotConfig
 
 # Re-exported wiring shared with the interactive worker (autotrade.pipelines.assembly).
 from autotrade.pipelines.assembly import (  # noqa: F401

@@ -44,13 +44,13 @@ from autotrade.environment.tools.base import (
     agent_visible_tool_result,
 )
 from autotrade.environment.tools.web_search import META_SEARCH_PERSPECTIVES, build_web_search_spec
-from autotrade.environment.web_fetch import WebFetchError
-from autotrade.environment.web_search import WebSearchError, WebSearchProvider
+from autotrade.environment.web.fetch import WebFetchError
+from autotrade.environment.web.search import WebSearchError, WebSearchProvider
 
 from .compact import (
     ContextCompactionConfig,
     ContextCompactor,
-    _drop_leading_orphan_tools,
+    drop_leading_orphan_tools,
     estimate_messages_tokens,
     is_compaction_message,
     is_llm_compaction_message,
@@ -1099,7 +1099,7 @@ class AgentSessionRunner:
 
     # Shared with compaction: a trimmed window must not start with an orphan
     # ``tool`` message (it must follow its ``assistant`` tool_calls turn).
-    _drop_leading_orphan_tools = staticmethod(_drop_leading_orphan_tools)
+    drop_leading_orphan_tools = staticmethod(drop_leading_orphan_tools)
 
     def _trim(self, messages: list[dict[str, object]]) -> list[dict[str, object]]:
         # Primary trigger is the estimated token budget; the message count is a
@@ -1112,7 +1112,7 @@ class AgentSessionRunner:
             return messages
         if self.config.max_history_messages <= 2:
             keep = max(self.config.max_history_messages - 1, 0)
-            tail = self._drop_leading_orphan_tools(messages[-keep:]) if keep else []
+            tail = self.drop_leading_orphan_tools(messages[-keep:]) if keep else []
             return [messages[0], *tail]
         non_summary = [message for message in messages[1:] if not is_compaction_message(message)]
         # Token-triggered entry with nothing to drop: rewriting index 1 with a
@@ -1137,7 +1137,7 @@ class AgentSessionRunner:
         # turns while retaining at least one recent raw message when possible.
         headroom = min(self.config.trim_message_headroom, max(max_tail - 1, 0))
         keep = max_tail - headroom
-        tail = self._drop_leading_orphan_tools(non_summary[-keep:]) if keep else []
+        tail = self.drop_leading_orphan_tools(non_summary[-keep:]) if keep else []
         if kept_llm_compaction:
             trimmed = [messages[0], latest_llm_summary, summary_message, *tail]
         else:

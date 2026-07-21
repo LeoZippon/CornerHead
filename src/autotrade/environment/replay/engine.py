@@ -35,18 +35,18 @@ import pyarrow as pa
 from autotrade.environment.broker import MarketData, SimBroker, optype, prtype
 from autotrade.environment.broker_core import afterhours_available
 from autotrade.environment.data.contracts import sim_datetime
-from autotrade.environment.replay_market import (
+from autotrade.environment.replay.market import (
     MinuteMarketData,
     ParquetMinuteReplaySource,
     empty_minute_rows,
     minute_rows_with_daily_fallback,
     minute_sort,
 )
-from autotrade.environment.replay_stats import ReplayResult
+from autotrade.environment.replay.stats import ReplayResult
 from autotrade.environment.runtime import sanitize_for_log
 from autotrade.environment.sandbox import hide_snapshot_slots_from_agent
-from autotrade.environment.state_staging import StateStager
-from autotrade.environment.timeview import Timeview
+from autotrade.environment.replay.state_staging import StateStager
+from autotrade.environment.replay.timeview import Timeview
 
 _AUCTION_PREOPEN_TIME = "09:15"
 _AUCTION_DECISION_TIME = "09:25"
@@ -163,10 +163,10 @@ _ORDER_ACTIONS = {
 _SUPPORTED_ACTIONS = _ORDER_ACTIONS | {"cancel"}
 
 
-# The persistent per-tick driver is a real module (main_ctx_driver.py) shipped into
+# The persistent per-tick driver is a real module (replay/driver.py) shipped into
 # the sandbox image; it is launched by file (executor.runtime_path) rather than as a
 # -c string so it stays typed and testable. It is standard-library only.
-_DRIVER_PATH = Path(__file__).with_name("main_ctx_driver.py")
+_DRIVER_PATH = Path(__file__).with_name("driver.py")
 
 
 @dataclass(frozen=True)

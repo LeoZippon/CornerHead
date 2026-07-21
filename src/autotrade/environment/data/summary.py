@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Mapping
 
-from autotrade.environment.features.units import AGENT_UNIT_CONTRACT
+from autotrade.environment.data.units import AGENT_UNIT_CONTRACT
 from autotrade.environment.runtime import utc_now_iso
 
 LARGE_TABLE_ROW_THRESHOLD = 1_000_000

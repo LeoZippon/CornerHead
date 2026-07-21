@@ -44,11 +44,11 @@ from autotrade.data_sources.tushare.common import (
 from autotrade.data_sources.tushare.io import parquet_meta
 from autotrade.environment.data import PITDataStore, default_tushare_contracts
 from autotrade.environment.data.contracts import CN_TZ
-from autotrade.environment.data.pit import yyyymmdd
-from autotrade.environment.features.auction import apply_open_auction_correction
-from autotrade.environment.features.fundamental_events import FUNDAMENTAL_EVENT_DATASETS, read_fundamental_events
-from autotrade.environment.features.units import normalize_auction_units, normalize_daily_units
-from autotrade.environment.research_release import DOMAIN_REPORT_TYPES, DOMAIN_STATUS_FILES
+from autotrade.environment.data.pit import to_cn_timestamps, yyyymmdd
+from autotrade.environment.data.auction import apply_open_auction_correction
+from autotrade.environment.data.fundamental_events import FUNDAMENTAL_EVENT_DATASETS, read_fundamental_events
+from autotrade.environment.data.units import normalize_auction_units, normalize_daily_units
+from autotrade.environment.data.research_release import DOMAIN_REPORT_TYPES, DOMAIN_STATUS_FILES
 from autotrade.environment.runtime import new_id, utc_now_iso
 
 SNAPSHOT_DOMAIN_WORKERS = 2
@@ -1654,48 +1654,6 @@ class SnapshotBuilder:
         return merged.drop_duplicates("ts_code", keep="last")[
             [col for col in ("ts_code", "l1_code", "l1_name") if col in merged.columns]
         ]
-
-
-def to_cn_timestamps(series: pd.Series) -> pd.Series:
-    """Parse available_at values to Asia/Shanghai timestamps.
-
-    Raw datasets mix tz-aware ISO strings (e.g. margin) and tz-naive Beijing
-    wall-clock strings (e.g. anns_d rec_time); naive values must be localized
-    to CN, never treated as UTC.
-
-    Fast path first: replay/snapshot columns are usually uniform
-    "YYYY-MM-DDTHH:MM:SS+08:00" strings, and pandas' generic tz-aware parser
-    costs ~5µs/row — a quarter of minute bars is tens of millions of rows.
-    The fixed-format naive parse plus one localize is ~10x faster and applies
-    only when a vectorized suffix check proves the offset is uniform CN.
-    """
-    if series.dtype == object and len(series):
-        text = series.astype(str)
-        if text.str.endswith("+08:00").all():
-            fast = pd.to_datetime(text.str.slice(0, 19), format="%Y-%m-%dT%H:%M:%S", errors="coerce")
-            if not fast.isna().any():
-                # Localize via a UTC shift: tz_localize(CN_TZ) with a ZoneInfo
-                # walks rows one by one, the UTC route is metadata-only.
-                return (fast - pd.Timedelta(hours=8)).dt.tz_localize("UTC").dt.tz_convert(CN_TZ)
-    try:
-        parsed = pd.to_datetime(series, errors="coerce")
-    except (ValueError, TypeError):
-        parsed = None
-    if parsed is not None and getattr(parsed.dtype, "tz", None) is not None:
-        return parsed.dt.tz_convert(CN_TZ)
-    if parsed is not None and parsed.dtype != object:
-        return parsed.dt.tz_localize(CN_TZ)
-    # Mixed aware/naive values: normalize element-wise.
-    fallback = pd.to_datetime(series, errors="coerce", utc=False)
-    if fallback.dtype != object:
-        if getattr(fallback.dtype, "tz", None) is not None:
-            return fallback.dt.tz_convert(CN_TZ)
-        return fallback.dt.tz_localize(CN_TZ)
-    return fallback.map(
-        lambda value: (value.tz_localize(CN_TZ) if value.tzinfo is None else value.tz_convert(CN_TZ))
-        if pd.notna(value)
-        else pd.NaT
-    )
 
 
 def _stamp_daily_available_at(daily: pd.DataFrame, contract) -> pd.DataFrame:

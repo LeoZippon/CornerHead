@@ -326,7 +326,7 @@ class SnapshotDomainFilterTest(unittest.TestCase):
     def test_domain_switches_and_dataset_subsets(self):
         from types import SimpleNamespace
 
-        from autotrade.environment.snapshot import SnapshotConfig
+        from autotrade.environment.data.snapshot import SnapshotConfig
         from autotrade.pipelines.assembly import build_snapshot_config
         from autotrade.pipelines.hitl_state import PARAM_DEFAULTS, resolve_options
 

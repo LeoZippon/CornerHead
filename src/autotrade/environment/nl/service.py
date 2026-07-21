@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from autotrade.environment.main_ctx_engine import BacktestError
+from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.nl.context import CompanyContextStore
 from autotrade.environment.nl.engine import (
     ENUM_MAX_RESULTS,

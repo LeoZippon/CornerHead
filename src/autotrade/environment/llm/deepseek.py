@@ -18,7 +18,7 @@ from autotrade.environment.llm.conversation_log import (
     _redact_secrets_in_obj,
     _stable_hash,
 )
-from autotrade.environment.runtime import new_id, sanitize_for_log
+from autotrade.environment.runtime import new_id
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"

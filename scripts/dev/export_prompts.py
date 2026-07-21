@@ -30,7 +30,7 @@ from autotrade.agent.prompts import (
     build_system_prompt,
 )
 from autotrade.environment.explore import EXPLORE_SYSTEM_PROMPT
-from autotrade.environment.features.units import AGENT_UNIT_CONTRACT
+from autotrade.environment.data.units import AGENT_UNIT_CONTRACT
 from autotrade.environment.nl.engine import FINAL_AFTER_TOOL_BUDGET, SUB_AGENT_SYSTEM_PROMPT
 from autotrade.pipelines.fold_analysis import FOLD_ANALYSIS_SYSTEM_PROMPT
 

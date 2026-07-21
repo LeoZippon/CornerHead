@@ -20,7 +20,7 @@ import duckdb
 import pandas as pd
 
 from autotrade.environment.data.contracts import text_dataset_visible_cutoff
-from autotrade.environment.snapshot import to_cn_timestamps
+from autotrade.environment.data.pit import to_cn_timestamps
 
 MAX_PATTERN_CHARS = 256
 _CANDIDATE_CACHE_SIZE = 128

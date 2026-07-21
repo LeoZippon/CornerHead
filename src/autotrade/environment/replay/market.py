@@ -1,6 +1,6 @@
 """Optional minute-market events for the fixed per-minute replay clock.
 
-The clock lives in ``main_ctx_engine.py`` and never depends on this data source.
+The clock lives in ``replay/engine.py`` and never depends on this data source.
 When minute rows are absent, daily data supplies two synthetic market events per
 day (09:30 open and 15:00 close). Synthetic rows are flagged so the Broker
 restricts them to reference-price fills.

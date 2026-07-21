@@ -10,9 +10,9 @@ import pandas as pd
 
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.executor import LocalExecutor
-from autotrade.environment.main_ctx_engine import BacktestError, MainPolicyRunner, _day_tick_plan, run_main_ctx_replay
-from autotrade.environment.replay_market import MinuteMarketData, ParquetMinuteReplaySource
-from autotrade.environment.replay_stats import compute_return_stats
+from autotrade.environment.replay.engine import BacktestError, MainPolicyRunner, _day_tick_plan, run_main_ctx_replay
+from autotrade.environment.replay.market import MinuteMarketData, ParquetMinuteReplaySource
+from autotrade.environment.replay.stats import compute_return_stats
 from autotrade.environment.sandbox import LocalSandbox
 
 
@@ -1911,7 +1911,7 @@ class DecisionGridTest(unittest.TestCase):
     def test_is_decision_tick_grid_and_always_on_ticks(self) -> None:
         from types import SimpleNamespace
 
-        from autotrade.environment.main_ctx_engine import _is_decision_tick
+        from autotrade.environment.replay.engine import _is_decision_tick
 
         def tick(minute_key, **flags):
             base = {"is_offsession": False, "is_auction": False, "is_close_auction": False, "is_afterhours": False}
@@ -1933,7 +1933,7 @@ class DecisionGridTest(unittest.TestCase):
 
 class MarketStateEncodingTest(unittest.TestCase):
     def test_numeric_fast_path_matches_scalar_contract(self) -> None:
-        from autotrade.environment.main_ctx_engine import _columnar_float_values, _float_or_none
+        from autotrade.environment.replay.engine import _columnar_float_values, _float_or_none
 
         cases = (
             pd.Series([1.0, float("nan"), float("inf"), float("-inf")], dtype="float64"),
@@ -1955,7 +1955,7 @@ class PackedBarsRoundTripTest(unittest.TestCase):
         from pathlib import Path as _P
 
         from autotrade.environment.broker import BrokerProfile, MarketData, SimBroker
-        from autotrade.environment.main_ctx_engine import _market_state
+        from autotrade.environment.replay.engine import _market_state
 
         daily = pd.DataFrame(
             [{"trade_date": "20220104", "ts_code": "000001.SZ", "open": 10.0, "close": 10.5,
@@ -1979,7 +1979,7 @@ class PackedBarsRoundTripTest(unittest.TestCase):
 
         wire = _json.loads(_json.dumps(bars))
 
-        driver_path = _P(__file__).resolve().parents[2] / "src" / "autotrade" / "environment" / "main_ctx_driver.py"
+        driver_path = _P(__file__).resolve().parents[2] / "src" / "autotrade" / "environment" / "replay" / "driver.py"
         spec = importlib.util.spec_from_file_location("_packed_driver", driver_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -1992,7 +1992,7 @@ class PackedBarsRoundTripTest(unittest.TestCase):
 
     def test_market_state_missing_and_object_columns(self) -> None:
         from autotrade.environment.broker import BrokerProfile, MarketData, SimBroker
-        from autotrade.environment.main_ctx_engine import _market_state
+        from autotrade.environment.replay.engine import _market_state
 
         daily = pd.DataFrame(
             [{"trade_date": "20220104", "ts_code": "000001.SZ", "open": 10.0, "close": 10.5,
@@ -2018,7 +2018,7 @@ class LazyBarsTest(unittest.TestCase):
         import importlib.util
         from pathlib import Path as _P
 
-        driver_path = _P(__file__).resolve().parents[2] / "src" / "autotrade" / "environment" / "main_ctx_driver.py"
+        driver_path = _P(__file__).resolve().parents[2] / "src" / "autotrade" / "environment" / "replay" / "driver.py"
         spec = importlib.util.spec_from_file_location("_lazybars_driver", driver_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
