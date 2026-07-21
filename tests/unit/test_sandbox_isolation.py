@@ -441,20 +441,29 @@ class SandboxSpecTest(unittest.TestCase):
 
             local = json.loads(paths.runtime_env.read_text(encoding="utf-8"))
             self.assertEqual(local["mode"], "local")
-            self.assertEqual(local["schema_version"], 1)
+            self.assertEqual(local["schema_version"], 2)
             self.assertIn("python", local)
             self.assertIn("python_packages", local)
             self.assertIn("numpy", local["python_packages"])
 
-            sandbox.write_runtime_env(mode="docker", sandbox_spec=SandboxSpec(gpu=None))
+            # Docker mode requires the image probe (fail-fast, no static claims).
+            with self.assertRaisesRegex(ValueError, "image probe"):
+                sandbox.write_runtime_env(mode="docker", sandbox_spec=SandboxSpec(gpu=None))
+            probe = {
+                "python_version": "3.11.15",
+                "packages": {"pandas": "2.2.3", "torch": "2.10.0"},
+                "tools": {"git": "/usr/bin/git", "hf": "/usr/local/bin/hf", "nvcc": None},
+            }
+            sandbox.write_runtime_env(mode="docker", sandbox_spec=SandboxSpec(gpu=None), image_probe=probe)
             docker = json.loads(paths.runtime_env.read_text(encoding="utf-8"))
             self.assertEqual(docker["mode"], "docker")
             self.assertEqual(docker["network"], "none")
-            self.assertEqual(docker["python"]["version"], "3.11")
-            self.assertEqual(docker["schema_version"], 1)
-            self.assertEqual(docker["python_packages"]["pandas"]["version"], "2.2.3")
-            self.assertIn("git", docker["tools"])
-            self.assertIn("hf", docker["tools"])
+            self.assertEqual(docker["probe_mode"], "image_probe")
+            self.assertEqual(docker["python"]["version"], "3.11.15")
+            self.assertEqual(docker["schema_version"], 2)
+            self.assertEqual(docker["python_packages"]["pandas"], "2.2.3")
+            self.assertTrue(docker["tools"]["git"]["available"])
+            self.assertFalse(docker["tools"]["nvcc"]["available"])
             self.assertFalse(docker["policy"]["install_packages_during_fold"])
 
 

@@ -37,33 +37,14 @@ from autotrade.environment.runtime import (
 DEFAULT_IMAGE = "autotrade-sandbox:latest"
 DEFAULT_HOST_FRACTION = 0.10
 
-RUNTIME_ENV_SCHEMA_VERSION = 1
+RUNTIME_ENV_SCHEMA_VERSION = 2
 
-PYTHON_PACKAGES: tuple[tuple[str, str, str | None], ...] = (
-    ("numpy", "numpy", "2.1.3"),
-    ("pandas", "pandas", "2.2.3"),
-    ("pyarrow", "pyarrow", "18.1.0"),
-    ("duckdb", "duckdb", "1.1.3"),
-    ("scipy", "scipy", "1.17.1"),
-    ("sklearn", "scikit-learn", "1.5.2"),
-    ("statsmodels", "statsmodels", "0.14.4"),
-    ("torch", "torch", "2.10.0"),
-    ("torchvision", "torchvision", "0.25.0"),
-    ("torch_geometric", "torch-geometric", "2.8.0.post1"),
-    ("torch_scatter", "torch-scatter", "2.1.2"),
-    ("torch_sparse", "torch-sparse", "0.6.18"),
-    ("torch_cluster", "torch-cluster", "1.6.3"),
-    ("transformers", "transformers", "5.14.1"),
-    ("accelerate", "accelerate", "1.14.0"),
-    ("safetensors", "safetensors", "0.8.0"),
-    ("einops", "einops", "0.8.2"),
-    ("lightgbm", "lightgbm", "4.7.0"),
-    ("xgboost", "xgboost", "3.2.0"),
-    ("huggingface_hub", "huggingface-hub", "1.24.0"),
-)
-# Keep in sync with ops/docker/sandbox.Dockerfile: the docker-mode runtime_env
-# contract declares each of these available without probing, so a tool must be
-# installed in the image before it is listed here (e.g. duckdb CLI).
+# Curated CLI tools the Agent may rely on; their availability is PROBED (from
+# the session image in docker mode, from the host in local mode), never
+# statically asserted. Python packages have no static list at all — the
+# session runtime itself is the single source of truth (see
+# probe_image_runtime), so base-image bumps and meta-learning derived images
+# can never drift from the published contract.
 IMPORTANT_TOOLS = ("rg", "git", "npm", "pip", "hf", "huggingface-cli", "duckdb", "nvcc")
 
 
@@ -168,11 +149,20 @@ class LocalSandbox:
         self.write_runtime_env(mode="local")
         return self.paths
 
-    def write_runtime_env(self, *, mode: str, sandbox_spec: SandboxSpec | None = None) -> Path:
-        """Write the read-only runtime contract visible at /mnt/artifacts/runtime_env.json."""
+    def write_runtime_env(
+        self,
+        *,
+        mode: str,
+        sandbox_spec: SandboxSpec | None = None,
+        image_probe: dict[str, object] | None = None,
+    ) -> Path:
+        """Write the read-only runtime contract visible at /mnt/artifacts/runtime_env.json.
+
+        Docker mode requires ``image_probe`` (from :func:`probe_image_runtime`)
+        so the contract reflects the actual session image."""
         if mode not in {"local", "docker"}:
             raise ValueError(f"unsupported runtime env mode: {mode}")
-        record = _runtime_env_record(mode=mode, sandbox_spec=sandbox_spec)
+        record = _runtime_env_record(mode=mode, sandbox_spec=sandbox_spec, image_probe=image_probe)
         path = self.paths.runtime_env
         if path.exists():
             try:
@@ -376,38 +366,64 @@ def _record_collect_skip(dest_dir: Path, name: str, exc: Exception) -> None:
         pass
 
 
-def _runtime_env_record(*, mode: str, sandbox_spec: SandboxSpec | None) -> dict[str, object]:
+def probe_image_runtime(image: str, *, timeout_seconds: float = 120.0) -> dict[str, object]:
+    """Probe the session image itself for its Python/package/tool inventory.
+
+    The runtime that will actually execute is the single source of truth: a
+    static list drifts on base-image bumps and cannot see meta-learning
+    derived images. One offline container run (~1s) per session keeps the
+    published contract honest; failures raise (fail-fast, no stale claims)."""
+    script = (
+        "import json, importlib.metadata, platform, shutil\n"
+        f"tools = {list(IMPORTANT_TOOLS)!r}\n"
+        "packages = {}\n"
+        "for dist in importlib.metadata.distributions():\n"
+        "    name = dist.metadata['Name']\n"
+        "    if name:\n"
+        "        packages[name] = dist.version\n"
+        "print(json.dumps({'python_version': platform.python_version(),"
+        " 'packages': packages, 'tools': {t: shutil.which(t) for t in tools}}))\n"
+    )
+    result = subprocess.run(
+        ["docker", "run", "--rm", "--network=none", "--entrypoint", "python", image, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"image runtime probe failed for {image}: {result.stderr.strip()[:500]}")
+    return json.loads(result.stdout)
+
+
+def _runtime_env_record(
+    *,
+    mode: str,
+    sandbox_spec: SandboxSpec | None,
+    image_probe: dict[str, object] | None,
+) -> dict[str, object]:
     if mode == "docker":
+        if image_probe is None:
+            raise ValueError("docker runtime env requires an image probe (probe_image_runtime)")
+        packages = dict(image_probe.get("packages") or {})
+        tools = dict(image_probe.get("tools") or {})
         return {
             "schema_version": RUNTIME_ENV_SCHEMA_VERSION,
             "generated_at": utc_now_iso(),
             "mode": "docker",
-            "probe_mode": "dockerfile_contract",
-            "python": {
-                "version": "3.11",
-                "executable": "/usr/local/bin/python",
-                "source": "ops/docker/sandbox.Dockerfile",
-            },
+            "probe_mode": "image_probe",
+            "python": {"version": str(image_probe.get("python_version"))},
             "network": sandbox_spec.network if sandbox_spec is not None else "none",
             "sandbox_spec": sandbox_spec.to_record() if sandbox_spec is not None else None,
-            "python_packages": {
-                key: {
-                    "import_name": key,
-                    "distribution": distribution,
-                    "version": docker_version,
-                    "available": docker_version is not None,
-                    "source": "ops/docker/sandbox.Dockerfile",
-                }
-                for key, distribution, docker_version in PYTHON_PACKAGES
-            },
+            "python_packages": dict(sorted(packages.items(), key=lambda kv: str(kv[0]).lower())),
             "tools": {
-                tool: {"available": True, "source": "ops/docker/sandbox.Dockerfile"}
-                for tool in IMPORTANT_TOOLS
+                str(tool): {"available": path is not None, "path": path}
+                for tool, path in tools.items()
             },
             "policy": _runtime_policy(),
             "notes": [
+                "Probed from the session image itself; meta-learning derived-image packages appear here automatically.",
+                "python_packages maps distribution name to version; import names may differ (e.g. scikit-learn -> sklearn).",
                 "Host writes this contract before Docker starts because /mnt/artifacts is mounted read-only.",
-                "If a dependency is uncertain, use a read-only shell import probe before relying on it.",
             ],
         }
     return {
@@ -428,26 +444,19 @@ def _runtime_env_record(*, mode: str, sandbox_spec: SandboxSpec | None) -> dict[
         "policy": _runtime_policy(),
         "notes": [
             "Local mode is for development and tests only; formal experiments should use Docker.",
+            "python_packages maps distribution name to version; import names may differ (e.g. scikit-learn -> sklearn).",
             "If a dependency is uncertain, use a read-only shell import probe before relying on it.",
         ],
     }
 
 
-def _local_package_records() -> dict[str, dict[str, object]]:
-    records: dict[str, dict[str, object]] = {}
-    for key, distribution, _docker_version in PYTHON_PACKAGES:
-        try:
-            installed = importlib.metadata.version(distribution)
-        except importlib.metadata.PackageNotFoundError:
-            installed = None
-        records[key] = {
-            "import_name": key,
-            "distribution": distribution,
-            "version": installed,
-            "available": installed is not None,
-            "source": "local_python_probe",
-        }
-    return records
+def _local_package_records() -> dict[str, str]:
+    records: dict[str, str] = {}
+    for dist in importlib.metadata.distributions():
+        name = dist.metadata["Name"]
+        if name:
+            records[str(name)] = str(dist.version)
+    return dict(sorted(records.items(), key=lambda kv: kv[0].lower()))
 
 
 def _runtime_policy() -> dict[str, object]:

@@ -99,21 +99,44 @@ RUN apt-get update \
     && rm -rf /usr/local/cuda-12.8/nsight* /usr/local/cuda-12.8/gds \
         /usr/local/cuda-12.8/libnvvp /usr/local/cuda-12.8/extras/demo_suite \
         /var/log/cuda-installer.log /tmp/cuda-installer.log \
+    # Static CUDA libs are ~3.3 GiB and unused by torch-extension builds
+    # (they link the shared libs); keep only libcudart_static.a, the default
+    # `nvcc -cudart static` link target of CMake-style builds. libcudadevrt.a
+    # (relocatable device code) does not match the pattern and stays.
+    && find /usr/local/cuda-12.8/targets/x86_64-linux/lib \
+        -name '*_static*.a' ! -name 'libcudart_static.a' -delete \
     && /usr/local/cuda-12.8/bin/nvcc --version
+# glibc 2.41 (Debian trixie) declares sinpi/cospi/sinpif/cospif with noexcept;
+# CUDA 12.8's crt/math_functions.h re-declarations lack it, so any host-side
+# nvcc compilation fails (NVIDIA fixed the headers in later toolkits). Mirror
+# the distro-standard fix by annotating the four declarations; the count check
+# fails the build if a toolkit bump changes the header shape.
+RUN sed -i -E 's/^(extern __DEVICE_FUNCTIONS_DECL__ __device_builtin__ +(double|float) +(sinpif|cospif|sinpi|cospi)\(.*\));$/\1 noexcept (true);/' \
+        /usr/local/cuda-12.8/include/crt/math_functions.h \
+    && test "$(grep -c 'noexcept (true);' /usr/local/cuda-12.8/include/crt/math_functions.h)" = 4
+
+# FORCE_CUDA: docker build has no GPU, so torch-extension setup scripts would
+# silently produce CPU-only kernels; the flag makes every source build here
+# AND in derived images compile real CUDA kernels for the arch below.
 ENV CUDA_HOME=/usr/local/cuda-12.8 \
     PATH=/usr/local/cuda-12.8/bin:$PATH \
-    TORCH_CUDA_ARCH_LIST=8.9
+    TORCH_CUDA_ARCH_LIST=8.9 \
+    FORCE_CUDA=1
 
 # Compiled PyG companions, source-built against the baked torch + nvcc (no
 # prebuilt cu128/2.10 wheels on PyPI). --no-build-isolation so the builds see
 # the installed torch; ninja + the single-arch TORCH_CUDA_ARCH_LIST keep the
-# compile bounded. The import check makes this layer the build-time proof
-# that the CUDA toolchain works end-to-end.
+# compile bounded. The cuda_version() assertions enforce at build time that
+# the extensions really contain CUDA kernels (importable-but-CPU-only would
+# pass a plain import check).
 RUN pip install --no-cache-dir --no-build-isolation -i ${PIP_INDEX_URL} \
         torch_scatter==2.1.2 \
         torch_sparse==0.6.18 \
         torch_cluster==1.6.3 \
-    && python -c "import torch_scatter, torch_sparse, torch_cluster, torch_geometric"
+    && python -c "import torch, torch_scatter, torch_sparse, torch_cluster, torch_geometric; \
+assert torch.ops.torch_scatter.cuda_version() > 0, 'torch_scatter built without CUDA'; \
+assert torch.ops.torch_sparse.cuda_version() > 0, 'torch_sparse built without CUDA'; \
+assert torch.ops.torch_cluster.cuda_version() > 0, 'torch_cluster built without CUDA'"
 
 # Trusted host-side runtime module baked in (R16): the de-stringed per-tick
 # main(ctx) driver, loaded by file (executor.runtime_path -> CONTAINER_RUNTIME_DIR).
