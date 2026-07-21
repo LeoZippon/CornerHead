@@ -25,6 +25,8 @@ else:
     from . import common as core
     from .common import *  # noqa: F401,F403
 
+from autotrade.environment.data.pit import concat_rows
+
 def write_reference_query_result(
     path: Path,
     result: ApiResult,
@@ -112,7 +114,7 @@ def merge_trade_cal_partition(path: Path, refreshed: pd.DataFrame) -> pd.DataFra
         return refreshed
     if refreshed.empty:
         return existing
-    merged = pd.concat([existing, refreshed], ignore_index=True)
+    merged = concat_rows([existing, refreshed], ignore_index=True)
     return (
         merged.drop_duplicates(["exchange", "cal_date"], keep="last")
         .sort_values(["exchange", "cal_date"], ascending=[True, False])
@@ -224,7 +226,7 @@ def download_namechange(client: TuShareClient, raw_dir: Path, force: bool) -> No
             frames.append(df)
         if index % 500 == 0:
             print(f"namechange {index}")
-    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=fields.split(","))
+    combined = concat_rows(frames, ignore_index=True) if frames else pd.DataFrame(columns=fields.split(","))
     if combined.empty and path.exists():
         print("namechange returned zero rows for existing partition; skipped_empty_reference_overwrite")
         return
@@ -592,7 +594,7 @@ def merge_existing_window_rows(
     if date_column not in refreshed.columns:
         refreshed[date_column] = ""
     retained = existing[~date_series_in_window(existing[date_column], start_date, end_date)].copy()
-    merged = pd.concat([retained, refreshed], ignore_index=True)
+    merged = concat_rows([retained, refreshed], ignore_index=True)
     if key_columns and set(key_columns).issubset(merged.columns):
         merged = merged.drop_duplicates(key_columns, keep="last")
     return merged.reset_index(drop=True)
@@ -1902,7 +1904,7 @@ def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dic
         df["source_file"] = os.path.relpath(str(path), str(Path.cwd()))
         df["source_cap_risk"] = parquet_rows(path) >= SHARE_FLOAT_ROW_LIMIT
         frames.append(df)
-    union = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=SHARE_FLOAT_FIELDS.split(","))
+    union = concat_rows(frames, ignore_index=True) if frames else pd.DataFrame(columns=SHARE_FLOAT_FIELDS.split(","))
     before = len(union)
     # Canonical rows dedup on the DECLARED business key only: float_share /
     # float_ratio are source-revisable values, so keying on them kept every
@@ -2414,7 +2416,7 @@ def download_intraday(args: argparse.Namespace) -> int:
                 dates = existing["trade_date"].astype(str)
                 outside = existing[(dates < str(year_start)) | (dates > str(year_end))]
                 if not outside.empty:
-                    df = pd.concat([outside, df], ignore_index=True, sort=False)
+                    df = concat_rows([outside, df], ignore_index=True, sort=False)
                     dedup_cols = [c for c in ("ts_code", "trade_time") if c in df.columns]
                     if dedup_cols:
                         df = df.drop_duplicates(dedup_cols, keep="last")
@@ -2547,7 +2549,7 @@ def compact_intraday_by_date(args: argparse.Namespace) -> int:
                 else:
                     raise RuntimeError(f"no minute rows found while compacting trade_date={trade_date}")
             else:
-                combined = pd.concat(buffers[trade_date], ignore_index=True)
+                combined = concat_rows(buffers[trade_date], ignore_index=True)
             normalized, normalize_details = normalize_stk_mins_by_date_frame(combined, trade_date)
             expected_codes = intraday_expected_codes_for_day(raw_dir, args, trade_date)
             ok, details = validate_stk_mins_by_date_frame(
@@ -2651,7 +2653,7 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
                 time.sleep(args.retry_delay_seconds)
         if len(pending) > args.allow_missing_codes:
             raise RuntimeError(f"{trade_date}: {len(pending)} minute codes still missing after retries; sample={pending[:20]}")
-        combined = pd.concat(collected.values(), ignore_index=True) if collected else pd.DataFrame(columns=STK_MINS_REQUIRED_COLUMNS)
+        combined = concat_rows(list(collected.values()), ignore_index=True) if collected else pd.DataFrame(columns=STK_MINS_REQUIRED_COLUMNS)
         normalized, normalize_details = normalize_stk_mins_by_date_frame(combined, trade_date)
         if expected_codes and normalized.empty:
             raise RuntimeError(

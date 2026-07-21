@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -9,6 +10,23 @@ from typing import Any
 import pandas as pd
 
 from autotrade.environment.data.contracts import CN_TZ
+
+
+def concat_rows(frames: list[pd.DataFrame], **kwargs) -> pd.DataFrame:
+    """Row-union concat for parquet-sourced frames.
+
+    Empty inputs are dropped (their inclusion in dtype inference is deprecated
+    and warns per call). Real frames may still carry all-NA columns — genuine
+    sparse schema, not removable — for which pandas' future behavior (typed
+    all-NA columns participate in inference) equals today's outcome because
+    the columns are parquet-typed; that residual FutureWarning is accepted
+    noise and suppressed at this single boundary."""
+    frames = [frame for frame in frames if not frame.empty]
+    if not frames:
+        return pd.DataFrame()
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=FutureWarning, message=".*empty or all-NA entries.*")
+        return pd.concat(frames, **kwargs)
 
 
 def parquet_meta(path: Path) -> dict[str, Any]:
