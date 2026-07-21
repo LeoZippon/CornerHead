@@ -1988,12 +1988,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertEqual([api_name for api_name, _ in client.calls], ["adj_factor"])
         self.assertIn("REVISION_ALERT", output.getvalue())
-        self.assertIn('"api_name": "adj_factor"', output.getvalue())
-        self.assertIn('"removed_keys": 1', output.getvalue())
+        # The alert is a compact one-liner; the full record lives in the ledger.
+        self.assertIn('"dataset": "adj_factor"', output.getvalue())
+        self.assertNotIn('"removed_keys_sample"', output.getvalue())
         ledger_lines = (self.root / "revision_events.jsonl").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(ledger_lines), 1)
         ledger_event = json.loads(ledger_lines[0])
-        self.assertEqual(ledger_event["downstream_status"], "pending_review")
+        self.assertEqual(ledger_event["schema_version"], 2)
         self.assertEqual(ledger_event["write_action"], "overwrite")
         self.assertIn("new_source_hash", ledger_event)
 
@@ -2267,7 +2268,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIsNotNone(event)
         self.assertEqual(tuple(event), common.REVISION_EVENT_FIELDS)
         self.assertEqual(event["schema_version"], common.REVISION_EVENT_SCHEMA_VERSION)
-        self.assertEqual(event["record_type"], "revision_event")
         self.assertIsNone(event["write_action"])
         self.assertEqual(event["changed_keys"], 2)
         self.assertEqual(event["added_keys"], 1)

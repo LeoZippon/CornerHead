@@ -580,8 +580,10 @@ results/data_quality/revision_summary.json
 - 正式 raw 根目录 `data/raw` 的源端修正写入 `results/data_quality/revision_events.jsonl`。
 - 单元测试、临时 raw 目录和过程排查目录只写本地 `revision_events.jsonl`，不得污染正式账本。
 - 正式账本不得出现 `/tmp` 路径；测试污染记录属于无效账本输入。
-- `event_id` 是修正内容的稳定语义身份（不含观测时间和下游处理状态）；正式账本只保留同一 `event_id` 的首次观测，重复探测仍可告警但不重复落账。
-- 每行统一为 `schema_version=1`、`record_type=revision_event` 的固定字段集合；只观察、不写 raw 的 sentinel 事件以 `null` 保留 `old_source_hash`、`new_source_hash`、`write_action` 和 `allow_empty_revision_overwrite`，不再通过缺字段表达状态。
+- `event_id` 是修正内容的稳定语义身份（不含观测时间）；正式账本只保留同一 `event_id` 的首次观测，重复探测仍可告警但不重复落账。告警行是仅含 `event_id`/dataset/partition/severity/issue 的紧凑单行，完整记录只存账本，不在运行日志重复完整 JSON。
+- 每行统一为 `schema_version=2` 的固定字段集合（v2 移除恒定的 `record_type`、`downstream_status` 与 `dataset` 的重复字段 `api_name`）；只观察、不写 raw 的 sentinel 事件以 `null` 保留 `old_source_hash`、`new_source_hash`、`write_action` 和 `allow_empty_revision_overwrite`，不再通过缺字段表达状态。
+- 业务键重复导致无法按键 diff 的分区，先做全表内容等价比较：内容一致不构成修正、不落账；仅在内容确实变化时记 `duplicate_key_rows` 事件。
+- 账本保持单文件追加 + 按 `event_id` 尾部增量去重（首次扫描 O(文件)，实测数十 MB 级 <1s）。这是当前规模下的成本边界；活跃文件接近约 256MB 时再评估按事件数据年分片。
 - 分页接口若连续返回重复的非空满页，会 fail fast，避免死循环或重复写入。
 - `stock_basic` 代码加载只接受合法 A 股代码模式 `\d{6}.(SH|SZ|BJ)`。
 - `bak_basic` 审计的预期交易日上限必须截到审计 `end_date`，不能把 `trade_cal` 的未来 lookahead 误报为缺失。

@@ -769,7 +769,10 @@ def audit_revision_sentinel(args: argparse.Namespace) -> int:
             )
             if event:
                 append_jsonl_unique(ledger, event, key="event_id")
-                print("REVISION_ALERT " + json.dumps(event, ensure_ascii=False, sort_keys=True))
+                print("REVISION_ALERT " + json.dumps(
+                    {key: event.get(key) for key in ("event_id", "dataset", "partition", "severity", "comparison_issue")},
+                    ensure_ascii=False, sort_keys=True,
+                ))
                 events.append(event)
                 dataset_events += 1
         no_effective_checks = int(bool(sample_dates) and checked == 0)
