@@ -43,7 +43,7 @@ from autotrade.environment.data.contracts import (
     STK_AUCTION_OBSERVED_AVAILABILITY_START,
     STK_AUCTION_PRICE_ABS_TOLERANCE,
 )
-from autotrade.environment.data.pit import parquet_meta, to_cn_timestamps, yyyymmdd
+from autotrade.environment.data.pit import concat_rows, parquet_meta, to_cn_timestamps, yyyymmdd
 from autotrade.environment.data.auction import apply_open_auction_correction
 from autotrade.environment.data.fundamental_events import FUNDAMENTAL_EVENT_DATASETS, read_fundamental_events
 from autotrade.environment.data.units import normalize_auction_units, normalize_daily_units
@@ -1311,17 +1311,13 @@ class SnapshotBuilder:
             # that dataset's replay data for the whole fold. Zero-row schema
             # contributions are applied after the union (not concatenated) so
             # dtype inference never sees empty entries.
-            if had_visible_rows:
+            if had_visible_rows and len(rows):
                 rows.insert(0, "dataset", dataset)
-                if len(rows):
-                    frames.append(rows)
-                else:
-                    schema_only[dataset] = rows
+                frames.append(rows)
             else:
-                empty = _empty_dataset_frame(dataset_dir)
-                if empty is not None:
-                    empty.insert(0, "dataset", dataset)
-                    schema_only[dataset] = empty
+                schema = _dataset_footer_schema(dataset_dir)
+                if schema is not None:
+                    schema_only[dataset] = schema
             dataset_build_profile[dataset] = {
                 **read_profile,
                 "rows_output": int(len(rows)),
@@ -1335,17 +1331,19 @@ class SnapshotBuilder:
                 },
             }
         merged = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
-        for empty in schema_only.values():
-            for column, dtype in empty.dtypes.items():
-                if column not in merged.columns:
-                    if len(merged) == 0:
-                        merged[column] = pd.Series(dtype=dtype)
-                    else:
-                        # All-NA object padding writes an arrow null-typed
-                        # column, which readers (DuckDB/pandas) unify with any
-                        # concrete replay-part type; a numeric NaN fill would
-                        # conflict with string-typed replay columns.
-                        merged[column] = None
+        if schema_only and "dataset" not in merged.columns:
+            merged.insert(0, "dataset", pd.Series([None] * len(merged), dtype=pd.ArrowDtype(pa.string()), index=merged.index))
+        for schema in schema_only.values():
+            for field in schema:
+                if field.name not in merged.columns:
+                    # Exact arrow-typed all-NA padding from the dataset's own
+                    # footer: frozen and replay parts then carry the SAME
+                    # column type, which pyarrow's multi-part reader requires
+                    # (an object-None column writes as the null type, and
+                    # casting a concrete replay type to null is unsupported).
+                    merged[field.name] = pd.Series(
+                        [None] * len(merged), dtype=pd.ArrowDtype(field.type), index=merged.index
+                    )
         # units="source": heterogeneous unions keep TuShare per-source units —
         # the daily-domain unit contract does NOT extend to same-named fields
         # here (env docs §1.4; raw unit table in data docs §1.2).
@@ -1994,13 +1992,13 @@ def _profile_key_nulls(frame: pd.DataFrame) -> dict[str, int]:
     return nulls
 
 
-def _empty_dataset_frame(dataset_dir: Path) -> pd.DataFrame | None:
-    """Typed zero-row frame from the newest partition footer: the dataset's
-    schema contribution when no rows are visible in the build window."""
+def _dataset_footer_schema(dataset_dir: Path):
+    """Arrow schema from the newest partition footer: the dataset's schema
+    contribution when no rows are visible in the build window."""
     latest = max(dataset_dir.rglob("*.parquet"), default=None, key=lambda p: p.name)
     if latest is None:
         return None
-    return pq.read_schema(latest).empty_table().to_pandas()
+    return pq.read_schema(latest)
 
 
 def _write(path: Path, frame: pd.DataFrame) -> None:

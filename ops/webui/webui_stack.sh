@@ -172,8 +172,9 @@ $CRON_END"
     fi
     rm -f /tmp/webui_crontab_err.$$
     if [ -n "$current" ]; then
-        mkdir -p "$LOG_DIR"
-        printf '%s\n' "$current" > "$LOG_DIR/crontab-$(date +%Y%m%d-%H%M%S).bak"
+        # Crontab backups are operational maintenance artifacts, not runtime logs.
+        mkdir -p "$REPO/archive/crontab"
+        printf '%s\n' "$current" > "$REPO/archive/crontab/crontab-$(date +%Y%m%d-%H%M%S).bak"
     fi
     ( printf '%s\n' "$current" | sed "/^${CRON_BEGIN}\$/,/^${CRON_END}\$/d"; echo "$block" ) | crontab -
     crontab -l | grep -qF "$CRON_BEGIN" || { echo "FAILED: managed block missing after install" >&2; exit 1; }

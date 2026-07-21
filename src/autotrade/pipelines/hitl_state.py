@@ -55,6 +55,9 @@ CONTROL_REQUESTS = (None, "pause", "stop")
 # dataclass (single source; see the overlay below the literal): only keys with
 # no domain owner (paths, model names, HITL knobs) stay literal here. A drift
 # test pins both this dict and the CLI argparse defaults to the dataclasses.
+# Stamped into control.json and status.json records; bump on shape changes.
+HITL_STATE_SCHEMA_VERSION = 1
+
 PARAM_DEFAULTS: dict[str, object] = {
     "experiment_id": None,
     "raw_dir": "data/raw",
@@ -295,7 +298,7 @@ class ControlState:
 
     def to_record(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
+            "schema_version": HITL_STATE_SCHEMA_VERSION,
             "mode": self.mode,
             "request": self.request,
             "approved_sessions": sorted(self.approved_sessions),
@@ -392,7 +395,7 @@ class StatusReporter:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._data: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": HITL_STATE_SCHEMA_VERSION,
             "pid": os.getpid(),
             "pid_start_ticks": proc_start_ticks(os.getpid()),
             "state": "starting",

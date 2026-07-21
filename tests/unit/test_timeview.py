@@ -2,12 +2,14 @@
 
 import tempfile
 import unittest
+import warnings
 from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pyarrow as pa
 
 from autotrade.environment.replay.timeview import Timeview
 
@@ -130,6 +132,36 @@ class TimeviewTest(unittest.TestCase):
             # waits for that night's conservative evening boundary (~03:05 next day).
             self.assertEqual(self._dates(asof, "daily"), {"20211231"})
             self.assertTrue((Path(asof) / "daily" / "part_0000.parquet").exists())
+
+    def test_schema_padded_null_column_carries_replay_values_without_warning(self):
+        # End-to-end for the v6 schema padding: a dataset absent from the
+        # decision window contributes a null-typed column to the frozen file;
+        # replay rows carrying real values for it must survive the roll and no
+        # schema-mismatch RuntimeWarning may fire.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            snapshot.mkdir()
+            frozen = pd.DataFrame({
+                "dataset": ["margin_secs"],
+                "available_at": ["2021-12-31T18:00:00+08:00"],
+                "ts_code": [TS],
+                "hot_num": pd.Series([None], dtype=pd.ArrowDtype(pa.float64())),
+            })
+            _write(snapshot / "events.parquet", frozen)
+            replay = pd.DataFrame([{
+                "dataset": "ths_hot", "available_at": "2022-01-04T18:00:00+08:00",
+                "ts_code": TS, "hot_num": 7.0,
+            }])
+            tv = Timeview(
+                host_dir=root / "asof", executor=FakeExecutor(),
+                snapshot_dir=snapshot, replay_frames={"events": replay},
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", RuntimeWarning)
+                asof, _ = tv.refresh(_when("2022-01-05 09:10:00"))
+            events = pd.read_parquet(Path(asof) / "events")
+            self.assertIn(7.0, set(events["hot_num"].dropna().astype(float)))
 
     def test_daily_rolls_after_evening_node(self):
         with tempfile.TemporaryDirectory() as tmp:

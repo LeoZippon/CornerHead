@@ -15,7 +15,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 # The sidecar read contract is owned by the environment's PIT layer.
-from autotrade.environment.data.pit import parquet_meta
+from autotrade.environment.data.pit import concat_rows, parquet_meta
 
 
 _unique_jsonl_lock = threading.Lock()
@@ -146,7 +146,7 @@ def append_jsonl_unique(path: Path, payload: dict[str, Any], *, key: str) -> boo
 
 def read_many(files: list[Path], columns: list[str] | None = None) -> pd.DataFrame:
     frames = [pd.read_parquet(path, columns=columns) for path in files]
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return concat_rows(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def parquet_rows(path: Path) -> int:

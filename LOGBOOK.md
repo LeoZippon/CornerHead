@@ -1,3 +1,10 @@
+2026-07-22 六项遗留收尾：summary v2、纯 JSONL dispatch、FutureWarning 清零、合同版本化
+
+- ①revision_summary 样本随 04:00 定时哨兵自动刷新为纯 v2（9 条内嵌事件全为 v2 形状，修复后的比较器实测产出真实新事件）；②dispatch.log 两处残余非 JSON 来源修复：raw generation 发布行与 dry-run 多行 JSON 均改为单行 JSON（03:35 PIT 任务抢在修复同步前打的最后一条 plain 行已锁内清除），现文件全行可 json.loads；④WebUI install-cron 的 crontab 备份同样迁至 archive/crontab/。
+- ③FutureWarning 全源清零：新增共享 `concat_rows`（过滤空表 + 对 parquet 类型化全 NA 列按未来语义接受并就地抑制），fundamental_events 3 处、tushare download 7 处、io/realtime 3 处、snapshot 窗口合并全部收编；`-W error::FutureWarning` 下 154 项相关测试通过。快照 schema 填充改为 footer 精确 arrow 类型（pd.ArrowDtype）——测试实证 object-None 会写出 null 类型列且 pyarrow 多分片读取无法与实际类型合一（cast double→null 报错），精确类型使冻结与回放分片同型。
+- ⑤补齐两项定向回归：键重复+内容一致不落账不告警（内容变化仍记 duplicate_key_rows）；端到端 Timeview 滚动测试证明 v6 填充列承载回放值且无 RuntimeWarning。⑥合同版本化：调度配置 schema_version 由装饰改为 load_config fail-fast 校验（5 处测试夹具同步）；实验账本记录与 HITL control/status 增加正式版本常量 stamp；parameters_reference 新增九项持久化合同版本一览表（sidecar 不加版本的理由一并成文）。
+- 验证：全量 tests/ 923 tests + 45 subtests（169.43s）通过；compileall、`bash -n`、`git diff --check` 通过。
+
 2026-07-22 修正账本 v2、比较器假阳性修复、日志治理与快照 schema 稳定
 
 - 核实 14 项问题并逐项裁决。修正账本：全部 15,599 行 `api_name==dataset`、三个恒定字段（record_type/schema_version=1/downstream_status）、4,049 条 duplicate_key_rows 中 2,248 条新旧 source_hash 相同——比较器在键重复时未做任何内容比较即判"已修正"。修复：`compare_keyed_frames` 键重复分支先做全表内容等价比较，内容一致不再落账；事件 schema v2 删除 api_name/record_type/downstream_status（保留 schema_version 作演化判别）；账本原子迁移为 13,348 行（清除 2,248 条假阳性 + 3 条新 id 合并），原件归档 SHA `a43a5c8a...c3343`；REVISION_ALERT 改为紧凑单行（event_id/dataset/partition/severity/issue），不再向 cron 日志重复完整 JSON。单文件+尾部增量去重判定为当前规模合理成本，活跃文件≈256MB 时再评估按数据年分片（边界已写入数据文档）。
