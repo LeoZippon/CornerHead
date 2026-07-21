@@ -24,7 +24,7 @@ from autotrade.environment.sandbox import (
     SandboxLifecycleFatal,
     SandboxSpec,
 )
-from autotrade.environment.web_search import (
+from autotrade.environment.web.search import (
     SemanticScholarSearchProvider,
     TavilySearchProvider,
     WebSearchError,

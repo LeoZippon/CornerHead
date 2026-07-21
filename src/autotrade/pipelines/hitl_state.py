@@ -26,7 +26,7 @@ from autotrade.agent.compact import ContextCompactionConfig
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 from autotrade.environment.sandbox import SandboxSpec
-from autotrade.environment.snapshot import SnapshotConfig
+from autotrade.environment.data.snapshot import SnapshotConfig
 
 from .config import AcceptanceRules, ExperimentConfig
 from .meta_schedule import meta_learning_id, meta_learning_trigger_counts, meta_session_key

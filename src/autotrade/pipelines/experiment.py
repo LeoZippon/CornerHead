@@ -25,7 +25,7 @@ from autotrade.environment.artifacts import (
     load_strategy_artifact,
     model_artifact_hash,
 )
-from autotrade.environment.data_summary import write_agent_data_summary
+from autotrade.environment.data.summary import write_agent_data_summary
 from autotrade.environment.executor import DockerExecutor
 from autotrade.environment.identity import agent_visible_ref as _agent_visible_ref
 from autotrade.environment.llm.proxy import LLMProxy

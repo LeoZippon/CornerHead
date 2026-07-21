@@ -11,10 +11,10 @@ from unittest.mock import patch
 
 from autotrade.agent import AgentSessionConfig
 from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
-from autotrade.environment.data_summary import write_agent_data_summary
+from autotrade.environment.data.summary import write_agent_data_summary
 from autotrade.environment.runtime import RunManifest
 from autotrade.environment.sandbox import LocalSandbox
-from autotrade.environment.snapshot import SnapshotConfig
+from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.llm.proxy import ScriptedLLM
 from autotrade.environment.tools import BacktestTool, FinishFoldTool, ModificationCheckTool, ToolContext, ToolError
 from autotrade.pipelines import (

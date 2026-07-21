@@ -13,8 +13,8 @@ from autotrade.environment.broker import (
     optype,
     prtype,
 )
-from autotrade.environment.main_ctx_engine import BacktestError, MainPolicyRunner, run_main_ctx_replay
-from autotrade.environment.replay_stats import ReplayResult, compute_return_stats
+from autotrade.environment.replay.engine import BacktestError, MainPolicyRunner, run_main_ctx_replay
+from autotrade.environment.replay.stats import ReplayResult, compute_return_stats
 from autotrade.environment.sandbox import hide_snapshot_slots_from_agent
 from autotrade.environment.runtime import SandboxPaths
 from autotrade.environment.tools.backtest import _profile_kwargs
@@ -1721,7 +1721,7 @@ class DelayedCashOpReleaseTest(unittest.TestCase):
         from datetime import datetime
         from zoneinfo import ZoneInfo
 
-        from autotrade.environment.main_ctx_engine import _DelayedAction, _Tick, _release_delayed_actions
+        from autotrade.environment.replay.engine import _DelayedAction, _Tick, _release_delayed_actions
 
         tz = ZoneInfo("Asia/Shanghai")
         broker = SimBroker(BrokerProfile(), MarketData(REPLAY), shortable_codes=frozenset({"000001.SZ"}))
@@ -1744,7 +1744,7 @@ class DelayedCashOpReleaseTest(unittest.TestCase):
         from datetime import datetime
         from zoneinfo import ZoneInfo
 
-        from autotrade.environment.main_ctx_engine import _DelayedAction, _Tick, _release_delayed_actions
+        from autotrade.environment.replay.engine import _DelayedAction, _Tick, _release_delayed_actions
 
         tz = ZoneInfo("Asia/Shanghai")
         broker = SimBroker(BrokerProfile(), MarketData(REPLAY), shortable_codes=frozenset({"000001.SZ"}))

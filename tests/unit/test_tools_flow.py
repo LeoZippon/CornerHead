@@ -1121,8 +1121,8 @@ def main(ctx):
         # H2: the tight per-decision/per-day wall caps bound only agent-iteration
         # validation; the final evals (frozen_eval) use a generous anti-hang
         # backstop so a load spike cannot make acceptance/held-out non-reproducible.
-        from autotrade.environment.main_ctx_engine import MainPolicyRunner as RealRunner
-        from autotrade.environment.main_ctx_engine import run_main_ctx_replay as real_replay
+        from autotrade.environment.replay.engine import MainPolicyRunner as RealRunner
+        from autotrade.environment.replay.engine import run_main_ctx_replay as real_replay
 
         with tempfile.TemporaryDirectory() as tmp:
             sandbox, ctx = build_sandbox(Path(tmp))

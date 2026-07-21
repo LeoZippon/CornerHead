@@ -11,6 +11,7 @@ from .base import PHASE_FROZEN, PHASE_TRAIN_VALID, ToolContext, ToolError
 __all__ = [
     "AgentWebFetchTool",
     "AgentWebSearchTool",
+    "ArtifactIOTool",
     "BacktestTool",
     "FinishFoldTool",
     "ModificationCheckTool",
@@ -34,6 +35,10 @@ def __getattr__(name: str):
         from .web_search import AgentWebSearchTool
 
         return AgentWebSearchTool
+    if name == "ArtifactIOTool":
+        from .artifact_io import ArtifactIOTool
+
+        return ArtifactIOTool
     if name == "BacktestTool":
         from .backtest import BacktestTool
 

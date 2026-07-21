@@ -18,7 +18,7 @@ from autotrade.environment.artifacts import ModificationConstraints
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.managed_proxy import ManagedProxySpec
 from autotrade.environment.sandbox import SandboxSpec, link_copytree
-from autotrade.environment.snapshot import SnapshotBuilder, SnapshotConfig, read_raw_generation
+from autotrade.environment.data.snapshot import SnapshotBuilder, SnapshotConfig, read_raw_generation
 from autotrade.environment.tools import ToolContext
 
 from .folds import FoldSpec, assert_no_overlap

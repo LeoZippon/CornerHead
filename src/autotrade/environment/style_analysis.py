@@ -32,7 +32,7 @@ import math
 from pathlib import Path
 from typing import Mapping
 
-from autotrade.environment.replay_stats import TRADING_DAYS_PER_YEAR
+from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.runtime import utc_now_iso
 
 BENCHMARK_TS_CODE = "000300.SH"

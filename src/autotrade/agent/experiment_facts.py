@@ -45,7 +45,7 @@ def build_experiment_facts(
         fold_period = manifest.get("fold_period")
 
     facts: dict[str, object] = {
-        "identity": _compact_mapping(
+        "identity": compact_mapping(
             {
                 "facts_schema_version": EXPERIMENT_FACTS_SCHEMA_VERSION,
                 "experiment_id": manifest.get("experiment_id"),
@@ -92,7 +92,7 @@ def build_experiment_facts(
     }
     if is_meta:
         facts["meta_learning"] = _meta_learning_facts(manifest)
-    return _compact_mapping(facts)
+    return compact_mapping(facts)
 
 
 
@@ -125,12 +125,12 @@ def _visible_timeline(
                 "visible_validation_replay_period": fold.get("validation_period"),
             }
         )
-    return _compact_mapping(timeline)
+    return compact_mapping(timeline)
 
 
 def _snapshot_windows(snapshot_config: Mapping[str, object]) -> dict[str, object]:
     windows = _as_mapping(snapshot_config.get("decision_windows"))
-    return _compact_mapping(
+    return compact_mapping(
         {
             "daily_months": windows.get("daily_months"),
             "fundamentals_months": windows.get("fundamentals_months"),
@@ -161,7 +161,7 @@ def _budget_facts(
     max_llm_calls: int | None,
     context_compaction: Mapping[str, object] | None,
 ) -> dict[str, object]:
-    return _compact_mapping(
+    return compact_mapping(
         {
             "fold_deadline_at": manifest.get("fold_deadline_at"),
             "finalize_before_deadline_seconds": manifest.get("finalize_before_deadline_seconds"),
@@ -208,13 +208,13 @@ def _artifact_contract_facts(
         "model_hash": manifest.get("parent_model_artifact_hash"),
         "model_artifacts_empty": model_artifacts_empty,
     }
-    return _compact_mapping(
+    return compact_mapping(
         {
             "required_entry": "output/main.py",
             "strategy_entry_function": "main",
             "model_artifacts_allowed": True,
             "workspace_frozen": False,
-            "parent": _compact_mapping(parent),
+            "parent": compact_mapping(parent),
             "modification_constraints": manifest.get("modification_constraints"),
             "acceptance_rules": None if is_meta else manifest.get("acceptance_rules"),
             # Semantics: max_drawdown + complete validation are HARD gates;
@@ -236,7 +236,7 @@ def _data_profile_facts(data_summary: Mapping[str, object], *, include_dates: bo
         if not view:
             continue
         detailed = name == "snapshot"
-        compact_views[name] = _compact_mapping(
+        compact_views[name] = compact_mapping(
             {
                 "mount_path": view.get("mount_path"),
                 "decision_time": view.get("decision_time") if include_dates else None,
@@ -250,7 +250,7 @@ def _data_profile_facts(data_summary: Mapping[str, object], *, include_dates: bo
                 ],
             }
         )
-    return _compact_mapping(
+    return compact_mapping(
         {
             "views": compact_views,
             "unit_contract": data_summary.get("unit_contract"),
@@ -277,7 +277,7 @@ def _compact_file_facts(item: object, *, detailed: bool, include_dates: bool) ->
                 "metadata_null_counts": record.get("metadata_null_counts"),
             }
         )
-    return _compact_mapping(base)
+    return compact_mapping(base)
 
 
 def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
@@ -285,20 +285,20 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
     if not profile:
         experiment_parameters = _as_mapping(manifest.get("experiment_parameters"))
         profile = _as_mapping(experiment_parameters.get("broker_profile"))
-    concentration = _compact_mapping(
+    concentration = compact_mapping(
         {
             "max_total_holdings": profile.get("max_total_holdings"),
             "max_single_name_weight": profile.get("max_single_name_weight"),
         }
     )
-    return _compact_mapping(
+    return compact_mapping(
         {
             "profile_id": profile.get("profile_id"),
             "stock_initial_cash": profile.get("stock_initial_cash"),
             "credit_initial_cash": profile.get("credit_initial_cash"),
             "commission_bps": profile.get("commission_bps"),
             "min_commission_cny": profile.get("min_commission_cny"),
-            "stamp_duty_policy": _compact_mapping(
+            "stamp_duty_policy": compact_mapping(
                 {
                     "sell_bps_before_cutover": profile.get("stamp_duty_sell_bps_before_cutover"),
                     "sell_bps_from_cutover": profile.get("stamp_duty_sell_bps_from_cutover"),
@@ -362,7 +362,7 @@ def _runtime_tool_facts(
     ]
     network = runtime_env.get("network") or sandbox_spec.get("network")
     web_search_engines = manifest.get("web_search_engines") if is_meta else None
-    return _compact_mapping(
+    return compact_mapping(
         {
             "python": runtime_env.get("python"),
             "python_packages": _compact_python_packages(runtime_env.get("python_packages")),
@@ -388,7 +388,7 @@ def _runtime_tool_facts(
 def _compact_python_packages(value: object) -> dict[str, object]:
     packages = _as_mapping(value)
     return {
-        str(name): _compact_mapping(
+        str(name): compact_mapping(
             {
                 "version": _as_mapping(record).get("version"),
                 "available": _as_mapping(record).get("available"),
@@ -400,7 +400,7 @@ def _compact_python_packages(value: object) -> dict[str, object]:
 
 def _meta_learning_facts(manifest: Mapping[str, object]) -> dict[str, object]:
     development_inputs = _as_mapping(manifest.get("development_inputs"))
-    return _compact_mapping(
+    return compact_mapping(
         {
             "taste_output_path": manifest.get("taste_output") or "/mnt/agent/workspace/taste.md",
             "taste_injected_scope": "subsequent_fold_prompts_until_next_meta_trigger",
@@ -451,13 +451,13 @@ def _limit_list(value: object, limit: int) -> list[object]:
     return seq[:limit]
 
 
-def _compact_mapping(value: Mapping[str, object]) -> dict[str, object]:
+def compact_mapping(value: Mapping[str, object]) -> dict[str, object]:
     compact: dict[str, object] = {}
     for key, item in value.items():
         if isinstance(item, Mapping):
-            item = _compact_mapping(item)
+            item = compact_mapping(item)
         elif isinstance(item, list):
-            item = [_compact_mapping(x) if isinstance(x, Mapping) else x for x in item]
+            item = [compact_mapping(x) if isinstance(x, Mapping) else x for x in item]
         if item is None or item == "" or item == {} or item == []:
             continue
         compact[str(key)] = item

@@ -14,9 +14,9 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from autotrade.data_quality import build_quality_report
-from autotrade.environment import snapshot as snapshot_module
-from autotrade.environment.features.fundamental_events import read_fundamental_events
-from autotrade.environment.snapshot import SnapshotBuilder, SnapshotConfig, load_snapshot_manifest, verify_snapshot_hash
+from autotrade.environment.data import snapshot as snapshot_module
+from autotrade.environment.data.fundamental_events import read_fundamental_events
+from autotrade.environment.data.snapshot import SnapshotBuilder, SnapshotConfig, load_snapshot_manifest, verify_snapshot_hash
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 DECISION = datetime(2021, 10, 8, 9, 25, tzinfo=CN_TZ)
@@ -734,7 +734,7 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertTrue(set(slot_daily["ts_code"].astype(str)) <= {"000001.SZ"})
 
     def test_apply_screen_passes_index_level_rows(self):
-        from autotrade.environment.snapshot import SnapshotBuilder
+        from autotrade.environment.data.snapshot import SnapshotBuilder
 
         frame = pd.DataFrame(
             [

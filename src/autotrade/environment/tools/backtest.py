@@ -31,7 +31,7 @@ from autotrade.environment.artifacts import (
     load_strategy_artifact,
     model_artifact_hash,
 )
-from autotrade.environment.replay_stats import compute_return_stats
+from autotrade.environment.replay.stats import compute_return_stats
 from autotrade.environment.broker import (
     BrokerProfile,
     auction_prints_by_date,
@@ -39,12 +39,12 @@ from autotrade.environment.broker import (
     load_shortable_by_date,
     load_shortable_codes,
 )
-from autotrade.environment.main_ctx_engine import BacktestError, MainPolicyRunner, run_main_ctx_replay
+from autotrade.environment.replay.engine import BacktestError, MainPolicyRunner, run_main_ctx_replay
 from autotrade.environment.nl.service import StrategyNLService, cleanup_nl_rpc_files, prepare_nl_rpc_files
-from autotrade.environment.replay_market import ParquetMinuteReplaySource
+from autotrade.environment.replay.market import ParquetMinuteReplaySource
 from autotrade.environment.identity import agent_visible_ref
 from autotrade.environment.runtime import chmod_tree, new_id, sanitize_for_log, utc_now_iso
-from autotrade.environment.snapshot import load_snapshot_manifest
+from autotrade.environment.data.snapshot import load_snapshot_manifest
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.style_analysis import replay_style_analysis
 

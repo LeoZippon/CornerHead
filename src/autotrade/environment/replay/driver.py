@@ -1,6 +1,6 @@
 """De-stringed persistent ``main(ctx)`` sandbox driver (R16; docs/environment_design.md).
 
-Loaded by file inside the Agent sandbox (``python main_ctx_driver.py <main.py> <marker>``).
+Loaded by file inside the Agent sandbox (``python driver.py <main.py> <marker>``).
 It serves one per-tick RPC over
 stdin/stdout: build a ``ctx``, call the Agent's ``main(ctx)``, and return the orders,
 declared sub-steps, and staged state writes. Broker actions are only accepted inside

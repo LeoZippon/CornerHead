@@ -20,7 +20,7 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
-from autotrade.environment.features import (
+from autotrade.environment.data import (
     FUNDAMENTAL_EVENT_DATASETS,
     FundamentalEventsBuilder,
     FundamentalEventsConfig,

@@ -62,7 +62,7 @@ RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 -
 # host, so the driver no longer needs broker_core). Must match
 # autotrade.environment.executor.CONTAINER_RUNTIME_DIR.
 RUN mkdir -p /opt/at_runtime
-COPY src/autotrade/environment/main_ctx_driver.py /opt/at_runtime/main_ctx_driver.py
+COPY src/autotrade/environment/replay/driver.py /opt/at_runtime/driver.py
 # COPY preserves the source mode (0600 on the host), so make the trusted module
 # world-readable for the non-root `agent` user that runs the driver.
 RUN chmod 0644 /opt/at_runtime/*.py

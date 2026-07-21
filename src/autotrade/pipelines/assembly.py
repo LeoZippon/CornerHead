@@ -30,11 +30,11 @@ from autotrade.environment.managed_proxy import (
     META_XRAY_CONFIG_PATH_ENV,
     ManagedProxySpec,
 )
-from autotrade.environment.research_release import pin_research_release
+from autotrade.environment.data.research_release import pin_research_release
 from autotrade.environment.sandbox import SandboxSpec
-from autotrade.environment.snapshot import SnapshotConfig
+from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.tools import ToolContext
-from autotrade.environment.web_search import SemanticScholarSearchProvider, TavilySearchProvider
+from autotrade.environment.web.search import SemanticScholarSearchProvider, TavilySearchProvider
 from autotrade.notify import load_dotenv_values
 
 from .config import ExperimentConfig, RawSnapshotProvider

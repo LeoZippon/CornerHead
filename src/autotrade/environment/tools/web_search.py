@@ -1,6 +1,6 @@
 """Agent-facing web_search_tool for meta-learning sessions.
 
-Provider implementations live in ``autotrade.environment.web_search``. This
+Provider implementations live in ``autotrade.environment.web.search``. This
 module keeps the Tool contract beside the other Agent-visible tools.
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from autotrade.environment.runtime import sanitize_for_log, utc_now_iso
-from autotrade.environment.web_search import WebSearchError, WebSearchProvider, WebSearchService
+from autotrade.environment.web.search import WebSearchError, WebSearchProvider, WebSearchService
 
 from .base import ActionField, ActionSpec, ToolContext
 
