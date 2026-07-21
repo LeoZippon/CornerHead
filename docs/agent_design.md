@@ -19,7 +19,7 @@ Fold Agent 负责在单个 Fold 内读取允许的研究输入，探索和验证
 | 中文名 | 代码/英文名 | 含义 |
 |---|---|---|
 | 智能体 | `Agent` | 在一个 Fold 内读取 Sandbox 数据、编写策略代码、调用受控工具并输出策略产物的模型驱动执行者 |
-| 探索偏好 | `Taste` | 由最近一次元学习会话生成，并注入后续 Fold Agent Prompt，直到下一次元学习触发的高层探索偏好 |
+| 探索偏好 | `Taste` | 由最近一次元学习会话生成，并注入后续 Fold Agent Prompt，直到下一次元学习触发的高层探索偏好；定位为服务研究者探索方向的可证伪先验——与硬约束、研究者指令冲突时让位，其中的容量/参数上限只是附反证条件的初始默认，Fold Agent 可凭 Validation 证据突破 |
 | 默认 Fold 探索方向 | `fold_exploration_directive` | 创建实验时由研究者可选设置的长期待检验主线；同时注入 Meta 与每个普通 Fold，Meta 据此形成 Taste，Agent 可据证据细化、降级或拒绝 |
 | 研究者 Fold 指令 | `fold_directive` | HITL 运行中由研究者在单个 Fold 启动前注入的可选探索方向；应表述为待检验假设，且不放宽任何硬约束 |
 | 策略产物 | `strategy_artifact` | 跨 Fold 共享的 `output/` 正式策略产物，根目录固定入口为 `main.py` |
