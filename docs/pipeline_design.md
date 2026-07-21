@@ -1,483 +1,639 @@
 # Pipeline 设计
 
-本文档记录训练、测试和 Held-out 的运行顺序。Pipeline 负责按时间顺序调度 Data、Environment 和 Agent，冻结每个阶段的输入输出，并写账本。
+本文档记录策略探索、冻结测试和 Held-out 的运行顺序。Pipeline 是 Step / Fold / Epoch 编排、策略产物冻结、测试执行和实验账本的权威文档。
 
-相关边界：
+**相关边界**
 
-- Agent 行为、状态和输出格式见 `docs/agent_design.md`。
-- PIT 窗口、Sandbox、Shell 和 Tool 见 `docs/environment_design.md`。
-- raw 数据下载和审计见 `docs/data_documentation.md`。
-- QMT 实盘流程见 `docs/QMT_documentation.md`。
+- raw 数据下载、源口径和审计见 [数据文档](data_documentation.md)。
+- PIT 窗口、Sandbox、工具和回测合同见 [Environment 设计](environment_design.md)。
+- Agent 工作合同、可见输入和可写产物见 [Agent 设计](agent_design.md)。
+- 控制台和 QMT 部署见 [部署文档](deployment_documentation.md)。
+- 参数默认值速查见 [参数参考](parameters_reference.md)。
 
-## 术语说明
+**职责边界**
 
-| 术语 | 含义 |
-|---|---|
-| Pipeline | 调度 Data、Environment 和 Agent 的外层程序，不实现投资逻辑 |
-| Step | 一个 Fold 内的一次策略修改和验证尝试 |
-| Fold | 一个验证区间加后续测试季度 |
-| Epoch | 从起始 Fold 到结束 Fold 跑完一遍 |
-| Held-out | 所有训练完成后才运行的冻结测试区间 |
-| Development | 用于滚动验证和测试的研究区间，不等于最终测试 |
-| `strategy_artifact` | Agent 写出的 `agent_output/factor/` 因子逻辑和 `agent_output/nl_prior/` 投资先验 |
-| `snapshot_manifest` | 记录本次可见数据窗口、hash、单位和时间覆盖的说明文件 |
-| ledger | 记录 Step、Fold、Epoch、Held-out 结果和审计信息的文件 |
+Pipeline 负责消费已准备的数据，按时间顺序调度 Environment 和 Agent，冻结各阶段输入输出，并写实验账本。Pipeline 不负责下载或更新 raw 数据、实现投资逻辑、定义市场回放与 Broker 语义或改写 Agent 策略代码。
 
-## 目录
+**术语说明**
 
-- [1. 核心循环](#1-核心循环)
-- [2. Fold 时间定义](#2-fold-时间定义)
-- [3. Step 流程](#3-step-流程)
-- [4. Fold 流程](#4-fold-流程)
-- [5. Epoch 流程](#5-epoch-流程)
-- [6. 测试和 Held-out](#6-测试和-held-out)
-- [7. 账本和日志](#7-账本和日志)
-- [8. 失败条件](#8-失败条件)
-- [9. 验收清单](#9-验收清单)
-
-## 1. 核心循环
-
-Pipeline 使用三层循环：
-
-| 层级 | 含义 | 是否允许修改策略产物 |
+| 中文名 | 代码/英文名 | 含义 |
 |---|---|---|
-| Step | 一个 Fold 内的一次尝试 | 允许，在修改约束内 |
-| Fold | 一个滚动验证区间和下一测试季度 | 验证期允许；测试期禁止 |
-| Epoch | 从起始季度到结束季度跑完所有 Fold | Epoch 结束后只允许正则化 |
+| 实验管线 | `Pipeline` | 消费 Data 产物并调度 Environment 和 Agent 的外层程序，不实现投资逻辑 |
+| 探索步骤 | `Step` | 策略探索阶段内的一次候选修改和验证回放 |
+| 滚动单元 | `Fold` | 一个验证区间及其后续测试区间 |
+| 实验轮次 | `Epoch` | 从起始 Fold 到结束 Fold 的一次完整运行 |
+| 策略探索阶段 | `exploration` | 一个 Fold 内允许 Agent 修改候选策略，并在验证区间反复回放和选择最终产物的运行阶段 |
+| 验证区间 | `validation period` | 策略探索阶段用于评价候选策略的市场数据时间范围，不是运行阶段 |
+| 测试回放阶段 | `frozen_eval` | 策略产物冻结后，由宿主在测试区间执行样本外回放的运行阶段；Agent 不再修改产物 |
+| 测试区间 | `test period` | 冻结产物接受样本外回放的市场数据时间范围，不是运行阶段 |
+| 开发范围 | `Development` | 由滚动 Fold 构成的研究范围，不包含最终 Held-out |
+| 最终留出评估 | `Held-out` | 全部 Development Fold 完成并冻结最终策略后运行的独立评估区间 |
+| 策略产物 | `strategy_artifact` | Agent 写出的 `output/` 正式策略产物，根目录入口为 `main.py` |
+| 模型参数产物 | `model_artifact` | Agent 写出的 `models/` 可继承模型参数产物 |
+| 探索偏好 | `Taste` | 由元学习会话生成，并作为 Prompt 注入后续 Fold Agent；在下一次元学习触发前持续生效的高层探索偏好 |
+| 快照清单 | `snapshot_manifest` | 记录本次可见数据窗口、hash、单位和时间覆盖的说明文件 |
+| 实验账本 | `ledger` | 记录 Fold、Epoch、Held-out 结果和审计信息的文件 |
 
-主路径：
+**导航**
 
-```text
-初始化策略产物
-  -> Epoch 1
-    -> Fold 2022Q1
-      -> 21 个月可见窗口
-      -> Step 1..N 在 2021-10..2021-12 验证区间上迭代
-      -> 冻结本 Fold 策略产物
-      -> 在 2022Q1 测试季度上评估
-    -> Fold 2022Q2
-    -> ...
-    -> Fold 2025Q4
-    -> 正则化 LLM 审计并压缩经验
-  -> Epoch 2..M
-  -> 固定最终策略产物
-  -> Held-out 分 Fold 测试
+- [1. 实验层级与时间排程](#1-实验层级与时间排程)
+  - [1.1 循环层级与主路径](#11-循环层级与主路径)
+  - [1.2 Fold 排程与时间边界](#12-fold-排程与时间边界)
+- [2. 单 Fold 执行、验收与冻结](#2-单-fold-执行验收与冻结)
+  - [2.1 Step 输入与执行](#21-step-输入与执行)
+  - [2.2 冻结条件、完整验证与测试](#22-冻结条件完整验证与测试)
+  - [2.3 策略产物、Manifest 与 Hash](#23-策略产物manifest-与-hash)
+- [3. 跨 Fold 演进与最终评估](#3-跨-fold-演进与最终评估)
+  - [3.1 产物继承与信息隔离](#31-产物继承与信息隔离)
+  - [3.2 元学习输入输出与边界](#32-元学习输入输出与边界)
+  - [3.3 多 Epoch、Development 与 Held-out](#33-多-epochdevelopment-与-held-out)
+- [4. 产物持久化、报告与失败处理](#4-产物持久化报告与失败处理)
+  - [4.1 实验目录、路径角色与主账本](#41-实验目录路径角色与主账本)
+  - [4.2 报告与结果口径](#42-报告与结果口径)
+  - [4.3 失败分类与记录语义](#43-失败分类与记录语义)
+- [5. 运行入口、交互控制与恢复](#5-运行入口交互控制与恢复)
+  - [5.1 运行入口与会话门控](#51-运行入口与会话门控)
+  - [5.2 续跑与状态恢复](#52-续跑与状态恢复)
+  - [5.3 Web 控制台与防泄漏](#53-web-控制台与防泄漏)
+
+## 1. 实验层级与时间排程
+
+本章定义 Step、Fold、Epoch 的层级、全局执行顺序和回放区间边界。
+
+### 1.1 循环层级与主路径
+
+**三层循环**
+
+| 层级 | 含义 |
+|---|---|
+| Step | 一个 Fold 内的一次候选修改和验证回放 |
+| Fold | 一个滚动验证区间和后续测试区间 |
+| Epoch | 从起始周期到结束周期跑完所有 Fold |
+
+**主路径**
+
+```mermaid
+flowchart TD
+    INIT[初始化策略产物] --> META1["Epoch 1 元学习：联网检索 + 生成 Taste"]
+    META1 -->|"Taste 注入后续 Fold"| E1
+    subgraph E1[Epoch 1]
+        F1["Fold P1\n继承初始/元学习产物\nStep 1..N -> 冻结 -> 测试"] --> PERIODIC{"达到可选 Meta Fold 间隔？"}
+        PERIODIC -->|是且仍有下一 Fold| METAN["同 Epoch 元学习\n读已完成开发证据 + 更新 Taste"]
+        PERIODIC -->|否| F2["Fold P2"]
+        METAN --> F2
+        F2 -->|"逐 Fold 链式继承"| FD["..."] --> FN["Fold PN"]
+    end
+    FN --> META2["Epoch 2 元学习：读上一 Epoch 结果 + 更新 Taste/可选压缩产物"]
+    META2 --> EM["Epoch 2..M"]
+    EM --> FINAL[固定最终策略产物]
+    FINAL --> HO["Held-out 按配置周期冻结测试"]
 ```
 
-Pipeline 不实现投资逻辑，也不改写 Agent 代码。它只做调度、冻结、校验和记录。
+### 1.2 Fold 排程与时间边界
 
-## 2. Fold 时间定义
+**可配置周期滚动**
 
-### 2.1 滚动 Fold
-
-首个 Fold 使用 2021-10 到 2021-12 作为启动验证区间，随后按自然季度滚动。以 `fold_2022Q1` 为例：
+Fold 周期支持周、月、季度和年，默认季度。每个测试周期使用前一个同频周期作为验证区间；上一 Fold 的测试区间会成为下一 Fold 的验证区间。以下以季度为例：
 
 | 项目 | 示例 |
 |---|---|
-| 输入窗口 | 2020-01 到 2021-09 |
-| 验证区间 | 2021-10 到 2021-12 |
-| 测试季度 | 2022-01 到 2022-03 |
-| 验证决策时点 | 2021 年 10 月第一个交易日开盘前 |
-| 验证可见数据 | 最近 21 个月内、截至验证决策时点已可见的数据 |
-| 测试决策时点 | 2022Q1 第一个交易日开盘前 |
-| 测试可见数据 | 最近 21 个月内、截至测试决策时点已可见的数据 |
+| 输入窗口 | 2020-01 至 2021-09 |
+| 验证区间 | 2021-10 至 2021-12 |
+| 测试区间 | 2022-01 至 2022-03 |
+| 验证决策时点 | 验证区间前最后一个交易日 23:59:59 北京时间（2021-10 首个交易日的前一交易日收盘） |
+| 验证可见数据 | Environment 配置窗口内、截至验证决策时点已可见的数据 |
+| 测试决策时点 | 测试区间前最后一个交易日 23:59:59 北京时间（2022-01 首个交易日的前一交易日收盘） |
+| 测试可见数据 | Environment 配置窗口内、截至测试决策时点已可见的数据 |
 
-含义：
+验证、测试和 held-out 使用同一锚点合同：
 
-- Agent 在验证决策时点只能看到验证季度开始前的数据。
-- Agent 在验证期回测 2021-10 到 2021-12，并可在 Step 内修改代码和经验。
-- 验证结束后冻结本 Fold 策略产物。
-- 测试时用冻结策略产物回测 2022Q1，不允许再改代码或经验。
+- 决策输入截止在区间开始前最后一个交易日 23:59:59。
+- 首日及后续回放数据只在回放时钟跨过行级可见时间和刷新节点后滚动进入 Timeview。
 
-### 2.2 滚动方式
+**Fold 滚动示例**
 
-下一个 Fold 向后移动一个季度；上一 Fold 的测试季度会成为下一 Fold 的验证区间：
-
-| Fold | 输入窗口 | 验证区间 | 测试季度 |
+| Fold ID | 输入窗口 | 验证区间 | 测试区间 |
 |---|---|---|---|
-| `fold_2022Q1` | 2020-01 到 2021-09 | 2021-10 到 2021-12 | 2022Q1 |
-| `fold_2022Q2` | 2020-01 到 2021-12 | 2022Q1 | 2022Q2 |
-| `fold_2022Q3` | 2020-04 到 2022-03 | 2022Q2 | 2022Q3 |
+| `fold_2022Q1` | 2020-01 至 2021-09 | 2021-10 至 2021-12 | 2022-01 至 2022-03 |
+| `fold_2022Q2` | 2020-04 至 2021-12 | 2022-01 至 2022-03 | 2022-04 至 2022-06 |
+| `fold_2022Q3` | 2020-07 至 2022-03 | 2022-04 至 2022-06 | 2022-07 至 2022-09 |
 
-下一个 Fold 只继承上一个 Fold 在测试前已经冻结的策略产物，也就是 `agent_output/factor/` 和 `agent_output/nl_prior/`。上一 Fold 的 Agent 对话历史、Shell/LLM/服务调用明细、测试季度收益、测试明细和复盘长文不能进入下一 Fold prompt 或策略产物。
+每个验证、测试和 held-out 区间至少有 2 个交易日，因为最后一个交易日保留给期末清仓处理；清仓仍可能因市场约束失败。排程构建阶段直接拒绝不足区间，避免启动无效 Sandbox 和模型会话。
 
-传递步骤必须显式记录：
+## 2. 单 Fold 执行、验收与冻结
 
-1. 上一个 Fold 在验证期结束时写入 `fold_ledger.frozen_strategy_artifact_id`。
-2. Pipeline 用 `experiment_id`、`epoch_id` 和该 ID 读取 `experiments/<experiment_id>/strategy_artifacts/<epoch_id>/<frozen_strategy_artifact_id>/manifest.json`。
-3. Pipeline 校验策略产物聚合版本、父产物 ID 和冻结标记。
-4. 新 Fold 启动时，Pipeline 把冻结产物直接复制到新 Sandbox 的 `/mnt/artifacts/agent_output/factor/` 和 `/mnt/artifacts/agent_output/nl_prior/`；同时创建新的 `conversation_id`。
-5. 新 Fold 的 Agent 只能看到复制后的因子逻辑和投资先验，不能看到上一 Fold 的对话、调用日志、测试收益或复盘文本。
+本章定义普通 Fold 从父产物装载到冻结测试的过程，其中 Step 是策略探索阶段内的一次候选修改和验证回放，其数量受配置上限、Fold deadline 和 `finish_fold` 约束。
 
-如果某个自然季度在后续 Fold 中成为验证季度，Pipeline 可以把该季度重新作为 raw/PIT 回放区间使用；但不能把它在上一 Fold 中作为测试季度时产生的收益摘要、复盘结论或测试 ledger 直接喂给 Agent。
+### 2.1 Step 输入与执行
 
-每个 Fold 必须创建新的 `conversation_id` 和 Agent session。Pipeline 不得复用上一 Fold 的对话上下文。
+**Fold 初始可见输入**
 
-### 2.3 数据窗口
-
-Environment 为每个决策时点准备固定最大长度窗口：主数据域默认最近 21 个月，分钟线默认最近 5 个交易日。这是 Sandbox 可见上限；Agent 可以少用，但不能请求超出窗口的数据。
-
-Pipeline 必须记录：
-
-- `decision_time`
-- `input_window`
-- `validation_period`
-- `test_period`
-- `snapshot_id`
-- `snapshot_manifest_hash`
-- `strategy_artifact_id`
-
-## 3. Step 流程
-
-Step 是验证期的一次策略修改和验证。每个 Fold 的 Step 数固定上限，例如 3-5 次。
-
-### 3.1 Step 输入
-
-| 输入 | 说明 |
+| 类别 | 内容 |
 |---|---|
-| `strategy_artifact` | 上一 Step 或上一 Fold 冻结的 `agent_output/factor/` 和 `agent_output/nl_prior/` |
-| `validation_snapshot` | 当前验证决策时点的 PIT 数据窗口 |
-| `modification_constraints` | 本 Step / Fold 对 `agent_output/factor/` 和 `agent_output/nl_prior/` 的修改约束 |
-| `fold_time_limit` | Fold 运行时长约束，例如 `max_fold_minutes=20`；Step 不设单独时长 |
-| `execution_policy` | 允许调用的 Shell/Tool 和调用上限；训练/验证期可启用受控 `sandbox_shell_tool`，测试和 held-out 默认关闭 |
-| `anti_overfit_prompt` | 防止记忆特定月份、题材或股票 |
+| 会话合同 | 默认系统 Prompt、初始任务指令和当前模式允许的原生工具 schema |
+| 固定决策输入 | `valid_decision_input` 绑定到 `/mnt/snapshot`；`train_snapshot` 是其 Agent 可读的只读别名 |
+| 验证回放数据 | `/mnt/snapshots/valid` 保存完整验证区间数据；Agent 工具可用于探查，正式策略不能直接读取，回放时由宿主作为动态数据源 |
+| 父产物 | 上一 Fold 冻结产物或初始模板，以只读 `parent_output` 和 `parent_models` 提供 |
+| 当前工作副本 | 可写 `workspace`、`output` 和 `models`；`output/main.py` 是正式策略入口 |
+| 运行事实 | 当前身份、决策时间、可见窗口、Snapshot 配置与 hash、数据摘要、Broker/回放规则、运行环境和工具能力 |
+| 验收与预算 | 验收规则、修改约束、Fold 截止时间、Step/回测/模型调用上限、上下文压缩和单次调用超时 |
+| 探索指导 | 当前阶段、防过拟合与收敛提示、Taste、可选的实验级默认 Fold 探索方向，以及可选的研究者本 Fold 追加指令 |
+| 历史证据 | 可见 Step 树和父产物血缘；普通 Fold 不直接接收历史测试结果，只接收最近 Taste 中的可迁移结论 |
 
-`strategy_artifact` 在 Sandbox 中直接展开到当前运行产物目录：
+研究者设置完整系统 Prompt 覆盖时，覆盖文本替代自动装配的运行事实、阶段提示、Taste、实验级默认 Fold 探索方向和本 Fold 指令；硬权限、工具和数据边界不变。
+
+**Step 间滚动输入**
+
+- 同一个 Fold 使用同一 Agent 会话；模型上下文保留近期消息和压缩摘要，旧消息及大型工具结果可能被裁剪，完整原始记录保留在可信 Trace 中。
+- `workspace`、`output` 和 `models` 保留上一步修改；只读父产物不变。
+- 每次验证产生新的 `results/valid_<idx>/`、Broker/NL 证据、修改检查结果和 Step 树节点。
+- 剩余 Fold 推理时间、Step 数、回测次数、模型调用次数和上下文预算按各自规则更新；正式回测墙钟耗时回补，不消耗 Fold 推理时间。
+- 每次回测重新初始化 Broker、`ctx.state_dir`、`ctx.asof_dir` 和该次回测的 NL 配额，不继承上一次回测的动态状态。
+
+**宿主保留的冻结评估输入**
+
+- 最终冻结的策略和模型产物及其 hash。
+- 测试决策时点、`test_decision_input`、对应 Snapshot hash 和完整测试回放槽。
+- Broker/回放配置、运行环境以及冻结评估的墙钟防挂死上限。
+- `frozen_eval` 强制回放完整测试区间，不接受调试窗口；回放期间策略和模型只读，结束后重新校验 hash。
+- Broker、策略状态、Timeview 和 NL 配额重新初始化，不继承验证回测状态。
+- 测试排程、输入和结果不属于 Agent 的 Step 输入，也不反馈给当前或后续 Fold Agent。
+
+**执行流程**
+
+1. Fold 开始时，Pipeline 启动一个 Sandbox 和一个 Agent 会话。
+2. Runner 挂载 `train`、`valid` 两类数据槽；test/held-out 数据仅由宿主持有，从不进入开发容器 mount namespace。
+3. Pipeline 把父策略产物复制到 `/mnt/artifacts/parent_output/` 和 `/mnt/agent/output/`，把父模型参数复制到 `/mnt/artifacts/parent_models/` 和 `/mnt/agent/models/`。
+4. Runner 把最近一次元学习生成的 Taste 注入 Fold Agent Prompt；该 Taste 不写入正式策略产物 hash，并在下一次元学习触发前持续指导 Agent 如何实现和取舍策略。
+5. Agent 在 `workspace/` 探索、读数据、复盘验证结果和调试。
+6. Agent 把当前正式代码写入 `output/`，把需要继承的模型参数写入 `models/`。
+7. Agent 主动调用 `modification_check`；`backtest` 在正式执行前也会复核最近检查结果和当前策略/model hash。
+8. 修改检查通过后，Agent 调用 `backtest`；可选参数只有 `replay_window`，Runner 固定以 valid 模式执行。若检查缺失或过期，`backtest` 自动补跑。
+9. `backtest` 执行 `output/main.py`，写入 `results/valid_<idx>/`。
+10. Pipeline 把完成验证回测的 Step 轻量摘要追加到当前 Fold 记录的 `steps[]`。
+11. Agent 根据结果继续下一 Step，或调用无参数 `finish_fold`。
+
+**Fold 截止时间**
+
+- Fold 内所有 Step 共享同一截止时间。
+- 进入收尾窗口时，Runner 最多发送一次固定收尾提示。
+- 主对话轮次和上下文压缩分别计数，但都受同一 Fold 截止时间约束。
+- 截止时间到达后，不再启动 Shell、受控服务或模型调用。
+- 正式回测独立计时并回补推理时间，但仍受回测次数和真实墙钟硬上限约束。
+
+**Step 摘要**
+
+`steps[]` 只记录完整验证回测。失败回测和超时始终写入 run manifest 与 Agent Trace；只有同时启用 Step Tree 和失败尝试记录时，才额外写入 failed 节点。整个 run 在成功记录前异常退出时，主账本另写 `attempt_failed`；无更新 fallback 则写入 Fold 顶层状态和原因。当前 Step 摘要记录：
+
+| 字段 | 内容 |
+|---|---|
+| `step_id` | Fold 内唯一 Step ID |
+| `status` | `accepted`、`completed` 或 `rejected`；`accepted` 表示最后一次完整验证被选作最终验收候选，不等于 Fold 最终采纳 |
+| `decision_reason` | 成功完整验证当前记为 `validation_backtest`；Fold 最终采纳或拒绝原因记录在顶层状态与原因列表 |
+| `strategy_artifact_ref` | 当前 `output` hash |
+| `model_artifact_ref` | 当前 `models` hash |
+| `combined_artifact_ref` | 策略 hash 与模型 hash 的组合身份 |
+| `modification_delta_summary` | 本次正式产物相对父产物的修改摘要 |
+| `summary` | 总收益、long/short 收益、Sharpe、最大回撤、融券资格拒单数、订单数、成交笔数、turnover、聚合 exposure 和紧凑 benchmark 归因 |
+| `validation_result_ref` | `results/valid_<idx>/` 引用 |
+| `run_manifest_ref` | 当前 run manifest 引用 |
+| `timing` | 当前只记录 `finished_at` |
+
+Step 摘要属于实验主账本，但只作为 Fold 记录内的 `steps[]` 写入，不单独创建 Step 类型记录或账本文件。Shell、LLM 和工具调用明细写入 Trace 与日志；Broker、NL 和回测明细写入对应结果目录，并由 run manifest 和 Fold 记录引用。
+
+### 2.2 冻结条件、完整验证与测试
+
+**冻结必要条件**
+
+- 最近一次 `modification_check` 通过。
+- 当前 `output` hash 与 modification check hash 一致。
+- 当前 `models` hash 与 modification check hash 一致。
+- 最近一次完整 `backtest` 验证成功。
+- 当前 `output` hash 与该 backtest 的 artifact hash 一致。
+- 当前 `models` hash 与该 backtest 的 artifact hash 一致。
+- 验证结果满足 `AcceptanceRules`。
+
+收益和风险阈值可配置，但完整验证要求始终开启；当前默认值见 [参数参考](parameters_reference.md#2-实验编排与验收experimentconfig--acceptancerules--modificationconstraints)。数值边界如下：
+
+- 非有限验收指标直接拒绝，不能利用 NaN 绕过阈值比较。
+- 阈值必须是范围合法的有限数；预算和上限必须是正有限数。
+- 验收指标与明确声明的严格 JSON 产物不得写入 NaN；其他审计文件不在此处作超出实现的统一保证。
+
+**完整验证**
+
+- `output/main.py` 的 `main(ctx)` 在整个回放区间逐 tick 成功执行。
+- `main` 发出的 Broker 动作均由 Broker 处理；成交、拒单和撤单结果完整记录。合法拒单不影响回放完整性。
+- Broker 完成日线或分钟线回放。
+- 固定结果摘要和必要清单已写入；订单或日终持仓记录仅在存在对应记录时生成。
+- Broker 可执行性、拒单和费用摘要可追溯。
+
+**收敛和早停**
+
+- 只看验证结果、修改量、策略复杂度和剩余 Fold 时间。
+- 不看测试或 held-out 结果。
+- 收敛阶段优先保护收益和风险指标，其次压缩 `output` 代码、helper、参数、prompt 和模型参数。
+- 当验证效果接近或边际收益很小时，优先保留更小、更简单、更可解释的版本。
+
+结束 Fold 时按以下顺序处理：
+
+1. 只读锁定策略与模型，并清理 Agent 后台进程。
+2. 选择最近一次完整验证成功且内容未变的候选。
+3. 若历史候选更优，Agent 必须先恢复它并重新通过 hash 匹配的修改检查（过期时 backtest/finish_fold 会自动补跑检查）；策略+模型 hash 与已有成功完整验证一致的候选免重跑验证回测。
+4. 没有可接受候选时进入下列 fallback。
+
+Fallback 规则：
+
+1. 有父产物时沿用父产物：从未有成功完整验证记 `no_valid_backtest`；已有完整验证但硬校验未过（回撤超限/指标非有限/内容已变）记 `no_update`。两种状态都附拒绝原因。收益/Sharpe 低于目标不再触发沿用——照常冻结并在账本记 `accept_warnings`（警告不重置 Fold）。
+2. 首个 Fold 没有父产物且无法产生可接受基线时，实验失败。
+
+**冻结测试**
+
+- Agent 停止，`shell` 不再可用。
+- Runner/root 绑定测试决策输入视图到 `/mnt/snapshot`。
+- 使用冻结产物自动执行 `frozen_eval`。
+- 测试前后校验 `output` hash 和 `models` hash 不变。
+- 测试结果完整明细只写宿主审计面，包括运行结果、development 账本、host manifest 和报告。已完成 Fold 的白名单指标（收益/风险、融券拒单数、订单/成交笔数、turnover、四项聚合 exposure 与紧凑 benchmark 归因）会投影给后续元学习会话，用于跨 Fold 泛化诊断；原始数据、排程、日志、路径、订单和逐日明细不投影，也不直接反馈给当前或下一 Fold Agent Prompt。
+- 冻结测试只作样本外诊断，不参与本 Fold 的策略接受。普通测试失败只记录原因，不撤销已冻结策略、不抹去 Fold 记录；测试前后策略/模型 hash 变化属于完整性失败：账本落盘（`state_changed_during_test=true`）后终止当前运行。
+
+### 2.3 策略产物、Manifest 与 Hash
+
+**冻结目录**
 
 ```text
-/mnt/artifacts/
-  strategy_artifact_manifest.json
-  workspace/
-  agent_output/
-    factor/
-      main.py
-      factors.json
-    nl_prior/
-      prior.md
-      prior.json
-  results/
+experiments/<experiment_id>/strategy_artifacts/<epoch_id>/<strategy_artifact_id>/
+  README.md
+  main.py
+  candidate.py
+  trading.py
+  nl_prompt.md
+  ...
+  manifest.json
+
+experiments/<experiment_id>/strategy_artifacts/<epoch_id>/<strategy_artifact_id>.models/
+  model.joblib
+  scaler.json
+  weights.pt
 ```
 
-训练/验证 Step 中，Agent 在 `/mnt/artifacts/workspace/` 写临时代码和调试脚本；确认无误后才把正式策略代码和投资先验写入 `/mnt/artifacts/agent_output/factor/` 和 `/mnt/artifacts/agent_output/nl_prior/`。接受该 Step 时，Pipeline 只冻结 `agent_output/factor/` 和 `agent_output/nl_prior/` 为新的 `strategy_artifact`，不冻结 `workspace/`，也不冻结 `results/`。测试和 held-out 只运行冻结产物，运行后必须校验因子和投资先验 hash 未变化。
+`manifest.json` 是冻结元数据，不参与策略 artifact hash，也不会复制回 `output`。下一 Fold 继承策略文件和对应模型参数；空 `models` 是合法状态并有稳定 hash。
 
-首次没有父策略产物时，Pipeline 要求 Environment 使用 `configs/agent_output_template/` 初始化 `agent_output/factor/main.py`、`agent_output/factor/factors.json`、`agent_output/nl_prior/prior.md` 和 `agent_output/nl_prior/prior.json`。之后的新 Fold 只复制上一 Fold 冻结后的同名目录，不复制上一 Fold 的对话历史或 `workspace/`。
+**Manifest 字段**
 
-除第一次创建策略产物外，Pipeline 进入正式 `backtest_tool` 前必须调用 Environment 执行策略修改约束检查：
+策略产物 `manifest.json` 只记录冻结产物自身的身份、血缘和来源运行。它不保存验证结果、修改检查详情或运行账本引用；这些属于 Fold ledger 的 Step 记录。
 
-1. 读取父产物 `parent_strategy_artifact_id`。
-2. 调度 Environment 执行 `modification_check_tool`，比较父产物和当前 `/mnt/artifacts/agent_output/factor/`、`/mnt/artifacts/agent_output/nl_prior/`；Tool 调用不接受 Agent 传入路径、父产物或约束参数，这些上下文来自 run manifest；`workspace/` 和 `results/` 不参与 diff。
-3. 对 `agent_output/factor/` 统计变更文件数、diff 行数，并通过 `factors.json` 统计新增、删除和修改的登记因子。
-4. 对 `agent_output/nl_prior/` 统计新增、删除、改写规则数，并检查总条数和单条字符数。
-5. 写入 `strategy_artifact_diff.json`，包含父 hash、当前 hash、约束、实际修改量和是否允许正式回测。
-6. 只有 `strategy_artifact_diff.allowed_to_backtest == true` 时，Environment 才接受运行包含自然语言分析步骤的 `backtest_tool`。
-7. 如果返回 false，本 Step 不获得回测结果，Agent 必须继续修改工作副本并重新检查。
-8. 只有通过修改约束且验证结果被接受时，Pipeline 才能冻结为新的 `strategy_artifact`。
+| 字段 | 内容 |
+|---|---|
+| `experiment_id` | 所属实验 ID |
+| `epoch_id` | 所属 Epoch |
+| `strategy_artifact_id` | 冻结产物 ID |
+| `parent_strategy_artifact_id` | 父产物 ID，首个产物为空 |
+| `strategy_artifact_hash` | 策略文件 hash，不含冻结 manifest |
+| `model_artifact_hash` | 模型参数 hash，可为空目录 hash |
+| `combined_artifact_hash` | 策略 hash 与模型 hash 的组合身份 |
+| `source_run_id` | 产物来源 run |
+| `source_fold_id` / `source_step_id` | 来源 Fold 和 Step |
+| `created_at` | 冻结时间 |
 
-`allowed_to_backtest` 是 Environment 按 Pipeline 下发约束计算出的继续验证门禁结果。该结果来自确定性计数检查。Pipeline 不重新解释修改约束，只记录该结果，并在验证结果合格后决定是否冻结产物。
+触发冻结的验证结果、`run_manifest_ref` 和修改摘要写入 Fold ledger 的 Step 记录；文件清单和文件 hash 可由冻结目录重新计算，不作为最小 manifest 字段。
 
-第一次创建策略产物时没有父产物，使用 `is_initial_artifact=true` 的初始化约束；从第二个 Fold 开始必须使用父产物 diff，不允许把整个目录当成新产物绕过修改约束。
+**完整性边界**
 
-运行时长由 Pipeline 统一下发，例如：
+- **内容身份**：策略代码、模型参数和数据快照使用稳定哈希；冻结、继承和评估前后据此校验内容未变。
+- **审计证据**：运行配置、提示词、期限、资源限制、执行轨迹和结果目录持久保存，并通过运行身份互相引用。
+- 除明确记录哈希的文件外，不宣称整个结果目录、运行清单或轨迹都经过内容寻址。
+
+## 3. 跨 Fold 演进与最终评估
+
+本章定义 Fold 之间的产物继承和信息隔离、Epoch 级元学习以及 development 结束后的 held-out。
+
+### 3.1 产物继承与信息隔离
+
+**产物继承**
+
+- 每个 Fold 按第 2 章的验收和 fallback 规则确定最终冻结产物。
+- 下一 Fold 继承上一 Fold 在测试前冻结的策略和模型产物；上一 Fold 没有可接受更新时，继承 Pipeline 选定的 fallback 父产物。
+- 每个 Epoch 起始固定运行一次元学习。`meta_learning_fold_interval=N>0` 时，每完成 N 个 Fold 且仍有下一 Fold，额外运行一次；末个 Fold 后不空跑。最近生成的 Taste 由之后的 Fold 共享，直到下一次触发。
+
+**信息隔离**
+
+- 每个 Fold 创建新的 `conversation_id` 和 Agent session。
+- 上一 Fold 的 Agent 对话、工具调用、LLM 日志、测试结果和测试日志不能直接进入下一 Fold Prompt 或策略产物。后续元学习只能读取第 3.2 节定义的 compact 测试指标投影，并通过不含逐 Fold 测试明细的 Taste 传递可迁移结论。
+- 除第 3.2 节定义的 Taste 外，不跨普通 Fold 共享模型生成内容。
+- 某个历史测试区间在后续 Fold 成为验证区间时，必须在当前 Fold 重新运行 `backtest`；不得复用它曾作为测试区间时产生的结果。
+
+### 3.2 元学习输入输出与边界
+
+**元学习输入**
+
+以下输入均写入 `workspace/`，由 Runner 注入。
+
+- compact `development_history.json`：紧凑的逐 Fold 验证摘要（含 exposure/turnover 等过拟合信号）、接受/拒绝原因、验证回测明细、已完成冻结测试的白名单指标（含 `trade_count`、`turnover` 与四项聚合 `exposure`，不含订单或逐日序列），以及逐 Epoch 冻结策略 hash 多样性（识别"收敛教条"导致的零修改冻结坍缩）。
+- `experiment_ledger_full.jsonl`：Agent 可见 development 账本（逐条 `fold` / `meta_learning` 记录）。已完成 `fold` 可含 compact 测试指标；排除 held-out、测试区间与决策时点、snapshot 身份、结果路径、Trace、订单、Broker/NL 日志和原始数据。
+- 元学习记忆：每个最近 Epoch 只注入其最新且早于当前会话的一份完整元学习 Trace，保留配置数量的最近 Epoch；同 Epoch 的最近周期触发也可成为下一次触发的记忆。设为 0 时关闭，避免原始记忆随 Epoch×触发次数增长；更早信息只通过 Taste 链和紧凑 Fold 历史保留。
+- 上一次 Taste。
+- 当前父策略产物和父模型参数产物。
+- 实验级 `meta_learning_directive`：研究者在实验启动前可选注入的探索方向，写入 run manifest 和 meta-learning 账本。
+- 实验级 `fold_exploration_directive`：创建实验时设置的长期 Fold 探索主线；Meta 同样可见，用于形成与主题一致的 Taste。
+- `run_manifest.json` 的 `experiment_parameters`：Fold 周期、数据窗口、验收规则、Broker profile、deadline、Step tree 和 Sandbox 资源等实验级参数；未来测试和 held-out 调度只保存在宿主审计账本。
+- 元学习会话使用与即将运行的 Fold Agent 相同的可见数据：`/mnt/snapshot` 与 `/mnt/snapshots/{train,valid}`；Test/Held-out 原始数据不进入元学习可见输入（绑定与可见性规则见 `environment_design.md` §1.2）。
+- `/mnt/artifacts/runtime_env.json`：Sandbox Python 包、CLI 工具、网络/安装策略和资源摘要。
+- `/mnt/artifacts/data_summary.json`：即将运行 Fold 可见数据的预生成轻量索引，含文件规模、行数、列数、关键列、日期覆盖、显式单位合同和大表访问提示。
+- meta-learning run manifest 中记录本次可用的 `web_search_engines`；当前默认引擎见 [参数参考](parameters_reference.md#9-hitl模型联网与控制台)。
+- `meta_learning_sandbox_spec`：仅用于元学习 run 的 Docker 网络、资源和环境变量名透传配置；普通 Fold 仍使用基础 `sandbox_spec`。
+- `workspace/sandbox_environment.example.json`：依赖声明模板，仅供 Agent 参考，不触发镜像构建。
+
+**元学习输出**
+
+- 非空 `workspace/taste.md`。
+- 可选的小幅正则化策略产物和模型参数产物。
+- 可选依赖声明只接受 Python、apt 和 npm 包列表，以及说明文本；不下载模型权重、数据或仓库，不接受 Shell 命令、URL、Token 或缓存路径。
+- 有效声明以当前 Fold 镜像为基础构建派生镜像，并在末尾执行 import 烟测。成功后，后续 Fold 与 held-out 使用派生镜像。
+- 构建失败显式终止，不回退旧环境。生效镜像身份写入账本，恢复进程据此继续继承；旧派生镜像只做不影响活跃运行的尽力清理。
+- meta-learning run manifest 和 canonical `artifacts/run_<id>/agent_trace.jsonl`。
+
+元学习只额外保存便于人工查看的 Taste，执行轨迹仍由规范运行目录单点保存。最终化顺序为：
+
+1. 采集可用产物。
+2. 总是写元学习账本，包括最终化错误。
+3. 再对构建或采集失败 fail-fast。
+
+**边界**
+
+- 元学习使用独立 run/session，不复用普通 Fold Agent 会话。
+- 实验级 `meta_learning_directive` 只进入元学习 Prompt，不直接进入普通 Fold Agent；元学习必须把它当作待检验假设，可采纳、细化、降级或拒绝，并在 Taste 中给出可执行方向。
+- 实验级 `fold_exploration_directive` 分别进入 Meta 和每个普通 Fold 的自动装配 Prompt，与 Meta 会话指令、Taste 和单 Fold 指令分别保留。Meta 以它为 Taste 主线；Meta/Fold 都可按证据选择最小可证伪实现、降级或拒绝，但不能无证据换成无关主题。完整 Prompt 覆盖仍原样替代自动装配内容。
+- 网页搜索和抓取只在元学习开放，普通 Fold 断网。抓取只读取公开网页，不替代三个规定研究视角的搜索完成要求；默认直连，显式请求才使用代理。
+- 元学习 Sandbox 默认通过桥接网络访问公网，仅用于当前会话的研究。工作区下载不自动继承；Taste 不得要求断网的普通 Fold 下载模型/仓库/数据或安装包。
+- 宿主中存在代码仓库或模型仓库凭据时，它们是默认透传候选；研究者还可显式追加允许的环境变量名。运行记录只保存实际注入的变量名，不保存值。
+- 托管代理只在配置存在时按会话启动，默认不接管 Shell 命令；代理凭据和正文不得进入 Prompt、清单或账本。完整网络边界见 Environment。
+- 元学习先读数据摘要，再只读检查可见快照的 schema、覆盖、行数、关键空值和单位。大表先查 metadata，之后按列和日期抽样或聚合。
+- 启用联网搜索时，元学习结束前必须完成金融/量化/经济、自然科学/工程、哲学/方法论三类视角的非空检索，并收敛为可执行的简洁 Taste。引擎限流、失败或返回空结果时，应换引擎或重试同一视角。
+- Pipeline 只在真实 Runner summary 显示 `meta_learning_done` 且 `taste.md` 非空时采纳 Taste 或正则化改动；否则 fail-fast，不沿用旧 Taste 伪装本轮完成。
+- Taste 是后续 Fold Agent 实现策略的重要指导输入。注入 Fold Prompt 前只保留方向性约束，不保存细粒度实现方案；它应提示 NL 证据的前视、召回和解析风险，以及是否把 NL 作为主信号、辅助过滤或风险降权。
+- 元学习可以读取 development 摘要、当前父产物和已完成 Fold 的 compact 冻结测试指标，但仅用于多 Fold 失效模式和稳定性诊断。不得按 Test 水平或 Validation/Test 差距排名、选择、回滚产物，也不得据此选参数、因子、阈值或模型；选择只依据 Validation 与机制证据。
+
+- `intraday_trade_days` 仅限制决策 snapshot 的历史分钟回看；Valid/Test replay 在分钟源存在时分别覆盖完整 Fold 区间。Meta/Fold 必须按 `data_summary.json` 的 view 分开判断，不得由 snapshot 天数推断 replay 覆盖。
+- 元学习不能读取 Test 原始数据、测试排程/日志/明细或任何 held-out 信息。
+- 元学习不能运行正式 backtest 来反复调参。
+- Taste 注入下一次触发前的 Fold Prompt，只能保留跨 Fold 的可迁移结论和反证条件，不能复制逐 Fold 测试数值、身份、区间或任何 held-out 明细。
+
+正则化只压缩正式策略、辅助模块、参数、Prompt 和模型产物，减少冗余。修改通过约束且存在父产物时可冻结为新的元学习产物；否则只保存 Taste 或沿用父产物。元学习本身不运行回测，因此新正则化产物必须在紧随的普通 Fold 完成并通过完整 Validation 后，才可成为该 Fold 的 fallback 或进入冻结 Test；否则该 Fold fail-fast，不把未经验证的 Meta 修改沿链传播。
+
+### 3.3 多 Epoch、Development 与 Held-out
+
+**多 Epoch 之间**
+
+- 每个 Epoch 都从首个 Fold 跑到末个 Fold。
+- 后续元学习会话可读取触发前已经完成的 development 摘要和上一 Taste，并生成新的 Taste；新 Taste 只影响之后的 Fold，不改写先前已冻结产物。
+- Held-out 始终保留到全部 development 结束后。
+
+**Development**
+
+Development 保存滚动 Fold 的验证结果和冻结测试结果，但两者用途不同：
+
+- 验证摘要、接受或拒绝原因及既往 Taste 可以进入后续元学习。
+- 已完成 Fold 的冻结测试白名单指标可以进入后续元学习，因此这些 Test 是自适应 meta-development 反馈，不再是最终未触碰估计；测试区间、原始数据、日志、快照引用、结果路径和对话仍在投影层移除。
+- Held-out 不进入任何 development 会话，是唯一最终未触碰评估。
+
+**Held-out 配置**
+
+- 起止周期必须在实验开始前配置并冻结。
+- 不能根据 development 结果选择 held-out 区间。
+- 不能与 development 区间重叠。
+- 使用最终冻结策略和模型产物，不启动 Agent，也不允许修改产物。
+- 按配置周期生成 `heldout_<label>` run。
+- 测试前后校验策略和模型 artifact hash 不变。
+- 账本只新增 held-out 类型记录；同时保存对应运行清单、Trace、回测结果和收集产物。
+
+Held-out 结果只用于最终评估，不反馈给策略探索、元学习或 Fold Prompt。
+
+## 4. 产物持久化、报告与失败处理
+
+本章定义 Pipeline 产物的落盘位置、账本与运行清单的关系、报告口径以及失败和审计语义。
+
+### 4.1 实验目录、路径角色与主账本
+
+**实验目录树**
+
+```text
+experiments/<experiment_id>/
+  ledgers/
+    experiment_ledger.jsonl
+  strategy_artifacts/
+    <epoch_id>/<strategy_artifact_id>/
+    <epoch_id>/<strategy_artifact_id>.models/
+  meta_learning/
+    <meta_learning_id>/
+  artifacts/
+    <run_id>/
+  research_release/
+    manifest.json
+    quality/
+  reports/
+  hitl/
+```
+
+**路径角色**
+
+| 路径 | 写入方 | 用途 |
+|---|---|---|
+| `ledgers/experiment_ledger.jsonl` | Pipeline | Fold、meta-learning、held-out 主账本 |
+| `strategy_artifacts/` | Pipeline | 冻结策略产物和对应模型参数产物 |
+| `meta_learning/` | Pipeline | 元学习 Taste；trace 由账本 `agent_trace_ref` 指向 canonical run 目录 |
+| `artifacts/<run_id>/` | Environment | Sandbox run manifest、trace、results、logs |
+| `research_release/` | Pipeline | 实验固定的数据 generation 与质量状态；恢复时原样复用 |
+| `<experiments_root>/.snapshot_cache/` | Pipeline | 跨实验共享的决策快照/回放槽构建缓存：键完全由内容（构件+提供方配置+raw 世代+格式版本）派生并跨进程 single-flight，并行实验同窗口互相复用；点前缀目录不进入控制台实验列表，无实验运行时可手动清理（见下） |
+| `reports/` | reporting 脚本 | 实验图表和汇总 |
+| `hitl/` | 交互式 worker / Web 后端 | HITL 控制面文件与 Fold 分析（见第 5 章） |
+
+快照缓存按内容身份跨实验复用字节相同的构建结果：
+
+- 新实验先固定一个 research release：live 可读时按需发布当前 committed generation，更新期立即使用最近完整版本；部署后的首个版本须在 committed 空窗 bootstrap，已有账本但缺少 pin 时拒绝混用数据恢复。
+- 相邻 Fold 可以共享相同决策锚点，多 Epoch 的同一视图也可复用。
+- 同区间回放数据跨 valid/test 标签复用；label 不进入内容键，只原子写入本次运行目录的独立 manifest。
+- 缓存键包含实验固定的 committed generation；live 更新不会令同一实验跨 Fold 换代，也不会读取部分更新。回放槽的键与内容另含 Fold 决策锚点（`available_from`）：锚点与期初日历日之间（周末/节假日）发布的事件、宏观和文本行以锚点为可见下界进入回放槽，首个盘前刷新节点即可放行。
+- 缓存键另含显式格式版本；快照/PIT 磁盘合同变化时递增版本，无关代码提交不清空大缓存。
+- 同一内容键由跨进程 `flock` 合并为一次构建，加锁后复查命中并原子发布；发布异常直接报错。
+- 数据文件以硬链接挂入运行目录；本地 manifest 以新 inode 替换，不会改写缓存或其他运行的硬链接。
+- 交互式 worker 只预取将进入的 Fold 的四个宿主数据缓存项：有 Meta 会话时自该 Fold 前的 Meta 门控起提交，否则与 Fold 自身门控重叠；不创建 Sandbox 或容器，并在进入 Fold 前等待完成，所以不与正式回测并行。
+- 每个 Fold/Meta/Held-out 的生产输入在启动 Agent 前校验 pinned generation 唯一；混代或部分缺失世代戳直接失败，本地合成输入可以全部无戳。
+
+**主账本**
+
+| record_type | 内容 |
+|---|---|
+| `fold` | Fold 时间、父产物、冻结产物、验证/测试摘要、Step 摘要、snapshot id |
+| `meta_learning` | Epoch、唯一 `meta_learning_id`、触发前已完成 Fold 数、Taste、正则化状态、修改检查摘要、`agent_trace_ref` |
+| `heldout` | held-out 区间和冻结测试结果 |
+
+**Fold 记录示例**
 
 ```json
 {
-  "max_fold_minutes": 20,
-  "fold_deadline_at": "2026-06-07T22:20:00+08:00",
-  "finalize_before_deadline_seconds": 300,
-  "per_call_timeout_seconds": 300
-}
-```
-
-每个 Fold 默认限时 20 分钟，Step 共享同一个 Fold deadline，不再单独计时。距离 deadline 5 分钟以上时，Pipeline、Runner 和 Proxy 不提示剩余时间，让 Agent 自由探索。剩余时间低于 `finalize_before_deadline_seconds` 时，Runner/Proxy 触发固定收尾提示，要求 Agent 立即输出当前最好版本的 `agent_output/factor/` 和 `agent_output/nl_prior/`。超过 `fold_deadline_at` 后，Pipeline 必须截断当前 Fold，停止新的 Shell/服务调用和 LLM 调用；已经卡住的 provider 请求只能超时取消，不能被追加 prompt。
-
-收尾结果可以作为 rejected 或 best-effort Step 输出，但不能绕过策略修改约束、订单计划校验或回测规则。若收尾产物不完整，Pipeline 应记录 timeout，并使用最后一个已通过约束和回测的策略产物作为本 Fold 的候选结果。
-
-### 3.2 Step 执行
-
-Pipeline 调度：
-
-1. 启动验证 Sandbox。
-2. 挂载验证 snapshot。
-3. 把策略产物复制到 Sandbox。
-4. Agent 在 `workspace/` 写和调试 Python 策略代码，确认后把正式入口写入 `agent_output/factor/`，把投资先验写入 `agent_output/nl_prior/`。
-5. Agent 可以用 Shell/Python 调试策略代码，但临时结果不作为正式回测结果。
-6. Agent 可以调用 `modification_check_tool` 自查；该调用只触发当前工作副本检查，不传业务参数。Pipeline 在正式 `backtest_tool` 前必须再次调度同一 Tool 复查。若 `allowed_to_backtest=false`，Environment 拒绝继续运行，Agent 需要缩小修改后重试。
-7. Agent 调用 `backtest_tool`。该 Tool 自动加载 `agent_output/factor/` 和 `agent_output/nl_prior/`，调用 `agent_output/factor/main.py::generate_orders(context)`，运行内部自然语言分析步骤，校验订单计划，再通过模拟 Broker 回测验证季度。
-8. `backtest_tool` 创建新的 `results/<phase>_<idx>/`，例如 `results/valid_000/`，写入 `summary.json`、`detailed_return.json`、`order_plan.parquet` 和 `nl_output/`。Agent 在训练/验证期只读这些结果；测试和 held-out 结果不反馈给 Agent。
-9. Agent 根据这些结果决定是否接受本 Step 修改。
-10. Pipeline 校验 Environment 自动生成的 artifact 和日志，写 Step ledger。
-
-自然语言分析步骤可以在每个训练 Step 的 `backtest_tool` 内部运行。它产生的 `results/<phase>_<idx>/nl_output/` 可以用于当前 Step 的订单计划生成，也可以作为下一 Step 改写 `nl_prior` 的证据。若 Agent 在自然语言分析之后又改写 `nl_prior` 并希望该修改影响当前 Step，则 Pipeline 必须重新运行 `modification_check_tool` 和 `backtest_tool`，并要求新的 `nl_prior`、`results/<phase>_<idx>/nl_output/`、策略主函数返回值、订单计划和回测结果在 manifest 中保持一致。
-
-### 3.3 Step 输出
-
-Step 至少输出：
-
-- 新的策略产物或 rejected 状态。
-- 策略产物 ID 和聚合版本。
-- 策略主函数返回值、订单计划和校验结果。
-- 验证回测结果。
-- Environment 自动生成的 Shell/LLM/服务调用记录。
-- `sandbox_shell_tool` transcript 路径。
-- Environment 自动生成的 LLM conversation log。
-- `accepted` / `rejected`。
-- 接受或拒绝原因。
-- 修改 diff 摘要。
-- 使用的 provider、model、prompt ID、随机种子、deadline 和资源护栏。
-- `fold_deadline_at`、实际耗时、是否触发收尾、是否超时。
-- Sandbox 镜像版本。
-- snapshot 时间范围。
-- 文本 evidence id 列表。
-
-## 4. Fold 流程
-
-### 4.1 验证期
-
-一个 Fold 内按顺序运行 Step。只有验证期可以修改策略产物。
-
-选择本 Fold 最终策略产物时，Pipeline 可以使用验证回测结果和风险约束，但不能使用测试季度结果。
-
-验证期选择规则：
-
-- 验证收益为正。
-- 最大回撤不超过阈值。
-- 持仓数量和集中度合规。
-- 修改次数没有超过约束。
-- 经验条数没有超过上限。
-
-### 4.2 Fold 内早停目标
-
-早停只能使用验证期结果，不能使用测试季度或 Held-out。Pipeline 应使用统一的 `validation_score`，而不是只看收益率。评分至少包含：
-
-- 验证收益。
-- 最大回撤惩罚。
-- 换手率和交易成本惩罚。
-- 持仓集中度惩罚。
-- 订单计划拒单或约束失败惩罚。
-
-第一个 Epoch 没有上一轮可比结果，每个 Fold 的早停门槛为：
-
-```text
-validation_return > 0
-and validation_score > 0
-and risk_constraints_passed == true
-and order_plan_valid == true
-```
-
-从第二个 Epoch 开始，每个 Fold 以“好于上一 Epoch 的同一 Fold”为主要目标：
-
-```text
-validation_score >= previous_epoch_same_fold.validation_score + min_delta
-and risk_constraints_passed == true
-and order_plan_valid == true
-```
-
-如果上一 Epoch 的同一 Fold 表现很差，目标不能退化成“亏得更少就通过”。可以使用下限：
-
-```text
-target_score = max(previous_epoch_same_fold.validation_score + min_delta, baseline_score_floor)
-```
-
-`baseline_score_floor` 默认不低于 0。达到早停目标后，Pipeline 可以停止本 Fold 后续 Step，冻结当前最优策略产物并进入测试期。早停只是节省验证期搜索，不代表策略通过最终测试。
-
-### 4.3 测试期
-
-验证期结束后，Pipeline 冻结：
-
-- 策略产物。
-- 策略产物 ID 和聚合版本。
-- 回测配置。
-- 模拟 Broker 配置。
-- 入口策略。
-- snapshot manifest。
-
-测试期只执行冻结策略产物，可以在同一个 Sandbox 中完成，但测试 snapshot 必须对 Agent 用户不可读，只允许 Runner/root 读取。
-
-1. Pipeline 冻结 `agent_output/factor/`、`agent_output/nl_prior/`、回测配置、prompt 和入口策略。
-2. 关闭 Agent 的可写探索阶段；`sandbox_shell_tool` 不再能读取测试 snapshot。
-3. Runner/root 读取 root-only 测试 snapshot。
-4. Runner/root 调用 `backtest_tool`，自动加载冻结 `agent_output/factor/` 和 `agent_output/nl_prior/`。
-5. `backtest_tool` 内部调用策略主函数、运行自然语言分析步骤、订单计划校验和模拟 Broker 回放。
-6. 写测试结果并结束本 Fold。
-
-测试结果只作为滚动开发表现记录。不能修改本 Fold，也不能进入后续 Fold prompt、策略产物或 Epoch 正则化输入。
-
-### 4.4 Fold 输出
-
-```json
-{
+  "record_type": "fold",
   "fold_id": "fold_2022Q1",
-  "input_window": "2020-01..2021-09",
-  "validation_period": "2021-10..2021-12",
-  "test_period": "2022Q1",
-  "parent_strategy_artifact_id": "strategy_epoch001_fold2021Q4",
-  "frozen_strategy_artifact_id": "strategy_epoch001_fold2022Q1",
-  "frozen_strategy_artifact_path": "experiments/exp_quarterly_single_agent_001/strategy_artifacts/epoch_001/strategy_epoch001_fold2022Q1",
-  "validation_result": {
-    "return": 0.031,
-    "max_drawdown": 0.042
-  },
-  "test_result": {
-    "return": 0.018,
-    "max_drawdown": 0.035
-  },
+  "input_window": "20200101..20210930",
+  "validation_period": "20211001..20211231",
+  "test_period": "20220101..20220331",
+  "parent_strategy_artifact_id": "strategy_epoch1_fold0",
+  "finish_reason": "fold_finished",
+  "fold_status": "frozen",
+  "accept_reasons": [],
+  "selected_step_id": "step_003",
+  "steps": [],
+  "frozen_strategy_artifact_id": "strategy_epoch1_fold_2022Q1",
+  "frozen_strategy_artifact_hash": "sha256:...",
+  "frozen_model_artifact_hash": "sha256:...",
+  "frozen_combined_artifact_hash": "sha256:...",
+  "frozen_strategy_artifact_path": "experiments/.../strategy_artifacts/...",
+  "frozen_model_artifact_path": "experiments/.../strategy_artifacts/...models",
+  "validation_result": {"total_return": 0.04, "sharpe": 0.8, "max_drawdown": 0.12},
+  "test_result": {"total_return": 0.02, "sharpe": 0.4, "max_drawdown": 0.10, "trade_count": 18, "turnover": 1.6, "exposure": {"avg_gross": 0.42, "max_gross": 0.81, "zero_position_days": 4, "replay_days": 60}},
+  "run_manifest_ref": "artifacts/run_x/run_manifest.json",
+  "snapshot_ids": {"train_snapshot": "...", "valid_decision_input": "...", "test_decision_input": "...", "valid_replay": "...", "test_replay": "..."},
   "state_changed_during_test": false
 }
 ```
 
-## 5. Epoch 流程
+`fold_status` 取 `frozen`（本 Fold 冻结了新产物；收益/Sharpe 低于目标时附 `accept_warnings`）、`no_update`（有完整验证但硬校验未过，沿用父产物）或 `no_valid_backtest`（无成功完整验证，沿用父产物）；后两者的 `accept_reasons` 记录拒绝原因。
 
-### 5.1 Epoch 范围
+实验启动时冻结各数据域的决策窗口：
 
-一个 Epoch 从 `fold_2022Q1` 跑到 `fold_2025Q4`。
+- 日频、财务、事件、宏观和文本按月配置，分钟样本按交易日数配置。
+- 未单独覆盖的域回退到基础窗口。
+- Fold 的输入窗口只是调度摘要；实际可见历史以生效配置和快照清单记录的各域覆盖为准。
 
-```text
-epoch_001:
-  fold_2022Q1
-  fold_2022Q2
-  ...
-  fold_2025Q4
-```
+普通 Fold run manifest 直接记录 Fold、snapshot、Broker、验收、修改约束和 deadline。
 
-每个 Fold 使用上一个 Fold 冻结后的策略产物作为起点；这个产物不包含上一 Fold 的测试结果或对话历史。
+**run manifest 约定**
 
-### 5.2 Epoch 后正则化
+- 初始模板只记录稳定 `template_ref` 和 `initial_template_hash`，不记录宿主 `configs/agent_output_template` 绝对路径；修改检查使用 sandbox 内只读 `parent_output` 作为基线。
+- 元学习 run manifest 通过 `experiment_parameters` 汇总同一组实验级参数，并记录唯一会话身份、触发前已完成 Fold 数、`fold_exploration_directive`、实际 Broker/回放时点配置，以及即将运行 Fold 的可见决策输入和验证回放 snapshot id/hash；不记录 Test 或 held-out 排程与结果。
+- CLI 装配的真实 Agent 运行还会写入 `agent_session_config` 和 `llm_config_summary`，用于审计上下文压缩阈值、最大调用数和模型配置；这些字段不包含 API key。
 
-Epoch 结束后，启动正则化 LLM。它读取：
+### 4.2 报告与结果口径
 
-- 本 Epoch 所有 Fold 的验证 Step 结果。
-- 策略产物变化记录。
-- `agent_output/factor/`。
-- `agent_output/nl_prior/`。
+**报告**
 
-正则化 LLM 输出：
+- 默认命令：`scripts/experiments/report_experiment.py`。
+- benchmark（沪深300 `000300.SH`）取自账本各记录中回放时冻结的 `benchmark` 块（回放槽数据计算），报告不读可变 raw 数据湖，与 Agent/控制台所见完全一致。
+- 有成绩的周期缺冻结 benchmark 块时，summary status 必须标记 warning。
+- 输出 `reports/epoch_comparison_returns.png`。
+- 输出 `reports/epoch_returns/<epoch_id>_returns.png`。
+- 逐 Fold `active_return` 是该 Fold 策略收益减 benchmark 收益。
+- 累计/复利 active return 统一用权益比口径 ∏(1+r)/∏(1+b)−1；汇总 `compound_active_return`、报告表 “Cum active” 列和 “Relative equity vs benchmark” 图三者口径一致。
+- development 汇总另含样本标准差 `std_test_return`、`std_active_return`（样本数 < 2 时为 null），以及逐 Fold active return 对零的单样本 t 统计量 `active_return_tstat`（样本数 < 2 或离散度为 0 时为 null）。
+- 相对权益曲线以策略权益除以 benchmark 权益表示，与上面的复利 active return 口径一致。
+- **跨 Epoch 不聚合**：Epoch 是对同一 Fold 日历的重复遍历，累计验证/测试收益只在单个 Epoch 内按 Fold 复利串联，绝不跨 Epoch 相加或相乘。控制台的 `metrics` 取最新 Epoch（`metrics.epoch_id` 标注），`metrics_by_epoch` 逐 Epoch 并列；`/equity` 收益曲线按所选 Epoch 单独成链（默认最新，支持切换），并附全周期统计（累计/年化收益、年化波动、Sharpe、最大回撤、日胜率、β、超额、跟踪误差、信息比率，均由服务端按日收益与冻结 benchmark 计算）与逐日仓位序列（EOD 持仓总市值/权益，多空分列，取自各结果窗口的 `positions_eod.parquet`，与收益同窗口口径成链）；前端在回撤子图下方渲染联动仓位子图。逐 Fold Barra-lite 风格倾斜仍在 Fold 视图。
 
-- 保留的经验。
-- 删除的经验和原因。
-- 合并后的规则。
-- 需要保留的因子逻辑。
-- 正则化后的策略产物。
+### 4.3 失败分类与记录语义
 
-它不能读取 Fold 测试结果或 held-out，不能新增基于某段表现的交易规则，只能删除、合并和抽象化已有经验。
+本节只定义失败如何影响当前运行、候选和恢复；各阶段的合法输入、冻结条件、信息隔离和报告要求由前文对应流程定义。
 
-正则化输入必须由白名单 manifest 指定，只允许包含验证 Step 结果、策略产物变化记录、`agent_output/factor/` 和 `agent_output/nl_prior/`。不能把完整 `fold_ledger` 或测试收益汇总直接喂给正则化 LLM。
+**终止当前运行**
 
-### 5.3 多 Epoch
+- 输入、Snapshot、父产物或冻结产物的身份与运行清单不一致。
+- 排程区间冲突、回测输入 schema 非法，或子进程退出状态与执行结果矛盾。
+- 首个 Fold 无法产生可接受基线，或正式实验试图复用已有冻结产物和 Fold 记录的实验身份。
+- 测试或 held-out 前后策略或模型 hash 发生变化。
 
-可以重复多个 Epoch。每个 Epoch 从上一个 Epoch 正则化后的策略产物开始。
+这类错误会破坏运行身份、时间边界或结果可信度，Pipeline 不猜测、不降级，也不继续后续阶段。
 
-多 Epoch 的目的不是记住更多历史细节，而是压缩出更稳定的因子和经验。Pipeline 必须限制：
+**拒绝当前操作或候选**
 
-- `nl_prior` 总条数。
-- `factor` 复杂度。
-- 每个 Fold 的修改数量。
+- 工具访问越权、阶段不允许当前操作或修改约束超限时，只拒绝该次操作或当前产物。
+- 单次回测、Broker 或产物校验失败时，当前结果不能用于冻结；预算和截止时间允许时可以修正后重试。
+- 已有父产物但当前 Fold 没有可接受更新时，按冻结规则沿用父产物并记录 `no_update` 或 `no_valid_backtest`，不把候选失败升级为整个实验失败。
 
-## 6. 测试和 Held-out
+**记录与恢复**
 
-### 6.1 Development 表现
+- 所有失败和拒绝都写入对应 Trace、run manifest 或主账本，并保留明确状态和原因；不得静默吞掉。
+- Fold、元学习或 held-out 在写入成功业务记录前异常退出时，主账本追加失败尝试记录。
+- 同一次运行可能先写入成功业务记录，再在产物收集或最终化阶段失败，因此成功记录和失败尝试可以并存。
+- 恢复逻辑以有效的成功业务记录重建已完成阶段；失败尝试提供审计证据，但不单独阻止重跑。
 
-Development 期间，每个 Fold 的测试季度表现汇总为滚动开发表现。
+## 5. 运行入口、交互控制与恢复
 
-Development 表现用于判断系统是否能在滚动验证中逐步改善，但不能代表最终泛化表现。
+本章定义批量实验、单会话审计和 HITL 入口，以及交互式控制、恢复和 Web 展示。
 
-### 6.2 Held-out
+控制面不能放宽实验的数据、执行、冻结或审计边界。
 
-Held-out 在所有 Epoch 完成后运行。Held-out 起止日期必须在实验开始前写入配置并冻结，不能根据验证或 development 结果选择；它不得与 `fold_2022Q1` 到 `fold_2025Q4` 的 development 区间重叠。
+### 5.1 运行入口与会话门控
 
-规则：
+**运行入口**
 
-- 使用最终冻结策略产物。
-- 按季度分 Fold 测试。
-- 不运行 Step。
-- 不修改 `agent_output/factor/`。
-- 不修改 `agent_output/nl_prior/`。
-- 不让 held-out 结果进入验证或正则化。
+- 批量入口执行完整实验；目标 experiment 已存在冻结产物或 Fold 账本记录时直接终止，不支持原地续跑。
+- 交互式入口用于需要研究者控制或会话级恢复的完整实验。
+- 单会话审计入口只启动一次元学习会话或一个普通 Fold，用于检查 Prompt、Trace、Sandbox 和产物交接，不替代完整实验。
 
-Held-out 输出是最终测试集表现。
+单会话审计分为两种模式：
 
-## 7. 账本和日志
+- 元学习模式只生成 Taste 和可选正则化产物。
+- Fold 模式执行 Agent、验证和冻结测试。
+- 审计入口不构建基础 Sandbox 镜像；正式 Docker 审计前必须确保基础镜像存在。
+- 元学习若提交有效依赖声明，仍按配置构建派生镜像；构建失败显式终止。
 
-本章是实验级日志和账本的唯一权威定义。Agent 文档只说明行为边界；Environment 文档只说明 Sandbox 实际写哪些运行时文件。
+交互式入口沿用正式 Pipeline 的元学习、Fold 和 held-out 顺序，但在会话边界增加研究者控制。控制面采用单写者、原子替换的本地状态文件：
 
-### 7.1 账本类型
+| 文件 | 写入方 | 内容 |
+|---|---|---|
+| `params.json` | 创建方 | 实验参数和交互式专有设置；每次启动据此确定性重建运行配置 |
+| `control.json` | 控制方 | 模式、暂停或停止请求、会话批准、研究者输入、重跑、回滚、提前收官和资源分配 |
+| `status.json` | worker（manager 仅在拉起瞬间写一次 `launching` 存根，进程创建前完成，无并发写者） | pid、心跳、当前会话、run_id 与实时 trace 路径、Agent 结束后的 Environment 阶段/粗粒度回放进度、错误；`launching` 桥接进程拉起到 worker 首次写状态的窗口（同时阻止该窗口内的重复拉起、回滚、重跑或删除），超时未接管降级为 `interrupted` |
+| `schedule.json` | 仅 worker | 启动时写出的确定性会话计划（Epoch 起始 Meta、可选区间 Meta、Fold、held-out）；每个 Meta 会话有唯一身份和触发位置 |
+| `analysis/` | worker / Web 后端 | Fold 完成后的 LLM 策略分析（markdown + provenance sidecar） |
 
-| 账本 | 内容 |
-|---|---|
-| `step_ledger` | 每个 Step 的代码、经验、调用和验证回测结果 |
-| `fold_ledger` | 每个 Fold 的冻结策略产物、验证结果和测试结果 |
-| `epoch_ledger` | 每个 Epoch 的训练过程摘要和正则化结果 |
-| `heldout_ledger` | 最终 held-out 分 Fold 结果 |
-| `conversation_trace` | 同一 Agent session 下的 `execution_calls.jsonl` 和 `llm_conversations.jsonl`；前者记录 Shell/Tool/回测摘要，后者记录真实 LLM provider messages 和响应 |
+**会话门控**
 
-### 7.2 版本与完整性记录
+- 三档运行模式：`auto` 连续执行；`manual` 每个会话启动前需批准；`step` 在 `manual` 基础上，每次正式验证回测后再挂起等待批准并可注入 Step 级指令（逐 Fold 可用 `set_step_gate` 显式覆盖开/关，清空恢复模式默认；等待时间回补 Fold 推理预算，且不计入实时/完成 Fold 有效耗时）。
+- `status.json` 的 `run_id`、trace 路径和 deadline 始终绑定同一个、且不早于 `session_started_at` 的 run；运行态和两种研究者等待态都会发现新 run。Web 在 state、session 或 run 变化时强制重取详情并重建 SSE。倒计时指 Agent 活跃会话预算，回测与研究者等待独立计时并回补。
+- 实时 Trace 节点重挂后在“自动滚动”开启时回到底部；长回测在首个按日进度前也持续显示已用墙钟，避免把初始化/首日计算误判为停止。
+- Agent `session_end` 后，控制台沿用同一状态轮询展示验收/冻结、冻结测试、结果落盘和 Fold 分析阶段及阶段墙钟；冻结测试与 held-out 只展示节流后的 `day_index/total_days`，不展示隐藏日期、订单、NL 活动、指标或结果。该宿主状态不进入 Agent Trace、Prompt、Sandbox 或预算核算，也不新增服务或轮询通道。
+- 暂停和停止在会话边界生效，不中断正在运行的 Fold。
+- 强制终止只用于中途停止进程；若当前计划会话尚无对应的成功业务账本记录，管理端撤销该会话的 `approved_sessions` 项但保留指令与 Prompt 覆盖草稿。若原模式为 `auto`，同时切换到 `manual`（原 `manual`/`step` 不变），因此恢复后必定重新进入待批准门控，可编辑、预览并再次批准；已经落账的会话不撤销批准，也不改变运行模式。被中断的 Fold 需要整体重跑，并可能留下待人工处理的未记账运行目录。
 
-Experiment ID 是索引，不是完整性校验。Pipeline 只在关键边界记录聚合版本或 hash，不为每条 Shell/Python 调用生成细粒度 hash。
+**研究者输入**
 
-必须记录：
+- 创建实验时可设置一个可选的默认 Fold 探索方向；它进入每个普通 Fold 的自动装配 Prompt、运行清单和账本。每个会话仍可附加更具体的待检验方向；两者都不参与策略内容哈希。
+- 研究者输入不能放宽 PIT、写入、修改量、验证或冻结边界，也不得携带测试或 held-out 证据。
+- Fold 允许整体覆盖系统 Prompt。覆盖会替代自动装配的 Prompt，并留下可审计标记；数据权限和工具硬边界不因此改变。
 
-- `experiment_id`、`epoch_id`、`fold_id`、`step_id`、`run_id` 和 `conversation_id`。
-- 冻结策略产物 ID 和聚合 hash。
-- snapshot manifest ID 和可选聚合 hash。
-- 回测结果文件和可选聚合 hash。
-- execution call log ID 和 LLM conversation log ID；二者必须通过同一个 `conversation_id` 和调用 ID 串联。
-- Sandbox 镜像版本。
-- provider、model、prompt ID、随机种子。
-- deadline、资源护栏和入口策略版本。
-- 文本 evidence id。
+**交互控制操作**
 
-Shell/Python 调用只需记录命令、exit code、stdout/stderr、transcript 路径、脚本路径和产物路径。若后续发现复现实验困难，再升级到更细的调用级 hash。
+- **重跑**：只允许在 worker 完全停止（非 `launching`）时重跑最新 Fold，且该 Fold 之后不能已有周期 Meta 会话；否则必须先回滚。旧记录保留，新产物使用独立身份；`auto` 转为 `manual` 并撤销旧批准，确保研究者可先编辑/预览再批准，完成后重新执行 held-out。
+- **回滚**：先以唯一操作 id 备份账本，再归档目标 Fold 之后的普通 Fold、周期 Meta 和 Held-out 记录/冻结产物；冻结路径必须位于当前实验的 `strategy_artifacts/`。随后从目标 Fold 恢复父产物链并修剪 Step 产物树——被丢弃 Fold 会话记录的节点（及其后代）连同快照移入同一归档目录（`tree.json` 一并备份），否则重跑的 Fold 会在树里看到未来区间上验证过的策略与指标。回滚后可继续运行或重跑该 Fold。
+- **逐 Step 门控**：对单个 Fold 会话开启后，每次正式验证回测完成即挂起（status `waiting_step_user` + 该 Step 指标摘要），研究者放行时可注入 Step 级指令（作为待检验假设写入该次回测的工具观察，不放宽硬约束）；等待时间回补 Fold 推理预算；门控可随时开关，stop 请求在门控处立即生效。控制动作 `set_step_gate` / `approve_step`（后者由服务端从 status.json 解析当前挂起的 step 序号）。探针（`replay_window`）与失败回测不触发门控。`ask_user` 回复键含本次 worker attempt nonce，崩溃重试不会误消费旧问题的回复。
+- **Agent 主动提问（`ask_user` 工具）**：Agent 在关键分叉点可暂停并提交一个方向性问题 + 现状总结（status `waiting_user_reply` + 问题原文），研究者在详情页答复（`reply_question`，空答复=放行由 Agent 自行决策），答复作为研究者方向指引注入工具观察（不放宽硬约束）；等待时间回补推理预算，stop 请求在等待处立即生效。auto 模式或 CLI 无人值守运行立即返回 unattended，由 Agent 自主决策。控制字段 `user_replies["<session>#q<n>"]`；重跑/回滚会清除对应会话的历史答复。
+- **Step 级回滚（父产物覆盖）**：详情页 Step 产物树列出跨 Fold 的全部已验证节点（含各节点完整源代码与验证明细下载）；研究者可把任一已验证节点设为某个 Fold 会话的父产物起点（`parent_overrides`，替代默认冻结继承链）。未运行的 Fold 在下次启动时生效；已完成的 Fold 配合重跑使用。仅允许指向不晚于目标会话的节点（更晚 Fold 的节点携带未来区间验证结果，控制台直接拒绝）；节点快照按记录哈希校验后才会成为父产物，账本中该 Fold 的父产物 id 带 `stepnode_` 前缀可审计。设置持续有效，重设覆盖、留空清除；Fold 回滚会清除被丢弃会话的覆盖。
+- **提前收官**：至少有一个冻结 Fold 后，可跳过剩余 development，以最新冻结产物进入 held-out；人工控制模式仍需批准 held-out。
+- **资源分配**：批准 Fold 前可以查看资源状态并设置 GPU 数，自动选择仍按空闲显存分配具体设备。
+- **继承创建**：新实验可以复制另一实验最新冻结产物作为起点。复制时校验内容身份，之后不依赖源实验继续存在。
+- **过期代码提示**：worker 启动时把当时的 source fingerprint 写入 status（`code_version`）；干净工作树使用短 commit id，存在已跟踪或未跟踪改动时附加内容 hash。长驻 worker 与当前仓库不一致时显示「代码过期」（重启 worker 生效）；控制台 API 自身使用同一启动快照/当前值比较并在页面与部署健康检查中报告，不再遗漏未提交改动。
 
-### 7.3 输出路径
+### 5.2 续跑与状态恢复
 
-建议路径：
+批量入口不支持在已有实验上原地续跑；交互式 worker 以账本为事实源进行会话级恢复：
 
-```text
-experiments/
-  <experiment_id>/
-    ledgers/
-      step_ledger.jsonl
-      fold_ledger.jsonl
-      epoch_ledger.jsonl
-      heldout_ledger.jsonl
-    strategy_artifacts/
-      <epoch_id>/
-        <strategy_artifact_id>/
-    artifacts/
-      <run_id>/
-    reports/
+- 已成功记录的每个唯一元学习会话和 Fold 会话都跳过，父产物链按计划与账本重建并重新校验哈希。
+- Taste 与最近生效的派生 Sandbox 环境按会话顺序从持久记录恢复；周期 Meta 恢复后只影响其后的 Fold。
+- held-out 只补跑缺失周期。
+- 强制终止的未落账当前会话不会继承旧批准；其指令和 Prompt 草稿保留，`auto` 会转为 `manual`，恢复时先重新批准。普通边界暂停、停止和已落账会话不触发该撤销或模式切换。
+- 冻结完成但账本尚未追加时被强制终止，会留下孤立产物；恢复流程拒绝猜测其归属，要求人工处理。
+- 在受支持的单控制面运行方式下，进程身份和心跳用于拒绝重复启动；它们不是跨多个控制台进程或手工启动的全局互斥锁。
 
-logs/
-  llm_conversations/
-  sandbox/
-```
+### 5.3 Web 控制台与防泄漏
 
-这些路径默认不提交 Git。重要结论写入 `LOGBOOK.md` 和 `docs/logbook/DETAILED_LOGBOOK.md`。
+Web 控制台是纯控制面，实验在独立 worker 进程中执行；控制台或隧道重启不影响正在运行的实验。生产网络、Unix socket、反向代理和访问控制由 Deployment 文档统一定义。
 
-## 8. 失败条件
+- 首页展示实验状态、Fold 进度和冻结结果摘要，并支持按统一参数定义创建、继承和删除实验；运行中的实验不得删除。
+- 详情页提供会话导航、门控操作、指令和 Prompt 预览、资源分配、实时轨迹摘要、验证结果、Step 历史和整包冻结产物下载。
+- Fold Prompt 预览只使用计划中最近且已完成的前置 Meta Taste；若该 Meta 尚未完成，预览/由预览生成的完整 Prompt 覆盖暂不可用，避免把旧 Taste 固化到未来 Fold。
+- 回放落盘权益曲线、基准日收益和风格归因。Web 后端只基于这些冻结产物派生展示曲线与跨 Fold 汇总，不读取 raw；浏览器只负责渲染。
+- 风格暴露使用 Broker 按账户和方向记录的权威日终持仓，不从成交记录重建。短窗口回归只作诊断，不作为优化目标。
+- 周期选择：创建表单的周期下拉由交易日历∩关键数据集分区覆盖（daily 与分钟线）共同约束，不提供无本地数据支撑、会在运行期报错的区间。
+- Fold 完成后，worker 可用固定模板生成中文策略分析；分析只读验证证据，失败仅记录状态、不阻断实验，并可按需重新生成。
+- Fold 分析只接收验证证据。测试与 Held-out 结果（首页汇总、逐 Fold 摘要、测试明细、测试权益曲线）默认全部隐藏，控制台只展示验证证据。
+- 研究者可显式「揭示测试结果」：揭示不可撤销，实验随即封存——批准、重跑、回滚、逐 Step 放行、提问答复、指令与 Prompt 覆盖、父产物覆盖、提前收官全部拒绝（查看/停止/删除仍可用）。揭示前测试对人不可见，揭示后人的知识无法再影响学习，两种状态下 HITL 都不再依赖“自觉不看”的人为环节。
+- 无控制面的 legacy 实验只读展示全部历史结果（不存在可被污染的后续学习）。
 
-以下情况必须失败：
-
-- snapshot 缺失或关键 manifest 不匹配。
-- Sandbox 访问了禁止路径。
-- Agent 读取了未来数据。
-- Python 代码运行失败但返回成功。
-- debug shell 调用没有 Environment 日志。
-- Environment 没有为 LLM 调用生成 conversation log。
-- 文本分析没有 evidence 引用。
-- 回测输入 schema 不合法。
-- 测试或 held-out 修改了策略产物。
-- Fold 修改次数超过约束。
-- 正则化 LLM 读取 Fold 测试结果或 held-out。
-
-## 9. 验收清单
-
-Pipeline 相关改动至少检查：
-
-- Step / Fold / Epoch 时间定义是否清楚。
-- 验证决策时点和测试决策时点是否没有未来数据。
-- 每个 Fold 是否只有验证期能修改策略产物。
-- 测试期是否只执行冻结策略产物。
-- Held-out 是否完全冻结。
-- 每次 LLM 调用是否由 Environment 自动生成 conversation log。
-- 每个关键 artifact 是否有 manifest；冻结策略产物和回测结果是否有聚合版本记录。
-- 正则化是否只压缩验证得到的经验，且不读取 Fold 测试结果或 held-out。
+控制台的实际部署拓扑、服务保活和故障排查见 Deployment 文档。

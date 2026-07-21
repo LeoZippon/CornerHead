@@ -7,7 +7,7 @@
 /reports/
 /archive/
 /.runtime/
-/experiments/trial_ledger/
+/experiments/
 
 # Python bytecode and caches
 __pycache__/
@@ -18,6 +18,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+*.egg-info/
 
 # Local environments and secrets
 .env
@@ -29,6 +30,7 @@ env/
 
 # Notebook and editor state
 .ipynb_checkpoints/
+check.ipynb
 .vscode/
 .idea/
 *.swp
@@ -37,3 +39,12 @@ env/
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Vendored references and local scratch (not part of the repo)
+/external_references/
+/check.md
+
+# Leftover/scratch data-ingestion experiments (superseded by src/autotrade/data_sources/tushare)
+/scripts/data/*_p0.py
+/scripts/data/test_write_marker.txt
+/.mutagenignore.suggested

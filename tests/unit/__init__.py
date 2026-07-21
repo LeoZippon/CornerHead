@@ -1,1 +1,1 @@
-"""Unit tests for MacroQuant."""
+"""Unit tests for AutoTrade."""

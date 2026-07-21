@@ -2,12 +2,20 @@
 
 ## Environment
 
-- Python Environment is 'stock' installed at `~/miniconda3/envs/stock`.
+- Python Environment is `quant` installed at `~/miniconda3/envs/quant` with Python 3.11.
 - Use that installation for environment activation and package management.
+- The previous `stock` environment may still exist for historical runs, but new local scripts, tests, cron jobs, and non-Docker tools should use `quant`.
+- Docker sandbox Python is independent from the local conda environment; rebuild `ops/docker/sandbox.Dockerfile` when sandbox dependencies change.
 - Prefer explicit environment setup over ad hoc local Python changes.
 - The real writable repository root on this machine is `/Data/lzp/MacroQuant`.
 - Paths under `/home/coder/projects/...` may be wrapper artifacts and should not be trusted for writes.
 - Before editing or running commands that write files, confirm the real path with `pwd -P` or `realpath`.
+
+## Repository Organization
+
+- Keep production implementation under `src/autotrade/`; `scripts/` should contain thin command-line entrypoints only.
+- Group scripts by responsibility instead of leaving unrelated entrypoints at the top level: data operations in `scripts/data/`, experiment runs and reports in `scripts/experiments/`, and developer utilities in `scripts/dev/`.
+- Avoid adding new one-off top-level scripts. If a script grows substantial business logic, move the logic into `src/autotrade/` and keep the script as a small wrapper.
 
 ## Git and GitHub
 
@@ -43,20 +51,22 @@
 ## Living Documentation
 
 - Treat the current design docs as the communication layer between audit, research decisions, and implementation.
-- Keep exactly five current living docs aligned by scope:
-  - `@docs/data_documentation.md`: data sources, downloads, audits, PIT rules, and unit rules.
-  - `@docs/agent_design.md`: evidence packs, LLM shadow, provider adapters, and Agent boundaries.
-  - `@docs/environment_design.md`: PIT features, Walk-Forward, replay, execution, and experiment ledgers.
-  - `@docs/pipeline_design.md`: feature build, development WFO, held-out, LLM shadow, and cross-layer orchestration.
-  - `@docs/QMT_documentation.md`: QMT deployment and live-operation workflow.
-- When a change materially affects one of these areas, update the relevant document in the same work item. Do not rely on code or logs alone to communicate a changed design, data contract, or operating procedure.
+- Keep five authoritative living docs aligned by scope:
+  - `@docs/data_documentation.md`: data sources, downloads, audits, PIT availability rules, unit rules, and known data risks.
+  - `@docs/agent_design.md`: Agent-visible inputs, writable strategy artifacts, prompt protocol, tool usage semantics, and forbidden behavior.
+  - `@docs/environment_design.md`: PIT snapshots, Sandbox/runtime paths, trusted tools, Broker/backtest/NL scoring, LLM API boundary, and run logs.
+  - `@docs/pipeline_design.md`: Fold/Epoch/Held-out orchestration, artifact handoff, freeze/fallback rules, ledgers, and reporting.
+  - `@docs/deployment_documentation.md`: deployment surfaces — the CornerHead console's three-machine network architecture, frontend service, tunnels/keepalive/startup workflow, plus the QMT in-client Python API, file-bridge architecture, and live-operation workflow.
+- Keep `@docs/parameters_reference.md` as a derived quick reference, not a sixth authoritative design doc. When defaults, CLI/config knobs, Broker profile fields, replay budgets, sandbox/tool limits, data-task limits, or QMT constants change, update the relevant authoritative doc and this parameter reference in the same work item. Code and run/snapshot manifests remain the source of truth for actually effective values.
+- When a change materially affects one of these areas, update the relevant document in the same work item. Do not rely on code or logs alone to communicate a changed design, data contract, operating procedure, or parameter default.
 - Keep these documents concise and current. They should describe the latest accepted state, not a chronology of earlier attempts, old names, or superseded workflows.
 - Detailed historical traces belong in `@LOGBOOK.md` and `@docs/logbook/DETAILED_LOGBOOK.md`; do not preserve obsolete version labels or migration notes in the living design docs unless they are still operationally relevant.
 - Add a new durable document under `docs/` when a new project area becomes important enough that the existing documents would become confusing or overloaded.
 
 ## Memory and GPU Monitoring
 
-- Check GPU memory and system memory before and after every script run.
+- Check GPU memory and system memory before and after experiment, training, inference, evaluation, or data-processing runs.
+- Routine read-only inspection, small documentation edits, prompt export, formatting checks, and targeted lightweight unit tests do not require RAM/GPU checks unless they are expected to be resource-intensive.
 - Stop and adjust the workload if memory usage becomes unsafe.
 
 Recommended checks:
@@ -68,16 +78,27 @@ free -h
 
 ## Execution Workflow
 
+For experiment, training, inference, evaluation, or data-processing jobs:
+
 1. Verify free system RAM and GPU memory.
 2. Start the job with logging enabled.
 3. Recheck memory usage after the job starts and after it finishes.
 4. Write the detailed traceability record to `@docs/logbook/DETAILED_LOGBOOK.md`, write the concise result to `@LOGBOOK.md`, and keep `logs/` out of commits.
 
+## Development Principles
+
+- Maintain a minimalist code architecture and implementation while ensuring logical correctness and completeness.
+- Achieve optimal performance while keeping the environment as close to real-world conditions as possible.
+- Maximize the Agent’s autonomy while lowering the complexity of interactions between the Agent and the environment.
+
 ## Operational Guardrails
 
+- Avoid over-engineering.
+- Fully read sufficient code and supporting documentation to form a sound design idea before writing or modifying any code.
 - Treat resource checks and logging as mandatory steps, not optional cleanup.
 - Keep the repository organized, clean and tidy.
 - Prefer fail-fast behavior in core pipelines. Missing data files, cache splits, scaler/meta artifacts, or model weights should raise explicit errors instead of silently falling back.
+- Route every production live raw/PIT source mutation through the updater's exclusive lock and temp-plus-replace; never modify a hardlinked source file in place.
 - When starting a sub-agent, always choose the best performing ones.
 - Do not add compatibility or fallback branches unless they are required by a real supported workflow and their trigger conditions are explicit.
 - Dare to break thinking inertia and rethink when necessary.

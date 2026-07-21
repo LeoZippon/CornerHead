@@ -1,0 +1,1305 @@
+"""Interactive (HITL) orchestration tests: gating, directives, resume, analysis.
+
+Uses a fake pipeline that mirrors the real ledger/freeze contracts (real
+ExperimentLedger, real artifact hashes) so resume verification runs the same
+code paths as production without Docker or LLM calls.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import pandas as pd
+
+from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
+from autotrade.pipelines import ExperimentConfig, ExperimentLedger, FoldOutcome, FrozenArtifact
+from autotrade.pipelines.fold_analysis import (
+    analyze_fold,
+    analyze_step,
+    build_fold_analysis_messages,
+    guarded_record_view,
+    read_strategy_files,
+)
+from autotrade.environment.runtime import utc_now_iso, write_json_atomic
+from autotrade.pipelines.hitl_state import (
+    CONTROL_NAME,
+    HELDOUT_SESSION_KEY,
+    PARAM_DEFAULTS,
+    SCHEDULE_NAME,
+    STATUS_NAME,
+    ControlState,
+    StatusReporter,
+    fold_session_key,
+    meta_session_key,
+    read_control,
+    read_status,
+    resolve_options,
+    write_control,
+)
+from autotrade.pipelines.interactive import ExperimentStopped, InteractiveExperimentRunner
+
+
+def _weekday_trading_days(first: str, last: str) -> list[str]:
+    days = pd.date_range(first, last, freq="B")
+    return [day.strftime("%Y%m%d") for day in days]
+
+
+TRADING_DAYS = _weekday_trading_days("2020-01-01", "2023-12-31")
+
+
+class WorkerEntrypointTest(unittest.TestCase):
+    def test_worker_restores_child_exit_status_after_console_sigchld_ignore(self) -> None:
+        from scripts.experiments import run_interactive_experiment
+
+        previous = signal.getsignal(signal.SIGCHLD)
+        try:
+            signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+            run_interactive_experiment._restore_child_reaping()
+            completed = subprocess.run([sys.executable, "-c", "raise SystemExit(7)"])
+            self.assertEqual(completed.returncode, 7)
+        finally:
+            signal.signal(signal.SIGCHLD, previous)
+
+    def test_rejects_an_existing_live_worker_before_runtime_setup(self) -> None:
+        from autotrade.pipelines import interactive
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            experiment_dir = root / "experiments" / "exp"
+            hitl_dir = experiment_dir / "hitl"
+            hitl_dir.mkdir(parents=True)
+            (hitl_dir / "params.json").write_text('{"experiment_id": "exp"}', encoding="utf-8")
+            options = SimpleNamespace(experiments_root=root / "experiments", experiment_id="exp")
+            with (
+                patch.object(interactive, "resolve_options", return_value=options),
+                patch.object(interactive, "read_status", return_value={"state": "starting", "pid": 123}),
+                patch.object(interactive, "status_pid_alive", return_value=True),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "already has a live worker"):
+                    interactive.run_interactive_worker(experiment_dir, repo_root=root)
+
+    def test_runtime_setup_failure_restores_callers_working_directory(self) -> None:
+        from autotrade.pipelines import interactive
+
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            experiment_dir = root / "experiments" / "exp"
+            hitl_dir = experiment_dir / "hitl"
+            hitl_dir.mkdir(parents=True)
+            (hitl_dir / "params.json").write_text('{"experiment_id": "exp"}', encoding="utf-8")
+            options = SimpleNamespace(experiments_root=root / "experiments", experiment_id="exp")
+            with (
+                patch.object(interactive, "resolve_options", return_value=options),
+                patch.object(interactive, "read_status", return_value={}),
+                patch.object(interactive, "build_config_from_options", side_effect=RuntimeError("setup failed")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "setup failed"):
+                    interactive.run_interactive_worker(experiment_dir, repo_root=root)
+        self.assertEqual(Path.cwd(), original_cwd)
+
+    def test_loads_the_trading_calendar_from_the_pinned_release(self) -> None:
+        from autotrade.pipelines import assembly, folds, interactive
+
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            experiment_dir = root / "experiments" / "exp"
+            hitl_dir = experiment_dir / "hitl"
+            hitl_dir.mkdir(parents=True)
+            (hitl_dir / "params.json").write_text('{"experiment_id": "exp"}', encoding="utf-8")
+            source_raw = root / "data" / "raw"
+            pinned_raw = experiment_dir / "research_release" / "raw"
+            options = SimpleNamespace(
+                experiments_root=root / "experiments",
+                experiment_id="exp",
+                raw_dir=source_raw,
+                initial_control_mode="auto",
+                analysis_enabled=False,
+            )
+            config = SimpleNamespace(
+                experiment_id="exp",
+                work_root=root / "work",
+            )
+            pipeline = SimpleNamespace(raw_dir=pinned_raw)
+            status = Mock()
+            runner = Mock()
+            runner.run.return_value = {"heldout_runs": 0}
+            trading_days = ["20220104", "20220105"]
+
+            with (
+                patch.object(interactive, "resolve_options", return_value=options),
+                patch.object(interactive, "read_status", return_value={}),
+                patch.object(interactive, "build_config_from_options", return_value=config),
+                patch.object(assembly, "build_proxies", return_value=SimpleNamespace()),
+                patch.object(assembly, "build_web_search_providers", return_value={}),
+                patch.object(assembly, "build_session_builders", return_value=(Mock(), None)),
+                patch.object(assembly, "build_pipeline", return_value=pipeline),
+                patch.object(folds, "load_sse_trading_days", return_value=trading_days) as load_days,
+                patch.object(interactive, "StatusReporter", return_value=status),
+                patch.object(interactive, "InteractiveExperimentRunner", return_value=runner),
+            ):
+                result = interactive.run_interactive_worker(experiment_dir, repo_root=root)
+
+            load_days.assert_called_once_with(pinned_raw)
+            runner.run.assert_called_once_with(trading_days)
+            self.assertEqual(result["status"], "completed")
+            status.stop.assert_called_once()
+        self.assertEqual(Path.cwd(), original_cwd)
+
+
+class FakePipeline:
+    """Mirrors the ExperimentPipeline surface the interactive runner drives."""
+
+    def __init__(self, config: ExperimentConfig, *, meta_enabled: bool = True) -> None:
+        self.config = config
+        self.ledger = ExperimentLedger(config.ledger_path)
+        self.meta_learner = object() if meta_enabled else None
+        self.calls: list[tuple] = []
+        self._counter = 0
+
+    # -- helpers -----------------------------------------------------------
+    def _freeze_fake(self, epoch_id: str, artifact_id: str, *, content: str) -> FrozenArtifact:
+        path = Path(self.config.experiment_dir) / "strategy_artifacts" / epoch_id / artifact_id
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "main.py").write_text(content, encoding="utf-8")
+        return FrozenArtifact(
+            artifact_id=artifact_id,
+            path=path,
+            artifact_hash=artifact_hash(path),
+            model_path=None,
+            model_artifact_hash=model_artifact_hash(path / ".missing_models"),
+        )
+
+    # -- pipeline surface ---------------------------------------------------
+    def run_meta_learning(self, *, epoch_id, meta_learning_id=None, trigger_after_folds=0, parent,
+                          previous_taste="", visible_fold=None, directive_override=None,
+                          system_prompt_override="", user_question_hook=None, agent_ready_hook=None,
+                          environment_progress_hook=None):
+        meta_id = str(meta_learning_id or epoch_id)
+        self.calls.append((
+            "meta", epoch_id, previous_taste, directive_override, system_prompt_override,
+            meta_id, trigger_after_folds, visible_fold.fold_id if visible_fold else None,
+            parent.artifact_id if parent else None,
+        ))
+        if agent_ready_hook is not None:
+            agent_ready_hook()
+        if environment_progress_hook is not None:
+            environment_progress_hook("meta_finalize", None)
+        taste = f"taste-{meta_id}"
+        meta_dir = Path(self.config.experiment_dir) / "meta_learning" / meta_id
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        (meta_dir / "taste.md").write_text(taste + "\n", encoding="utf-8")
+        self.ledger.append(
+            {
+                "record_type": "meta_learning",
+                "experiment_id": self.config.experiment_id,
+                "epoch_id": epoch_id,
+                "meta_learning_id": meta_id,
+                "trigger_after_folds": trigger_after_folds,
+                "fold_id": f"{meta_id}_meta_learning",
+                "run_id": f"run_meta_{meta_id}",
+                "status": "taste_only" if parent is None else "taste_only_kept_parent",
+                "taste_path": str(meta_dir / "taste.md"),
+                "meta_learning_directive": directive_override or "",
+            }
+        )
+        return parent, taste
+
+    def run_fold(self, fold, *, epoch_id, parent, taste_prompt="", fold_directive="",
+                 system_prompt_override="", rerun_id=None, sandbox_gpu_count=None, step_gate_hook=None,
+                 user_question_hook=None, environment_progress_hook=None):
+        self.calls.append(("fold", epoch_id, fold.fold_id, taste_prompt, fold_directive,
+                           parent.artifact_id if parent else None, system_prompt_override, rerun_id))
+        self.gpu_counts_seen = getattr(self, "gpu_counts_seen", []) + [sandbox_gpu_count]
+        if environment_progress_hook is not None:
+            environment_progress_hook("acceptance", None)
+            environment_progress_hook("persistence", None)
+        self._counter += 1
+        artifact_id = f"strategy_{epoch_id}_{fold.fold_id}" + (f"__r{rerun_id[:8]}" if rerun_id else "")
+        frozen = self._freeze_fake(epoch_id, artifact_id, content=f"# v{self._counter}\n")
+        self.ledger.append(
+            {
+                "record_type": "fold",
+                "experiment_id": self.config.experiment_id,
+                "epoch_id": epoch_id,
+                "fold_id": fold.fold_id,
+                "run_id": f"run_{self._counter:03d}",
+                "fold_status": "frozen",
+                "fold_directive": fold_directive or None,
+                "rerun_id": rerun_id,
+                "frozen_strategy_artifact_id": frozen.artifact_id,
+                "frozen_strategy_artifact_hash": frozen.artifact_hash,
+                "frozen_model_artifact_hash": frozen.model_artifact_hash,
+                "frozen_strategy_artifact_path": str(frozen.path),
+                "frozen_model_artifact_path": None,
+                "validation_result": {"total_return": 0.01, "sharpe": 0.5, "max_drawdown": 0.05},
+                "test_result": {"total_return": 0.02, "sharpe": 0.6, "max_drawdown": 0.04},
+            }
+        )
+        return FoldOutcome(
+            fold_id=fold.fold_id,
+            run_id=f"run_{self._counter:03d}",
+            fold_status="frozen",
+            frozen=frozen,
+            validation_summary={"total_return": 0.01},
+            test_summary={"total_return": 0.02},
+        )
+
+    def run_heldout(
+        self, final, trading_days, *, epoch_id, skip_labels=None, environment_progress_hook=None
+    ):
+        self.calls.append(("heldout", epoch_id, frozenset(skip_labels or ())))
+        from autotrade.pipelines.folds import heldout_periods
+
+        summaries = []
+        for period in heldout_periods(
+            self.config.heldout_first_period,
+            self.config.heldout_last_period,
+            trading_days,
+            period=self.config.fold_period,
+        ):
+            if skip_labels and str(period["label"]) in skip_labels:
+                continue
+            if environment_progress_hook is not None:
+                environment_progress_hook(
+                    "heldout", {"day_index": 1, "total_days": 1, "percent": 100.0, "elapsed_seconds": 0.1}
+                )
+            self.ledger.append(
+                {
+                    "record_type": "heldout",
+                    "experiment_id": self.config.experiment_id,
+                    "epoch_id": epoch_id,
+                    "fold_id": f"heldout_{period['label']}",
+                    "run_id": f"run_heldout_{period['label']}",
+                    "test_result": {"total_return": 0.0},
+                }
+            )
+            summaries.append({"total_return": 0.0})
+        return summaries
+
+
+class InteractiveRunnerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.config = ExperimentConfig(
+            experiment_id="hitl_exp",
+            experiments_root=self.root / "experiments",
+            work_root=self.root / "sandboxes",
+            template_dir=self.root / "template",
+            first_test_period="2022Q1",
+            last_test_period="2022Q2",
+            heldout_first_period="2023Q1",
+            heldout_last_period="2023Q1",
+            epochs=1,
+            use_docker=False,
+        )
+        self.hitl_dir = self.config.experiment_dir / "hitl"
+        self.hitl_dir.mkdir(parents=True, exist_ok=True)
+
+    def _runner(self, pipeline, poll_seconds: float = 0.02) -> InteractiveExperimentRunner:
+        status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=self.config.work_root, interval_seconds=60.0)
+        return InteractiveExperimentRunner(
+            pipeline, hitl_dir=self.hitl_dir, poll_seconds=poll_seconds, status=status
+        )
+
+    def _control(self, **kwargs) -> None:
+        write_control(self.hitl_dir / CONTROL_NAME, ControlState(**kwargs))
+
+    def test_auto_mode_runs_meta_folds_heldout_in_order(self) -> None:
+        pipeline = FakePipeline(self.config)
+        self._control(mode="auto")
+        result = self._runner(pipeline).run(TRADING_DAYS)
+        kinds = [call[0] for call in pipeline.calls]
+        self.assertEqual(kinds, ["meta", "fold", "fold", "heldout"])
+        # Parent chains fold N frozen -> fold N+1 parent.
+        self.assertIsNone(pipeline.calls[1][5])
+        self.assertEqual(pipeline.calls[2][5], "strategy_epoch_001_fold_2022Q1")
+        # Taste from the epoch's meta session reaches every fold.
+        self.assertEqual(pipeline.calls[1][3], "taste-epoch_001")
+        self.assertEqual(result["final_strategy_artifact"], "strategy_epoch_001_fold_2022Q2")
+        self.assertEqual(result["heldout_runs"], 1)
+        schedule = json.loads((self.hitl_dir / SCHEDULE_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(len(schedule["sessions"]), 4)
+        status = read_status(self.hitl_dir / STATUS_NAME)
+        self.assertEqual(status["state"], "completed")
+        self.assertEqual(status["completed_sessions"], 4)
+
+    def test_interval_meta_is_causal_unique_and_resumable(self) -> None:
+        config = replace(self.config, meta_learning_fold_interval=1)
+        pipeline = FakePipeline(config)
+        self._control(mode="auto")
+
+        result = self._runner(pipeline).run(TRADING_DAYS)
+
+        self.assertEqual([call[0] for call in pipeline.calls], ["meta", "fold", "meta", "fold", "heldout"])
+        first_meta, first_fold, periodic_meta, second_fold = pipeline.calls[:4]
+        self.assertEqual(first_meta[5:9], ("epoch_001", 0, "fold_2022Q1", None))
+        self.assertEqual(periodic_meta[5:9], (
+            "epoch_001_after_fold_001", 1, "fold_2022Q2", "strategy_epoch_001_fold_2022Q1"
+        ))
+        self.assertEqual(periodic_meta[2], "taste-epoch_001")
+        self.assertEqual(first_fold[3], "taste-epoch_001")
+        self.assertEqual(second_fold[3], "taste-epoch_001_after_fold_001")
+        self.assertEqual(result["final_strategy_artifact"], "strategy_epoch_001_fold_2022Q2")
+
+        schedule = json.loads((self.hitl_dir / SCHEDULE_NAME).read_text(encoding="utf-8"))["sessions"]
+        self.assertEqual(
+            [session["key"] for session in schedule],
+            [
+                "epoch_001/meta_learning",
+                "epoch_001/fold_2022Q1",
+                "epoch_001/meta_learning_after_fold_001",
+                "epoch_001/fold_2022Q2",
+                "heldout",
+            ],
+        )
+        self.assertEqual(len(pipeline.ledger.read("meta_learning")), 2)
+
+        resumed = FakePipeline(config)
+        self.assertEqual(self._runner(resumed).run(TRADING_DAYS)["heldout_runs"], 0)
+        self.assertEqual(resumed.calls, [])
+
+    def test_fold_data_prefetch_finishes_before_fold_execution(self) -> None:
+        pipeline = FakePipeline(self.config)
+        prefetched: set[str] = set()
+        prefetch_active = threading.Event()
+        original_run_fold = pipeline.run_fold
+
+        def prefetch_fold_data(fold):
+            pipeline.calls.append(("prefetch", fold.fold_id))
+            prefetch_active.set()
+            time.sleep(0.02)
+            prefetched.add(fold.fold_id)
+            prefetch_active.clear()
+
+        def checked_run_fold(fold, **kwargs):
+            self.assertIn(fold.fold_id, prefetched)
+            self.assertFalse(prefetch_active.is_set())
+            return original_run_fold(fold, **kwargs)
+
+        pipeline.prefetch_fold_data = prefetch_fold_data
+        pipeline.run_fold = checked_run_fold
+        self._control(mode="auto")
+
+        self._runner(pipeline).run(TRADING_DAYS)
+
+        self.assertEqual(
+            [
+                (call[0], call[2] if call[0] == "fold" else call[1])
+                for call in pipeline.calls
+                if call[0] in {"prefetch", "fold"}
+            ],
+            [
+                ("prefetch", "fold_2022Q1"),
+                ("fold", "fold_2022Q1"),
+                ("prefetch", "fold_2022Q2"),
+                ("fold", "fold_2022Q2"),
+            ],
+        )
+
+    def test_first_fold_prefetch_overlaps_meta_gate_and_agent_in_step_mode(self) -> None:
+        # The first-fold prefetch is now submitted BEFORE the meta gate, so it
+        # overlaps the researcher's approval wait as well as Meta reasoning.
+        pipeline = FakePipeline(self.config)
+        prefetch_started = threading.Event()
+        original_meta = pipeline.run_meta_learning
+
+        def slow_meta(**kwargs):
+            hook = kwargs.pop("agent_ready_hook")
+            self.assertTrue(prefetch_started.wait(timeout=1.0))
+            hook()  # idempotent: the entry is already in early_prefetches
+            return original_meta(agent_ready_hook=None, **kwargs)
+
+        def prefetch_fold_data(fold):
+            pipeline.calls.append(("prefetch", fold.fold_id))
+            if fold.fold_id == "fold_2022Q1":
+                prefetch_started.set()
+
+        pipeline.run_meta_learning = slow_meta
+        pipeline.prefetch_fold_data = prefetch_fold_data
+        self._control(
+            mode="step",
+            approved_sessions=(
+                meta_session_key("epoch_001"),
+                fold_session_key("epoch_001", "fold_2022Q1"),
+                fold_session_key("epoch_001", "fold_2022Q2"),
+                HELDOUT_SESSION_KEY,
+            ),
+        )
+
+        self._runner(pipeline).run(TRADING_DAYS)
+
+        self.assertTrue(prefetch_started.is_set())
+        self.assertEqual(
+            [call for call in pipeline.calls if call[0] == "prefetch"][0],
+            ("prefetch", "fold_2022Q1"),
+        )
+
+    def test_meta_prefetch_selects_an_earlier_rerun(self) -> None:
+        from autotrade.pipelines.folds import build_fold_schedule
+
+        pipeline = FakePipeline(self.config)
+        first_fold = build_fold_schedule("2022Q1", "2022Q2", TRADING_DAYS)[0]
+        pipeline.run_fold(first_fold, epoch_id="epoch_001", parent=None)
+        pipeline.calls.clear()
+        pipeline.prefetch_fold_data = lambda fold: pipeline.calls.append(("prefetch", fold.fold_id))
+        self._control(
+            mode="auto",
+            rerun_sessions={fold_session_key("epoch_001", "fold_2022Q1"): "rerun-new"},
+        )
+
+        self._runner(pipeline).run(TRADING_DAYS)
+
+        self.assertEqual(
+            [call for call in pipeline.calls if call[0] == "prefetch"][0],
+            ("prefetch", "fold_2022Q1"),
+        )
+
+    def test_dynamic_skip_waits_for_meta_prefetch_before_heldout(self) -> None:
+        seed = self.root / "seed_for_skip"
+        seed.mkdir()
+        (seed / "main.py").write_text("def main(ctx):\n    return None\n", encoding="utf-8")
+        write_json_atomic(self.hitl_dir / "params.json", {
+            "experiment_id": self.config.experiment_id,
+            "_inherited_artifact": {
+                "artifact_id": "strategy_seed_for_skip",
+                "path": str(seed),
+                "artifact_hash": artifact_hash(seed),
+                "model_path": None,
+                "model_artifact_hash": model_artifact_hash(seed / ".missing_models"),
+            },
+        })
+        pipeline = FakePipeline(self.config)
+        prefetch_started = threading.Event()
+        release_prefetch = threading.Event()
+        original_meta = pipeline.run_meta_learning
+
+        def meta_then_skip(**kwargs):
+            hook = kwargs.pop("agent_ready_hook")
+            hook()
+            self.assertTrue(prefetch_started.wait(timeout=1.0))
+            self._control(mode="auto", skip_to_heldout=True)
+            return original_meta(agent_ready_hook=None, **kwargs)
+
+        def blocked_prefetch(fold):
+            pipeline.calls.append(("prefetch", fold.fold_id))
+            prefetch_started.set()
+            self.assertTrue(release_prefetch.wait(timeout=2.0))
+            raise RuntimeError("unused skipped-fold prefetch")
+
+        pipeline.run_meta_learning = meta_then_skip
+        pipeline.prefetch_fold_data = blocked_prefetch
+        self._control(mode="auto")
+        errors: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                self._runner(pipeline).run(TRADING_DAYS)
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        self.assertTrue(prefetch_started.wait(timeout=1.0))
+        time.sleep(0.05)
+        self.assertFalse(any(call[0] == "heldout" for call in pipeline.calls))
+        release_prefetch.set()
+        thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(any(call[0] == "heldout" for call in pipeline.calls))
+
+    def test_skip_to_heldout_after_first_frozen_fold(self) -> None:
+        pipeline = FakePipeline(self.config)
+        # Set from the start: ignored while nothing froze (meta + fold 1 run),
+        # then fold 2 is skipped and held-out runs on fold 1's artifact.
+        self._control(mode="auto", skip_to_heldout=True)
+        result = self._runner(pipeline).run(TRADING_DAYS)
+        self.assertEqual([call[0] for call in pipeline.calls], ["meta", "fold", "heldout"])
+        self.assertEqual(result["final_strategy_artifact"], "strategy_epoch_001_fold_2022Q1")
+        self.assertEqual(result["heldout_runs"], 1)
+
+    def test_gpu_count_override_reaches_run_fold(self) -> None:
+        pipeline = FakePipeline(self.config)
+        self._control(mode="auto", gpu_counts={fold_session_key("epoch_001", "fold_2022Q1"): 2})
+        self._runner(pipeline).run(TRADING_DAYS)
+        self.assertEqual(pipeline.gpu_counts_seen, [2, None])
+
+    def test_parent_override_uses_step_node_snapshot(self) -> None:
+        from autotrade.environment.step_tree import StepTree
+
+        from .test_artifacts import write_artifact
+
+        pipeline = FakePipeline(self.config)
+        source = write_artifact(self.root / "node_artifact")
+        from autotrade.environment.identity import agent_visible_ref
+
+        tree = StepTree(self.config.experiment_dir / "steps")
+        node_id = tree.record_step(
+            source,
+            epoch_id="epoch_001",
+            fold_id=agent_visible_ref("fold_2022Q1", prefix="fold_ref"),
+            result_name="valid_003",
+            artifact_hash=artifact_hash(source),
+            metrics={"total_return": 0.02},
+            complete_validation=True,
+            model_artifact_hash=model_artifact_hash(source / ".missing_models"),
+        )
+        self._control(mode="auto", parent_overrides={fold_session_key("epoch_001", "fold_2022Q2"): node_id})
+        self._runner(pipeline).run(TRADING_DAYS)
+        fold_calls = [call for call in pipeline.calls if call[0] == "fold"]
+        # Fold 1 keeps the default chain; fold 2 starts from the node snapshot.
+        self.assertIsNone(fold_calls[0][5])
+        self.assertEqual(fold_calls[1][5], f"stepnode_{node_id}")
+
+    def test_step_mode_defaults_the_gate_on_and_respects_override(self) -> None:
+        pipeline = FakePipeline(self.config)
+        key = fold_session_key("epoch_001", "fold_2022Q1")
+        runner = self._runner(pipeline)
+        hook = runner._step_gate_hook(key)
+        # mode="step": gate defaults ON -> hook holds until released.
+        self._control(mode="step", step_go={key: 1})
+        self.assertEqual(hook(1, {"total_return": 0.01}), "")
+        # Explicit per-session OFF overrides the mode default.
+        self._control(mode="step", step_gate={key: False})
+        self.assertEqual(hook(2, {"total_return": 0.01}), "")
+        status = read_status(self.hitl_dir / STATUS_NAME)
+        self.assertNotEqual(status.get("state"), "waiting_step_user")
+
+    def test_step_gate_hook_waits_for_release_and_returns_directive(self) -> None:
+        pipeline = FakePipeline(self.config)
+        key = fold_session_key("epoch_001", "fold_2022Q1")
+        runner = self._runner(pipeline)
+        hook = runner._step_gate_hook(key)
+        # Gate off: immediate no-op.
+        self._control(mode="auto")
+        self.assertEqual(hook(1, {"total_return": 0.01}), "")
+        # Gate on: holds until step_go reaches the step, then hands the directive.
+        self._control(mode="auto", step_gate={key: True})
+        observed_status: dict[str, object] = {}
+
+        def release() -> None:
+            time.sleep(0.15)
+            observed_status.update(read_status(self.hitl_dir / STATUS_NAME))
+            self._control(mode="auto", step_gate={key: True}, step_go={key: 2},
+                          step_directives={f"{key}#2": "收紧持仓集中度"})
+
+        thread = threading.Thread(target=release)
+        thread.start()
+        try:
+            directive = hook(2, {
+                "total_return": 0.02,
+                "sharpe": 1.0,
+                "diagnostic_warnings": ["zero orders"],
+            })
+        finally:
+            thread.join()
+        self.assertEqual(directive, "收紧持仓集中度")
+        self.assertEqual(observed_status["step_summary"]["diagnostic_warnings"], ["zero orders"])
+        status = read_status(self.hitl_dir / STATUS_NAME)
+        self.assertEqual(status["state"], "running_session")
+        # Stop request raises out of the gate.
+        self._control(mode="auto", step_gate={key: True}, request="stop")
+        with self.assertRaises(ExperimentStopped):
+            hook(3, {})
+
+    def test_user_question_hook_waits_for_reply_and_is_unattended_in_auto(self) -> None:
+        pipeline = FakePipeline(self.config)
+        key = fold_session_key("epoch_001", "fold_2022Q1")
+        runner = self._runner(pipeline)
+        hook = runner._user_question_hook(key)
+        # auto mode: nobody is attending -> None immediately (Agent decides).
+        self._control(mode="auto")
+        self.assertIsNone(hook(1, "先做什么？"))
+        # manual mode: holds until the reply lands, then returns it verbatim.
+        self._control(mode="manual")
+
+        def reply() -> None:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                question = read_status(self.hitl_dir / STATUS_NAME).get("awaiting_question") or {}
+                if question.get("reply_key"):
+                    self._control(
+                        mode="manual",
+                        user_replies={str(question["reply_key"]): "优先流动性筛选"},
+                    )
+                    return
+                time.sleep(0.02)
+            raise AssertionError("question reply_key was not published")
+
+        thread = threading.Thread(target=reply)
+        thread.start()
+        try:
+            answer = hook(2, "方案A还是方案B？")
+        finally:
+            thread.join()
+        self.assertEqual(answer, "优先流动性筛选")
+        status = read_status(self.hitl_dir / STATUS_NAME)
+        self.assertEqual(status["state"], "running_session")
+        self.assertIsNone(status.get("awaiting_question"))
+        # Empty reply releases without guidance.
+        self._control(mode="step")
+
+        def release_empty() -> None:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                question = read_status(self.hitl_dir / STATUS_NAME).get("awaiting_question") or {}
+                if question.get("reply_key"):
+                    self._control(mode="step", user_replies={str(question["reply_key"]): ""})
+                    return
+                time.sleep(0.02)
+            raise AssertionError("question reply_key was not published")
+
+        thread = threading.Thread(target=release_empty)
+        thread.start()
+        try:
+            self.assertEqual(hook(3, "继续吗？"), "")
+        finally:
+            thread.join()
+        # Stop request raises out of the wait.
+        self._control(mode="manual", request="stop")
+        with self.assertRaises(ExperimentStopped):
+            hook(4, "还在吗？")
+
+    def test_user_question_hook_does_not_reuse_reply_from_prior_attempt(self) -> None:
+        pipeline = FakePipeline(self.config)
+        key = fold_session_key("epoch_001", "fold_2022Q1")
+        hook = self._runner(pipeline)._user_question_hook(key)
+        stale_key = f"{key}#askoldattempt#q1"
+        self._control(mode="manual", user_replies={stale_key: "旧问题的答案"})
+
+        def reply_current_attempt() -> None:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                question = read_status(self.hitl_dir / STATUS_NAME).get("awaiting_question") or {}
+                reply_key = question.get("reply_key")
+                if reply_key:
+                    self.assertNotEqual(reply_key, stale_key)
+                    self._control(
+                        mode="manual",
+                        user_replies={stale_key: "旧问题的答案", str(reply_key): "新问题的答案"},
+                    )
+                    return
+                time.sleep(0.02)
+            raise AssertionError("question reply_key was not published")
+
+        thread = threading.Thread(target=reply_current_attempt)
+        thread.start()
+        try:
+            self.assertEqual(hook(1, "这是重启后的新问题吗？"), "新问题的答案")
+        finally:
+            thread.join()
+
+    def test_parent_override_rejects_failed_node(self) -> None:
+        from autotrade.environment.step_tree import StepTree
+
+        pipeline = FakePipeline(self.config)
+        tree = StepTree(self.config.experiment_dir / "steps")
+        failed = tree.record_failed_attempt(fold_id="fold_ref_abc123", result_name="failed_1", error="boom")
+        self._control(mode="auto", parent_overrides={fold_session_key("epoch_001", "fold_2022Q1"): failed})
+        with self.assertRaisesRegex(RuntimeError, "not a validated node"):
+            self._runner(pipeline).run(TRADING_DAYS)
+
+    def test_inherited_artifact_seeds_first_fold_parent(self) -> None:
+        from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
+
+        seed = self.root / "seed_artifact"
+        seed.mkdir()
+        (seed / "main.py").write_text("def main(ctx):\n    return 'seed'\n", encoding="utf-8")
+        write_json_atomic(self.hitl_dir / "params.json", {
+            "experiment_id": self.config.experiment_id,
+            "_inherited_artifact": {
+                "artifact_id": "strategy_inherited_src",
+                "path": str(seed),
+                "artifact_hash": artifact_hash(seed),
+                "model_path": None,
+                "model_artifact_hash": model_artifact_hash(seed / ".missing_models"),
+            },
+        })
+        pipeline = FakePipeline(self.config)
+        self._control(mode="auto")
+        self._runner(pipeline).run(TRADING_DAYS)
+        # The first fold's parent is the inherited artifact, not None.
+        self.assertEqual(pipeline.calls[1][5], "strategy_inherited_src")
+        # A tampered copy fails the hash gate instead of silently seeding.
+        (seed / "main.py").write_text("tampered", encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            self._runner(FakePipeline(self.config)).run(TRADING_DAYS)
+
+    def test_step_mode_waits_for_approval_and_passes_directives(self) -> None:
+        pipeline = FakePipeline(self.config)
+        self._control(
+            mode="manual",
+            approved_sessions=(meta_session_key("epoch_001"),),
+            directives={
+                meta_session_key("epoch_001"): "meta directive",
+                fold_session_key("epoch_001", "fold_2022Q1"): "try industry-neutral momentum",
+            },
+            prompt_overrides={meta_session_key("epoch_001"): "FULL META SYSTEM PROMPT"},
+        )
+        runner = self._runner(pipeline)
+        result_box: dict[str, object] = {}
+        thread = threading.Thread(target=lambda: result_box.update(runner.run(TRADING_DAYS)), daemon=True)
+        thread.start()
+        # Meta was pre-approved; the first fold must block in waiting_user.
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            status = read_status(self.hitl_dir / STATUS_NAME)
+            if status.get("state") == "waiting_user" and status.get("session_key") == "epoch_001/fold_2022Q1":
+                break
+            time.sleep(0.01)
+        else:
+            self.fail(f"first fold never reached waiting_user: {read_status(self.hitl_dir / STATUS_NAME)}")
+        self.assertIsNone(status.get("session_started_at"))
+        self.assertIsNone(status.get("run_id"))
+        self.assertIsNone(status.get("trace_path"))
+        self.assertIsNone(status.get("fold_deadline_at"))
+        self.assertEqual([call[0] for call in pipeline.calls], ["meta"])
+        self.assertEqual(pipeline.calls[0][3], "meta directive")
+        self.assertEqual(pipeline.calls[0][4], "FULL META SYSTEM PROMPT")
+        # Approve everything else.
+        self._control(
+            mode="manual",
+            approved_sessions=(
+                meta_session_key("epoch_001"),
+                fold_session_key("epoch_001", "fold_2022Q1"),
+                fold_session_key("epoch_001", "fold_2022Q2"),
+                HELDOUT_SESSION_KEY,
+            ),
+            directives={fold_session_key("epoch_001", "fold_2022Q1"): "try industry-neutral momentum"},
+        )
+        thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result_box.get("heldout_runs"), 1)
+        fold_calls = [call for call in pipeline.calls if call[0] == "fold"]
+        self.assertEqual(fold_calls[0][4], "try industry-neutral momentum")
+        self.assertEqual(fold_calls[1][4], "")
+
+    def test_stop_request_halts_at_session_boundary(self) -> None:
+        pipeline = FakePipeline(self.config)
+        self._control(mode="auto", request="stop")
+        with self.assertRaises(ExperimentStopped):
+            self._runner(pipeline).run(TRADING_DAYS)
+        self.assertEqual(pipeline.calls, [])
+
+    def test_resume_skips_completed_sessions_and_rebuilds_parent(self) -> None:
+        pipeline = FakePipeline(self.config)
+        self._control(mode="auto")
+        # First run: complete meta + first fold, then stop before the second fold.
+        original_run_fold = pipeline.run_fold
+        def stop_after_first(fold, **kwargs):
+            outcome = original_run_fold(fold, **kwargs)
+            self._control(mode="auto", request="stop")
+            return outcome
+        pipeline.run_fold = stop_after_first
+        with self.assertRaises(ExperimentStopped):
+            self._runner(pipeline).run(TRADING_DAYS)
+        self.assertEqual([call[0] for call in pipeline.calls], ["meta", "fold"])
+
+        # Resume with a fresh pipeline over the same ledger.
+        resumed = FakePipeline(self.config)
+        self._control(mode="auto")
+        result = self._runner(resumed).run(TRADING_DAYS)
+        kinds = [call[0] for call in resumed.calls]
+        self.assertEqual(kinds, ["fold", "heldout"])  # meta + fold 1 restored, not re-run
+        self.assertEqual(resumed.calls[0][2], "fold_2022Q2")
+        self.assertEqual(resumed.calls[0][5], "strategy_epoch_001_fold_2022Q1")  # parent from ledger
+        self.assertEqual(resumed.calls[0][3], "taste-epoch_001")  # taste restored from file
+        self.assertEqual(result["final_strategy_artifact"], "strategy_epoch_001_fold_2022Q2")
+
+    def test_resume_detects_tampered_frozen_artifact(self) -> None:
+        pipeline = FakePipeline(self.config)
+        self._control(mode="auto", request=None)
+        original_run_fold = pipeline.run_fold
+        def stop_after_first(fold, **kwargs):
+            outcome = original_run_fold(fold, **kwargs)
+            self._control(mode="auto", request="stop")
+            return outcome
+        pipeline.run_fold = stop_after_first
+        with self.assertRaises(ExperimentStopped):
+            self._runner(pipeline).run(TRADING_DAYS)
+        frozen_main = (
+            Path(self.config.experiment_dir)
+            / "strategy_artifacts" / "epoch_001" / "strategy_epoch_001_fold_2022Q1" / "main.py"
+        )
+        frozen_main.write_text("# tampered\n", encoding="utf-8")
+        self._control(mode="auto")
+        with self.assertRaisesRegex(RuntimeError, "hash changed"):
+            self._runner(FakePipeline(self.config)).run(TRADING_DAYS)
+
+    def test_rerun_latest_fold_with_prompt_override_and_heldout_replay(self) -> None:
+        pipeline = FakePipeline(self.config)
+        self._control(mode="auto")
+        self._runner(pipeline).run(TRADING_DAYS)  # full pass: meta + 2 folds + heldout
+        # Request a re-run of the latest fold with an edited system prompt.
+        self._control(
+            mode="auto",
+            rerun_sessions={fold_session_key("epoch_001", "fold_2022Q2"): "rerun123456"},
+            prompt_overrides={fold_session_key("epoch_001", "fold_2022Q2"): "OVERRIDDEN PROMPT"},
+        )
+        resumed = FakePipeline(self.config)
+        result = self._runner(resumed).run(TRADING_DAYS)
+        kinds = [call[0] for call in resumed.calls]
+        self.assertEqual(kinds, ["fold", "heldout"])  # fold 1 restored; fold 2 re-ran; heldout replayed
+        fold_call = resumed.calls[0]
+        self.assertEqual(fold_call[2], "fold_2022Q2")
+        self.assertEqual(fold_call[6], "OVERRIDDEN PROMPT")
+        self.assertEqual(fold_call[7], "rerun123456")
+        self.assertEqual(fold_call[5], "strategy_epoch_001_fold_2022Q1")  # same parent as original
+        self.assertEqual(result["final_strategy_artifact"], "strategy_epoch_001_fold_2022Q2__rrerun123")
+        # Heldout replayed with no skips despite existing records.
+        self.assertEqual(resumed.calls[1][2], frozenset())
+        # Idempotent: same rerun_id already recorded -> nothing re-runs.
+        third = FakePipeline(self.config)
+        self._runner(third).run(TRADING_DAYS)
+        self.assertEqual([call[0] for call in third.calls], [])
+
+    def test_resume_skips_recorded_heldout_periods(self) -> None:
+        pipeline = FakePipeline(self.config)
+        self._control(mode="auto")
+        self._runner(pipeline).run(TRADING_DAYS)
+        # Second full pass: everything restored, heldout fully recorded -> no calls.
+        resumed = FakePipeline(self.config)
+        result = self._runner(resumed).run(TRADING_DAYS)
+        self.assertEqual(resumed.calls, [])
+        self.assertEqual(result["heldout_runs"], 0)
+
+    def test_orphan_frozen_artifact_fails_fast(self) -> None:
+        pipeline = FakePipeline(self.config)
+        orphan = (
+            Path(self.config.experiment_dir) / "strategy_artifacts" / "epoch_001" / "strategy_epoch_001_fold_2022Q1"
+        )
+        orphan.mkdir(parents=True)
+        self._control(mode="auto")
+        with self.assertRaisesRegex(RuntimeError, "orphan frozen artifact"):
+            self._runner(pipeline).run(TRADING_DAYS)
+
+    def test_status_reporter_surfaces_live_run_and_deadline(self) -> None:
+        work_root = Path(self.config.work_root)
+        run_artifacts = work_root / "run_live" / "artifacts"
+        run_artifacts.mkdir(parents=True)
+        (run_artifacts / "run_manifest.json").write_text(
+            json.dumps({"fold_deadline_at": "2026-07-07T12:00:00+00:00"}), encoding="utf-8"
+        )
+        (run_artifacts / "agent_trace.jsonl").write_text("", encoding="utf-8")
+        status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=work_root, interval_seconds=60.0)
+        status.set(state="running_session")
+        with status._lock:
+            status._refresh_live_run_locked()
+            status._write_locked()
+        data = read_status(self.hitl_dir / STATUS_NAME)
+        self.assertEqual(data["run_id"], "run_live")
+        self.assertEqual(data["fold_deadline_at"], "2026-07-07T12:00:00+00:00")
+        self.assertTrue(str(data["trace_path"]).endswith("agent_trace.jsonl"))
+
+    def test_status_reporter_keeps_preparing_until_trace_exists(self) -> None:
+        work_root = Path(self.config.work_root)
+        run_artifacts = work_root / "run_preparing" / "artifacts"
+        run_artifacts.mkdir(parents=True)
+        status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=work_root, interval_seconds=60.0)
+        status.set(state="running_session")
+
+        with status._lock:
+            status._refresh_live_run_locked()
+        self.assertEqual(status._data["run_id"], "run_preparing")
+        self.assertIsNone(status._data["trace_path"])
+
+        (run_artifacts / "agent_trace.jsonl").write_text("", encoding="utf-8")
+        with status._lock:
+            status._refresh_live_run_locked()
+        self.assertTrue(str(status._data["trace_path"]).endswith("agent_trace.jsonl"))
+
+    def test_status_reporter_excludes_researcher_wait_from_live_elapsed(self) -> None:
+        status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=Path(self.config.work_root))
+        status.set(state="running_session", session_started_at=utc_now_iso())
+        status.set(state="waiting_user_reply")
+        self.assertIsNotNone(status._data["wait_started_at"])
+        time.sleep(0.01)
+        status.set(state="running_session")
+        self.assertGreater(status._data["researcher_wait_seconds"], 0.0)
+        self.assertIsNone(status._data["wait_started_at"])
+
+        status.set(state="running_session", session_started_at=utc_now_iso())
+        self.assertEqual(status._data["researcher_wait_seconds"], 0.0)
+
+    def test_status_reporter_tracks_and_resets_environment_progress(self) -> None:
+        status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=Path(self.config.work_root))
+        status.set(state="running_session", session_started_at=utc_now_iso())
+        status.set(environment_stage="frozen_test", environment_progress={"day_index": 0, "total_days": 61})
+        started = status._data["environment_stage_started_at"]
+        status.set(environment_stage="frozen_test", environment_progress={"day_index": 30, "total_days": 61})
+        self.assertEqual(status._data["environment_stage_started_at"], started)
+        self.assertEqual(status._data["environment_progress"]["day_index"], 30)
+
+        status.set(state="running_session", session_started_at=utc_now_iso())
+        self.assertIsNone(status._data["environment_stage"])
+        self.assertIsNone(status._data["environment_stage_started_at"])
+        self.assertIsNone(status._data["environment_progress"])
+
+    def test_status_reporter_does_not_attach_previous_session_run(self) -> None:
+        work_root = Path(self.config.work_root)
+        old_artifacts = work_root / "run_meta" / "artifacts"
+        old_artifacts.mkdir(parents=True)
+        (old_artifacts / "run_manifest.json").write_text(
+            json.dumps({
+                "created_at": "2026-07-07T10:00:00+00:00",
+                "fold_deadline_at": "2026-07-07T11:00:00+00:00",
+            }),
+            encoding="utf-8",
+        )
+        os.utime(work_root / "run_meta", (1, 1))
+        status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=work_root, interval_seconds=60.0)
+        status.set(state="running_session", session_started_at=utc_now_iso())
+        with status._lock:
+            status._refresh_live_run_locked()
+        self.assertIsNone(status._data["run_id"])
+        self.assertIsNone(status._data["fold_deadline_at"])
+
+        new_artifacts = work_root / "run_fold" / "artifacts"
+        new_artifacts.mkdir(parents=True)
+        (new_artifacts / "run_manifest.json").write_text(
+            json.dumps({
+                "created_at": utc_now_iso(),
+                "fold_deadline_at": "2026-07-07T12:00:00+00:00",
+            }),
+            encoding="utf-8",
+        )
+        with status._lock:
+            status._refresh_live_run_locked()
+        self.assertEqual(status._data["run_id"], "run_fold")
+        self.assertEqual(status._data["fold_deadline_at"], "2026-07-07T12:00:00+00:00")
+
+    def test_status_reporter_discovers_run_while_waiting_for_researcher(self) -> None:
+        work_root = Path(self.config.work_root)
+        status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=work_root, interval_seconds=60.0)
+        status.set(state="waiting_user_reply", session_started_at=utc_now_iso())
+        run_artifacts = work_root / "run_fast_question" / "artifacts"
+        run_artifacts.mkdir(parents=True)
+        (run_artifacts / "run_manifest.json").write_text(
+            json.dumps({"created_at": utc_now_iso()}), encoding="utf-8"
+        )
+        (run_artifacts / "agent_trace.jsonl").write_text("", encoding="utf-8")
+        status._stop = SimpleNamespace(wait=Mock(side_effect=[False, True]))
+
+        status._heartbeat_loop()
+
+        self.assertEqual(status._data["run_id"], "run_fast_question")
+        self.assertTrue(str(status._data["trace_path"]).endswith("agent_trace.jsonl"))
+
+    def test_post_fold_hook_failure_is_advisory(self) -> None:
+        pipeline = FakePipeline(self.config, meta_enabled=False)
+        self._control(mode="auto")
+        status = StatusReporter(self.hitl_dir / STATUS_NAME, work_root=self.config.work_root, interval_seconds=60.0)
+        def broken_hook(record, outcome):
+            raise RuntimeError("analysis provider down")
+        runner = InteractiveExperimentRunner(
+            pipeline, hitl_dir=self.hitl_dir, poll_seconds=0.02, post_fold_hook=broken_hook, status=status
+        )
+        result = runner.run(TRADING_DAYS)
+        self.assertEqual(result["heldout_runs"], 1)
+        self.assertIn("analysis provider down", str(read_status(self.hitl_dir / STATUS_NAME)["analysis_error"]))
+
+
+class ResolveOptionsTest(unittest.TestCase):
+    def test_defaults_merge_and_path_resolution(self) -> None:
+        repo_root = Path("/repo")
+        options = resolve_options(
+            {
+                "experiment_id": "exp1",
+                "first_test_period": "2022Q1",
+                "last_test_period": "2022Q2",
+                "heldout_first_period": "2023Q1",
+                "heldout_last_period": "2023Q1",
+            },
+            repo_root,
+        )
+        self.assertEqual(options.raw_dir, repo_root / "data/raw")
+        self.assertEqual(options.model, PARAM_DEFAULTS["model"])
+        self.assertEqual(options.web_search_engines, ("tavily", "semantic_scholar"))
+        self.assertEqual(options.gpu_count, 1)
+        self.assertTrue(options.analysis_enabled)
+
+    def test_gpu_count_validation(self) -> None:
+        base = {
+            "experiment_id": "exp1",
+            "first_test_period": "2022Q1",
+            "last_test_period": "2022Q2",
+            "heldout_first_period": "2023Q1",
+            "heldout_last_period": "2023Q1",
+        }
+        self.assertEqual(resolve_options({**base, "gpu_count": "3"}, Path("/repo")).gpu_count, 3)
+        for invalid in (0, 5, 17, "bad"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "gpu_count"):
+                    resolve_options({**base, "gpu_count": invalid}, Path("/repo"))
+
+    def test_extended_params_flow_into_config_and_broker_profile(self) -> None:
+        from autotrade.pipelines.interactive import build_config_from_options
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            options = resolve_options(
+                {
+                    "experiment_id": "exp1",
+                    "first_test_period": "2022Q1",
+                    "last_test_period": "2022Q2",
+                    "heldout_first_period": "2023Q1",
+                    "heldout_last_period": "2023Q1",
+                    "max_steps_per_fold": 5,
+                    "max_backtests_per_fold": 12,
+                    "gpu_count": 3,
+                    "meta_memory_max_epochs": 1,
+                    "nl_max_calls_per_decision_day": 4,
+                    "nl_max_calls_per_backtest": 20,
+                    "offsession_tick_minutes": 0,
+                    "stock_initial_cash": 1_000_000,
+                    "credit_initial_cash": 250_000,
+                    "commission_bps": 2.5,
+                    "max_total_holdings": 15,
+                    "max_single_name_weight": 0.2,
+                    "fold_exploration_directive": "持续检验事件冲击的关系网络传播。",
+                },
+                repo_root,
+            )
+            config = build_config_from_options(options, repo_root=repo_root)
+        self.assertEqual(config.max_steps_per_fold, 5)
+        self.assertEqual(config.max_backtests_per_fold, 12)
+        self.assertEqual(config.sandbox_spec.gpu_count, 3)
+        self.assertEqual(config.meta_learning_sandbox_spec.gpu_count, 3)
+        self.assertEqual(config.meta_memory_max_epochs, 1)
+        self.assertEqual(config.nl_max_calls_per_decision_day, 4)
+        self.assertEqual(config.nl_max_calls_per_backtest, 20)
+        self.assertEqual(config.offsession_tick_minutes, 0)
+        self.assertEqual(config.broker_profile.stock_initial_cash, 1_000_000.0)
+        self.assertEqual(config.broker_profile.credit_initial_cash, 250_000.0)
+        self.assertEqual(config.broker_profile.commission_bps, 2.5)
+        self.assertEqual(config.broker_profile.max_total_holdings, 15)
+        self.assertEqual(config.broker_profile.max_single_name_weight, 0.2)
+        self.assertEqual(config.fold_exploration_directive, "持续检验事件冲击的关系网络传播。")
+        # Defaults untouched elsewhere.
+        self.assertEqual(config.broker_profile.slippage_bps, 5.0)
+        self.assertEqual(config.backtest_max_seconds_per_decision, 1800.0)
+        self.assertEqual(config.backtest_max_seconds_per_trading_day, 3600.0)
+
+    def test_metadata_keys_are_ignored(self) -> None:
+        options = resolve_options(
+            {
+                "experiment_id": "exp1",
+                "first_test_period": "2022Q1",
+                "last_test_period": "2022Q2",
+                "heldout_first_period": "2023Q1",
+                "heldout_last_period": "2023Q1",
+                "_created_at": "2026-07-06T00:00:00+00:00",
+            },
+            Path("/repo"),
+        )
+        self.assertFalse(hasattr(options, "_created_at"))
+
+    def test_unknown_and_missing_params_fail_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown experiment parameters"):
+            resolve_options({"experiment_id": "x", "no_such_knob": 1}, Path("/repo"))
+        with self.assertRaisesRegex(ValueError, "missing required"):
+            resolve_options({"experiment_id": "x"}, Path("/repo"))
+
+
+class StatusPidTest(unittest.TestCase):
+    def test_zombie_worker_counts_as_dead(self) -> None:
+        import subprocess
+
+        from autotrade.pipelines.hitl_state import status_pid_alive
+
+        # An exited-but-unreaped child (state Z) must not read as alive: the
+        # console judges worker liveness purely from the recorded pid.
+        child = subprocess.Popen(["true"])
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                stat = Path(f"/proc/{child.pid}/stat").read_text(encoding="ascii")
+                if stat.rpartition(")")[2].split()[:1] == ["Z"]:
+                    break
+                time.sleep(0.02)
+            else:
+                self.skipTest("child never reached zombie state")
+            self.assertFalse(status_pid_alive({"pid": child.pid}))
+        finally:
+            child.wait(timeout=5)
+        self.assertFalse(status_pid_alive({"pid": None}))
+        self.assertFalse(status_pid_alive({"pid": -1}))
+
+    def test_recycled_pid_counts_as_dead(self) -> None:
+        import os
+
+        from autotrade.pipelines.hitl_state import proc_start_ticks, status_pid_alive
+
+        # A recorded start time that does not match the live process means the
+        # pid number was recycled (e.g. after a reboot): the dead worker must
+        # not impersonate a live one, or resume stays blocked forever.
+        pid = os.getpid()
+        ticks = proc_start_ticks(pid)
+        self.assertIsInstance(ticks, int)
+        self.assertTrue(status_pid_alive({"pid": pid, "pid_start_ticks": ticks}))
+        self.assertFalse(status_pid_alive({"pid": pid, "pid_start_ticks": ticks - 1}))
+        # A status without the recorded start time never reads as alive.
+        self.assertFalse(status_pid_alive({"pid": pid}))
+
+
+class ControlFileTest(unittest.TestCase):
+    def test_control_round_trip_and_bad_values_degrade_safely(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "control.json"
+            write_control(path, ControlState(
+                mode="auto", request="pause", approved_sessions=("a",), directives={"a": "d"},
+                prompt_overrides={"a": "P"}, rerun_sessions={"a": "r1"}, parent_overrides={"a": "n1"},
+            ))
+            state = read_control(path)
+            self.assertEqual((state.mode, state.request, state.approved_sessions, state.directives), ("auto", "pause", ("a",), {"a": "d"}))
+            self.assertEqual((state.prompt_overrides, state.rerun_sessions), ({"a": "P"}, {"a": "r1"}))
+            self.assertEqual(state.parent_overrides, {"a": "n1"})
+            path.write_text(json.dumps({"mode": "bogus", "request": "bogus"}), encoding="utf-8")
+            state = read_control(path)
+            self.assertEqual((state.mode, state.request), ("manual", None))
+            self.assertEqual(read_control(Path(tmp) / "missing.json").mode, "manual")
+            # "step" is the first-class per-step approval tier, never downgraded.
+            path.write_text(json.dumps({"mode": "step"}), encoding="utf-8")
+            self.assertEqual(read_control(path).mode, "step")
+
+
+class FoldAnalysisTest(unittest.TestCase):
+    def test_guarded_view_excludes_test_evidence(self) -> None:
+        record = {
+            "epoch_id": "epoch_001",
+            "fold_id": "fold_2022Q1",
+            "validation_period": "20211001..20211231",
+            "test_period": "20220101..20220331",
+            "validation_result": {"total_return": 0.01},
+            "test_result": {"total_return": 0.09},
+            "fold_directive": "try X",
+        }
+        view = guarded_record_view(record)
+        self.assertNotIn("test_result", view)
+        self.assertNotIn("test_period", view)
+        self.assertEqual(view["validation_result"], {"total_return": 0.01})
+        messages = build_fold_analysis_messages(record, [{"path": "main.py", "content": "print(1)", "truncated": False}])
+        user = messages[1]["content"]
+        self.assertNotIn("0.09", user)
+        self.assertNotIn("20220101..20220331", user)
+        self.assertIn("print(1)", user)
+
+    def test_analyze_fold_writes_markdown_and_sidecar(self) -> None:
+        class FakeProxy:
+            provider = "fake"
+            model = "fake-model"
+            def complete(self, messages, *, json_mode, timeout_seconds, max_tokens=None):
+                assert not json_mode
+                from types import SimpleNamespace
+                return SimpleNamespace(content="## 策略逻辑概述\n看多动量。", usage={"total_tokens": 10})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            strategy = Path(tmp) / "strategy"
+            strategy.mkdir()
+            (strategy / "main.py").write_text("def main(ctx):\n    pass\n", encoding="utf-8")
+            (strategy / "manifest.json").write_text("{}", encoding="utf-8")
+            out_dir = Path(tmp) / "analysis"
+            record = {"epoch_id": "epoch_001", "fold_id": "fold_2022Q1", "validation_result": {"total_return": 0.01}}
+            md_path = analyze_fold(
+                FakeProxy(), ledger_record=record, strategy_dir=strategy, model_dir=None, out_dir=out_dir
+            )
+            self.assertIn("看多动量", md_path.read_text(encoding="utf-8"))
+            meta = json.loads((out_dir / "epoch_001__fold_2022Q1.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["status"], "ok")
+            self.assertEqual(meta["guarded_view"], "validation_only")
+
+    def test_analyze_fold_retries_once_on_length_stop(self) -> None:
+        from autotrade.pipelines.fold_analysis import DEFAULT_MAX_TOKENS, RETRY_MAX_TOKENS
+
+        calls: list[int] = []
+
+        class LengthOnceProxy:
+            provider = "fake"
+            model = "fake-model"
+            def complete(self, messages, *, json_mode, timeout_seconds, max_tokens=None):
+                calls.append(max_tokens)
+                if len(calls) == 1:
+                    raise RuntimeError("deepseek request failed: DeepSeek response stopped with finish_reason=length")
+                from types import SimpleNamespace
+                return SimpleNamespace(content="## 策略逻辑概述\n重试成功。", usage={"total_tokens": 5})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            strategy = Path(tmp) / "strategy"
+            strategy.mkdir()
+            (strategy / "main.py").write_text("pass\n", encoding="utf-8")
+            out_dir = Path(tmp) / "analysis"
+            record = {"epoch_id": "epoch_001", "fold_id": "fold_2022Q1"}
+            md_path = analyze_fold(
+                LengthOnceProxy(), ledger_record=record, strategy_dir=strategy, model_dir=None, out_dir=out_dir
+            )
+            self.assertIn("重试成功", md_path.read_text(encoding="utf-8"))
+            self.assertEqual(calls, [DEFAULT_MAX_TOKENS, RETRY_MAX_TOKENS])
+            meta = json.loads((out_dir / "epoch_001__fold_2022Q1.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["status"], "ok")
+            self.assertTrue(meta["retried_after_length_stop"])
+
+    def test_analyze_step_uses_step_prompt_and_separate_sidecar(self) -> None:
+        class FakeProxy:
+            provider = "fake"
+            model = "fake-model"
+
+            def complete(self, messages, *, json_mode, timeout_seconds, max_tokens=None):
+                self.assert_step_prompt = "下一 Step 可检验假设" in messages[0]["content"]
+                from types import SimpleNamespace
+                return SimpleNamespace(content="## 下一 Step 可检验假设\n降低换手。", usage={})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            strategy = Path(tmp) / "strategy"
+            strategy.mkdir()
+            (strategy / "main.py").write_text("pass\n", encoding="utf-8")
+            out_dir = Path(tmp) / "analysis"
+            proxy = FakeProxy()
+            node_id = "epoch_001__fold_ref_x__run_x__valid_003"
+            md_path = analyze_step(
+                proxy,
+                step_record={"epoch_id": "epoch_001", "fold_id": "fold_2022Q1",
+                             "step_id": "step_002", "validation_result": {"total_return": -0.01}},
+                strategy_dir=strategy,
+                model_dir=None,
+                out_dir=out_dir,
+                node_id=node_id,
+            )
+            self.assertTrue(proxy.assert_step_prompt)
+            self.assertEqual(md_path.name, f"step__{node_id}.md")
+            meta = json.loads((out_dir / f"step__{node_id}.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["analysis_kind"], "step")
+
+    def test_read_strategy_files_orders_main_first_and_skips_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            strategy = Path(tmp)
+            (strategy / "aaa.py").write_text("a", encoding="utf-8")
+            (strategy / "main.py").write_text("m", encoding="utf-8")
+            (strategy / "manifest.json").write_text("{}", encoding="utf-8")
+            (strategy / "weights.pt").write_bytes(b"\x00\x01")
+            entries = read_strategy_files(strategy)
+            self.assertEqual(entries[0]["path"], "main.py")
+            paths = [entry["path"] for entry in entries]
+            self.assertNotIn("manifest.json", paths)
+            binary = next(entry for entry in entries if entry["path"] == "weights.pt")
+            self.assertIn("non-text", binary["skipped"])
+
+
+if __name__ == "__main__":
+    unittest.main()

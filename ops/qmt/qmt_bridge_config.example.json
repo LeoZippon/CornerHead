@@ -1,0 +1,20 @@
+{
+  "accounts": [
+    {
+      "account_id": "<stock-account-id>",
+      "account_type": "STOCK"
+    }
+  ],
+  "execution": {
+    "enabled": false,
+    "allowed_strategy_ids": ["wfB_q50_agree60"],
+    "max_order_notional": 50000,
+    "max_payload_notional": 100000,
+    "op_type_buy": 23,
+    "op_type_sell": 24,
+    "order_type": 1101,
+    "pr_type_limit": 11,
+    "quick_trade": 1,
+    "trading_windows": [["09:30", "11:30"], ["13:00", "14:57"]]
+  }
+}

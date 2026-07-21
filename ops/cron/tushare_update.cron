@@ -1,50 +1,68 @@
 # MacroQuant TuShare scheduled updates.
 # Template for the managed MacroQuant block. If the user already has other cron
 # jobs, append/refresh this block instead of replacing the whole crontab.
-# Install or refresh with: /home/lzp/miniconda3/envs/stock/bin/python ops/cron/install_tushare_cron.py
+# Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py
 #
 # The runner reads /Data/lzp/MacroQuant/.env when TUSHARE_TOKEN is not already
-# exported, writes detailed per-run logs under logs/, and skips duplicate
+# exported, writes 14-day per-run logs under logs/tushare/cron/, and skips duplicate
 # successful job/date runs.
 
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRON_TZ=Asia/Shanghai
 MACROQUANT_ROOT=/Data/lzp/MacroQuant
-STOCK_PYTHON=/home/lzp/miniconda3/envs/stock/bin/python
+QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
+DISPATCH_LOG=logs/tushare/dispatch.log
 
 # After normal same-day releases should have landed. The job uses a rolling
 # recent window with open-window refreshes plus selected reference/daily
 # refreshes, not a full-history re-scan from the research lower bound. T+1
 # margin sources are handled by the pre-open jobs below.
-35 23 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_evening_full >> logs/tushare_cron_dispatch.log 2>&1
+35 23 * * * cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_evening_full --dispatch-log $DISPATCH_LOG
 
 # Refresh the six formal data-quality status files over the full retained
 # window after the evening update has normally finished.
-30 2 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_nightly_full_audit >> logs/tushare_cron_dispatch.log 2>&1
+30 2 * * * cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_full_audit --dispatch-log $DISPATCH_LOG
 
-# Build the PIT-ready financial event layer and recent daily_alpha features
-# after raw status refresh. The job audits fundamental_events before joining it
-# into daily_alpha.
-35 3 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_nightly_feature_build >> logs/tushare_cron_dispatch.log 2>&1
+# Build and audit PIT-ready financial event availability partitions
+# after raw status refresh. Snapshot construction uses this layer to enforce
+# financial statement visibility without precomputing alpha columns.
+35 3 * * * cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_pit_event_build --dispatch-log $DISPATCH_LOG
 
 # Sample historical daily partitions without overwriting raw data. Differences
 # are appended to the revision ledger for downstream stale-cache review.
-0 4 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_daily_revision_sentinel >> logs/tushare_cron_dispatch.log 2>&1
+0 4 * * * cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_daily_revision_sentinel --dispatch-log $DISPATCH_LOG
 
 # Pre-open refreshes for sources whose official/current availability is better
 # in the next-morning window than in the prior evening run.
-50 8 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_board_backfill_0850 >> logs/tushare_cron_dispatch.log 2>&1
-55 8 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_text_backfill_0855 >> logs/tushare_cron_dispatch.log 2>&1
+50 8 * * * cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_board_backfill_0850 --dispatch-log $DISPATCH_LOG
+55 8 * * * cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_text_backfill_0855 --dispatch-log $DISPATCH_LOG
 
 # Pre-open forced backfill for same-day margin eligibility and T+1 margin
 # sources. Distinct retry job names keep the second query active if the first
 # one returned before the source was fully ready.
-3 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_margin_secs_backfill_0903 >> logs/tushare_cron_dispatch.log 2>&1
-5 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_margin_backfill_0905 >> logs/tushare_cron_dispatch.log 2>&1
-13 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_margin_secs_retry_0913 >> logs/tushare_cron_dispatch.log 2>&1
-15 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_margin_retry_0915 >> logs/tushare_cron_dispatch.log 2>&1
+3 9 * * * cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_margin_secs_backfill_0903 --dispatch-log $DISPATCH_LOG
+5 9 * * * cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_margin_backfill_0905 --dispatch-log $DISPATCH_LOG
+13 9 * * * cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_margin_secs_retry_0913 --dispatch-log $DISPATCH_LOG
+15 9 * * * cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_margin_retry_0915 --dispatch-log $DISPATCH_LOG
 
 # Refresh event/flow status after margin retry so 09:25 pre-open gates do not
 # see the stale 02:30 status for T+1 margin sources.
-20 9 * * * cd $MACROQUANT_ROOT && mkdir -p logs && $STOCK_PYTHON scripts/tushare/cron_update.py --job cn_preopen_event_flow_audit_0920 >> logs/tushare_cron_dispatch.log 2>&1
+20 9 * * * cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_event_flow_audit_0920 --dispatch-log $DISPATCH_LOG
+
+# Opening-auction results publish between 09:27 and 09:29. The first run polls
+# through that window; the same job retries at 09:31 only if the first did not
+# finish successfully (skip_if_already_ok prevents a second generation publish).
+27 9 * * * cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927 --dispatch-log $DISPATCH_LOG
+31 9 * * * cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927 --dispatch-log $DISPATCH_LOG
+
+# Final strict source reconciliation before the evening full refresh. It always
+# re-queries the exact date even when the morning capture succeeded, so a late
+# source correction is published before the normal nightly generation.
+20 23 * * * cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927 --force-run --dispatch-log $DISPATCH_LOG
+
+# Weekly deep sweeps (Saturday, market closed; end date resolves to Friday):
+# slow-moving per-code reference loops and the 90-day fundamental/dividend
+# correction window, moved off the nightly critical path.
+35 12 * * 6 cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_reference_deep --dispatch-log $DISPATCH_LOG
+0 14 * * 6 cd $MACROQUANT_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_fundamental_deep --dispatch-log $DISPATCH_LOG
