@@ -38,7 +38,7 @@ from autotrade.pipelines.hitl_state import (
 from autotrade.pipelines.meta_schedule import meta_record_session_key
 
 from .params_schema import HIDDEN_KEYS
-from .registry import ACTIVE_STATES, experiment_state, read_ledger_records, resolve_experiment_dir
+from .registry import ACTIVE_STATES, experiment_state, read_ledger_records, resolve_experiment_dir, test_results_revealed
 
 MAX_RUNNING_EXPERIMENTS = 5
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
@@ -405,7 +405,8 @@ class ExperimentManager:
             raise ManagerError(f"experiment {experiment_id!r} is legacy/read-only")
         control_path = hitl_dir / CONTROL_NAME
         control = read_control(control_path)
-        if control.test_revealed and action in _SEALED_BLOCKED_ACTIONS:
+        # Effective seal: manual reveal OR held-out completed (auto-reveal).
+        if action in _SEALED_BLOCKED_ACTIONS and test_results_revealed(experiment_dir):
             raise ManagerError("测试结果已揭示，实验已封存：不能再进行影响后续学习的控制操作")
         if action == "reveal_test_results":
             # One-way: showing OOS results to the researcher makes every later

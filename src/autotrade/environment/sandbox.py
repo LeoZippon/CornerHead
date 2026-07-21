@@ -44,15 +44,27 @@ PYTHON_PACKAGES: tuple[tuple[str, str, str | None], ...] = (
     ("pandas", "pandas", "2.2.3"),
     ("pyarrow", "pyarrow", "18.1.0"),
     ("duckdb", "duckdb", "1.1.3"),
+    ("scipy", "scipy", "1.17.1"),
     ("sklearn", "scikit-learn", "1.5.2"),
     ("statsmodels", "statsmodels", "0.14.4"),
-    ("torch", "torch", "2.5.1"),
-    ("huggingface_hub", "huggingface-hub", "0.27.1"),
+    ("torch", "torch", "2.10.0"),
+    ("torchvision", "torchvision", "0.25.0"),
+    ("torch_geometric", "torch-geometric", "2.8.0.post1"),
+    ("torch_scatter", "torch-scatter", "2.1.2"),
+    ("torch_sparse", "torch-sparse", "0.6.18"),
+    ("torch_cluster", "torch-cluster", "1.6.3"),
+    ("transformers", "transformers", "5.14.1"),
+    ("accelerate", "accelerate", "1.14.0"),
+    ("safetensors", "safetensors", "0.8.0"),
+    ("einops", "einops", "0.8.2"),
+    ("lightgbm", "lightgbm", "4.7.0"),
+    ("xgboost", "xgboost", "3.2.0"),
+    ("huggingface_hub", "huggingface-hub", "1.24.0"),
 )
 # Keep in sync with ops/docker/sandbox.Dockerfile: the docker-mode runtime_env
 # contract declares each of these available without probing, so a tool must be
 # installed in the image before it is listed here (e.g. duckdb CLI).
-IMPORTANT_TOOLS = ("rg", "git", "npm", "pip", "hf", "huggingface-cli", "duckdb")
+IMPORTANT_TOOLS = ("rg", "git", "npm", "pip", "hf", "huggingface-cli", "duckdb", "nvcc")
 
 
 class SandboxLifecycleFatal(BaseException):

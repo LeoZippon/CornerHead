@@ -742,11 +742,13 @@ async function renderHomePage() {
     $main.innerHTML = `<div class="empty">加载失败：${escapeHtml(error.message)}</div>`;
     return;
   }
-  $topbarRight.append(
+  // Native append() stringifies null (unlike el()'s child handling), so filter
+  // the badge out when the console code is current.
+  $topbarRight.append(...[
     consoleCodeBadge(payload),
     el("span", { class: "mode-note" }, `并行运行 ${payload.running.length}/${payload.max_running_experiments}`),
     el("button", { class: "btn primary", onclick: openCreateModal }, "＋ 新建实验"),
-  );
+  ].filter(Boolean));
   const container = el("div", {});
   const best = pickBestExperiment(payload.experiments);
   if (best) container.append(heroPanel(best), el("div", { class: "section-gap" }));
@@ -927,7 +929,7 @@ function confirmRevealTests(experimentId) {
     el("button", {
       class: "btn danger",
       onclick: () => sendControlAction(
-        experimentId, { action: "reveal_test_results" }, "测试结果已揭示，实验已封存", { modal: true }),
+        experimentId, { action: "reveal_test_results" }, "测试结果已揭示，实验已封存", { modal: true, reload: true }),
     }, "揭示并封存"),
   ]);
 }
@@ -1251,7 +1253,7 @@ async function renderDetailPage(experimentId, selectedKey) {
             title: `worker 启动于 ${status.code_version}，仓库已是 ${detail.repo_code_version}：长驻进程仍在运行旧代码，重启 worker 生效` },
             "代码过期")
         : null,
-      detail.kind === "hitl" && (detail.control || {}).test_revealed
+      detail.kind === "hitl" && detail.test_revealed
         ? el("span", { class: "badge state-waiting_user", title: "测试/Held-out 结果已揭示：实验已封存，不能再批准、重跑、回滚或注入指令" }, "已揭示测试（封存）")
         : null,
     ),
@@ -1271,7 +1273,7 @@ async function renderDetailPage(experimentId, selectedKey) {
       onclick: () => openParamsModal(detail),
     }, "创建参数"));
   }
-  if (detail.kind === "hitl" && detail.control && !detail.control.test_revealed) {
+  if (detail.kind === "hitl" && detail.control && !detail.test_revealed) {
     head.querySelector("h2").append(el("button", {
       class: "btn small", style: "margin-left:0.4rem",
       onclick: () => confirmRevealTests(detail.experiment_id),
@@ -1700,14 +1702,18 @@ function gpuAllocationRow(detail, session, send) {
 
 /* POST one control action, then refresh the detail page in place (a full
    route() rebuild flashes the page). Shared by every control-sending panel. */
-async function sendControlAction(experimentId, payload, note, { modal = false } = {}) {
+async function sendControlAction(experimentId, payload, note, { modal = false, reload = false } = {}) {
   try {
     const result = await api(`/api/experiments/${encodeURIComponent(experimentId)}/control`, {
       method: "POST", body: JSON.stringify(payload),
     });
     if (note) toast(typeof note === "function" ? note(result) : note);
     if (modal) closeModal();
-    refreshDetail();
+    // Actions that change the whole page structure (e.g. sealing) need a full
+    // re-render: refreshDetail() only swaps the control bar and session list,
+    // leaving the page head (seal badge) and other panels stale.
+    if (reload) route();
+    else refreshDetail();
   } catch (error) { toast(error.message, true); }
 }
 

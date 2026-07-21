@@ -1,3 +1,10 @@
+2026-07-22 控制台修复、Prompt 合同纠偏与完整深度学习沙箱
+
+- 修复首页 `consoleCodeBadge` 为 null 时原生 append 渲染出 "null" 标签（filter 后再 append）；「揭示测试结果」改为成功后整页重渲染（原局部刷新不更新页头封存徽章）。Held-out 语义升级：排程内全部 Held-out 区间落账后测试/Held-out 结果自动揭示并触发同等封存（registry 单一谓词，manager 封存门与 detail/list 载荷共用），部分完成不揭示以保留 worker resume 补跑；新增回归测试覆盖部分/完整/封存三态。
+- 依据 lzp-test29 证据修正两处 Prompt 误导：taste 出现"推荐季度调仓，匹配 fold period"，根源是元学习 Prompt"适配周期粒度、交易频率"措辞——现明确 Fold 周期只是评估窗口推进节奏、非调仓频率，且与 Fold 周期同级的低频调仓在单窗口内无法被验证（Meta 与 Fold Prompt 同步）。Taste 定位改为"服务研究者方向的可证伪先验"：注入 Fold 时新增框架（硬约束>研究者指令>Taste），容量/参数上限只能是附反证条件的初始默认，Fold Agent 可凭 Validation 证据突破；输出合同与禁止事项同步，agent_design 术语表更新。PROMPTS.md 新哈希 `fd74c1fe...d16252`。
+- 沙箱升级为完整深度学习环境：torch 2.5.1→2.10.0（cu128 线最成熟版本），新增 CUDA 12.8 完整工具链（NVIDIA apt 源 SHA1 签名被 trixie Sequoia 策略拒绝，改用 sha256 自校验 runfile，md5 与官方 canonical 一致；TORCH_CUDA_ARCH_LIST=8.9 单架构编译），并预装 torchvision/torch_geometric 2.8 + 源码编译 torch_scatter/sparse/cluster（构建期即端到端验证 nvcc）、transformers 5.14/accelerate/safetensors/einops、lightgbm/xgboost、scipy 显式钉版；PYTHON_PACKAGES/IMPORTANT_TOOLS（含 nvcc）合同同步。镜像 25.1GB；真实 L20 上 cuda 可用、scatter_mean+autograd 通过，lzp-test29 的 PyG 缺 nvcc 失败模式已消除。
+- 验证：全量 tests/ 921 tests + 45 subtests（158.53s）通过；node --check、Prompt 双次导出幂等、`git diff --check` 通过；镜像内 driver SHA 与源一致；pipeline_design/environment_design/agent_design 同步。合并入 main 后控制台已重新 deploy。
+
 2026-07-21 全仓一致性复扫与层边界依赖倒置
 
 - 逐类复扫代码/文档/日志/质量产物。核实三个真实边界问题并修复：Environment 反向依赖 TuShare（snapshot/broker 引 tushare.common/io）——竞价容差、观测起始日、打板数据集清单移入 environment/data/contracts.py、sidecar 读取移入 data/pit.py，ingest 适配层反向引用环境合同，environment 现零 data_sources 依赖并新增边界守卫测试；explore.py 迁至 agent/（唯一消费方为主会话 Runner）；style_analysis.py 迁至 replay/style.py。补充发现 nl/extraction.py 实为 provider 响应解析且 NL 栈从未使用，迁至 llm/extraction.py。

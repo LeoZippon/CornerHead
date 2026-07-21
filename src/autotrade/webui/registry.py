@@ -90,11 +90,40 @@ def test_results_revealed(experiment_dir: Path) -> bool:
     """P1-7: test/held-out results are hidden from the console until the
     researcher explicitly reveals them (which seals the experiment against
     further learning). Legacy experiments without a control plane are
-    read-only history — nothing can leak forward, so they show everything."""
+    read-only history — nothing can leak forward, so they show everything.
+    Held-out is the terminal evaluation: once every scheduled held-out period
+    is recorded, no learning session can ever follow, so results auto-reveal
+    (and the same seal applies). Partial held-out does not auto-reveal — the
+    worker may still need resume to finish the remaining periods."""
     control_path = experiment_dir / HITL_DIR_NAME / CONTROL_NAME
     if not control_path.exists():
         return True
-    return read_control(control_path).test_revealed
+    if read_control(control_path).test_revealed:
+        return True
+    return heldout_complete(experiment_dir)
+
+
+def heldout_complete(experiment_dir: Path, records: list[dict[str, object]] | None = None) -> bool:
+    """Every held-out period planned in the schedule has a durable ledger record."""
+    schedule = read_json(experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME)
+    sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
+    planned = {
+        str(period.get("label"))
+        for session in sessions
+        if isinstance(session, dict) and str(session.get("kind")) == "heldout"
+        for period in (session.get("periods") if isinstance(session.get("periods"), list) else [])
+        if isinstance(period, dict) and period.get("label")
+    }
+    if not planned:
+        return False
+    if records is None:
+        records = read_ledger_records(experiment_dir)
+    completed = {
+        str(record.get("fold_id") or "").removeprefix("heldout_")
+        for record in records
+        if record.get("record_type") == "heldout"
+    }
+    return planned <= completed
 
 
 def sealed_result_prefixes(experiment_dir: Path) -> tuple[str, ...]:
@@ -324,7 +353,10 @@ def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, o
     schedule = read_json(hitl_dir / SCHEDULE_NAME)
     sessions_plan = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
     control = read_control(hitl_dir / CONTROL_NAME) if (hitl_dir / CONTROL_NAME).exists() else None
-    revealed = control.test_revealed if control is not None else True  # legacy: read-only history
+    # Legacy (no control file) is read-only history; a fully recorded held-out
+    # means the terminal evaluation finished, so results auto-reveal (mirrors
+    # test_results_revealed, reusing the records already in hand).
+    revealed = control is None or control.test_revealed or heldout_complete(experiment_dir, records)
     sessions: list[dict[str, object]] = []
     if sessions_plan:
         for planned in sessions_plan:
@@ -373,6 +405,9 @@ def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, o
         {
             "sessions": sessions,
             "control": control.to_record() if control is not None else None,
+            # Effective reveal state (manual reveal OR held-out completed); the
+            # UI must key on this, not on the raw control flag.
+            "test_revealed": revealed,
             "params": _public_params(read_json(hitl_dir / PARAMS_NAME)),
             "heldout_records": [_public_heldout_view(record, revealed) for record in heldout_records],
         }

@@ -42,7 +42,7 @@ FOLD_CORE_CONTRACT = """\
 FOLD_ENV_SECTION = """\
 # 环境与配置
 ## Pipeline 流程
-- Experiment 由多个 Epoch 组成；每个 Epoch 开始时运行一次元学习会话；若配置了 Fold 间隔，还会在固定数量的 Fold 完成后、下一 Fold 开始前再次运行。每次产出当前生效的 Taste 和可选小幅正则化，随后继续按配置的日/周/月/季/年 Fold 周期启动普通 Fold Agent（即你）。
+- Experiment 由多个 Epoch 组成；每个 Epoch 开始时运行一次元学习会话；若配置了 Fold 间隔，还会在固定数量的 Fold 完成后、下一 Fold 开始前再次运行。每次产出当前生效的 Taste 和可选小幅正则化，随后继续按配置的日/周/月/季/年 Fold 周期启动普通 Fold Agent（即你）。Fold 周期只是滚动评估窗口的推进节奏，不是策略的调仓或交易频率；调仓/交易频率由你的机制假设自行决定，且应使单个 Validation 窗口内有足够多的独立决策与成交样本可供评估——与 Fold 周期同级的低频调仓在单个窗口内只有一次决策，无法被验证。
 - 你只看到本 Fold 的决策输入、训练/验证可见窗口和父产物；测试与 held-out 区间由 Environment 在你冻结产物后隐藏执行，你无法读取。
 - 单个 Fold 的闭环：探查可见数据与父产物 → 在 `output/`（及可选 `models/`）小步修改 → `modification_check` → `backtest`（valid）复盘 → 收敛后 `finish_fold`。`finish_fold` 只表示你停止修改，是否冻结由 Pipeline 复核。
 - 策略与模型产物链式继承；当前 Taste 在下一次元学习触发前持续生效。若本 Fold 没有更好的可接受更新，保留 Pipeline 选择的 fallback 父产物，不要为了产生改动而改动。
@@ -338,7 +338,7 @@ META_LEARNING_INSTRUCTION = """\
 - `engine` 由你按问题选择；若某个引擎限流、失败或返回空结果，换引擎或重试同一视角。不要为满足类别而构造无效查询。
 - `tavily` 适合近期实践、工程经验、市场结构解释和公开资料交叉验证。`semantic_scholar` 适合论文、理论名、方法名和英文关键词；其结果是论文元数据和摘要，不等价于普通网页搜索。
 - 如需阅读 `web_search` 返回的公开网页，可用 `web_fetch` 抓取单个 URL；默认直连，只有直连失败、明显卡顿或任务明确需要代理时才设置 `use_proxy=true`；它只返回受限 markdown 摘录并把完整有界文本写入日志，不支持登录、认证、POST、PDF、浏览器渲染或 JS 执行。
-- 从机制假设、可见数据、执行约束、反证路径和失败模式做充分推理，把资料收敛为一个具有创新性又有实际意义、并适配 run manifest 中周期粒度、交易频率和执行约束的探索方向。
+- 从机制假设、可见数据、执行约束、反证路径和失败模式做充分推理，把资料收敛为一个具有创新性又有实际意义、并与 run manifest 中执行约束相容的探索方向。注意：Fold 周期（日/周/月/季/年）只是滚动评估窗口的推进节奏，不是策略的调仓或交易频率；交易频率由机制假设自行决定，且应使单个 Validation 窗口内产生足够多的独立决策与成交样本供统计评估——与 Fold 周期同级的低频调仓在单个窗口内只有一次决策，无法被验证，不要据此推荐调仓节奏。
 - 评估 development 证据时，compact Test 只能辅助识别多 Fold 的失效模式、方向一致性和暴露问题；不得用 Test 水平或 Validation/Test 差距选择/回滚产物或选任何参数。短区间、后续 Meta 自适应使用和多 Epoch 重复开发都会放大过拟合；把“开发反馈”与“最终可泛化”分开，并为核心结论给出反证条件。
 - NL 证据存在发布时间/入库时间、检索召回、模型常识污染、自由文本解析和前视泄露风险；Taste 应说明 NL 更适合作为主信号、辅助过滤还是风险降权。
 - 如果当前 `output/` 或 `models/` 明显冗余、过拟合或重复，可以小幅正则化：删除长期未生效或明显过拟合的候选筛选、NL prompt、交易 helper 或模型参数；合并重复函数；把具体月份、题材、个股经验抽象成更通用的条件；缩短提示、代码和不必要的模型参数，保持修改量在上限内。
@@ -346,7 +346,7 @@ META_LEARNING_INSTRUCTION = """\
 - 写入 `/mnt/agent/workspace/taste.md` 后，调用 `done` 结束元学习会话。
 
 ## Taste 输出合同
-把当前阶段的探索品味写入 `/mnt/agent/workspace/taste.md`。Taste 是下一次元学习触发前后续普通 Fold Agent 的方向性约束，不是实现计划、调参记录或代码模板。必须使用中文撰写；代码标识、论文标题、模型名、仓库名和英文专有名词可以保留原文。
+把当前阶段的探索品味写入 `/mnt/agent/workspace/taste.md`。Taste 是下一次元学习触发前后续普通 Fold Agent 的方向性先验，不是实现计划、调参记录或代码模板。若研究者提供了实验级探索方向，Taste 必须服务并细化该方向，不得替换、稀释或反向否定它；证据不支持时按指令章节的要求降级并说明原因。必须使用中文撰写；代码标识、论文标题、模型名、仓库名和英文专有名词可以保留原文。
 
 `taste.md` 只能包含一个一级标题和以下三个二级章节；不要新增其他二级章节，不要按 Fold、日期或时间窗口分解计划。章节内可以使用简短的三级标题或项目符号。请按下面模板写入；代码块围栏本身不要写入 `taste.md`。
 
@@ -373,6 +373,7 @@ META_LEARNING_INSTRUCTION = """\
 - Taste 不得规定 `candidate.py` / `trading.py` / `nl_prompt.md` 等模板文件名为固定结构；只有 `output/main.py` 是官方必需入口，其他结构可复用模板，也可由 Fold Agent 用 helper 模块或子包自由组织。
 - Taste 不得把 development 结果表述为已证明的泛化结论（如“真实 alpha”“不是样本内过拟合”）：全部可见证据都来自同一段有限开发窗口，样本量不支持这类判定；因子有效性只能写成带样本局限与反证条件的方向性倾向。
 - Taste 不得整体禁止某个因子类别或把探索空间收窄到单一信号家族；可以排序优先级，但必须为后续 Fold 保留至少一条与主信号不同源的备选方向（仍应服务于同一机制假设，与"统一机制"要求不冲突），作为主信号拥挤、衰减或市况切换时的降级路径。
+- Taste 中的模型容量、参数规模、复杂度等量化上限只能作为附反证条件的初始默认，不得写成无条件硬禁令；后续 Fold 在 Validation 证据支持下可以突破这些默认。
 - Taste 不得指示后续 Fold 不做任何修改直接冻结，也不得以“修改量最小化”本身为目标压缩探索；收敛期的正确表述是每个 Fold 至少完成一次可检验的假设验证（小改动、稳健性检查或消融复核均可），验证无改进时保留父产物。
 - Taste 不得写入任何具体日历日期（`YYYY年`、`YYYY-MM`、`YYYYMMDD`、`YYYYQn`、季度+年等任意形式）、Fold 标签、某个 Fold 的专属计划，或复述 valid/test/held-out 的具体区间。描述当前样本窗口局限时用定性表述，不要写日期：反例 `日内数据仅覆盖 21 个交易日（2021 年 8-9 月）`、`2020Q3 有效`；正例 `决策 snapshot 的分钟历史回看较短，而 valid replay 覆盖需另行审计`。季度/月/周等调仓节奏词和纯数量、百分比、指数名（如沪深300）不受限。调用 `done` 前自行逐行扫描 `taste.md` 删除任何日历日期；done 门会拒绝含日历日期或本可见窗口年份的 Taste 并要求改写。
 - 不得新增只因某段 development 表现好才成立的规则。
@@ -437,7 +438,14 @@ def build_system_prompt(
     if step_tree_enabled:
         context_parts.append(STEP_TREE_SECTION.replace("# Step 产物树", "## Step 产物树"))
     if taste_prompt.strip():
-        context_parts.append(f"## 本 Epoch 的 Taste（元学习注入）\n{taste_prompt.strip()}")
+        context_parts.append(
+            "## 本 Epoch 的 Taste（元学习注入）\n"
+            "Taste 是元学习会话为服务研究者探索方向而写的方向性先验，不是已验证结论。"
+            "它不替代研究者注入的指令与任何硬约束；三者冲突时，硬约束最高，其次研究者指令，Taste 最后。"
+            "Taste 中的模型容量、参数规模等量化上限是可证伪的初始默认：当 Validation 证据支持时你可以突破，"
+            "并在会话中简要说明理由。\n\n"
+            f"{taste_prompt.strip()}"
+        )
     exploration_section = build_fold_exploration_section(fold_exploration_directive)
     if exploration_section:
         context_parts.append(exploration_section)
