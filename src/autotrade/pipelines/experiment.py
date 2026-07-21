@@ -31,7 +31,7 @@ from autotrade.environment.identity import agent_visible_ref as _agent_visible_r
 from autotrade.environment.llm.proxy import LLMProxy
 from autotrade.environment.managed_proxy import ManagedProxySession
 from autotrade.environment.runtime import chmod_tree, AgentTraceWriter, RunManifest, new_id, sanitize_for_log, utc_now_iso
-from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree, probe_image_runtime
+from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree, probe_image_runtime, resolve_image_identity
 from autotrade.environment.sandbox_images import (
     SANDBOX_ENVIRONMENT_REQUEST_NAME,
     maybe_rebuild_sandbox_image,
@@ -233,6 +233,12 @@ class ExperimentPipeline:
             # Per-session HITL override; the "auto" selector still picks the
             # requested number of GPUs by free memory at container start.
             spec = replace(spec, gpu_count=int(gpu_count))
+        if self.config.use_docker:
+            # Pin the session to the immutable image id before anything reads
+            # the tag: a tag reassigned between the probe and container start
+            # would otherwise publish a runtime_env for a different image.
+            image_id, _ = resolve_image_identity(spec.image)
+            spec = replace(spec, image=image_id)
         sandbox.write_runtime_env(
             mode="docker" if self.config.use_docker else "local",
             sandbox_spec=spec if self.config.use_docker else None,

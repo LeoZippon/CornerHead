@@ -99,12 +99,6 @@ RUN apt-get update \
     && rm -rf /usr/local/cuda-12.8/nsight* /usr/local/cuda-12.8/gds \
         /usr/local/cuda-12.8/libnvvp /usr/local/cuda-12.8/extras/demo_suite \
         /var/log/cuda-installer.log /tmp/cuda-installer.log \
-    # Static CUDA libs are ~3.3 GiB and unused by torch-extension builds
-    # (they link the shared libs); keep only libcudart_static.a, the default
-    # `nvcc -cudart static` link target of CMake-style builds. libcudadevrt.a
-    # (relocatable device code) does not match the pattern and stays.
-    && find /usr/local/cuda-12.8/targets/x86_64-linux/lib \
-        -name '*_static*.a' ! -name 'libcudart_static.a' -delete \
     && /usr/local/cuda-12.8/bin/nvcc --version
 # glibc 2.41 (Debian trixie) declares sinpi/cospi/sinpif/cospif with noexcept;
 # CUDA 12.8's crt/math_functions.h re-declarations lack it, so any host-side
