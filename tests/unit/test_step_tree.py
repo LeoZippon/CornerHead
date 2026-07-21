@@ -289,7 +289,11 @@ class PhasePromptTest(unittest.TestCase):
         self.assertIn("不得按 Test 指标或 Validation/Test 差距", meta_prompt)
         self.assertIn("不得要求普通 Fold 下载", meta_prompt)
         self.assertIn("参与开盘集合竞价必须在 `09:15`", meta_prompt)
+        self.assertIn("关闭分钟域不会切换日线时钟", meta_prompt)
         self.assertIn("Taste 中要求下载/安装", fold_prompt)
+        self.assertIn("固定交易分钟时钟", fold_prompt)
+        self.assertIn("`include_intraday=false`", fold_prompt)
+        self.assertIn("09:30 日线开盘与 15:00 日线收盘", fold_prompt)
 
     def test_fold_strategy_interfaces_are_inside_action_section(self):
         prompt = build_system_prompt(fold_info={"fold_id": "f"}, acceptance_rules={})
@@ -353,6 +357,11 @@ class PhasePromptTest(unittest.TestCase):
         self.assertNotIn("test_period", prompt)
         self.assertNotIn("test_decision_time", prompt)
         self.assertNotIn("20220101..20220331", prompt)
+        replay_policy = facts["visible_timeline"]["replay_policy"]
+        self.assertTrue(replay_policy["fixed_session_minute_clock"])
+        self.assertTrue(replay_policy["minute_market_events_optional"])
+        self.assertEqual(replay_policy["daily_fallback_event_times"], ["09:30", "15:00"])
+        self.assertNotIn("minute_when_available_else_daily_fallback", replay_policy)
 
     def test_unit_contract_and_test_visibility_are_explicit_by_agent_kind(self):
         unit_contract = {

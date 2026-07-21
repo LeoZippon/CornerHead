@@ -119,7 +119,7 @@ MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
 **部署命令**（均在计算主机上执行）：
 
 - 首次/幂等 provisioning：`bash ops/webui/frontend_setup.sh`（创建用户、写 authorized_keys、装 nginx 配置）。
-- 完整控制台更新：`ops/webui/webui_stack.sh deploy`（先同步静态 SPA，再只回收控制台 API并等待本地 Unix-socket 健康检查通过；保留反向隧道和独立实验 worker）。
+- 完整控制台更新：完成代码修改后运行 `ops/webui/webui_stack.sh deploy`（先同步静态 SPA，再只回收控制台 API；除 Unix-socket 健康外，还要求新进程启动时加载的 source fingerprint 与当前仓库完全一致，否则部署失败；保留反向隧道和独立实验 worker）。
 - 仅 UI 资产更新时可用 `ops/webui/webui_stack.sh sync`（tar-over-ssh，归一化属主与权限）。Python/API/schema 变更不能只运行 `sync`，必须使用 `deploy` 让长驻进程重新加载代码。
 
 ### 1.3 保活、启动流程与故障排查
@@ -130,10 +130,10 @@ MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
 
 | 命令 | 作用 |
 |---|---|
-| `start` / `stop` / `status` | 启停控制台 API（uvicorn，Unix socket `.runtime/webui/console.sock`）与 autossh 反向隧道；start 在返回前等待本地 API 健康，status 含前端端到端健康检查；`.runtime/webui` 与 `logs/webui` 均为 `0700` |
+| `start` / `stop` / `status` | 启停控制台 API（uvicorn，Unix socket `.runtime/webui/console.sock`）与 autossh 反向隧道；start 在返回前等待本地 API 健康，status 同时报告进程代码是否等于当前仓库以及前端端到端健康；`.runtime/webui` 与 `logs/webui` 均为 `0700` |
 | `ensure` | 缺什么补什么（keepalive 目标，幂等） |
 | `sync` | 推送静态 SPA 到前端 |
-| `deploy` | 推送静态 SPA，并优雅重启控制台 API；保持隧道和实验 worker 不动 |
+| `deploy` | 推送静态 SPA，优雅重启控制台 API并校验 source fingerprint；保持隧道和实验 worker 不动 |
 | `install-cron` | 安装托管 crontab 块：`*/2` 分钟 `ensure` + `@reboot` |
 
 保活分三层：
@@ -148,6 +148,8 @@ MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
 
 - 手动操作和 cron 共用进程锁，避免重复拉起。
 - 进程存活同时校验 pid 和命令行，避免 pid 复用误判。
+- `code_version` 在干净工作树中是短 commit id；存在已跟踪或未跟踪改动时追加内容 hash，因此服务启动后继续修改代码也会在 30 秒内被 health、`status` 和页面「控制台代码过期」提示发现，不再被未变化的 Git HEAD 掩盖。部署成功只证明该返回时刻代码一致；之后再次修改仍须重跑 `deploy`。
+- 受管控制台以 `-B`、`PYTHONDONTWRITEBYTECODE=1` 和仓库外空 cache prefix 启动；它及其分离 worker 不读取或写入仓库内 `.pyc`，运行行为不依赖残留的 timestamp cache。手工分析仍应遵守同一原则，尤其不得直接导入冻结策略目录。
 - 日常检查保持静默，只记录实际拉起、轮转和失败。
 - 控制台与保活日志超过 10 MB 后轮转，保留一代。
 
@@ -172,6 +174,7 @@ Host cornerhead
 | 浏览器打不开 localhost:8888 | Mac 侧隧道未建立：重跑 `ssh -N cornerhead`；确认私钥对应已授权公钥 |
 | 页面能开、API 返回 503“计算主机离线” | 计算主机→前端隧道断：在计算主机 `ops/webui/webui_stack.sh status`，通常等 2 分钟 keepalive 自愈 |
 | status 显示 console DOWN | 看 `logs/webui/console.log`；`webui_stack.sh ensure` 拉起 |
+| status 或页面显示控制台代码过期 | 当前进程早于仓库 source fingerprint；先完成正在进行的编辑/提交，再运行 `ops/webui/webui_stack.sh deploy`，确认 `console code: current` |
 | UI 文案/样式是旧版本 | 忘记同步静态资产：`webui_stack.sh sync`；资产响应禁用持久缓存，普通刷新即可 |
 | 新参数/API 字段不可见 | 长驻 API 仍加载旧 Python schema：`webui_stack.sh deploy`；随后用 `status` 验证端到端健康 |
 

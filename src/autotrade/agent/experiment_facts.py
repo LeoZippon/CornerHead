@@ -148,7 +148,9 @@ def _replay_policy(data_summary: Mapping[str, object]) -> dict[str, object]:
         "include_minutes": "intraday_1min.parquet" in visible_files,
         "include_events": "events.parquet" in visible_files,
         "include_text": "text_index.parquet" in visible_files,
-        "minute_when_available_else_daily_fallback": True,
+        "fixed_session_minute_clock": True,
+        "minute_market_events_optional": True,
+        "daily_fallback_event_times": ["09:30", "15:00"],
         "forced_liquidation_last_day": True,
     }
 

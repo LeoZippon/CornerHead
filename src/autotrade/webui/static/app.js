@@ -224,6 +224,15 @@ function stateBadge(state) {
   return el("span", { class: `badge state-${state}` }, STATE_LABELS[state] || state);
 }
 
+function consoleCodeBadge(payload) {
+  if (payload.code_current !== false) return null;
+  return el("span", {
+    id: "console-code-badge",
+    class: "badge state-failed",
+    title: `控制台进程加载于 ${payload.service_code_version || "未知版本"}，仓库当前为 ${payload.repo_code_version || "未知版本"}；请运行 webui_stack.sh deploy`,
+  }, "控制台代码过期");
+}
+
 function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 }
@@ -734,6 +743,7 @@ async function renderHomePage() {
     return;
   }
   $topbarRight.append(
+    consoleCodeBadge(payload),
     el("span", { class: "mode-note" }, `并行运行 ${payload.running.length}/${payload.max_running_experiments}`),
     el("button", { class: "btn primary", onclick: openCreateModal }, "＋ 新建实验"),
   );
@@ -761,6 +771,11 @@ async function renderHomePage() {
 
 async function renderHomePageSilent() {
   const payload = await api("/api/experiments");
+  const oldCodeBadge = document.getElementById("console-code-badge");
+  const newCodeBadge = consoleCodeBadge(payload);
+  if (oldCodeBadge && newCodeBadge) oldCodeBadge.replaceWith(newCodeBadge);
+  else if (oldCodeBadge) oldCodeBadge.remove();
+  else if (newCodeBadge) $topbarRight.prepend(newCodeBadge);
   const grid = document.querySelector(".grid");
   if (!grid) return;
   const fresh = el("div", { class: "grid" });
@@ -1229,6 +1244,7 @@ async function renderDetailPage(experimentId, selectedKey) {
       detail.experiment_id,
       stateBadge(detail.state),
       detail.kind === "legacy" ? el("span", { class: "badge kind" }, "只读") : null,
+      consoleCodeBadge(detail),
       detail.worker_alive && status.code_version && detail.repo_code_version
         && status.code_version !== detail.repo_code_version
         ? el("span", { class: "badge state-failed",
@@ -1310,6 +1326,7 @@ async function renderDetailPage(experimentId, selectedKey) {
       if (badge && !badge.className.includes(`state-${freshState}`)) route(true); // fetch fresh detail on state change
       else if (raw.session_key && raw.session_key !== (status.session_key || null)) route(true);
       else if (String(raw.run_id || "") !== String(status.run_id || "")) route(true);
+      else if (fresh.code_current !== detail.code_current) route(true);
     } catch { /* transient */ }
   }, 4000);
 }

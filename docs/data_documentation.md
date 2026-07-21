@@ -578,6 +578,7 @@ results/data_quality/revision_summary.json
 - 正式 raw 根目录 `data/raw` 的源端修正写入 `results/data_quality/revision_events.jsonl`。
 - 单元测试、临时 raw 目录和过程排查目录只写本地 `revision_events.jsonl`，不得污染正式账本。
 - 正式账本不得出现 `/tmp` 路径；测试污染记录属于无效账本输入。
+- `event_id` 是修正内容的稳定语义身份（不含观测时间和下游处理状态）；正式账本只保留同一 `event_id` 的首次观测，重复探测仍可告警但不重复落账。
 - 分页接口若连续返回重复的非空满页，会 fail fast，避免死循环或重复写入。
 - `stock_basic` 代码加载只接受合法 A 股代码模式 `\d{6}.(SH|SZ|BJ)`。
 - `bak_basic` 审计的预期交易日上限必须截到审计 `end_date`，不能把 `trade_cal` 的未来 lookahead 误报为缺失。

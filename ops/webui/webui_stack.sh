@@ -28,10 +28,11 @@ LOG_DIR="$REPO/logs/webui"
 SOCK="$RUN_DIR/console.sock"
 CONSOLE_PID="$RUN_DIR/console.pid"
 TUNNEL_PID="$RUN_DIR/tunnel.pid"
+PYCACHE_DIR="$RUN_DIR/pycache"
 CRON_BEGIN="# BEGIN CornerHead webui stack"
 CRON_END="# END CornerHead webui stack"
-mkdir -p "$RUN_DIR" "$LOG_DIR"
-chmod 700 "$RUN_DIR" "$LOG_DIR"   # socket and logs may contain experiment details
+mkdir -p "$RUN_DIR" "$LOG_DIR" "$PYCACHE_DIR"
+chmod 700 "$RUN_DIR" "$LOG_DIR" "$PYCACHE_DIR"   # socket and logs may contain experiment details
 
 # alive PIDFILE PATTERN — the pid must exist AND its cmdline must match PATTERN,
 # so a stale pidfile whose pid number was recycled after a reboot reads as DOWN.
@@ -44,6 +45,10 @@ alive() {
 QUIET=0
 say() { [ "$QUIET" = 1 ] || echo "$@"; }
 
+code_current() {
+    [[ "$1" == *'"code_current":true'* ]]
+}
+
 # Copy-truncate rotation, one generation; keeps the cron/uvicorn append fds valid.
 rotate_log() {
     local f="$1" max=$((10 * 1024 * 1024))
@@ -53,20 +58,27 @@ rotate_log() {
 }
 
 start_console() {
-    local pid
+    local pid health=""
     if alive "$CONSOLE_PID" run_webui; then say "console: already running (pid $(cat "$CONSOLE_PID"))"; return; fi
     rm -f "$SOCK"   # a stale socket file from a crashed console blocks the bind
     # 9>&-: long-lived children must not inherit the ensure.lock fd, or they
     # hold the lock forever and every later stack operation times out.
-    nohup "$PY" "$REPO/scripts/webui/run_webui.py" --uds "$SOCK" \
+    # An empty external cache prefix plus -B makes the console and every worker
+    # it spawns compile repository source, never read/write repo-local .pyc.
+    PYTHONPYCACHEPREFIX="$PYCACHE_DIR" PYTHONDONTWRITEBYTECODE=1 \
+    nohup "$PY" -B "$REPO/scripts/webui/run_webui.py" --uds "$SOCK" \
         >> "$LOG_DIR/console.log" 2>&1 9>&- &
     pid=$!
     echo "$pid" > "$CONSOLE_PID"
     for _ in {1..50}; do
         if alive "$CONSOLE_PID" run_webui \
-            && curl -sf -m 1 --unix-socket "$SOCK" "http://console/api/health" > /dev/null; then
-            echo "console: started (pid $(cat "$CONSOLE_PID"), uds $SOCK)"
-            return
+            && health="$(curl -sf -m 5 --unix-socket "$SOCK" "http://console/api/health")"; then
+            if code_current "$health"; then
+                echo "console: started with current code (pid $(cat "$CONSOLE_PID"), uds $SOCK)"
+                return
+            fi
+            echo "console: source changed during startup; refusing an unverifiable process" >&2
+            break
         fi
         alive "$CONSOLE_PID" run_webui || break
         sleep 0.1
@@ -115,10 +127,17 @@ restart_console() {
 }
 
 status() {
+    local health=""
     alive "$CONSOLE_PID" run_webui && echo "console: running (pid $(cat "$CONSOLE_PID"))" || echo "console: DOWN"
     alive "$TUNNEL_PID" autossh && echo "tunnel:  running (pid $(cat "$TUNNEL_PID"))" || echo "tunnel:  DOWN"
-    curl -sf -m 5 --unix-socket "$SOCK" "http://console/api/health" > /dev/null \
-        && echo "local API: ok" || echo "local API: unreachable"
+    if health="$(curl -sf -m 5 --unix-socket "$SOCK" "http://console/api/health")"; then
+        echo "local API: ok"
+        code_current "$health" \
+            && echo "console code: current" \
+            || echo "console code: STALE or unverifiable (run deploy after finalizing code)"
+    else
+        echo "local API: unreachable"
+    fi
     ssh -o ConnectTimeout=8 "root@${FRONTEND_HOST}" \
         "curl -sf -m 5 http://127.0.0.1:8080/api/health > /dev/null" 2>/dev/null \
         && echo "frontend end-to-end: ok (nginx -> tunnel -> local API)" \

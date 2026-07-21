@@ -286,7 +286,7 @@ def main(ctx):
         code = "000001.SZ"
         if ctx.cur_time == "09:30" and ctx.price(code) is not None and not ctx.broker.pending(code):
             ctx.broker.buy(code, amount=1000, limit=7.00, reason="postclose_target")
-        if ctx.cur_time > "09:34":
+        if ctx.cur_time > "15:00":
             for order in ctx.broker.pending():
                 if order.get("order_id"):
                     ctx.broker.cancel(order["order_id"], reason="postclose_stale_cancel")
@@ -1316,9 +1316,9 @@ def main(ctx):
         self.assertEqual(len(buys), 1)
         self.assertFalse(any(e.get("pending_stage") == "substep_delay" for e in result.broker.events))
 
-    def test_substep_ready_on_real_tick_without_fill_bar_records_unfilled(self) -> None:
-        # A ready delayed action should submit on the first real/orderable tick. If
-        # that tick has no later fill bar, it is recorded as no-fill rather than being
+    def test_substep_ready_on_last_session_tick_records_unfilled(self) -> None:
+        # A ready delayed action should submit on an orderable session tick. If
+        # that tick has no later activation minute, it is recorded as no-fill rather than being
         # silently rolled into a later off-session or next-day tick.
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_LATE_NO_FILL_MAIN, encoding="utf-8")
         result = self._run_with(_ohlc_replay(), _late_no_fill_minutes())
@@ -1444,6 +1444,14 @@ def main(ctx):
         self.assertEqual(buys[0]["price_label"], "auction")
         self.assertEqual(buys[0]["trade_date"], "20220104")
         # The blind 09:15 order fills at the 09:30 opening-auction print (10.0, no slippage).
+        self.assertAlmostEqual(buys[0]["price"], 10.0)
+
+    def test_daily_only_preopen_order_matches_daily_open_event(self) -> None:
+        (self.sandbox.paths.agent_output / "main.py").write_text(PREOPEN_MAIN, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), offsession_tick_minutes=0)
+        buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["price_label"], "auction")
         self.assertAlmostEqual(buys[0]["price"], 10.0)
 
     def test_open_auction_order_cannot_be_cancelled_at_0925(self) -> None:
@@ -1700,6 +1708,61 @@ def main(ctx):
         # Fills at the 15:00 close (10.6), not the 15:00 open (10.5); auction, no slippage.
         self.assertAlmostEqual(buys[0]["price"], 10.6)
 
+    def test_daily_fallback_inserts_priceless_close_auction_tick(self) -> None:
+        main = '''
+def main(ctx):
+    if ctx.cur_time == "14:57":
+        assert ctx.price("000001.SZ") is None  # daily close is still future
+        with ctx.substep("close_order", budget_minutes=0.5):
+            ctx.broker.buy("000001.SZ", amount=1000, reason="daily_fallback_close")
+'''
+        (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), offsession_tick_minutes=0)
+
+        buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["price_label"], "auction")
+        self.assertAlmostEqual(buys[0]["price"], 11.0)
+
+    def test_daily_only_market_keeps_full_clock_and_pending_order_lifecycle(self) -> None:
+        main = '''
+def main(ctx):
+    code = "000001.SZ"
+    if ctx.cur_time == "10:00":
+        assert ctx.price(code) is None
+        with ctx.substep("daily_only_order", budget_minutes=0.5):
+            ctx.broker.buy(code, amount=1000, reason="wait_for_daily_close")
+    if ctx.cur_time == "14:57":
+        assert ctx.price(code) is None
+        assert ctx.broker.pending(code), "ordinary order must remain working without market events"
+    if ctx.cur_time == "15:00":
+        assert ctx.price(code) == 11.0
+        assert ctx.broker.position(code) > 0, "15:00 daily close event must match the working order"
+'''
+        (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+        result = self._run_with(_ohlc_replay(), offsession_tick_minutes=0)
+
+        buys = [o for o in _all_orders(result.broker) if o["action"] == "buy" and o["status"] == "filled"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["price_label"], "daily:15:00")
+        self.assertEqual(result.total_ticks, 244)  # 09:15/09:25 + 242 session minutes
+        self.assertEqual(result.decision_calls, 244)
+
+    def test_daily_only_decision_interval_filters_calls_not_clock_ticks(self) -> None:
+        main = '''
+def main(ctx):
+    if ctx.cur_time not in {"09:15", "09:25", "14:57"}:
+        hour, minute = map(int, ctx.cur_time.split(":"))
+        assert (hour * 60 + minute) % 30 == 0, ctx.cur_time
+'''
+        (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
+        result = self._run_with(
+            _ohlc_replay(), offsession_tick_minutes=0, intraday_decision_minutes=30
+        )
+
+        self.assertEqual(result.total_ticks, 244)
+        self.assertEqual(result.decision_calls, 13)
+
     def test_close_auction_order_cannot_be_cancelled_after_1457(self) -> None:
         main = '''
 def main(ctx):
@@ -1764,6 +1827,32 @@ if __name__ == "__main__":
 
 
 class DayTickPlanTest(unittest.TestCase):
+    def test_daily_events_attach_to_the_fixed_session_clock(self) -> None:
+        rows = pd.DataFrame(
+            [
+                {"trade_date": "20220104", "ts_code": TS_CODE, "minute_key": "09:30", "open": 10.0},
+                {"trade_date": "20220104", "ts_code": TS_CODE, "minute_key": "15:00", "open": 11.0},
+            ]
+        )
+        plan = _day_tick_plan(rows, 2, offsession_tick_minutes=0)
+
+        session = [tick for tick in plan if tick.is_session]
+        self.assertEqual(len(session), 242)
+        self.assertEqual((session[0].minute_key, session[-1].minute_key), ("09:30", "15:00"))
+        empty_tick = next(tick for tick in session if tick.minute_key == "10:00")
+        self.assertFalse(empty_tick.has_market_event)
+        self.assertTrue(empty_tick.group.empty)
+
+        close_ticks = [tick for tick in plan if tick.minute_key == "14:57"]
+        self.assertEqual(len(close_ticks), 1)
+        close_tick = close_ticks[0]
+        self.assertFalse(close_tick.has_market_event)
+        self.assertTrue(close_tick.is_session)
+        self.assertTrue(close_tick.is_auction)
+        self.assertTrue(close_tick.is_close_auction)
+        self.assertTrue(close_tick.group.empty)
+        self.assertEqual(close_tick.activate_index, 241)
+
     def test_0925_is_blind_and_result_tick_uses_stk_auction(self) -> None:
         minutes = pd.DataFrame(
             [
@@ -1813,7 +1902,7 @@ class DayTickPlanTest(unittest.TestCase):
 
         opening = [tick for tick in plan if tick.minute_key == "09:30"]
         self.assertEqual(len(opening), 1)
-        self.assertTrue(opening[0].is_real)
+        self.assertTrue(opening[0].has_market_event)
         self.assertTrue(opening[0].always_decide)
         self.assertEqual(float(opening[0].group.iloc[0]["open"]), 10.0)
 

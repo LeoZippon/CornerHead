@@ -37,6 +37,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     analysis_service = AnalysisService(repo_root)
     app = FastAPI(title="CornerHead Console", docs_url=None, redoc_url=None)
     trading_days_cache: dict[str, list[str] | None] = {}
+    service_code_version = repo_code_version(repo_root)
 
     @app.middleware("http")
     async def revalidate_frontend_assets(request: Request, call_next):
@@ -59,13 +60,20 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     code_version_cache: dict[str, object] = {"at": 0.0, "value": ""}
 
     def _repo_code_version() -> str:
-        """Current repo HEAD, 30s-cached: the UI compares it against each live
-        worker's start-time stamp to flag workers running stale code."""
+        """Current source fingerprint, 30s-cached for stale-process checks."""
         now = time.monotonic()
         if now - float(code_version_cache["at"]) > 30.0:
             code_version_cache["value"] = repo_code_version(repo_root)
             code_version_cache["at"] = now
         return str(code_version_cache["value"])
+
+    def _code_status() -> dict[str, object]:
+        current = _repo_code_version()
+        return {
+            "service_code_version": service_code_version,
+            "repo_code_version": current,
+            "code_current": service_code_version == current,
+        }
 
     def _experiment_dir(experiment_id: str) -> Path:
         try:
@@ -83,6 +91,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             "experiments_root": str(manager.experiments_root),
             "max_running_experiments": MAX_RUNNING_EXPERIMENTS,
             "running": manager.running_experiments(),
+            **_code_status(),
         }
 
     def _inherit_sources() -> list[str]:
@@ -119,7 +128,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             "experiments": registry.list_experiments(manager.experiments_root),
             "running": manager.running_experiments(),
             "max_running_experiments": MAX_RUNNING_EXPERIMENTS,
-            "repo_code_version": _repo_code_version(),
+            **_code_status(),
         }
 
     @app.post("/api/experiments")
@@ -134,7 +143,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     def get_experiment(experiment_id: str) -> dict[str, object]:
         _experiment_dir(experiment_id)
         detail = registry.experiment_detail(manager.experiments_root, experiment_id)
-        detail["repo_code_version"] = _repo_code_version()
+        detail.update(_code_status())
         return detail
 
     @app.delete("/api/experiments/{experiment_id}")
@@ -167,6 +176,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         return {
             **registry.experiment_state(experiment_dir),
             "raw_status": read_status(experiment_dir / HITL_DIR_NAME / STATUS_NAME),
+            **_code_status(),
         }
 
     # ---- folds -------------------------------------------------------------------

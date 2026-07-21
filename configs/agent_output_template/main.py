@@ -33,15 +33,16 @@ Run rolling research at a fixed time and cache by the date/data node it actually
 depends on. ``ctx.snapshot_dir`` never rolls, so frozen features should be computed
 once per backtest (the live bar is always ``ctx.bars`` / ``ctx.price``).
 
-Orders fill a LATER bar (``execution_lag_bars`` ahead), never within the decision
-bar. Broker actions and ``ctx.state_dir`` access must run inside a positive-budget
+Orders enter the Broker a LATER fixed session minute (``execution_lag_bars`` ahead),
+never within the decision minute; without a market event they remain working.
+Broker actions and ``ctx.state_dir`` access must run inside a positive-budget
 ``ctx.substep``; even light per-tick management should use a small budget such as
 0.5 minutes so runtime and submit latency are accounted uniformly.
 
 Account/position views are snapshots from tick entry: same-tick actions do not
 reduce those views (submitted light actions also appear in ``pending()``). Batch
 orders therefore keep a local remaining budget and leave a fee/slippage buffer.
-Same-bar matching is FIFO; only earlier orders still working reserve resources.
+Same-event matching is FIFO; only earlier orders still working reserve resources.
 """
 
 from __future__ import annotations

@@ -1883,7 +1883,13 @@ def share_float_union_files(raw_dir: Path, args: argparse.Namespace) -> list[tup
     return files
 
 def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dict[str, Any]) -> None:
-    output = (Path.cwd().resolve() / args.union_output).resolve()
+    repo_root = Path.cwd().resolve()
+    output = (repo_root / args.union_output).resolve()
+    revision_ledger = resolve_revision_ledger(
+        raw_dir,
+        getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+        repo_root=repo_root,
+    )
     files = share_float_union_files(raw_dir, args)
     frames: list[pd.DataFrame] = []
     for path, source in files:
@@ -1945,7 +1951,7 @@ def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dic
         fields=list(union.columns),
         source_hash=union_source_hash,
         key_columns=key_columns,
-        revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+        revision_ledger=revision_ledger,
         source="share_float_union_rebuild",
         allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
         allow_key_removal_overwrite=True,

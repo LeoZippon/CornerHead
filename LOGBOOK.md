@@ -1,3 +1,17 @@
+2026-07-20 控制台加载最终代码的可验证部署
+
+- 现场证据定位为部署顺序与版本盲区，而非 nginx/路径故障：远端 SPA 三个文件 hash 与本地完全一致且 `Cache-Control: no-cache`，console cwd/解释器也指向当前仓库；但 PID 1716086 于 03:37:44 启动，`main_ctx_engine.py` 最终修改发生于 03:41:04。旧 health 不暴露进程加载版本，动态字段又只返回未变化的 HEAD `77979f5`，因此进程早于最终源码却仍看似“当前”。
+- `repo_code_version()` 现对 dirty tracked diff 和 untracked 文件内容生成短 hash，console 在创建 app 时冻结加载版本并与 30 秒缓存的当前版本比较；health、列表、详情、轻量 status 及 SPA 均暴露/提示 `code_current`。`deploy` 只有在 UDS 可用且两者相等时才成功，`status` 明确报告 current/stale。
+- 受管 console 及其继承环境的 worker 以 `-B` + 禁写 bytecode + 仓库外空 cache prefix 启动，不读写仓库 `.pyc`。没有加入 autoreload、文件 watcher、额外 daemon 或自动中断 worker；完成修改后一次显式 deploy 仍是唯一切换点，保持控制面简单且不加载编辑中的半成品。
+- 服务/回放定向 135 tests 与全量 905 tests（161.594s）通过；构造同 mtime/同大小 stale pyc 的实测为普通启动读取旧值、受管启动读取新源码。Bash/JS 语法及 `git diff --check` 通过；真实 `deploy` 后 health 的服务版本与仓库版本相等、`code_current=true`，tunnel 保持原 PID 且无运行中实验；验证前 428GiB 内存可用，GPU 占用未变。
+
+2026-07-20 统一固定交易分钟时钟与可选行情事件
+
+- 确认真实架构缺口：`include_intraday=false` 本应只关闭分钟行情，却通过“无分钟文件”隐式把回放压缩为 09:30/15:00 两个日线事件，使 PIT、substep、状态、订单年龄和 14:57 收盘竞价都丢失中间时钟。取消这条数据可用性→时间结构耦合，不保留第二套日线 timeline。
+- 所有正式策略日现共用 242 个固定交易分钟（09:30–11:30、13:00–15:00）和 09:15/09:25 竞价 tick；分钟条只是可选市场事件。订单按固定分钟激活，空分钟可报单/撤单且 `ctx.price()` 为空，工作单等待下一事件；无分钟行情时仍在 09:30 日线开盘、15:00 日线收盘撮合，14:57 固定提交收盘竞价。
+- 部分分钟日同时补齐缺失的 09:30/15:00 逐票日线事件；`intraday_decision_minutes` 只过滤 `main(ctx)` 调用而不减时钟，`replay_granularity` 统一报告 `minute`。Agent facts、Fold/Meta Prompt、模板、环境/参数文档和前端参数帮助同步，没有新增配置、调度器或独立引擎。
+- 定向 385 tests 与全量 902 tests（144.148s）通过；修改 Python 编译、JS 语法、Prompt 双次导出（SHA-256 `821a608b...c4d6a3fe`）和 `git diff --check` 通过。CornerHead console 已部署为 PID 1716086，既有 tunnel PID 828388 保持不变，本地/API/前端端到端健康且无运行中实验 worker。
+
 2026-07-20 固定竞价合同与冗余配置清理
 
 - 全量核对 196 份持久化 run/host manifest（含 Sandbox 副本共 408 处 JSON 字段）后，四项配置唯一取值始终为 `True / 09:15 / 09:25 / 14:57`；9 份实验 `params.json`、CLI、HITL defaults 和新建实验前端均无覆盖入口，确认它们只是重复传递固定市场合同。
@@ -1847,3 +1861,10 @@
 - 控制台确认文案与终止结果提示同步更新；回归测试覆盖未完成 periodic Meta 的撤销→预览新指令→重新批准，以及已落账 Fold 不撤销的竞态边界。WebUI 已通过 `deploy` 更新，console PID 4058977、tunnel PID 828388，端到端健康。
 - 现场核查时 `lzp-test24` 的首个 Meta 已在部署前完成落账并进入 `epoch_001/fold_2024Q1`，故未篡改历史记录或强杀有效 Fold。实验已切到 `manual`，下一 Meta `epoch_001/meta_learning_after_fold_001` 已通过前端 API 预览并保存英文新方向、保持未批准；当前 Fold PID 3977272 持续运行。
 - 验证：相关 98 tests 通过，全量 `tests/unit` 890 tests（116.969s）通过；`py_compile`、`node --check`、`git diff --check` 通过。结束时可用 RAM 407GiB，GPU 占用未由本任务改变。
+
+2026-07-20 修正账本语义去重与过程产物清理
+
+- `revision_events.jsonl` 的 31,300 条均可解析；按既有稳定 `event_id` 只有 15,206 个逻辑事件，16,094 条（51.4%）只是不同 `detected_at` 下的重复观测，另有 71 条 `/tmp` 单测污染。原始账本已压缩备份至 `archive/data_quality/20260720_revision_ledger_dedup/`，正式账本原子压缩为 15,135 条，现 `event_id` 全唯一、无 `/tmp`、无坏行。
+- 正式修正写入改为带内核文件锁的 `event_id` 唯一追加；每进程首次扫描当前 40.5MiB 账本实测 0.36s，之后只增量读取尾部，不引入 sidecar 索引、数据库、守护进程或定时清理。revision sentinel 与 revision-aware writer 共用该边界，重复探测仍打印告警但不重复落账。
+- 修复 `write_share_float_union()` 被单测直接调用时绕过 ledger resolver 的路径，临时 raw 根现始终落本地账本。6 月 4/19 日的 14 份 `results/data_quality/process/` 一次性排查产物已有日志结论且无消费者，已删除并移除空目录。
+- 验证：TuShare 数据层 89 tests 通过；全量 `tests/unit` 906 tests（162.175s）通过。两轮测试前后正式账本 SHA-256 均为 `6e2afa72e7e80001f5c28fb19555a438b473e09c3e188a92d0507e4e94d38be3`，证明测试未再污染正式账本；`py_compile` 与 `git diff --check` 通过。

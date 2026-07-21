@@ -7,6 +7,7 @@ never replaces these records.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -257,17 +258,68 @@ def chmod_tree(root: Path, *, file_mode: int, dir_mode: int) -> None:
 
 
 def repo_code_version(repo_root: Path | None = None) -> str:
-    """Short git HEAD of the running code (best-effort, '' outside a repo).
+    """Git HEAD plus a content stamp for local changes (best-effort).
 
     Stamped into every run manifest so a frozen result can be tied to the
     implementation that produced it; long-lived workers import code at spawn,
-    so the console also compares this against the repo's current HEAD."""
+    so the console also compares this against the repository's current source.
+
+    A HEAD-only stamp silently reports equality while tracked or untracked
+    source is edited after a process starts.  Hash the actual dirty diff and
+    untracked file contents so development deployments remain observable; the
+    clean, common case stays the familiar short commit id."""
+    cwd = Path(repo_root or Path.cwd())
     try:
-        result = subprocess.run(
+        head_result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
-            cwd=repo_root or Path.cwd(), capture_output=True, text=True, timeout=10,
+            cwd=cwd, capture_output=True, text=True, timeout=10,
         )
-        return result.stdout.strip() if result.returncode == 0 else ""
+        # The WebUI process ignores SIGCHLD so subprocess return codes are not
+        # trustworthy there. Validate the output instead.
+        head = head_result.stdout.strip()
+        if not re.fullmatch(r"[0-9a-fA-F]+", head):
+            return ""
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=cwd, capture_output=True, timeout=10,
+        ).stdout
+        if not status:
+            return head
+
+        digest = hashlib.sha256(status)
+        digest.update(
+            subprocess.run(
+                ["git", "diff", "--no-ext-diff", "--binary", "HEAD", "--"],
+                cwd=cwd, capture_output=True, timeout=10,
+            ).stdout
+        )
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=cwd, capture_output=True, timeout=10,
+        ).stdout
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd, capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        root = Path(top) if top else cwd
+        for raw_name in filter(None, untracked.split(b"\0")):
+            digest.update(b"\0untracked\0")
+            digest.update(raw_name)
+            path = root / os.fsdecode(raw_name)
+            try:
+                stat = path.lstat()
+                digest.update(f"\0mode={stat.st_mode:o}\0".encode("ascii"))
+                if path.is_symlink():
+                    digest.update(os.fsencode(os.readlink(path)))
+                elif path.is_file():
+                    with path.open("rb") as handle:
+                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                            digest.update(chunk)
+            except OSError as exc:
+                # A concurrently edited/deleted file must still change the
+                # stamp rather than making source drift look clean.
+                digest.update(f"\0unreadable={type(exc).__name__}\0".encode("ascii"))
+        return f"{head}+dirty.{digest.hexdigest()[:12]}"
     except (OSError, subprocess.SubprocessError):
         return ""
 

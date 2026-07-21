@@ -287,6 +287,20 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertEqual(ledger, self.root / "revision_events.jsonl")
 
+    def test_revision_ledger_appends_each_event_id_once(self):
+        from autotrade.data_sources.tushare.io import append_jsonl_unique
+
+        ledger = self.root / "revision_events.jsonl"
+        first = {"event_id": "same", "detected_at": "first"}
+        repeated = {"event_id": "same", "detected_at": "later"}
+        distinct = {"event_id": "different", "detected_at": "later"}
+
+        self.assertTrue(append_jsonl_unique(ledger, first, key="event_id"))
+        self.assertFalse(append_jsonl_unique(ledger, repeated, key="event_id"))
+        self.assertTrue(append_jsonl_unique(ledger, distinct, key="event_id"))
+        records = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(records, [first, distinct])
+
     def test_load_stock_codes_keeps_only_valid_a_share_codes(self):
         path = self.raw_dir / "stock_basic" / "list_status=L.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -467,6 +481,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             download.write_share_float_union(self.raw_dir, args, report)
         self.assertEqual(report["union"]["previous_rows"], 2)
         self.assertEqual(report["union"]["rows_after_dedup"], 2)
+        self.assertTrue((self.root / "revision_events.jsonl").exists())
 
     def test_share_float_empty_refresh_keeps_existing_cap_risk_signal(self):
         path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
@@ -746,6 +761,19 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
         self.assertEqual(event["write_action"], "skipped_key_removal_overwrite")
         self.assertEqual(event["removed_keys"], 1)
+
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(common.write_parquet_revision_aware(
+                path,
+                truncated,
+                api_name="forecast_vip",
+                params={"start_date": "20200110", "end_date": "20200131"},
+                fields=list(truncated.columns),
+                source_hash="new",
+                key_columns=["ts_code", "ann_date", "type"],
+                revision_ledger=ledger,
+            ))
+        self.assertEqual(len(ledger.read_text(encoding="utf-8").splitlines()), 1)
 
         with redirect_stdout(io.StringIO()):
             did_write = common.write_parquet_revision_aware(

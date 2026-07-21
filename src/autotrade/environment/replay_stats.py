@@ -30,6 +30,7 @@ class ReplayResult:
     broker: SimBroker
     decision_date: str
     exit_date: str
+    # Official replay-clock granularity. Market-event rows may still be daily-derived.
     granularity: str = "minute"
     # Cost feedback: per-sub-step wall-time aggregates, total replay wall-clock, and
     # the number of strategy and liquidation days replayed (so the Agent can
@@ -39,8 +40,8 @@ class ReplayResult:
     replay_wall_seconds: float | None = None
     replayed_trade_days: int | None = None
     replayed_exit_days: int | None = None
-    # 24h tick-grid breakdown: total main(ctx) ticks and how many were intraday
-    # (matchable session/auction bars) vs off-session (research/state only), so the
+    # 24h tick-grid breakdown: total clock ticks and how many were intraday
+    # (fixed session/auction ticks, with or without market events) vs off-session, so the
     # Agent can see the extra cost the off-session grid adds.
     total_ticks: int | None = None
     intraday_ticks: int | None = None

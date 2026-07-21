@@ -1005,7 +1005,7 @@ def main(ctx):
             self.assertEqual(fill["price_label"], "minute:09:33")
             self.assertAlmostEqual(fill["price"], BrokerProfile().slipped_price(10.0, is_buy=True))
 
-    def test_empty_minute_replay_file_reports_daily_granularity(self):
+    def test_empty_minute_replay_file_keeps_fixed_minute_granularity(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
             pd.DataFrame(columns=["trade_date", "ts_code", "trade_time", "open", "high", "low", "close"]).to_parquet(
@@ -1017,9 +1017,9 @@ def main(ctx):
             summary = BacktestTool(ctx).run(mode="valid")
 
             self.assertEqual(summary["status"], "ok")
-            self.assertEqual(summary["replay_granularity"], "daily")
+            self.assertEqual(summary["replay_granularity"], "minute")
             detailed = json.loads((Path(summary["result_path"]) / "detailed_return.json").read_text(encoding="utf-8"))
-            self.assertEqual(detailed["replay_granularity"], "daily")
+            self.assertEqual(detailed["replay_granularity"], "minute")
 
     def test_template_strategy_can_be_overridden(self):
         with tempfile.TemporaryDirectory() as tmp:

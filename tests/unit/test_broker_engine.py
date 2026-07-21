@@ -1729,14 +1729,14 @@ class DelayedCashOpReleaseTest(unittest.TestCase):
         preopen, incoming = [], {}
         when = datetime(2022, 1, 4, 9, 5, tzinfo=tz)
         tick = _Tick(minute_key="09:05", group=REPLAY.iloc[:0], activate_index=None,
-                     is_real=False, is_auction=False, is_offsession=True)
+                     has_market_event=False, is_auction=False, is_offsession=True)
         delayed = [_DelayedAction(
             seq=0, ready_at=when,
             action={"action": "transfer", "amount": 10_000, "from_account": "stock", "to_account": "credit"},
             substep="plan", generated_at=datetime(2022, 1, 4, 9, 0, tzinfo=tz).isoformat(),
         )]
         _release_delayed_actions(delayed, broker=broker, incoming=incoming, preopen_transfers=preopen,
-                                 tick=tick, trade_date="20220104", when=when, n_real=0)
+                                 tick=tick, trade_date="20220104", when=when, n_session=0)
         self.assertEqual(len(preopen), 1)
         self.assertFalse([e for e in broker.events if e["event_type"] == "main_actions_unfilled"])
 
@@ -1753,13 +1753,13 @@ class DelayedCashOpReleaseTest(unittest.TestCase):
         self.assertEqual(fin.status, "filled")
         when = datetime(2022, 1, 4, 10, 0, tzinfo=tz)
         tick = _Tick(minute_key="10:00", group=REPLAY.iloc[:0], activate_index=None,
-                     is_real=True, is_auction=False)
+                     has_market_event=False, is_auction=False, is_session=True)
         delayed = [_DelayedAction(
             seq=0, ready_at=when, action={"action": "direct_repay", "amount": 500.0},
             substep="plan", generated_at=datetime(2022, 1, 4, 9, 0, tzinfo=tz).isoformat(),
         )]
         _release_delayed_actions(delayed, broker=broker, incoming=incoming_map(), preopen_transfers=[],
-                                 tick=tick, trade_date="20220104", when=when, n_real=0)
+                                 tick=tick, trade_date="20220104", when=when, n_session=0)
         repay = [o for o in broker.orders if o.action == "direct_repay"][-1]
         self.assertEqual(repay.status, "filled")
         self.assertFalse([e for e in broker.events if e["event_type"] == "main_actions_unfilled"])
@@ -1770,9 +1770,9 @@ def incoming_map():
 
 
 class ReplayIntegrationTest(unittest.TestCase):
-    def test_main_runs_each_bar_and_liquidates_at_exit(self):
-        # Decide once at the 09:25 pre-open tick; next-bar execution fills it, and
-        # the position is force-liquidated on the final replay day.
+    def test_main_runs_on_fixed_clock_and_liquidates_at_exit(self):
+        # Decide once at 09:25; the order activates at 09:31, waits for the daily
+        # close market event, and the position is force-liquidated on the exit day.
         def buy_hold(state):
             if state["cur_time"] != "09:25" or _held(state, "000001.SZ"):
                 return []
@@ -1785,7 +1785,7 @@ class ReplayIntegrationTest(unittest.TestCase):
             main_policy=FakeMainPolicy(buy_hold),
         )
         stats = compute_return_stats(replay)
-        self.assertEqual(stats["replay_granularity"], "daily")
+        self.assertEqual(stats["replay_granularity"], "minute")
         self.assertEqual(stats["order_status_counts"].get("filled"), 1)
         self.assertGreater(stats["total_return"], 0.0)
         self.assertTrue(any(e["event_type"] == "position_closed" for e in replay.broker.events))

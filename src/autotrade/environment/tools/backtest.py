@@ -264,11 +264,7 @@ class BacktestTool:
         with guard:
             artifact = load_strategy_artifact(self.ctx.paths.agent_output)
             decision_time = str(self.ctx.manifest.require("valid_decision_time"))
-            replay_granularity = (
-                "minute"
-                if _replay_minutes_available(self.ctx.paths.valid / "intraday_1min.parquet")
-                else "daily"
-            )
+            replay_granularity = "minute"  # fixed clock; market rows are optional
             snapshot_dir = self._resolved_snapshot()
             with _formal_artifacts_readonly(self.ctx.paths, restore_writable=not self.ctx.write_locked):
                 with _formal_replay_execution(self.ctx) as (executor, runtime_dir, _rpc_agent):
@@ -370,7 +366,7 @@ class BacktestTool:
                 "auction_source_bytes": _path_bytes(replay_dir / "auction.parquet"),
             }
         )
-        replay_granularity = "minute" if minute_source is not None else "daily"
+        replay_granularity = "minute"  # one official fixed-minute replay engine
         result_dir = self._planned_result_dir(mode, result_name)
         if result_dir.exists():
             raise ToolError(f"result directory already exists: {result_dir}")

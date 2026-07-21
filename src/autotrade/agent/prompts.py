@@ -33,7 +33,7 @@ FOLD_CORE_CONTRACT = """\
 - 所有 `ctx.state_dir` 访问、`ctx.broker`/`ctx.nl()` 调用、状态读写和实质筛选/推理都必须位于 `ctx.substep(name, budget_minutes=B)` 内；`B>0` 且同 tick 名称唯一。`B>=1` 的 action 只在 `ready_at` 仍处于交易所申报窗口时提交，不会自动顺延。
 - PIT 以 `ctx.asof_dir` 和仿真时钟为准；`ctx.snapshot_dir` 是回放内不变的研究基准。`intraday_trade_days` 只限制决策 snapshot 的历史分钟回看，Valid replay 在分钟源存在时覆盖完整 Validation 区间；分别核对 `data_summary.json` 的 `snapshot`/`valid` view。
 - 单位是策略合同：先读 `data_summary.json.unit_contract`，按“文件 + dataset + 字段”解释异构 union。`daily` 的比例是小数（5%=0.05），`moneyflow.*_amount` 是万元（500=人民币 500 万元），`index_daily.pct_chg` 是百分数值（5%=5.0）。未知单位不得进入信号或阈值。
-- 参与 09:30 开盘集合竞价的订单必须在盲 `09:15` tick 提交；`09:25` 新单进入首根连续交易 bar 并计 taker 滑点。普通 bar 决策按 `execution_lag_bars` 延后撮合；普通/信用账户、现金、持仓和 T+1 各自独立，Broker 才是持仓与委托真相源。
+- 参与 09:30 开盘集合竞价的订单必须在盲 `09:15` tick 提交；`09:25` 新单于 09:31 进入 Broker。普通盘中单按 `execution_lag_bars` 个固定交易分钟后进入 Broker；激活分钟无行情则继续挂单到下一市场事件。普通/信用账户、现金、持仓和 T+1 各自独立，Broker 才是持仓与委托真相源。
 - `ctx.positions` 行的确切键是 `account`/`ts_code`/`side`/`quantity`/`sellable_quantity`/`entry_price`/`entry_date`/`entry_cost`/`last_price`/`market_value`；不存在 `qty`/`volume`/`cost_basis`/`avg_price`。判断持有看 `quantity`，卖出按 `sellable_quantity`。
 - 普通 Fold 无外网且不能安装或下载。Taste 中要求下载/安装，或依赖未出现在 `runtime_env` 与可继承 `output`/`models` 的资源，都必须自主降级为当前环境可执行方案。
 - `finish_fold` 前，当前 `output`/`models` hash 必须通过 `modification_check` 和一次不带 `replay_window` 的完整 Valid；提交当前最好且已验证的最小产物，删除失败方向的缓存、死代码和装饰性残留。\
@@ -72,12 +72,12 @@ FOLD_ENV_SECTION = """\
 - 正式产物不得包含 `__pycache__`、`.pyc`、`.pyo`、临时数据文件、日志、数据 dump、notebook 或密钥；模型权重只能放在 `models/`，不能放进 `output/`。
 
 ## 回放与交易环境规则（写入回测流程，无法绕过）
-- 入口：Environment 按 24h tick 网格逐 tick 调用一次 `main(ctx)`（一次覆盖全市场），盘中 09:15–15:00 为 1 分钟 bar，普通盘中 bar 的决策间距见事实 `intraday_decision_minutes`（默认 1 = 每分钟；竞价 tick 恒为决策 tick，Broker 仍逐 bar 撮合挂单），非交易时段按 `offsession_tick_minutes` 唤醒但只用于研究、状态和计划维护。无需返回 `trade_intents`。
-- 可报单时点：只有显式可报单 tick（`09:15`/`09:25`/`14:57`、启用时的盘后定价 tick）或有真实行情的交易分钟 tick 才能提交订单；普通 off-session tick 只做研究与计划。参与开盘集合竞价必须在 `09:15` 提交；`09:25` 新单进入首根连续交易 bar。
+- 入口：Environment 始终按固定交易分钟时钟推进（09:30–11:30、13:00–15:00，另含 09:15/09:25 竞价 tick）；分钟行情只是可选市场事件。`include_intraday=false` 时仍推进每个时钟 tick、PIT/状态/substep/订单生命周期，只有 09:30 日线开盘与 15:00 日线收盘事件带价格。普通盘中 `main(ctx)` 间距见 `intraday_decision_minutes`；非交易时段按 `offsession_tick_minutes` 唤醒且只用于研究、状态和计划维护。
+- 可报单时点：固定交易时钟内均可提交或撤销；当前 tick 无行情时 `ctx.price()`/`ctx.bar()` 为空，订单进入 Broker 后继续挂起，直到后续市场事件可撮合。普通 off-session 与竞价结果研究 tick 不可报单。参与开盘集合竞价必须在 `09:15` 提交；`09:25` 新单于 09:31 进入 Broker。
 - 盘后固定价格 tick（如启用，默认 15:05）：可见当日已确认收盘价（`ctx.bars` 为收盘 bar），订单**立即按当日收盘价成交**（无滑点、无成交延迟，`limit` 劣于收盘价视为无效申报拒单）；仅限该日已开通盘后定价的板块（科创板 2019-07 起、创业板 2020-08 起、其余 A 股 2026-07-06 起，之前的日期拒 `afterhours_not_available`）；`short`/`fin_buy` 开新杠杆仓不支持；涨跌停/停牌/T+1/资金约束照常执行。
-- 固定日内时间表（贴近真实交易员的日常例程）：为策略选定少数**固定的每日时钟时点**，用 `ctx.cur_time` 门控，而不是每个 tick 或随机时点行动。典型安排：盘前固定时点（如 `08:00`）研究并写计划 → 需参与开盘集合竞价则在 `09:15` 盲下单，否则从 `09:25` 或真实连续 bar 进入 → 盘中固定节奏管理 → `14:57` 收尾。事件驱动策略也应收敛到少数固定检查点，使信号计算、模型推理与 `ctx.nl()` 成本可控、可复现。
-- 成交延迟：在某根 bar 决策的单默认于其后第 `execution_lag_bars`（默认 2）根 bar 起进入撮合，杜绝 bar 内前视（如 09:35 决策、09:37 起成交）。临近收盘、其后无可成交 bar 的决策无法成交。
-- 竞价：`09:15` 信息 tick 无价格，盲下单成交于 09:30 开盘竞价；`09:25` 仍不暴露竞价结果，盲下单成交于首根连续 bar（按 taker 滑点），且不能再撤销此前开盘竞价单。`stk_auction` 结果只在实际落地后可见；09:30前的结果 tick 仅供研究、不可报单或撤单，策略应等09:30真实 bar。`14:57` 下单成交于 15:00 收盘竞价并进入不可撤阶段，**只对照单一竞价价**：限价可成交则按竞价价清算，劣于竞价价不成交。真正开/收盘集合竞价成交不计滑点。
+- 固定日内时间表（贴近真实交易员的日常例程）：为策略选定少数**固定的每日时钟时点**，用 `ctx.cur_time` 门控，而不是每个 tick 或随机时点行动。典型安排：盘前固定时点（如 `08:00`）研究并写计划 → 需参与开盘集合竞价则在 `09:15` 盲下单，否则从 `09:25` 或连续交易时钟进入 → 盘中固定节奏管理 → `14:57` 收尾。事件驱动策略也应收敛到少数固定检查点，使信号计算、模型推理与 `ctx.nl()` 成本可控、可复现。
+- 成交延迟：普通盘中决策默认于其后第 `execution_lag_bars`（默认 2）个固定交易分钟进入 Broker，杜绝同分钟前视（如 09:35 决策、09:37 激活）。激活分钟没有行情时继续挂单，临近收盘且没有后续激活分钟则不提交。
+- 竞价：`09:15` 信息 tick 无价格，盲下单成交于 09:30 开盘竞价；`09:25` 仍不暴露竞价结果，新单于 09:31 进入 Broker，完整分钟行情下通常在首根连续 bar 按 taker 规则撮合，缺行情则继续挂起；此前开盘竞价单不能再撤。`stk_auction` 结果只在实际落地后可见，09:30前结果 tick 仅供研究。`14:57` 固定存在；无该分钟行情时 `ctx.price` 为空，其订单仍于 15:00 收盘竞价清算并进入不可撤阶段。真正开/收盘集合竞价按单一竞价价且不计滑点。
 - 订单类型：市价单按进入 bar 的 open + 滑点成交；该分钟该票无成交时继续挂单、在当日下一个有成交的 bar 成交（当日收盘仍未成交自动撤销）。限价单（FIX_PRICE）挂单，若 open 已优于限价则按 open 成交，否则须 bar **严格击穿**限价（买单 low 低于限价 / 卖单 high 高于限价）才按限价成交——仅触及视为排队未成交；对只有日线数据的股票（按日线合成 bar 撮合）限价单不做区间击穿、只按合成 bar 参考价成交。限价单默认当日有效，直到成交、策略主动撤销或日终清扫。需要“N 分钟后撤单”时，用 `pending()` 的 `age_minutes` 加 `cancel()` 自行管理。
 - Broker 约束：普通+信用两个账户的现金、持仓、T+1 与风险约束相互独立；Broker 强制可用余额、手数、涨跌停、停牌、两融标的/额度、维保比例与末日清仓。`ctx.account`、`ctx.positions` 和 `ctx.broker.stock/credit` 是 tick 入口快照，同 tick action 不回写；批量下单需本地递减一次性预算并预留费用/滑点。
 - 子步骤预算：所有会访问 `ctx.state_dir`、调用 `ctx.broker`、调用 `ctx.nl()`、读写策略状态或做实质筛选/推理的策略步骤，都必须放进 `ctx.substep(name, budget_minutes=B)`；`B>0`、tick 内 name 唯一、低报会 fail-fast。`ctx.broker` 原语和 `ctx.state_dir` 在子步骤外会被拒绝；宿主还会用 `main(ctx)` 总耗时减去 substep 耗时，拒绝实质未包裹计算。`B<1` 的轻量块在回测中视为本决策分钟内完成（仍统计/限时并带 `ready_at` 元数据）；`B>=1` 的 broker action 只有在生成 tick、`ready_at` 和释放 tick 都处于交易所接受申报窗口内才提交，否则记录未提交/未成交，不会自动排到下一交易时段。未 ready 的跨分钟 broker 动作还不是委托，不会出现在 `pending()`；`pending()` 只展示已提交但未成交/可撤的在途单。
@@ -267,7 +267,8 @@ META_LEARNING_INSTRUCTION = """\
 - 策略产物和模型参数按普通 Fold 链式继承：首个普通 Fold 继承初始模板或元学习正则化后的父产物；之后每个普通 Fold 继承上一个普通 Fold 在测试前冻结的策略和模型产物；如果某个普通 Fold 没有可接受更新，则继承 Pipeline 选择的 fallback 父产物。
 - 如果 `tree.txt` 显示 `(empty step tree)`、`tree.json.nodes` 为空、development 账本为空或 `meta_learning_memory.jsonl` 为空，按首轮处理：不要追查缺失历史、编造已验证结论或正则化不存在的过拟合经验；应理解初始 `output/`、`models/`、run manifest、runtime env 和可见数据结构，结合配置允许时的联网检索提出首个可执行 Taste。
 - 因此 Taste 应清晰、可执行、可迁移，不能只是摘要或随意建议。
-- Taste 可以包含跨周期执行先验：盘前固定时点研究；要参与开盘集合竞价必须在 `09:15` 盲提交，其订单以 09:30 竞价价成交且不计滑点；`09:25` 新单已以首根连续交易 bar 撮合并计 taker 滑点，且不能撤销早先竞价单；`14:57` 用于收盘竞价。不得把 `09:25` 称为开盘集合竞价报单窗口。
+- 正式回放始终使用固定交易分钟时钟（09:30–11:30、13:00–15:00）；分钟行情只是可选市场事件。关闭分钟域不会切换日线时钟，空分钟仍推进 PIT/状态/substep/订单，日线只在09:30/15:00提供开收盘撮合事件。
+- Taste 可以包含跨周期执行先验：盘前固定时点研究；要参与开盘集合竞价必须在 `09:15` 盲提交，其订单以09:30竞价价成交且不计滑点；`09:25` 新单于09:31进入 Broker，完整分钟行情下通常从首根连续交易 bar 按 taker 规则撮合，缺行情则继续挂起；此时不能撤销早先竞价单。`14:57` 用于收盘竞价。不得把 `09:25` 称为开盘集合竞价报单窗口。
 
 ## 可读写文件
 | 路径 | 权限 | 内容 | 用途 |

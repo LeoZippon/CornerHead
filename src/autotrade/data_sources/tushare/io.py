@@ -5,12 +5,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from datetime import datetime, timezone
+from fcntl import LOCK_EX, LOCK_UN, flock
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import pyarrow.parquet as pq
+
+
+_unique_jsonl_lock = threading.Lock()
+_unique_jsonl_state: dict[tuple[Path, str], tuple[int, int, int, set[str]]] = {}
 
 
 def file_sha256(path: Path) -> str:
@@ -103,6 +109,46 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def append_jsonl_unique(path: Path, payload: dict[str, Any], *, key: str) -> bool:
+    """Append once per stable record key, without rescanning on every write."""
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"unique JSONL record requires a non-empty string {key!r}")
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cache_key = (path, key)
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
+    with _unique_jsonl_lock, path.open("a+", encoding="utf-8") as handle:
+        flock(handle.fileno(), LOCK_EX)
+        try:
+            stat = os.fstat(handle.fileno())
+            state = _unique_jsonl_state.get(cache_key)
+            if state is None or state[:2] != (stat.st_dev, stat.st_ino) or stat.st_size < state[2]:
+                offset, values = 0, set()
+            else:
+                offset, values = state[2], state[3]
+            handle.seek(offset)
+            while line := handle.readline():
+                try:
+                    existing = json.loads(line).get(key)
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+                if isinstance(existing, str) and existing:
+                    values.add(existing)
+            offset = os.fstat(handle.fileno()).st_size
+            if value in values:
+                _unique_jsonl_state[cache_key] = (stat.st_dev, stat.st_ino, offset, values)
+                return False
+            handle.write(encoded)
+            handle.flush()
+            values.add(value)
+            offset = os.fstat(handle.fileno()).st_size
+            _unique_jsonl_state[cache_key] = (stat.st_dev, stat.st_ino, offset, values)
+            return True
+        finally:
+            flock(handle.fileno(), LOCK_UN)
 
 
 def read_many(files: list[Path], columns: list[str] | None = None) -> pd.DataFrame:

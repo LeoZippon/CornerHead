@@ -40,16 +40,16 @@ def main(ctx) -> None:
 once per tick, with a **market-level** `ctx`. `main` owns all timing: it reconciles
 positions/orders and maintains plans every tick, then screens/opens new positions
 on the ticks it chooses. It drives the Broker primitives by `ts_code` through
-`ctx.broker`; there is no `trade_intents` mapping. Submit broker orders only on
-explicit orderable ticks (09:15/09:25/14:57, plus the after-hours fixed-price
-tick when enabled — see the `afterhours_decision_time` fact) or ticks with live
-bars; ordinary off-session ticks are for research, state updates, and plan handoff.
+`ctx.broker`; there is no `trade_intents` mapping. Fixed session-clock ticks are
+orderable even when they carry no market row; ordinary off-session and auction-result
+research ticks are for research, state updates, and plan handoff only.
 
 Orders map to live QMT `order_stock` types (no broker-side stop/conditional
-order). An order reaches the book a **later bar**, `execution_lag_bars` ahead
-(default 2, modelling submit latency), never within the bar you decided on: a
-plain call is a **market order** (fills at its bar's open + slippage; if the code
-prints no bar that minute it keeps working and fills at the day's next traded
+order). An order reaches the book a **later fixed session minute**,
+`execution_lag_bars` ahead (default 2, modelling submit latency), never within
+the minute you decided on. If that minute has no market event, the order remains
+working. A plain call is a **market order** (fills at the next event's open +
+slippage; if the code prints no bar that minute it keeps working until the next
 bar, else the day-end sweep cancels it); `limit=P` is a **limit order**
 (FIX_PRICE) that fills without slippage: at a favorable open if the bar opens
 through P, otherwise at P only when the bar trades STRICTLY through it — a bare
@@ -69,15 +69,19 @@ Within one bar the Broker matches FIFO: filled/rejected predecessors release the
 reservation immediately; only earlier orders that remain working keep resources
 frozen.
 
-The Environment calls `main(ctx)` across the WHOLE day on a 24h tick grid (intraday
-bars at 1-minute granularity plus a configurable off-session grid for research/state
-only), so the same loop also drives live trading. Do not submit new broker orders
+The Environment calls `main(ctx)` across the WHOLE day on one fixed clock: every
+exchange minute from 09:30–11:30 and 13:00–15:00, the explicit 09:15/09:25 auction
+ticks, plus a configurable off-session research grid. Minute market rows are optional:
+with none loaded, only daily-derived 09:30 open and 15:00 close events carry prices;
+all intervening ticks still advance PIT/state/substeps/orders. Do not submit orders
 from ordinary off-session ticks. To prepare a pre-open order, write the plan to
 `ctx.state_dir` inside an off-session `ctx.substep`. Submit at blind 09:15 only
 when the order should participate in the 09:30 opening auction; a new 09:25
-order instead enters matching at the first continuous bar with taker slippage.
-An observed auction-result tick between 09:25 and 09:30 is research-only. A 14:57 close-auction tick fills at the
-15:00 close. The after-hours fixed-price tick (default 15:05, when enabled) shows the
+order enters the Broker at 09:31 and waits if no event is available. An observed
+auction-result tick between 09:25 and 09:30 is research-only. The fixed 14:57
+close-auction tick fills at the 15:00 close; without a 14:57 market row its
+`ctx.price()` is `None`, avoiding future-close leakage.
+The after-hours fixed-price tick (default 15:05, when enabled) shows the
 confirmed close in `ctx.bars` and settles orders **immediately at that close** (no
 slippage, no lag; a limit worse than the close is an invalid submission) — only for
 codes whose board has after-hours trading on that date (STAR from 2019-07, ChiNext

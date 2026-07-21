@@ -13,9 +13,10 @@ no network access or unbounded loops. The Broker enforces cash, short margin,
 T+1 sellable balance, lot size, price limits, suspension, and shortability, and
 reserves the final replay day for mandatory liquidation.
 
-Orders fill a few bars later (``execution_lag_bars``), and ``ctx.positions``
-reflects FILLED positions only, so a just-submitted exit is not visible there until
-it fills. Gate management on ``ctx.broker.pending(ts_code)`` (the working-order
+Orders enter the Broker a few fixed session minutes later (``execution_lag_bars``)
+and wait if no market event is available. ``ctx.positions`` reflects FILLED
+positions only, so a just-submitted exit is not visible there until it fills.
+Gate management on ``ctx.broker.pending(ts_code)`` (the working-order
 query) — and/or band/threshold guards — so a rule does not re-fire the same order
 on consecutive ticks before it fills. Use ``ctx.broker.pending()`` with no code to
 scan all working orders; returned records include ``order_id`` and ``age_minutes``

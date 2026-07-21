@@ -1,9 +1,9 @@
-"""Minute replay market data and the daily-synthesized bar fallback.
+"""Optional minute-market events for the fixed per-minute replay clock.
 
-The per-minute ``main(ctx)`` engine (``main_ctx_engine.py``) replays real
-minute bars when the slot carries them and falls back to two synthetic bars
-per day (09:30 open, 15:00 close) built from the daily row. Synthetic bars are
-flagged so the Broker restricts them to reference-price fills.
+The clock lives in ``main_ctx_engine.py`` and never depends on this data source.
+When minute rows are absent, daily data supplies two synthetic market events per
+day (09:30 open and 15:00 close). Synthetic rows are flagged so the Broker
+restricts them to reference-price fills.
 """
 
 from __future__ import annotations
@@ -334,8 +334,10 @@ def empty_minute_rows() -> pd.DataFrame:
 
 
 def _synthetic_daily_minutes(replay_daily: pd.DataFrame, trade_date: str) -> pd.DataFrame:
-    """Fallback minute bars (09:30 open, 15:00 close) for daily-only dates.
+    """Daily-derived market events (09:30 open, 15:00 close).
 
+    Every other fixed clock minute remains price-less, so the daily close is not
+    exposed before 15:00.
     Both bars carry ``synthetic=True``: the 15:00 bar's high/low span the whole
     session, so the Broker restricts synthetic bars to reference-price fills
     (no range trade-through — see ``broker._limit_fill_price``). The day range
@@ -377,22 +379,25 @@ def minute_rows_with_daily_fallback(
         return fallback
     present_codes = set(minute_rows["ts_code"].astype(str))
     missing_rows = fallback[~fallback["ts_code"].astype(str).isin(present_codes)]
-    close_fallback = fallback[
-        (fallback["minute_key"] == "15:00")
-        & fallback["ts_code"].astype(str).isin(present_codes)
-    ].copy()
-    if not close_fallback.empty:
-        # Every close_fallback candidate has minute_key == "15:00", so only the
-        # day's 15:00 rows can collide — keying the full ~700k-row day frame
-        # cost ~0.2s/day of pure waste in host_replay_overhead.
-        at_close = minute_rows[minute_rows["minute_key"].astype(str) == "15:00"]
-        existing_keys = set(at_close["ts_code"].astype(str))
-        close_fallback = close_fallback[
-            [str(row.ts_code) not in existing_keys for row in close_fallback.itertuples()]
-        ]
-    if missing_rows.empty and close_fallback.empty:
+    event_fallbacks: list[pd.DataFrame] = []
+    for minute_key in ("09:30", "15:00"):
+        candidates = fallback[
+            (fallback["minute_key"] == minute_key)
+            & fallback["ts_code"].astype(str).isin(present_codes)
+        ].copy()
+        if candidates.empty:
+            continue
+        # Only inspect the two official event minutes; keying the full ~700k-row
+        # day frame costs measurable host replay time for no added correctness.
+        at_event = minute_rows[minute_rows["minute_key"].astype(str) == minute_key]
+        existing_codes = set(at_event["ts_code"].astype(str))
+        event_fallbacks.append(
+            candidates[~candidates["ts_code"].astype(str).isin(existing_codes)]
+        )
+    supplements = [frame for frame in (missing_rows, *event_fallbacks) if not frame.empty]
+    if not supplements:
         return minute_rows
-    return pd.concat([minute_rows, missing_rows, close_fallback], ignore_index=True).sort_values(
+    return pd.concat([minute_rows, *supplements], ignore_index=True).sort_values(
         ["minute_sort", "ts_code"],
         kind="stable",
     ).reset_index(drop=True)

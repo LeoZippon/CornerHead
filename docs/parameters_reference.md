@@ -44,7 +44,7 @@
 | `macro_window_months` | None（回退基础） | `macro` 域月窗口 |
 | `text_window_months` | None（回退基础） | `text` 域月窗口 |
 | `intraday_trade_days` | 21 | 决策输入快照的分钟线交易日窗口（回放槽分钟窗口由 Fold 周期决定，与此无关） |
-| `include_events` / `include_macro` / `include_text` / `include_fundamentals` / `include_intraday` | True | 数据域开关：关闭 = 决策快照与回放槽均不加载该域（分钟域关闭后回放退化为日线粒度） |
+| `include_events` / `include_macro` / `include_text` / `include_fundamentals` / `include_intraday` | True | 数据域开关：关闭 = 决策快照与回放槽均不加载该域；`include_intraday=false` 只移除分钟行情事件，固定交易分钟时钟不变，日线仍提供 09:30/15:00 开收盘事件 |
 | `events_datasets` / `macro_datasets` / `text_datasets` / `fundamental_datasets` | ()（=该域全部默认数据集） | 数据项子集：只加载所选数据集；未知名称在配置构造时 fail-fast |
 | `news_sources` | ()（=磁盘上全部来源） | `news` 快讯来源子集；空元组表示自动发现全部 `src=` 分区，显式列表逐源 fail-fast 校验；跨源文本载荷 hash 去重恒开启 |
 | `news_window_months` | None（跟随 text 窗口） | `news` 独立滚动窗口钳制；None 表示不额外钳制 |
@@ -158,8 +158,8 @@
 | `max_backtests_per_fold` | 30 | 单 Fold 回测次数上限（独立计时豁免的上限） |
 | `afterhours_decision_time` | `15:05` | 盘后固定价格 tick：可见已确认收盘价，合资格订单立即按收盘价结算；`short`/`fin_buy` 不支持；`None` 关闭 |
 | `offsession_tick_minutes` | 30 min | 盘外研究 tick 间距（`0` 关闭；盘外不下单） |
-| `intraday_decision_minutes` | 1 | 普通盘中 bar 上 `main(ctx)` 决策间距（分钟）；Broker 仍逐 bar 撮合，竞价/盘外 tick 恒为决策 tick |
-| `execution_lag_bars` | 2 | 决策 bar 到撮合 bar 的固定滞后（按当日 bar 数收敛 `max(1, min(lag, n-1))`） |
+| `intraday_decision_minutes` | 1 | 固定盘中分钟时钟上 `main(ctx)` 的调用间距；非决策分钟仍推进订单激活、PIT、状态和 substep，存在行情事件时才撮合；竞价/盘外 tick 恒为决策 tick |
+| `execution_lag_bars` | 2 | 决策到订单进入 Broker 的固定交易分钟滞后（键名为兼容保留）；激活分钟无行情时订单继续挂起，等待下一市场事件 |
 | `decision_max_sim_minutes` | 30 min | `ctx.substep` 声明预算 `B` 的上限（超过在初始化即拒） |
 | substep `budget_minutes`（Agent 声明） | `B>0`，tick 内唯一 | 实测墙钟 fail-fast + `state_dir` 写可见性 + broker action 提交时点（`B<1` 当分钟、`B>=1` 到 `ready_at`） |
 | `ctx.state_dir` 单个暂存文件 | 64 MiB | substep 首次访问才复制可见状态；合并前按普通文件和大小门禁，拒绝父目录/符号链接/FIFO 换链 |

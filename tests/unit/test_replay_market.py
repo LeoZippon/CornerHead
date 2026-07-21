@@ -12,6 +12,7 @@ from autotrade.environment.replay_market import (
     MinuteMarketData,
     ParquetMinuteReplaySource,
     _minute_key,
+    minute_rows_with_daily_fallback,
 )
 
 
@@ -73,6 +74,31 @@ class MinuteMarketDataTest(unittest.TestCase):
                     [{"trade_date": "20220104", "ts_code": "000001.SZ", "trade_time": "bad", "close": 10.0}]
                 )
             )
+
+    def test_partial_minutes_receive_missing_daily_open_and_close_events(self) -> None:
+        daily = pd.DataFrame(
+            [{
+                "trade_date": "20220104", "ts_code": "000001.SZ",
+                "open": 10.0, "high": 12.0, "low": 9.0, "close": 11.0,
+            }]
+        )
+        seed = MinuteMarketData(
+            pd.DataFrame(
+                [{
+                    "trade_date": "20220104", "ts_code": "000001.SZ",
+                    "trade_time": "10:00", "open": 10.2, "high": 10.3,
+                    "low": 10.1, "close": 10.25,
+                }]
+            )
+        ).rows_for_date("20220104")
+
+        events = minute_rows_with_daily_fallback(daily, "20220104", seed)
+
+        self.assertEqual(events["minute_key"].tolist(), ["09:30", "10:00", "15:00"])
+        opening = events[events["minute_key"] == "09:30"].iloc[0]
+        closing = events[events["minute_key"] == "15:00"].iloc[0]
+        self.assertEqual((opening["open"], opening["close"]), (10.0, 10.0))
+        self.assertEqual((closing["open"], closing["close"]), (11.0, 11.0))
 
 
 class ParquetMinuteReplaySourceTest(unittest.TestCase):

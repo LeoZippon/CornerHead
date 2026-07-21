@@ -737,7 +737,7 @@ def audit_revision_sentinel(args: argparse.Namespace) -> int:
                 source="sentinel_probe",
             )
             if event:
-                append_jsonl(ledger, event)
+                append_jsonl_unique(ledger, event, key="event_id")
                 print("REVISION_ALERT " + json.dumps(event, ensure_ascii=False, sort_keys=True))
                 events.append(event)
                 dataset_events += 1

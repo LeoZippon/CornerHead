@@ -913,7 +913,8 @@ class MetaLearningSessionTest(unittest.TestCase):
             self.assertIn("hf", runner.system_prompt)
             self.assertIn("不得要求普通 Fold 下载", runner.system_prompt)
             self.assertIn("所有产物与参数选择只依据 Validation", runner.system_prompt)
-            self.assertIn("`09:25` 新单已以首根连续交易 bar 撮合", runner.system_prompt)
+            self.assertIn("`09:25` 新单于09:31进入 Broker", runner.system_prompt)
+            self.assertIn("关闭分钟域不会切换日线时钟", runner.system_prompt)
 
     def test_meta_learning_prompt_describes_default_network_without_secret_values(self):
         with tempfile.TemporaryDirectory() as tmp:

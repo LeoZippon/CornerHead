@@ -244,7 +244,9 @@ class WebuiBackendTest(unittest.TestCase):
             {"auction_enabled", "auction_preopen_time", "auction_decision_time", "auction_close_time"}
             .isdisjoint(fields)
         )
-        self.assertIn("固定 09:15/09:25/14:57", fields["intraday_decision_minutes"]["help"])
+        self.assertIn("09:15/09:25/14:57", fields["intraday_decision_minutes"]["help"])
+        self.assertIn("固定交易分钟时钟", fields["include_intraday"]["help"])
+        self.assertIn("激活分钟没有行情", fields["execution_lag_bars"]["help"])
         self.assertTrue(all(field.get("help") for field in fields.values()))
 
     def test_period_options_and_defaults_from_calendar(self) -> None:
@@ -277,6 +279,20 @@ class WebuiBackendTest(unittest.TestCase):
             f"/api/experiments/{experiment_id}/control", json={"action": "reveal_test_results"}
         )
         self.assertEqual(response.status_code, 200)
+
+    def test_health_reports_loaded_and_current_source_versions(self) -> None:
+        payload = self.client.get("/api/health").json()
+        self.assertEqual(payload["service_code_version"], payload["repo_code_version"])
+        self.assertTrue(payload["code_current"])
+
+        with patch(
+            "autotrade.webui.server.repo_code_version", side_effect=["loaded-version", "current-version"]
+        ):
+            stale_client = TestClient(create_app(self.repo_root, self.experiments_root))
+            stale = stale_client.get("/api/health").json()
+        self.assertEqual(stale["service_code_version"], "loaded-version")
+        self.assertEqual(stale["repo_code_version"], "current-version")
+        self.assertFalse(stale["code_current"])
 
     def test_list_experiments_marks_kind_state_and_metrics(self) -> None:
         payload = self.client.get("/api/experiments").json()

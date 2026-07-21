@@ -51,6 +51,14 @@ from autotrade.environment.timeview import Timeview
 _AUCTION_PREOPEN_TIME = "09:15"
 _AUCTION_DECISION_TIME = "09:25"
 _AUCTION_CLOSE_TIME = "14:57"
+_SESSION_CLOSE_TIME = "15:00"
+# Official A-share minute clock: opening print + continuous-session minutes.
+# Market rows are optional events attached to this immutable schedule.
+_SESSION_MINUTE_KEYS = tuple(
+    f"{minute // 60:02d}:{minute % 60:02d}"
+    for start, end in ((9 * 60 + 30, 11 * 60 + 30), (13 * 60, 15 * 60))
+    for minute in range(start, end + 1)
+)
 
 
 class BacktestError(RuntimeError):
@@ -485,20 +493,21 @@ def run_main_ctx_replay(
     """Replay the region tick by tick, calling ``main(ctx)`` per tick.
 
     Market and FIX_PRICE limit orders go through the Broker's day order book:
-    the Agent decides on the bar it can see, then each order reaches a LATER bar
-    for matching. ``execution_lag_bars`` (default 2) sets the gap from the
-    decision bar to the activation bar — 1 = the immediate next bar, 2 = one bar
-    of submit latency then matching on the following bar — which removes
-    within-bar look-ahead. Broker actions issued inside ``ctx.substep`` with a
+    ``execution_lag_bars`` (default 2; legacy key name) sets the fixed-session-
+    minute gap from decision to order activation. An activated order matches only
+    when a market event is available and otherwise remains working. This removes
+    within-minute look-ahead. Broker actions issued inside ``ctx.substep`` with a
     sub-minute budget are treated as submitted in the current decision minute while
     retaining ``ready_at`` metadata for audit; actions with ``B>=1`` are first held
     until the block's ``ready_at`` and submitted only if the generating tick,
     ``ready_at``, and release tick are in an exchange order-submission window.
     From that submit tick they use the same ``execution_lag_bars`` mapping. A
-    decision with no bar ``execution_lag_bars`` ahead (near the close) cannot fill
-    and is recorded ``main_actions_unfilled``. The final trade date is reserved for
-    mandatory liquidation; minute bars drive the replay when present, else a daily
-    09:30/15:00 fallback is synthesized.
+    decision with no session minute ``execution_lag_bars`` ahead (near the close)
+    cannot fill and is recorded ``main_actions_unfilled``. The final trade date is
+    reserved for mandatory liquidation. Every strategy day uses the same fixed
+    exchange-minute clock. Optional minute rows are market events on that clock;
+    without them, daily data contributes only synthetic 09:30 open and 15:00 close
+    events while all intervening ticks still advance normally.
 
     The tick grid spans the whole day on the same ``main(ctx)`` entry, so the loop
     drives both backtest and live. Every day starts with a fixed 09:15 info tick
@@ -506,8 +515,8 @@ def run_main_ctx_replay(
     tick (no price, fills at the first continuous bar). A captured
     ``stk_auction`` result wakes ``main(ctx)`` only at its observed availability;
     pre-open result ticks are research-only, while arrivals after 09:30 wake the
-    corresponding real bar. The fixed 14:57 decision fills at the day's final
-    bar (the 15:00 close auction). These batch-auction fills are labelled
+    corresponding session minute. The fixed 14:57 decision fills at the day's
+    15:00 close event. These batch-auction fills are labelled
     ``price_label="auction"``.
     ``afterhours_decision_time`` (None = off) appends the after-hours fixed-price
     tick (盘后固定价格交易, e.g. 15:05): the strategy sees the day's close prints
@@ -518,12 +527,12 @@ def run_main_ctx_replay(
     still-working orders so the Agent can avoid re-submitting before a fill (parity
     with the live order query).
 
-    ``intraday_decision_minutes`` (default 1 = every bar) coarsens only the
-    ``main(ctx)`` decision cadence on plain intraday bars: the Broker still
-    matches every minute bar (pending orders, execution lag, auction fills are
-    unchanged), auction and off-session ticks always decide, and the Timeview /
-    staged-state clocks advance every tick. Decisions land on wall-clock minutes
-    divisible by the grid.
+    ``intraday_decision_minutes`` (default 1 = every session minute) coarsens only
+    the ``main(ctx)`` decision cadence on plain intraday clock ticks. Broker order
+    activation, pending-order ageing, Timeview and staged state still advance every
+    minute; matching runs only when that minute carries a market event. Auction and
+    off-session ticks always decide. Decisions land on wall-clock minutes divisible
+    by the grid.
 
     ``enforce_substep_timeout`` (default True) keeps the per-substep wall fail-fast
     that aborts the replay when a declared ``ctx.substep`` block runs over its budget
@@ -561,7 +570,9 @@ def run_main_ctx_replay(
             else []
         )
     }
-    granularity = "minute" if minute_market is not None or replay_minute_source is not None else "daily"
+    market_event_granularity = (
+        "minute" if minute_market is not None or replay_minute_source is not None else "daily"
+    )
     entry_date, exit_date = market.trade_dates[0], market.trade_dates[-1]
     broker = SimBroker(
         profile,
@@ -654,10 +665,13 @@ def run_main_ctx_replay(
                     afterhours_time=afterhours_decision_time,
                     auction_results=auction_results_by_date.get(str(trade_date)),
                 )
-                real_index = {tick.minute_key: i for i, tick in enumerate(t for t in plan if t.is_real)}
-                n_real = len(real_index)
+                session_index = {
+                    tick.minute_key: i
+                    for i, tick in enumerate(t for t in plan if t.is_session)
+                }
+                n_session = len(session_index)
                 # Decisions wait out the submit lag, then enter the Broker's order book
-                # (passorder) at their activation bar. Substep-wrapped broker actions
+                # (passorder) at their activation minute. Substep-wrapped broker actions
                 # are first delayed until ready_at; if ready_at is not an exchange
                 # order-submission time, the action is recorded unfilled instead of
                 # being auto-scheduled into a later session.
@@ -665,17 +679,20 @@ def run_main_ctx_replay(
                 for tick in plan:
                     tick_counts["total"] += 1
                     tick_counts["offsession" if tick.is_offsession else "intraday"] += 1
-                    if tick.is_real:
+                    if tick.is_session:
                         _match_t0 = time.monotonic()
-                        index = real_index[tick.minute_key]
+                        index = session_index[tick.minute_key]
                         for action, is_auction, is_close_auction in incoming.pop(index, []):
                             if not _submit_order(broker, action, is_auction, is_close_auction):
                                 broker.record_event(
                                     "main_action_ignored", trade_date=trade_date,
                                     action=_jsonable(action), reason="unsupported_or_missing_ts_code",
                                 )
-                        broker.match_bar(trade_date, tick.minute_key, tick.group, granularity)
-                        if index == n_real - 1:
+                        if tick.has_market_event:
+                            broker.match_bar(
+                                trade_date, tick.minute_key, tick.group, market_event_granularity
+                            )
+                        if index == n_session - 1:
                             _cancel_day_end_orders(broker, trade_date=trade_date, minute_key=tick.minute_key)
                         phase_wall["broker_match"] += time.monotonic() - _match_t0
                     when = sim_datetime(trade_date, tick.minute_key)
@@ -700,7 +717,7 @@ def run_main_ctx_replay(
                         tick=tick,
                         trade_date=trade_date,
                         when=when,
-                        n_real=n_real,
+                        n_session=n_session,
                     )
                     if released_actions:
                         broker.record_event(
@@ -712,7 +729,7 @@ def run_main_ctx_replay(
                             delayed_from_substep=True,
                         )
                     # Coarser decision grid: skip main(ctx) (and its state assembly)
-                    # on non-decision bars; matching, timeview, staged-state merges,
+                    # on non-decision minutes; matching, timeview, staged-state merges,
                     # transfers, and delayed-action release above all still ran.
                     if not _is_decision_tick(tick, intraday_decision_minutes):
                         continue
@@ -839,7 +856,7 @@ def run_main_ctx_replay(
                         tick=tick,
                         trade_date=trade_date,
                         when=when,
-                        n_real=n_real,
+                        n_session=n_session,
                     )
                     if placed_actions:
                         broker.record_event(
@@ -875,7 +892,7 @@ def run_main_ctx_replay(
         broker=broker,
         decision_date=entry_date,
         exit_date=exit_date,
-        granularity=granularity,
+        granularity="minute",
         substep_runtime=substep_runtime or None,
         replay_wall_seconds=replay_wall_seconds,
         replayed_trade_days=len(replay_days),
@@ -897,13 +914,15 @@ def run_main_ctx_replay(
 
 @dataclass(frozen=True)
 class _Tick:
-    """One decision tick and the bar its orders fill at under next-bar execution."""
+    """One clock tick with an optional market event and order activation target."""
 
     minute_key: str
     group: pd.DataFrame
     activate_index: int | None
-    is_real: bool
+    has_market_event: bool
     is_auction: bool
+    # Fixed exchange-session clock tick. It remains true when ``group`` is empty.
+    is_session: bool = False
     is_offsession: bool = False
     # A close (15:00) call-auction tick: its order fills at the final bar's CLOSE.
     is_close_auction: bool = False
@@ -919,8 +938,8 @@ def _is_decision_tick(tick: "_Tick", intraday_decision_minutes: int) -> bool:
     """Whether ``main(ctx)`` runs on this tick under the configured decision grid.
 
     Auction ticks (pre-open info, matched open, close auction) and off-session
-    research ticks always decide; plain intraday bars decide only on wall-clock
-    minutes divisible by the grid. 1 = every bar (the default, exact legacy
+    research ticks always decide; plain session ticks decide only on wall-clock
+    minutes divisible by the grid. 1 = every minute (the default, exact legacy
     behavior)."""
     if intraday_decision_minutes <= 1:
         return True
@@ -961,90 +980,91 @@ def _day_tick_plan(
     afterhours_time: str | None = None,
     auction_results: pd.DataFrame | None = None,
 ) -> list[_Tick]:
-    """Ordered decision ticks for one day, each tagged with the real-bar index its
-    orders reach the book at (``activate_index``).
+    """Build the fixed daily clock and attach optional market-event rows.
 
-    A decision on real bar *i* activates at *i + execution_lag_bars*; a bar with no
-    such later bar (near the close) yields ``activate_index=None``. Two fixed
-    pre-open ticks lead the day: a 09:15 info tick with no bars (``ctx.price`` is
-    None) activating at the first real bar (the 09:30 opening auction), and a blind
-    09:25 tick. An
-    observed ``stk_auction`` result can add a source-backed pre-open tick or wake
-    the corresponding real minute after continuous trading begins. The fixed 14:57
-    decision activates at the day's final bar (the 15:00 close auction) instead of
-    the default lag. ``offsession_tick_minutes`` (0 = off) adds a
-    research-only grid outside the session: off-session ticks never fill orders. The
-    explicit pre-open auction ticks and close-auction tick have fixed activations
-    independent of ``execution_lag_bars``. ``afterhours_time`` (e.g. 15:05) appends
-    the after-hours fixed-price tick after the last real bar: it sees the day's
-    close prints and its orders settle immediately at the official close for
-    board-eligible codes (no activation bar; see ``_execute_afterhours_action``).
+    ``activate_index`` indexes the immutable exchange-session minute schedule, not
+    the available bars. A decision on minute *i* reaches the order book at
+    *i + execution_lag_bars* even when that activation minute has no market row;
+    the working order then waits for the next market event. Two fixed pre-open ticks
+    lead the day: 09:15 activates at the 09:30 opening auction, and blind 09:25 at
+    the 09:31 first continuous minute. An observed ``stk_auction`` result can add a
+    source-backed pre-open tick or wake the corresponding fixed session minute. The
+    14:57 close-auction decision activates at 15:00. Off-session ticks remain
+    research-only. The optional after-hours tick sees only a confirmed 15:00 event
+    and settles eligible orders immediately at that official close.
     """
-    real_keys = sorted({str(key) for key in minute_rows["minute_key"]}, key=minute_sort)
-    if not real_keys:
-        return []
-    groups = {str(key): group for key, group in minute_rows.groupby(minute_rows["minute_key"].astype(str), sort=False)}
-    n = len(real_keys)
+    groups = {
+        str(key): group
+        for key, group in minute_rows.groupby(minute_rows["minute_key"].astype(str), sort=False)
+    }
+    session_keys = _SESSION_MINUTE_KEYS
+    n = len(session_keys)
+    empty_group = empty_minute_rows()
     plan: list[_Tick] = []
-    # Off-session grid frame: the session starts at the earliest pre-open tick and
-    # ends at the last real bar; ticks outside [open, close] are research-only.
-    session_open = _AUCTION_PREOPEN_TIME
-    open_min, close_min = minute_sort(session_open), minute_sort(real_keys[-1])
+    # The clock frame never depends on which source events happened to be loaded.
+    open_min = minute_sort(_AUCTION_PREOPEN_TIME)
+    close_min = minute_sort(_SESSION_CLOSE_TIME)
     # Pre-open off-session ticks are research/state only. Actual auction order
     # entry starts at the explicit pre-open auction tick below.
     for key in _offsession_keys(0, open_min, offsession_tick_minutes):
-        plan.append(_Tick(key, empty_minute_rows(), None, False, False, True))
+        plan.append(_Tick(key, empty_group, None, False, False, is_offsession=True))
     # 09:15 blind pre-open orders clear in the 09:30 opening call auction (single
     # price, no slippage): is_auction=True.
-    plan.append(_Tick(_AUCTION_PREOPEN_TIME, empty_minute_rows(), 0, False, True))
+    plan.append(_Tick(_AUCTION_PREOPEN_TIME, empty_group, 0, False, True))
     # The exchange has matched by 09:25, but this project's TuShare source does
     # not publish the full result until 09:27-09:29. Keep this order-entry tick
     # blind; never reconstruct its price from the future 09:30/09:31 minute bar.
-    plan.append(_Tick(_AUCTION_DECISION_TIME, empty_minute_rows(), min(1, n - 1), False, False))
+    plan.append(
+        _Tick(
+            _AUCTION_DECISION_TIME, empty_group, min(1, n - 1), False, False,
+            always_decide=True,
+        )
+    )
     auction_ticks, auction_wake_keys = _auction_result_ticks(
         auction_results,
-        real_keys=real_keys,
+        session_keys=session_keys,
     )
     plan.extend(auction_ticks)
-    # Clamp the lag to the day's bar count: >=1 preserves next-bar execution;
-    # <=n-1 lets the first decision reach the last bar on short/fallback days.
+    # Clamp only to the fixed session length; source sparsity never changes latency.
     lag = max(1, min(execution_lag_bars, n - 1))
-    for index, key in enumerate(real_keys):
-        if key == _AUCTION_CLOSE_TIME and index < n - 1:
-            # Close call auction: this bar's decision fills at the day's final bar's
-            # CLOSE (the 15:00 print), not its open.
-            plan.append(_Tick(key, groups[key], n - 1, True, True, is_close_auction=True))
-        else:
-            activate_index = index + lag
-            plan.append(
-                _Tick(
-                    key,
-                    groups[key],
-                    activate_index if activate_index < n else None,
-                    True,
-                    False,
-                    always_decide=key in auction_wake_keys,
-                )
+    for index, key in enumerate(session_keys):
+        group = groups.get(key, empty_group)
+        is_close_auction = key == _AUCTION_CLOSE_TIME
+        activate_index = n - 1 if is_close_auction else index + lag
+        plan.append(
+            _Tick(
+                key,
+                group,
+                activate_index if activate_index < n else None,
+                key in groups,
+                is_close_auction,
+                is_session=True,
+                is_close_auction=is_close_auction,
+                always_decide=key in auction_wake_keys,
             )
+        )
     session_end = close_min
     if afterhours_time and minute_sort(str(afterhours_time)) > close_min:
-        # After-hours fixed-price tick: the close prints are visible (ctx.bars =
-        # the final bar group) and orders settle at the close, immediately.
-        plan.append(_Tick(str(afterhours_time), groups[real_keys[-1]], None, False, False, is_afterhours=True))
+        plan.append(
+            _Tick(
+                str(afterhours_time), groups.get(_SESSION_CLOSE_TIME, empty_group),
+                None, False, False, is_afterhours=True,
+            )
+        )
         session_end = minute_sort(str(afterhours_time))
     # Post-close off-session ticks: research/state only, orders never fill.
     after_start = ((session_end // offsession_tick_minutes) + 1) * offsession_tick_minutes if offsession_tick_minutes > 0 else 0
     for key in _offsession_keys(after_start, 24 * 60, offsession_tick_minutes):
-        plan.append(_Tick(key, empty_minute_rows(), None, False, False, True))
+        plan.append(_Tick(key, empty_group, None, False, False, is_offsession=True))
     return sorted(plan, key=lambda tick: minute_sort(tick.minute_key))
 
 
 def _auction_result_ticks(
     rows: pd.DataFrame | None,
     *,
-    real_keys: list[str],
+    session_keys: tuple[str, ...],
 ) -> tuple[list[_Tick], set[str]]:
-    """Return source-backed pre-open ticks and real bars that an arrival wakes."""
+    """Return source-backed pre-open ticks and session minutes an arrival wakes."""
     if rows is None or rows.empty or "available_at" not in rows.columns or "price" not in rows.columns:
         return [], set()
     frame = rows.copy()
@@ -1059,11 +1079,11 @@ def _auction_result_ticks(
     frame["result_minute"] = available.dt.ceil("min").dt.strftime("%H:%M").to_numpy()
     ticks: list[_Tick] = []
     wake_keys: set[str] = set()
-    first_real_key = real_keys[0]
+    first_session_key = session_keys[0]
     for minute_key, group in frame.groupby("result_minute", sort=True):
-        if minute_sort(str(minute_key)) >= minute_sort(first_real_key):
+        if minute_sort(str(minute_key)) >= minute_sort(first_session_key):
             wake_key = next(
-                (key for key in real_keys if minute_sort(key) >= minute_sort(str(minute_key))),
+                (key for key in session_keys if minute_sort(key) >= minute_sort(str(minute_key))),
                 None,
             )
             if wake_key is not None:
@@ -1118,7 +1138,7 @@ def _normalize_tick(
     result: object,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]], float | None, int | None]:
     """A ``MainPolicyRunner`` step returns a ``_TickResult``; test fakes return a
-    plain action list (no sub-steps or staged writes = current next-bar behavior)."""
+    plain action list (no sub-steps or staged writes = current delayed activation)."""
     if isinstance(result, _TickResult):
         return (
             result.actions,
@@ -1140,16 +1160,15 @@ def _release_delayed_actions(
     tick: "_Tick",
     trade_date: str,
     when: datetime,
-    n_real: int,
+    n_session: int,
 ) -> list[dict[str, object]]:
     """Submit substep-produced broker actions once their declared compute is ready.
 
     A substep action is not a broker order until this release point. If its
     generating tick or ready_at is outside the exchange's accepted order-submission
     windows, the action is recorded unfilled instead of being auto-scheduled into
-    a later session. Real market ticks are orderable even when no fill bar remains;
-    those submissions follow the normal no-fill path instead of silently rolling
-    forward.
+    a later session. Fixed session ticks are orderable even without market data;
+    submitted orders wait for a later event or follow the normal no-fill path.
     """
     ready = sorted((item for item in delayed_actions if item.ready_at <= when), key=lambda item: item.seq)
     if not ready:
@@ -1217,14 +1236,14 @@ def _release_delayed_actions(
         tick=tick,
         trade_date=trade_date,
         when=when,
-        n_real=n_real,
+        n_session=n_session,
     )
 
 
 def _is_orderable_tick(tick: "_Tick") -> bool:
     if tick.is_afterhours:
         return True
-    return not tick.is_offsession and (tick.is_real or tick.activate_index is not None)
+    return not tick.is_offsession and (tick.is_session or tick.activate_index is not None)
 
 
 def _parse_datetime(value: str) -> datetime | None:
@@ -1282,7 +1301,7 @@ def _place_actions_at_tick(
     tick: "_Tick",
     trade_date: str,
     when: datetime,
-    n_real: int,
+    n_session: int,
 ) -> list[dict[str, object]]:
     """Route broker actions submitted at this tick into cancel/order queues."""
     placed_actions: list[dict[str, object]] = []
@@ -1366,7 +1385,7 @@ def _place_actions_at_tick(
                 placed_actions.append(dict(action))
             continue
         fill_index = tick.activate_index
-        if fill_index is None or fill_index >= n_real:
+        if fill_index is None or fill_index >= n_session:
             broker.record_event(
                 "main_actions_unfilled", trade_date=trade_date, minute_key=tick.minute_key,
                 action=_jsonable(action), reason="no_fill_bar_ahead",
@@ -1488,14 +1507,14 @@ def _submit_order(broker: SimBroker, action: dict[str, object], is_auction: bool
     """Translate a ``main()`` action into a Broker ``passorder`` submission.
 
     ``limit`` (a fixed price) routes to a 指定价 day order; otherwise a 对手价 market
-    order. ``close`` has no official op: it resolves to the holding account's market exit at submission
-    (the activation tick is also the match tick, so there is no drift window) —
-    an explicit ``account`` wins, else the unique holder; ambiguous closes are
+    order. ``close`` has no official op: it resolves to the holding account's market
+    exit at activation and, like other market orders, waits if that minute has no
+    event. An explicit ``account`` wins, else the unique holder; ambiguous closes are
     ignored (the driver already rejects them at call time). ``direct_repay``
     follows the official 1102 (amount in CNY) convention and needs no bar.
     ``transfer`` is handled by the pre-open batch path before this order-submission
     translator. ``is_close_auction`` marks a 15:00 close-auction order so it fills
-    at the activation bar's close.
+    at the activation event's close.
     Returns False if unsupported."""
     name = _action_name(action)
     order_kwargs = {

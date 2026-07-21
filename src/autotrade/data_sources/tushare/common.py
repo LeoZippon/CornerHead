@@ -17,7 +17,7 @@ from typing import Any, Iterable
 import pandas as pd
 import requests
 
-from .io import append_jsonl, file_sha256, has_pagination_probe, parquet_meta, parquet_rows, read_many, write_parquet
+from .io import append_jsonl, append_jsonl_unique, file_sha256, has_pagination_probe, parquet_meta, parquet_rows, read_many, write_parquet
 
 
 API_URL = "https://api.tushare.pro"
@@ -1777,7 +1777,7 @@ def write_parquet_revision_aware(
                 write_action=write_action,
                 allow_empty_revision_overwrite=allow_empty_revision_overwrite,
             )
-            append_jsonl(Path(revision_ledger), event)
+            append_jsonl_unique(Path(revision_ledger), event, key="event_id")
             print("REVISION_ALERT " + json.dumps(event, ensure_ascii=False, sort_keys=True))
         if write_action == "skipped_empty_revision_overwrite":
             print(f"{api_name} {path} returned zero rows for existing nonempty partition; skipped_empty_revision_overwrite")
