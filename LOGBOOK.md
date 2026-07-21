@@ -1,3 +1,10 @@
+2026-07-22 沙箱 CUDA 内核修复、runtime_env 动态化与镜像瘦身
+
+- 证实用户指出的三个问题并全部修复。①PyG 扩展此前确为 CPU-only：docker build 无 GPU，setup 脚本静默降级（scatter/sparse cuda_version()=-1，scatter_max 在 GPU 上抛 "Not compiled with CUDA support"；此前的 scatter_mean 验证走的是纯 torch 合成路径，未触发编译内核）。现镜像 ENV 固定 `FORCE_CUDA=1`（派生镜像构建同样继承，杜绝同类问题上移一层），编译层内置 `cuda_version()>0` 构建期强制断言；期间还修复了 trixie glibc 2.41 与 CUDA 12.8 头文件的 sinpi/cospi noexcept 冲突（镜像内按发行版标准做法为四个声明补 noexcept，附计数守卫，先交互复现+验证再入 Dockerfile）。真实 L20 验证：三个扩展 cuda_version=12080，scatter_max/spmm/knn_graph 全部通过。
+- ②runtime_env 弃用静态合同：删除 PYTHON_PACKAGES 硬编码清单（本日已两次人工同步、一次钉版失配，漂移风险实证），Docker 模式改为会话启动前对本次实际镜像做一次离线容器探针（~1s，失败即 fail-fast），发布完整发行版→版本清单（93 项）与工具可用性（含 nvcc）；派生镜像新增包自动出现在合同中，Agent 可见信息更真实完整。schema v2；本地模式同构改为全量安装清单；IMPORTANT_TOOLS 保留为受策展的探针候选集。
+- ③镜像瘦身：CUDA 静态库 3.3GiB 对 torch 扩展构建无用（链接共享库），仅保留 libcudart_static.a 与 libcudadevrt.a，镜像 25.1GB→19.7GB（实际文件系统约 13GB）；其余体积为完整离线 DL 环境的真实成本，宿主磁盘充裕且 overlay 层跨容器/派生镜像共享，边际成本≈0，判定接受。
+- 验证：全量 tests/ 921 tests + 45 subtests（167.16s，含真实 Docker 路径实跑镜像探针）通过；PROMPTS.md 双次导出保持 `fd74c1fe...` 不变；`git diff --check` 通过；镜像内 driver SHA 与源一致。环境设计文档同步 runtime_env 探针语义与 FORCE_CUDA 说明。
+
 2026-07-22 控制台修复、Prompt 合同纠偏与完整深度学习沙箱
 
 - 修复首页 `consoleCodeBadge` 为 null 时原生 append 渲染出 "null" 标签（filter 后再 append）；「揭示测试结果」改为成功后整页重渲染（原局部刷新不更新页头封存徽章）。Held-out 语义升级：排程内全部 Held-out 区间落账后测试/Held-out 结果自动揭示并触发同等封存（registry 单一谓词，manager 封存门与 detail/list 载荷共用），部分完成不揭示以保留 worker resume 补跑；新增回归测试覆盖部分/完整/封存三态。

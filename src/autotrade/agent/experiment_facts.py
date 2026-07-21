@@ -365,7 +365,7 @@ def _runtime_tool_facts(
     return compact_mapping(
         {
             "python": runtime_env.get("python"),
-            "python_packages": _compact_python_packages(runtime_env.get("python_packages")),
+            "python_packages": dict(_as_mapping(runtime_env.get("python_packages"))),
             "cli_tools_available": available,
             "cli_tools_missing": missing,
             "network_mode": network,
@@ -385,17 +385,6 @@ def _runtime_tool_facts(
     )
 
 
-def _compact_python_packages(value: object) -> dict[str, object]:
-    packages = _as_mapping(value)
-    return {
-        str(name): compact_mapping(
-            {
-                "version": _as_mapping(record).get("version"),
-                "available": _as_mapping(record).get("available"),
-            }
-        )
-        for name, record in packages.items()
-    }
 
 
 def _meta_learning_facts(manifest: Mapping[str, object]) -> dict[str, object]:

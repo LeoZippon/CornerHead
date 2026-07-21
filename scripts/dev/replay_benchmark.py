@@ -53,7 +53,7 @@ from autotrade.environment.nl.service import (
     prepare_nl_rpc_files,
 )
 from autotrade.environment.replay.market import ParquetMinuteReplaySource
-from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, SandboxSpec, link_copytree
+from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, SandboxSpec, link_copytree, probe_image_runtime
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.environment.tools.backtest import nl_call_budget, read_replay_auction
 
@@ -135,7 +135,7 @@ def main() -> int:
     spec = SandboxSpec.from_host_fraction(gpu=None) if args.cpu_only else SandboxSpec.from_host_fraction()
     if args.image:
         spec = __import__("dataclasses").replace(spec, image=args.image)
-    sandbox.write_runtime_env(mode="docker", sandbox_spec=spec)
+    sandbox.write_runtime_env(mode="docker", sandbox_spec=spec, image_probe=probe_image_runtime(spec.image))
     docker = DockerSandbox(sandbox, spec)
     result_payload: dict[str, object] = {
         "label": args.label,

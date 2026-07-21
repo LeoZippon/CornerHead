@@ -31,7 +31,7 @@ from autotrade.environment.identity import agent_visible_ref as _agent_visible_r
 from autotrade.environment.llm.proxy import LLMProxy
 from autotrade.environment.managed_proxy import ManagedProxySession
 from autotrade.environment.runtime import chmod_tree, AgentTraceWriter, RunManifest, new_id, sanitize_for_log, utc_now_iso
-from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree
+from autotrade.environment.sandbox import DockerSandbox, LocalSandbox, link_copytree, probe_image_runtime
 from autotrade.environment.sandbox_images import (
     SANDBOX_ENVIRONMENT_REQUEST_NAME,
     maybe_rebuild_sandbox_image,
@@ -236,6 +236,7 @@ class ExperimentPipeline:
         sandbox.write_runtime_env(
             mode="docker" if self.config.use_docker else "local",
             sandbox_spec=spec if self.config.use_docker else None,
+            image_probe=probe_image_runtime(spec.image) if self.config.use_docker else None,
         )
         docker = None
         if self.config.use_docker:
