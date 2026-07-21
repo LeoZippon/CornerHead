@@ -314,6 +314,45 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(legacy["kind"], "legacy")
         self.assertEqual(legacy["state"], "legacy")
 
+    def test_heldout_completion_auto_reveals_and_seals(self) -> None:
+        from autotrade.webui.registry import test_results_revealed
+
+        experiment_dir = self.experiments_root / "exp_hitl"
+        hitl = experiment_dir / "hitl"
+        schedule = json.loads((hitl / "schedule.json").read_text(encoding="utf-8"))
+        schedule["sessions"][-1]["periods"] = [{"label": "2023Q1"}, {"label": "2023Q2"}]
+        write_json_atomic(hitl / "schedule.json", schedule)
+
+        # Partial held-out (fixture records only 2023Q1): stays hidden so the
+        # worker can still be resumed to finish the remaining periods.
+        self.assertFalse(test_results_revealed(experiment_dir))
+        detail = self.client.get("/api/experiments/exp_hitl").json()
+        self.assertFalse(detail["test_revealed"])
+
+        # Recording the last planned period auto-reveals without any click.
+        ledger_path = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
+        with ledger_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "record_type": "heldout", "experiment_id": "exp_hitl", "epoch_id": "epoch_001",
+                "fold_id": "heldout_2023Q2", "run_id": "run_heldout_2",
+                "test_result": {"total_return": 0.01, "sharpe": 0.1, "max_drawdown": 0.02},
+            }) + "\n")
+        self.assertTrue(test_results_revealed(experiment_dir))
+        detail = self.client.get("/api/experiments/exp_hitl").json()
+        self.assertTrue(detail["test_revealed"])
+        listing = self.client.get("/api/experiments").json()
+        entry = {item["experiment_id"]: item for item in listing["experiments"]}["exp_hitl"]
+        self.assertTrue(entry["test_revealed"])
+        self.assertAlmostEqual(entry["metrics"]["cum_test_return"], 0.20)
+
+        # Auto-reveal applies the same seal as a manual reveal.
+        response = self.client.post(
+            "/api/experiments/exp_hitl/control",
+            json={"action": "approve", "session_key": "heldout"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("封存", response.json()["detail"])
+
     def test_dead_question_wait_degrades_to_interrupted(self) -> None:
         write_json_atomic(
             self.experiments_root / "exp_hitl" / "hitl" / "status.json",
