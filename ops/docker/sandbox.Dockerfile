@@ -29,15 +29,30 @@ RUN apt-get update \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
+# Complete, pinned research/DL stack. Data layer pins are the environment's
+# byte-format contract (parquet caches) and stay put; the DL family follows
+# "widely adopted, relatively recent": torch 2.10.0 is the last and most
+# mature release of the CUDA 12.8 line, and the transformers/boosting/PyG
+# picks are the current stable releases the ecosystem has settled on.
 RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
         pandas==2.2.3 \
         numpy==2.1.3 \
         pyarrow==18.1.0 \
         duckdb==1.1.3 \
+        scipy==1.17.1 \
         scikit-learn==1.5.2 \
         statsmodels==0.14.4 \
-        torch==2.5.1 \
-        "huggingface_hub[cli]==0.27.1"
+        torch==2.10.0 \
+        torchvision==0.25.0 \
+        torch_geometric==2.8.0.post1 \
+        transformers==5.14.1 \
+        accelerate==1.14.0 \
+        safetensors==0.8.0 \
+        einops==0.8.2 \
+        lightgbm==4.7.0 \
+        xgboost==3.2.0 \
+        ninja==1.13.0 \
+        "huggingface_hub[cli]==1.24.0"
 
 RUN if ! command -v hf >/dev/null 2>&1 && command -v huggingface-cli >/dev/null 2>&1; then \
         ln -s "$(command -v huggingface-cli)" /usr/local/bin/hf; \
@@ -55,6 +70,50 @@ RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 -
     && chmod +x /usr/local/bin/duckdb \
     && rm /tmp/duckdb_cli.zip \
     && duckdb -c "select 1"
+
+# CUDA build toolchain (nvcc + headers/dev libs), completing the pre-baked
+# compiler policy above for CUDA-extension source builds (torch_scatter,
+# torch_sparse, pyg_lib, ...) declared via sandbox_environment.json. Version
+# matches the torch==2.10.0 wheel's CUDA 12.8. Installed from the sha256-pinned
+# runfile (same pattern as the DuckDB CLI above) because the NVIDIA apt repo's
+# SHA1-signed key is rejected by Debian trixie's Sequoia apt policy. The .cn
+# CDN mirrors the canonical developer.download.nvidia.com bytes (md5 verified
+# against the canonical md5sum.txt); the pin makes the mirror choice
+# irrelevant. Nsight profilers are dropped to keep the layer lean. Placed
+# after the pip/CLI layers so adding it kept their cache.
+# TORCH_CUDA_ARCH_LIST targets the host L20s (sm_89): extension builds compile
+# one arch instead of all, cutting derived-image build time several-fold.
+ARG CUDA_RUNFILE_URL=https://developer.download.nvidia.cn/compute/cuda/12.8.1/local_installers/cuda_12.8.1_570.124.06_linux.run
+# libxml2 is required by the runfile's cuda-installer (and by some CUDA tools
+# at runtime); installed here rather than in the first apt layer so adding the
+# toolchain did not invalidate the pip layer cache.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libxml2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fL --retry 8 --retry-delay 3 --connect-timeout 30 --max-time 7200 \
+        "${CUDA_RUNFILE_URL}" \
+        -o /tmp/cuda.run \
+    && echo "228f6bcaf5b7618d032939f431914fc92d0e5ed39ebe37098a24502f26a19797  /tmp/cuda.run" | sha256sum -c - \
+    && sh /tmp/cuda.run --silent --toolkit --override --no-man-page \
+    && rm -f /tmp/cuda.run \
+    && rm -rf /usr/local/cuda-12.8/nsight* /usr/local/cuda-12.8/gds \
+        /usr/local/cuda-12.8/libnvvp /usr/local/cuda-12.8/extras/demo_suite \
+        /var/log/cuda-installer.log /tmp/cuda-installer.log \
+    && /usr/local/cuda-12.8/bin/nvcc --version
+ENV CUDA_HOME=/usr/local/cuda-12.8 \
+    PATH=/usr/local/cuda-12.8/bin:$PATH \
+    TORCH_CUDA_ARCH_LIST=8.9
+
+# Compiled PyG companions, source-built against the baked torch + nvcc (no
+# prebuilt cu128/2.10 wheels on PyPI). --no-build-isolation so the builds see
+# the installed torch; ninja + the single-arch TORCH_CUDA_ARCH_LIST keep the
+# compile bounded. The import check makes this layer the build-time proof
+# that the CUDA toolchain works end-to-end.
+RUN pip install --no-cache-dir --no-build-isolation -i ${PIP_INDEX_URL} \
+        torch_scatter==2.1.2 \
+        torch_sparse==0.6.18 \
+        torch_cluster==1.6.3 \
+    && python -c "import torch_scatter, torch_sparse, torch_cluster, torch_geometric"
 
 # Trusted host-side runtime module baked in (R16): the de-stringed per-tick
 # main(ctx) driver, loaded by file (executor.runtime_path -> CONTAINER_RUNTIME_DIR).
