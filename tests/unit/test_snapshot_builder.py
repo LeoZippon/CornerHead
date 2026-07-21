@@ -817,6 +817,11 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(len(fundamentals), 1)
             events = pd.read_parquet(out / "events.parquet")
             self.assertEqual(set(events["dataset"]), {"margin_secs"})
+            # Datasets without visible rows in the window still contribute
+            # their typed schema: the Timeview intersects replay parts to the
+            # frozen schema, so a missing column would silently drop that
+            # dataset's replay data for the whole fold.
+            self.assertIn("net_mf_amount", events.columns)
             macro = pd.read_parquet(out / "macro.parquet")
             self.assertEqual(len(macro), 0)
             text_index = pd.read_parquet(out / "text_index.parquet")

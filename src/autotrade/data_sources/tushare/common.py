@@ -40,19 +40,18 @@ REVISION_EVENTS_PATH = "results/data_quality/revision_events.jsonl"
 
 REVISION_SUMMARY_PATH = "results/data_quality/revision_summary.json"
 
-REVISION_EVENT_SCHEMA_VERSION = 1
+# v2 drops the always-constant record_type/downstream_status and api_name
+# (verbatim duplicate of dataset); schema_version stays as the discriminator.
+REVISION_EVENT_SCHEMA_VERSION = 2
 REVISION_EVENT_FIELDS = (
     "schema_version",
-    "record_type",
     "event_id",
     "detected_at",
     "source",
     "dataset",
-    "api_name",
     "partition",
     "path",
     "severity",
-    "downstream_status",
     "key_columns",
     "old_rows",
     "new_rows",
@@ -80,7 +79,6 @@ REVISION_EVENT_FIELDS = (
 )
 _REVISION_EVENT_OPTIONAL_DEFAULTS = {
     "schema_version": REVISION_EVENT_SCHEMA_VERSION,
-    "record_type": "revision_event",
     "changed_columns": {},
     "changed_columns_sample": [],
     "added_rows_sample": [],
@@ -1568,6 +1566,22 @@ REVISION_CHANGED_COLUMN_SAMPLE_SIZE = 12
 REVISION_ADDED_REMOVED_ROW_SAMPLE_SIZE = 5
 
 
+def _frames_content_equal(old_df: pd.DataFrame, new_df: pd.DataFrame) -> bool:
+    """Order-insensitive whole-frame equality over the union of columns."""
+    if len(old_df) != len(new_df):
+        return False
+    columns = sorted(set(old_df.columns) | set(new_df.columns))
+
+    def canon(df: pd.DataFrame) -> list[tuple[str, ...]]:
+        normalized = df.copy()
+        for column in columns:
+            if column not in normalized.columns:
+                normalized[column] = ""
+        return sorted(normalized[columns].astype(str).itertuples(index=False, name=None))
+
+    return canon(old_df) == canon(new_df)
+
+
 def compare_keyed_frames(old_df: pd.DataFrame, new_df: pd.DataFrame, key_columns: list[str]) -> dict[str, Any]:
     keys = list(key_columns)
     missing_old = [column for column in keys if column not in old_df.columns]
@@ -1600,9 +1614,13 @@ def compare_keyed_frames(old_df: pd.DataFrame, new_df: pd.DataFrame, key_columns
     base["duplicate_key_rows_old"] = duplicate_old
     base["duplicate_key_rows_new"] = duplicate_new
     if duplicate_old or duplicate_new:
+        # Duplicate business keys prevent a keyed diff, but identical content
+        # is still decidable — and identical content is not a revision. Without
+        # this, every re-pull of a dup-key partition (dividend, news, ...)
+        # logged a false "revised" event on unchanged data.
         return {
             **base,
-            "changed": True,
+            "changed": not _frames_content_equal(old_df, new_df),
             "comparison_issue": "duplicate_key_rows",
             "changed_keys": [],
             "added_keys": [],
@@ -1699,7 +1717,7 @@ def revision_event_id(event: dict[str, Any]) -> str:
         {
             key: value
             for key, value in event.items()
-            if key not in {"schema_version", "record_type", "event_id", "detected_at", "downstream_status"}
+            if key not in {"schema_version", "event_id", "detected_at"}
             and value is not None
         }
     )
@@ -1729,15 +1747,12 @@ def build_revision_event(
     )
     event = {
         "schema_version": REVISION_EVENT_SCHEMA_VERSION,
-        "record_type": "revision_event",
         "detected_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "source": source,
         "dataset": dataset,
-        "api_name": dataset,
         "partition": partition,
         "path": str(path),
         "severity": revision_severity(dataset),
-        "downstream_status": "pending_review",
         "key_columns": keys,
         "old_rows": comparison["old_rows"],
         "new_rows": comparison["new_rows"],
@@ -1838,7 +1853,10 @@ def write_parquet_revision_aware(
                 allow_empty_revision_overwrite=allow_empty_revision_overwrite,
             )
             append_jsonl_unique(Path(revision_ledger), event, key="event_id")
-            print("REVISION_ALERT " + json.dumps(event, ensure_ascii=False, sort_keys=True))
+            print("REVISION_ALERT " + json.dumps(
+                {key: event.get(key) for key in ("event_id", "dataset", "partition", "severity", "comparison_issue", "write_action")},
+                ensure_ascii=False, sort_keys=True,
+            ))
         if write_action == "skipped_empty_revision_overwrite":
             print(f"{api_name} {path} returned zero rows for existing nonempty partition; skipped_empty_revision_overwrite")
             return False
