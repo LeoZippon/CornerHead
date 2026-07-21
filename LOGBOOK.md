@@ -1,3 +1,11 @@
+2026-07-22 修正账本 v2、比较器假阳性修复、日志治理与快照 schema 稳定
+
+- 核实 14 项问题并逐项裁决。修正账本：全部 15,599 行 `api_name==dataset`、三个恒定字段（record_type/schema_version=1/downstream_status）、4,049 条 duplicate_key_rows 中 2,248 条新旧 source_hash 相同——比较器在键重复时未做任何内容比较即判"已修正"。修复：`compare_keyed_frames` 键重复分支先做全表内容等价比较，内容一致不再落账；事件 schema v2 删除 api_name/record_type/downstream_status（保留 schema_version 作演化判别）；账本原子迁移为 13,348 行（清除 2,248 条假阳性 + 3 条新 id 合并），原件归档 SHA `a43a5c8a...c3343`；REVISION_ALERT 改为紧凑单行（event_id/dataset/partition/severity/issue），不再向 cron 日志重复完整 JSON。单文件+尾部增量去重判定为当前规模合理成本，活跃文件≈256MB 时再评估按数据年分片（边界已写入数据文档）。
+- margin `trade_date=20260717` 真实缺失已按加锁通道回补（3 行/11 列，sidecar 完整），event_flow 报告重跑后 error→warning/0 errors；凌晨越排程跑审计会把当日尚未发布的 margin 判为缺失，属预期时点问题，按 as-of 0720 出正式报告。
+- 快照 schema 稳定（worker 日志 22+21 列被滚动视图丢弃的根因）：决策窗口内无可见行的配置数据集此前不贡献任何列，回放分区含其数据时被 Timeview 丢列。现空窗数据集从最新分区 footer 贡献零行带类型 schema（不进 concat，顺带消除 1323 处 deprecated 空表 concat 告警），缓存格式 v5→v6；pit.read_trade_range 过滤空分区 concat。剩余 FutureWarning 类别为真实宽表中的全 NA 类型化列，parquet 类型使未来推断结果不变，判定不改。
+- 日志治理：keepalive ensure 改非阻塞锁静默跳过+时间戳（消除 358 条重复锁行）；dispatch.log 混合格式历史归档（SHA `a6655309...f755`）后从空文件起步，现行 writer 输出统一 JSONL；QMT monitor 改状态转移+每小时聚合日志（附抑制计数）；crontab 备份迁至 archive/crontab/（运维备份非运行日志），安装器路径同步。
+- CUDA 静态库按用户裁决全量恢复（编译工具链→完整 CUDA 开发库），镜像重建；runtime_env/容器启动改为先解析不可变 image id 再探针+启动（消除 latest 重指向竞态），benchmark 同步。
+
 2026-07-22 沙箱 CUDA 内核修复、runtime_env 动态化与镜像瘦身
 
 - 证实用户指出的三个问题并全部修复。①PyG 扩展此前确为 CPU-only：docker build 无 GPU，setup 脚本静默降级（scatter/sparse cuda_version()=-1，scatter_max 在 GPU 上抛 "Not compiled with CUDA support"；此前的 scatter_mean 验证走的是纯 torch 合成路径，未触发编译内核）。现镜像 ENV 固定 `FORCE_CUDA=1`（派生镜像构建同样继承，杜绝同类问题上移一层），编译层内置 `cuda_version()>0` 构建期强制断言；期间还修复了 trixie glibc 2.41 与 CUDA 12.8 头文件的 sinpi/cospi noexcept 冲突（镜像内按发行版标准做法为四个声明补 noexcept，附计数守卫，先交互复现+验证再入 Dockerfile）。真实 L20 验证：三个扩展 cuda_version=12080，scatter_max/spmm/knn_graph 全部通过。
