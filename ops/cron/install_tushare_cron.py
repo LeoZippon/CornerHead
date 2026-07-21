@@ -13,7 +13,7 @@ BEGIN = "# BEGIN MacroQuant TuShare update"
 END = "# END MacroQuant TuShare update"
 REPO_ROOT = Path("/Data/lzp/MacroQuant")
 TEMPLATE = REPO_ROOT / "ops/cron/tushare_update.cron"
-BACKUP_DIR = REPO_ROOT / "logs" / "tushare" / "cron_backups"
+BACKUP_DIR = REPO_ROOT / "archive" / "crontab"
 
 
 def parse_args() -> argparse.Namespace:

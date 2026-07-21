@@ -48,11 +48,27 @@ def main() -> int:
         local_dir=args.local_dir, notify=bot.send_card,
         ssh_dest=ssh_dest, remote_outbox=args.remote_outbox,
     )
-    print(f"qmt_live_monitor: {ssh_dest}:{args.remote_outbox} -> {args.local_dir} every {args.interval_seconds}s")
+    print(f"{time.strftime('%F %T')} qmt_live_monitor: {ssh_dest}:{args.remote_outbox} -> {args.local_dir} every {args.interval_seconds}s")
+    # Fills always log. Errors log on state transitions (first failure, error
+    # change, recovery) plus an hourly still-failing aggregate — a persistent
+    # link failure must not append an identical line every cycle.
+    last_error = ""
+    suppressed = 0
+    last_error_logged = 0.0
     while True:
         result = monitor.run_once()
-        if result["notified"] or result["error"]:
-            print(f"{time.strftime('%F %T')} {result}")
+        error = str(result["error"] or "")
+        transition = error != last_error
+        periodic = bool(error) and time.monotonic() - last_error_logged >= 3600.0
+        if result["notified"] or transition or periodic:
+            note = f" [suppressed_repeats={suppressed}]" if suppressed else ""
+            print(f"{time.strftime('%F %T')} {result}{note}")
+            if error:
+                last_error_logged = time.monotonic()
+            suppressed = 0
+        elif error:
+            suppressed += 1
+        last_error = error
         if args.once:
             return 0
         time.sleep(args.interval_seconds)

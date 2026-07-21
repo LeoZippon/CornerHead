@@ -190,10 +190,15 @@ case "${1:-}" in
     stop)   grab_lock; stop_one tunnel "$TUNNEL_PID" autossh; stop_one console "$CONSOLE_PID" run_webui ;;
     status) status ;;
     # Cron target: silent when everything is already up, so keepalive.log only
-    # records actual starts, rotations, and failures.
-    ensure) grab_lock; QUIET=1
-            rotate_log "$LOG_DIR/console.log"; rotate_log "$LOG_DIR/keepalive.log"
-            start_console; start_tunnel ;;
+    # records actual starts, rotations, and failures (timestamped). A held
+    # lock means another stack operation is mid-flight — exactly what the
+    # keepalive must not disturb — so it skips silently instead of appending
+    # the same lock message every two minutes.
+    ensure) exec 9>"$RUN_DIR/ensure.lock"; flock -n 9 || exit 0
+            QUIET=1
+            { rotate_log "$LOG_DIR/console.log"; rotate_log "$LOG_DIR/keepalive.log"
+              start_console; start_tunnel
+            } 2>&1 | while IFS= read -r line; do echo "$(date -Is) $line"; done ;;
     sync)   sync_static ;;
     deploy) grab_lock; sync_static; restart_console; start_tunnel ;;
     install-cron) install_cron ;;
