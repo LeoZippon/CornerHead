@@ -10,7 +10,12 @@ import time
 import unittest
 from pathlib import Path
 
-from autotrade.environment.research_release import DOMAIN_STATUS_FILES, pin_research_release
+from autotrade.data_quality import build_quality_report
+from autotrade.environment.research_release import (
+    DOMAIN_REPORT_TYPES,
+    DOMAIN_STATUS_FILES,
+    pin_research_release,
+)
 
 
 class ResearchReleaseTest(unittest.TestCase):
@@ -33,9 +38,20 @@ class ResearchReleaseTest(unittest.TestCase):
         pit_path = self.pit / "income" / "available_month=202601.parquet"
         pit_path.parent.mkdir(parents=True)
         pit_path.write_bytes(b"pit-v1")
-        for index, name in enumerate(DOMAIN_STATUS_FILES.values()):
+        for domain, name in DOMAIN_STATUS_FILES.items():
+            report = build_quality_report(
+                report_type=DOMAIN_REPORT_TYPES[domain],
+                scope={
+                    "data_root": str(self.raw),
+                    "start_date": "20260101",
+                    "end_date": "20260103",
+                    "datasets": ["fixture"],
+                },
+                findings=[],
+                created_at="2026-01-03T00:00:00+00:00",
+            )
             (self.quality / name).write_text(
-                json.dumps({"status": "ok", "version": index}) + "\n", encoding="utf-8"
+                json.dumps(report) + "\n", encoding="utf-8"
             )
 
     def tearDown(self) -> None:
@@ -100,6 +116,14 @@ class ResearchReleaseTest(unittest.TestCase):
         self.assertNotEqual(os.stat(self.status).st_ino, os.stat(release.fundamental_events_status).st_ino)
         self.assertFalse((release.raw_dir / "rt_min_live").exists())
         self.assertTrue((self.root / "experiments" / "exp1" / "research_release" / "manifest.json").is_file())
+
+    def test_live_quality_report_must_be_strict_v2(self) -> None:
+        payload = json.loads(self.status.read_text(encoding="utf-8"))
+        payload["schema_version"] = 1
+        self.status.write_text(json.dumps(payload), encoding="utf-8")
+
+        with self.assertRaisesRegex(RuntimeError, "regenerate it as schema v2"):
+            self._pin("invalid-quality")
 
     def test_atomic_live_replacement_does_not_change_release(self) -> None:
         release = self._pin("exp1")

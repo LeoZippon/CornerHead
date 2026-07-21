@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.data_quality import build_quality_report
 from autotrade.environment import snapshot as snapshot_module
 from autotrade.environment.features.fundamental_events import read_fundamental_events
 from autotrade.environment.snapshot import SnapshotBuilder, SnapshotConfig, load_snapshot_manifest, verify_snapshot_hash
@@ -137,24 +138,61 @@ def build_fundamental_events(root: Path) -> None:
     )
 
 
+def write_quality_status(
+    path: Path,
+    report_type: str,
+    *,
+    status: str = "ok",
+    created_at: str = "2026-01-01T00:00:00+00:00",
+) -> None:
+    findings = []
+    if status != "ok":
+        findings.append(
+            {
+                "severity": status,
+                "check": "fixture_status",
+                "message": "fixture quality status",
+                "details": {},
+            }
+        )
+    report = build_quality_report(
+        report_type=report_type,
+        scope={
+            "data_root": "/fixture/raw",
+            "start_date": "20200101",
+            "end_date": "20260101",
+            "datasets": ["fixture"],
+        },
+        findings=findings,
+        created_at=created_at,
+    )
+    path.write_text(json.dumps(report), encoding="utf-8")
+
+
 def write_fundamental_status(path: Path, *, status: str = "ok", errors: int = 0) -> None:
-    path.write_text(json.dumps({"status": status, "errors": errors, "warnings": 0}), encoding="utf-8")
+    write_quality_status(
+        path,
+        "fundamental_events",
+        status="error" if errors else status,
+    )
     write_domain_statuses(path.parent)
 
 
 def write_domain_statuses(quality_dir: Path, **overrides: str) -> None:
     """The per-domain audit statuses the snapshot gates read (default all ok)."""
-    for domain, filename in (
-        ("daily", "base_research_status.json"),
-        ("intraday_1min", "intraday_minutes_status.json"),
-        ("events", "event_flow_status.json"),
-        ("board_trading", "board_trading_status.json"),
-        ("macro", "macro_context_status.json"),
-        ("text", "text_evidence_status.json"),
+    for domain, filename, report_type in (
+        ("daily", "base_research_status.json", "base_research"),
+        ("intraday_1min", "intraday_minutes_status.json", "intraday_minutes"),
+        ("events", "event_flow_status.json", "event_flow"),
+        ("board_trading", "board_trading_status.json", "board_trading"),
+        ("macro", "macro_context_status.json", "macro_context"),
+        ("text", "text_evidence_status.json", "text_evidence"),
     ):
         quality_dir.mkdir(parents=True, exist_ok=True)
-        (quality_dir / filename).write_text(
-            json.dumps({"status": overrides.get(domain, "ok"), "datasets": {}}), encoding="utf-8"
+        write_quality_status(
+            quality_dir / filename,
+            report_type,
+            status=overrides.get(domain, "ok"),
         )
 
 
@@ -981,9 +1019,10 @@ class SnapshotBuilderTest(unittest.TestCase):
             build_fundamental_events(events_root)
             write_fundamental_status(status_path)
             # Macro status proves an OLDER generation than the current lake.
-            (Path(tmp) / "macro_context_status.json").write_text(
-                json.dumps({"status": "ok", "datasets": {}, "created_at": "2021-10-01T00:00:00+00:00"}),
-                encoding="utf-8",
+            write_quality_status(
+                Path(tmp) / "macro_context_status.json",
+                "macro_context",
+                created_at="2021-10-01T00:00:00+00:00",
             )
             (raw / ".raw_generation.json").write_text(
                 json.dumps({"generation_id": "g2", "completed_at": "2021-10-07T00:00:00+00:00"}),
@@ -994,7 +1033,7 @@ class SnapshotBuilderTest(unittest.TestCase):
             )
             warnings = manifest["data_quality_warnings"]
             self.assertIn("predates current raw generation", warnings["macro"])
-            # Statuses without created_at (fixture default) are not flagged.
+            # The other fixture statuses are newer than the generation.
             self.assertNotIn("events", warnings)
 
     def test_raw_generation_recorded_and_guarded(self):
@@ -1334,7 +1373,7 @@ class SnapshotBuilderTest(unittest.TestCase):
             status_path = Path(tmp) / "fundamental_events_status.json"
             build_raw(raw)
             build_fundamental_events(events_root)
-            status_path.write_text(json.dumps({"status": "error", "errors": 1}), encoding="utf-8")
+            write_fundamental_status(status_path, status="error", errors=1)
             config = SnapshotConfig(
                 events_datasets=(),
                 macro_datasets=(),

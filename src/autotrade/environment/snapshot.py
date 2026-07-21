@@ -35,6 +35,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from autotrade.data_quality import read_quality_report
 from autotrade.data_sources.tushare.common import (
     BOARD_TRADING_DATASETS,
     STK_AUCTION_OBSERVED_AVAILABILITY_START,
@@ -47,7 +48,7 @@ from autotrade.environment.data.pit import yyyymmdd
 from autotrade.environment.features.auction import apply_open_auction_correction
 from autotrade.environment.features.fundamental_events import FUNDAMENTAL_EVENT_DATASETS, read_fundamental_events
 from autotrade.environment.features.units import normalize_auction_units, normalize_daily_units
-from autotrade.environment.research_release import DOMAIN_STATUS_FILES
+from autotrade.environment.research_release import DOMAIN_REPORT_TYPES, DOMAIN_STATUS_FILES
 from autotrade.environment.runtime import new_id, utc_now_iso
 
 SNAPSHOT_DOMAIN_WORKERS = 2
@@ -568,9 +569,11 @@ class SnapshotBuilder:
                 problem = "status file missing"
             else:
                 try:
-                    payload = json.loads(path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    problem = "status file unreadable"
+                    payload = read_quality_report(
+                        path, expected_report_type=DOMAIN_REPORT_TYPES[domain]
+                    )
+                except (OSError, TypeError, ValueError) as exc:
+                    problem = f"status report invalid: {exc}"
                 else:
                     if str(payload.get("status", "")).lower() == "error":
                         problem = "audit status is error"
@@ -592,12 +595,11 @@ class SnapshotBuilder:
             raise ValueError("PIT fundamental events status is required when fundamental datasets are enabled")
         if not self.fundamental_events_status.exists():
             raise FileNotFoundError(f"missing PIT fundamental events status: {self.fundamental_events_status}")
-        try:
-            report = json.loads(self.fundamental_events_status.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"invalid PIT fundamental events status JSON: {self.fundamental_events_status}") from exc
-        counts = report.get("finding_counts") or {}
-        errors = int(counts.get("error", report.get("errors", 0)) or 0)
+        report = read_quality_report(
+            self.fundamental_events_status,
+            expected_report_type=DOMAIN_REPORT_TYPES["fundamentals"],
+        )
+        errors = int(report["finding_counts"]["error"])
         status = str(report.get("status", "")).lower()
         if status == "error" or errors > 0:
             raise ValueError(

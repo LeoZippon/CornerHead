@@ -8,7 +8,7 @@ import json
 
 import pandas as pd
 
-from autotrade.data_quality import build_quality_report, summarize_datasets, write_quality_report
+from autotrade.data_quality import build_quality_report, write_quality_report
 
 from autotrade.environment.data.contracts import CN_TZ
 from autotrade.environment.data.pit import yyyymmdd
@@ -280,7 +280,6 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
             "datasets": list(datasets),
         },
         findings=checks,
-        datasets=summarize_datasets(checks, datasets),
         metadata={"rows": total_rows, "require_partitions": bool(require_partitions)},
     )
     if output:

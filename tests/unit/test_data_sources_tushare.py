@@ -1222,6 +1222,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertEqual(generation.read_bytes(), before)
         self.assertTrue(written_state[0]["auction"]["skipped_non_trading_day"])
+        self.assertNotIn("log_path", written_state[0]["auction"])
 
     def test_same_day_open_check_fails_when_calendar_does_not_cover_target(self):
         self._write_trade_cal("20260712", is_open="0")
@@ -1286,6 +1287,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertEqual(json.loads(generation.read_text(encoding="utf-8")), before)
         self.assertEqual(written_state[-1]["auction"]["status"], "not_ready")
+        self.assertNotIn("log_path", written_state[-1]["auction"])
 
     def test_auction_cron_command_overrides_global_request_timeout(self):
         ctx = cron_update.RunContext(
@@ -1403,6 +1405,83 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertTrue(referenced.exists())
         self.assertTrue(fresh.exists())
         self.assertTrue(unrelated.exists())
+
+    def test_dispatch_log_rotation_is_size_bounded(self):
+        dispatch = self.root / "logs" / "tushare" / "dispatch.log"
+
+        for index in range(5):
+            cron_update.append_dispatch_log(
+                dispatch,
+                f"line-{index}\n",
+                max_bytes=12,
+                backups=2,
+            )
+
+        retained = [dispatch, dispatch.with_name("dispatch.log.1"), dispatch.with_name("dispatch.log.2")]
+        self.assertTrue(all(path.is_file() for path in retained))
+        self.assertTrue(all(path.stat().st_size <= 12 for path in retained))
+        self.assertFalse(dispatch.with_name("dispatch.log.3").exists())
+
+    def test_log_path_helper_reuses_only_existing_runtime_logs(self):
+        existing = self.root / "logs" / "previous.log"
+        existing.parent.mkdir(parents=True)
+        existing.write_text("real run\n", encoding="utf-8")
+
+        reused = cron_update.attach_existing_log_path(
+            {"status": "skipped"},
+            repo_root=self.root,
+            previous={"log_path": str(existing)},
+        )
+        omitted = cron_update.attach_existing_log_path(
+            {"status": "skipped"},
+            repo_root=self.root,
+            previous={"log_path": str(self.root / "missing.log")},
+        )
+
+        self.assertEqual(reused["log_path"], str(existing))
+        self.assertNotIn("log_path", omitted)
+
+    def test_skipped_and_lock_failed_jobs_never_expose_a_future_log(self):
+        ctx = cron_update.RunContext(
+            config={"default_raw_dir": "raw"},
+            repo_root=self.root,
+            python="/env/python",
+            job_name="audit",
+            job={"operation": "audit_full"},
+            start_date="20200101",
+            end_date="20260720",
+            timezone_name="Asia/Shanghai",
+        )
+        args = argparse.Namespace(dry_run=False, force_run=False)
+        missing = self.root / "logs" / "never-created.log"
+
+        with (
+            patch.object(cron_update, "build_context", return_value=ctx),
+            patch.object(cron_update, "build_job_commands", return_value=[["audit"]]),
+            patch.object(cron_update.os, "chdir"),
+            patch.object(cron_update, "read_state", return_value={"audit": {"log_path": str(missing)}}),
+            patch.object(cron_update, "prune_run_logs"),
+            patch.object(cron_update, "should_skip_completed", return_value=True),
+            patch.object(cron_update, "acquire_lock", side_effect=AssertionError("must not lock")),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(cron_update._run(args), 0)
+        self.assertNotIn("log_path", json.loads(output.getvalue()))
+
+        written_state = []
+        with (
+            patch.object(cron_update, "build_context", return_value=ctx),
+            patch.object(cron_update, "build_job_commands", return_value=[["audit"]]),
+            patch.object(cron_update.os, "chdir"),
+            patch.object(cron_update, "read_state", return_value={"audit": {"log_path": str(missing)}}),
+            patch.object(cron_update, "write_state", side_effect=written_state.append),
+            patch.object(cron_update, "prune_run_logs"),
+            patch.object(cron_update, "should_skip_completed", return_value=False),
+            patch.object(cron_update, "acquire_lock", side_effect=RuntimeError("lock is held")),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(cron_update._run(args), 1)
+        self.assertNotIn("log_path", written_state[-1]["audit"])
 
     def test_cron_full_audit_can_use_open_date_for_event_flow(self):
         trade_cal = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"

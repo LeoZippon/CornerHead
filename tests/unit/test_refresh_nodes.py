@@ -146,6 +146,15 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
         for job in schedule_jobs - AUDIT_ONLY_JOBS - WEEKLY_DEEP_SWEEP_JOBS:
             self.assertIn(job, REFRESH_NODES, f"data-landing job {job!r} has no Timeview refresh node")
 
+    def test_managed_jobs_use_bounded_python_dispatch_logging(self) -> None:
+        job_lines = [
+            line for line in CRONTAB.read_text(encoding="utf-8").splitlines()
+            if _CRON_LINE.match(line)
+        ]
+        self.assertTrue(job_lines)
+        self.assertTrue(all("--dispatch-log $DISPATCH_LOG" in line for line in job_lines))
+        self.assertTrue(all(">>" not in line and "2>&1" not in line for line in job_lines))
+
     def test_evening_daily_set_cannot_bypass_dedicated_auction_capture(self) -> None:
         schedule = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))
         args = schedule["jobs"]["cn_evening_full"]["extra_args"]

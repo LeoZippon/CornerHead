@@ -21,7 +21,7 @@ else:
     from . import common as core
     from .common import *  # noqa: F401,F403
 
-from autotrade.data_quality import build_quality_report, summarize_datasets, write_quality_report
+from autotrade.data_quality import build_quality_report, write_quality_report
 
 def audit_trade_date_dataset(raw_dir: Path, spec: TradeDateDataset, expected_dates: set[str], add) -> None:
     files = sorted((raw_dir / spec.api_name).glob("trade_date=*.parquet"))
@@ -663,9 +663,6 @@ def audit_revision_history_sample(args: argparse.Namespace) -> int:
             "groups": sorted(groups),
         },
         findings=findings,
-        datasets=summarize_datasets(
-            findings, (item["dataset"] for item in dataset_reports)
-        ),
         metadata={
             "raw_mutation": "none",
             "sample_per_year": args.sample_per_year,
@@ -822,7 +819,6 @@ def audit_revision_sentinel(args: argparse.Namespace) -> int:
             "datasets": datasets,
         },
         findings=findings,
-        datasets=summarize_datasets(findings, datasets),
         metadata={
             "revision_ledger": str(ledger),
             "sample_size": args.sample_size,
@@ -921,7 +917,6 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
             "expected_codes_source": args.expected_codes_source,
         },
         findings=findings,
-        datasets=summarize_dataset_status(findings),
         metadata={
             "unit_rules": {
                 args.output_dataset: {
@@ -1068,7 +1063,6 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
             "output_dataset": args.output_dataset,
         },
         findings=findings,
-        datasets=summarize_dataset_status(findings),
         metadata={
             "conclusions": [
                 "Raw minute files are not modified by this audit.",
@@ -2067,7 +2061,6 @@ def audit_text_only(args: argparse.Namespace) -> int:
             "datasets": datasets,
         },
         findings=findings,
-        datasets=summarize_dataset_status(findings),
         metadata={
             "pit_rules": text_pit_rules(),
             "doc_refs": {
@@ -2266,7 +2259,6 @@ def audit_macro_only(args: argparse.Namespace) -> int:
             "eco_event": selected_eco_filter_values(args, "eco_event"),
         },
         findings=findings,
-        datasets=summarize_dataset_status(findings),
         metadata={
             "unit_rules": macro_unit_rules(),
             "pit_rules": macro_pit_rules(),
@@ -2505,7 +2497,6 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
             "datasets": datasets,
         },
         findings=findings,
-        datasets=summarize_dataset_status(findings),
         metadata={
             "unit_rules": event_unit_rules(),
             "pit_rules": event_pit_rules(),
@@ -2652,7 +2643,6 @@ def audit_board_trading_only(args: argparse.Namespace) -> int:
             "datasets": datasets,
         },
         findings=findings,
-        datasets=summarize_dataset_status(findings),
         metadata={
             "unit_rules": board_unit_rules(),
             "pit_rules": board_pit_rules(),
@@ -2895,20 +2885,6 @@ def audit_daily_direct(raw_dir: Path, args: argparse.Namespace, add) -> set[str]
         audit_trade_date_dataset(raw_dir, spec, expected, add)
     return trade_dates
 
-def summarize_dataset_status(findings: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    return summarize_datasets(
-        findings,
-        REFERENCE_DATASETS
-        + DAILY_REQUIRED_DATASETS
-        + DAILY_OPTIONAL_DATASETS
-        + FUNDAMENTAL_DATASETS
-        + INTRADAY_DATASETS
-        + EVENT_FLOW_DATASETS
-        + BOARD_TRADING_DATASETS
-        + TEXT_DATASETS
-        + MACRO_DATASETS,
-    )
-
 def default_audit_output(args: argparse.Namespace) -> str:
     include_text = bool(getattr(args, "include_text", False))
     include_intraday = bool(getattr(args, "include_intraday", False))
@@ -2993,7 +2969,6 @@ def audit_unified(args: argparse.Namespace) -> int:
             "domains": included_domains,
         },
         findings=findings,
-        datasets=summarize_dataset_status(findings),
         metadata={
             "case_studies": case_studies,
             "unit_rules": integrated_unit_rules(),
@@ -3058,7 +3033,6 @@ def audit_intraday_only(args: argparse.Namespace) -> int:
             "intraday_max_codes": getattr(args, "intraday_max_codes", None),
         },
         findings=findings,
-        datasets=summarize_dataset_status(findings),
         metadata={
             "unit_rules": {
                 STK_MINS_DATASET: {

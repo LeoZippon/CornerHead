@@ -377,7 +377,7 @@ TuShare 接口更新时间和 cron 策略维护在 `configs/tushare_update_sched
 
 runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw/PIT，下载子进程继承同一 flock（经 `TUSHARE_UPDATE_LOCK_HELD` 标记避免重复加锁），避免 runner 异常退出后残留写进程失锁。手工 `tushare_download.py` 对生产 `data/raw` 的写命令同样非阻塞获取该独占锁，锁忙时直接失败而不是与 cron 或发布竞态。任一 raw 或 PIT 落库任务在第一条写命令前把 `data/raw/.raw_generation.json` 标为 `updating`，全部成功后发布新的 `committed` 湖世代；失败为 `dirty`，只能由同 job、区间和命令精确重跑恢复。纯审计任务不改变世代。
 
-盘前两融任务（`cn_preopen_margin_secs_backfill_0903`/`_retry_0913`、`cn_preopen_margin_backfill_0905`/`_retry_0915`）带 `--zero-rows-not-ready`：源端尚未发布（必需数据集返回空响应）是常规事件而非失败——若本次调用没有任何写入，进程以退出码 75 结束（与竞价捕获相同的"无变更可重试"契约），cron 恢复先前 `committed` 世代并记 `not_ready`，由独立命名的重试任务或夜间全量同步补齐；若部分数据集已写入，则正常提交世代并把空分区留给重试任务。历史回补不带该旗标，必需数据集的空响应仍 fail-fast。详细运行日志写入 `logs/tushare/cron/tushare_cron_<job>_<end_date>_<timestamp>.log`，保留 14 天（当前 state 引用的每个 job 最后一份日志不删除）；cron 汇总输出写入 `logs/tushare/dispatch.log`，运行状态写入 `.runtime/tushare/cron_state.json`。
+盘前两融任务（`cn_preopen_margin_secs_backfill_0903`/`_retry_0913`、`cn_preopen_margin_backfill_0905`/`_retry_0915`）带 `--zero-rows-not-ready`：源端尚未发布（必需数据集返回空响应）是常规事件而非失败——若本次调用没有任何写入，进程以退出码 75 结束（与竞价捕获相同的"无变更可重试"契约），cron 恢复先前 `committed` 世代并记 `not_ready`，由独立命名的重试任务或夜间全量同步补齐；若部分数据集已写入，则正常提交世代并把空分区留给重试任务。历史回补不带该旗标，必需数据集的空响应仍 fail-fast。详细运行日志写入 `logs/tushare/cron/tushare_cron_<job>_<end_date>_<timestamp>.log`，保留 14 天（当前 state 引用的每个 job 最后一份日志不删除）。cron 汇总流写入 `logs/tushare/dispatch.log`，单文件上限 5 MiB、保留两个轮转副本；进程锁保证并发追加与轮转不互相覆盖。运行状态写入 `.runtime/tushare/cron_state.json`：只有本次真实日志已成功创建才记录新 `log_path`，跳过、休市或锁失败只能沿用仍存在的上一条路径，否则省略该字段。
 
 实验不直接跟随 live 目录变化：首次启动在锁空闲且 generation committed 时按需发布 `data/research_releases/<generation_id>/`；更新锁忙或 generation 为 `updating` / `dirty` 时立即复用最近完整版本。raw Parquet、配对 sidecar 和 PIT Parquet 使用硬链接，其余小文件与质量状态使用副本，实时目录 `rt_min_live` 不进入版本。发布后所有 Fold、交易日历和恢复运行都读取同一个实验 pin，因此数据更新无需中断实验。部署后须先在 committed 世代完成一次 bootstrap；此前若更新锁正忙会立即失败而非等待。
 
@@ -454,10 +454,11 @@ runner 使用 `.runtime/tushare/locks/tushare_update.lock` 防止并发写 raw/P
 
 **报告结构**
 
-- 顶层保留报告（六个 raw 数据域、财务事件索引和 revision summary）统一采用 schema v1 的九字段 envelope：`schema_version`、`report_type`、`created_at`、`status`、`scope`、`finding_counts`、`datasets`、`findings`、`metadata`；生产端原子发布完整 JSON。
-- `scope` 固定包含 `data_root`、`start_date`、`end_date`、`datasets`，各报告可补充筛选条件；`datasets.<name>` 固定包含 `status`、`finding_counts`、`checks`。
+- 顶层保留报告（六个 raw 数据域、财务事件索引和 revision summary）统一采用 schema v2 的九字段 envelope：`schema_version`、`report_type`、`created_at`、`status`、`scope`、`finding_counts`、`datasets`、`findings`、`metadata`。schema v1 已被旧 revision summary 占用，因此生产端和消费端一律拒绝 v1、无版本及未知版本文件，修复方式是重新生成 v2，不做推测性兼容。
+- `scope` 固定包含 `data_root`、`start_date`、`end_date`、`datasets`，各报告可补充筛选条件；`datasets` 由同一个 builder 从 findings 与 `scope.datasets` 派生，其键集合必须与 `scope.datasets` 精确相等。即使某数据集没有 finding，也保留 `status=ok`、全零 `finding_counts` 和空 `checks`。`datasets.<name>` 固定只包含 `status`、`finding_counts`、`checks`。
 - 每条 finding 只包含 `severity`、`check`、`message`、`details`。`check` 是记录判别符，只有 `details` 允许保留该检查真正需要的领域字段；消费方不得跨不同 `check` 猜测同名扩展字段语义。
 - `metadata` 保存单位、PIT 规则、结论、行数、抽样参数等报告专属内容，避免把大量可空扩展字段铺到统一 envelope 上。
+- producer 写入前和 snapshot/research-release consumer 读取后都校验完整 envelope、类型、状态/计数、finding、dataset summary 与报告类型。发布使用同目录唯一临时文件后 `os.replace()`，并发手工审计与 cron 发布最多产生“最后一个完整报告获胜”，不会共享或覆盖同一临时文件。
 
 存在 `error` 时脚本返回非 0；只有 `warning` 时返回 0，但下游必须显式处理 warning 指向的语义风险。
 

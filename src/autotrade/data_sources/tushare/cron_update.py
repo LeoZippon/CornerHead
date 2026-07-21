@@ -11,7 +11,9 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 import uuid
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,6 +27,8 @@ RUNTIME_ROOT = Path(".runtime/tushare")
 STATE_PATH = RUNTIME_ROOT / "cron_state.json"
 RUN_LOG_ROOT = Path("logs/tushare/cron")
 RUN_LOG_RETENTION_DAYS = 14
+DISPATCH_LOG_MAX_BYTES = 5 * 1024 * 1024
+DISPATCH_LOG_BACKUPS = 2
 DEFAULT_LOCK_WAIT_SECONDS = 900
 # Job operations that mutate the raw/PIT lake and therefore publish a new
 # generation on success; audit-only jobs must not churn snapshot cache keys.
@@ -54,6 +58,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-date", help="Override update end date. Defaults to job offset from current Asia/Shanghai date.")
     parser.add_argument("--dry-run", action="store_true", help="Print the computed command without running it.")
     parser.add_argument("--force-run", action="store_true", help="Run even if this job/date already has an ok state.")
+    parser.add_argument(
+        "--dispatch-log",
+        type=Path,
+        help="Append stdout/stderr to a size-bounded dispatch log (used by managed cron).",
+    )
     return parser.parse_args()
 
 
@@ -601,6 +610,93 @@ def mark_raw_generation_dirty(raw_dir: Path, transaction: dict, *, error: str) -
     _write_raw_generation_file(raw_dir, payload)
 
 
+def append_dispatch_log(
+    path: Path,
+    text: str,
+    *,
+    max_bytes: int = DISPATCH_LOG_MAX_BYTES,
+    backups: int = DISPATCH_LOG_BACKUPS,
+) -> None:
+    """Append one dispatch fragment under a process lock and bounded rotation."""
+    if not text:
+        return
+    if max_bytes <= 0 or backups < 1:
+        raise ValueError("dispatch log rotation requires max_bytes > 0 and backups >= 1")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = text.encode("utf-8")
+    if len(encoded) > max_bytes:
+        marker = b"[dispatch fragment truncated]\n"
+        if len(marker) >= max_bytes:
+            encoded = encoded[-max_bytes:]
+        else:
+            tail = encoded[-(max_bytes - len(marker)) :]
+            encoded = marker + tail.decode("utf-8", errors="ignore").encode("utf-8")
+    lock_path = path.parent / f".{path.name}.lock"
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            current_size = path.stat().st_size if path.exists() else 0
+            if current_size and current_size + len(encoded) > max_bytes:
+                oldest = path.with_name(f"{path.name}.{backups}")
+                oldest.unlink(missing_ok=True)
+                for index in range(backups - 1, 0, -1):
+                    source = path.with_name(f"{path.name}.{index}")
+                    if source.exists():
+                        os.replace(source, path.with_name(f"{path.name}.{index + 1}"))
+                os.replace(path, path.with_name(f"{path.name}.1"))
+            with path.open("ab") as handle:
+                handle.write(encoded)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+class DispatchLogWriter:
+    """Small line-buffered stream used to capture managed-cron output."""
+
+    encoding = "utf-8"
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._buffer = ""
+
+    def write(self, text: str) -> int:
+        self._buffer += str(text)
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            append_dispatch_log(self.path, line + "\n")
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer:
+            append_dispatch_log(self.path, self._buffer)
+            self._buffer = ""
+
+
+def attach_existing_log_path(
+    record: dict,
+    *,
+    repo_root: Path,
+    previous: dict | None = None,
+    created: Path | None = None,
+) -> dict:
+    """Expose only a newly created or previously valid runtime log path."""
+    candidates: list[str] = []
+    if created is not None:
+        candidates.append(str(created))
+    if isinstance(previous, dict) and previous.get("log_path"):
+        candidates.append(str(previous["log_path"]))
+    for value in candidates:
+        candidate = Path(value)
+        resolved = candidate if candidate.is_absolute() else repo_root / candidate
+        try:
+            if resolved.is_file():
+                record["log_path"] = value
+                break
+        except OSError:
+            continue
+    return record
+
+
 def prune_run_logs(state: dict, *, now: float | None = None) -> None:
     """Bound dedicated cron-run logs while retaining every state-linked run."""
     if not RUN_LOG_ROOT.exists():
@@ -694,8 +790,7 @@ def should_skip_completed(ctx: RunContext, args: argparse.Namespace, job_state: 
     )
 
 
-def main() -> int:
-    args = parse_args()
+def _run(args: argparse.Namespace) -> int:
     ctx = build_context(args)
     commands = build_job_commands(ctx)
     timestamp = datetime.now(ZoneInfo(ctx.timezone_name)).strftime("%Y%m%d_%H%M%S")
@@ -707,7 +802,6 @@ def main() -> int:
         "commands": commands,
         "command_hash": stable_hash(commands),
         "config_hash": job_config_hash(ctx),
-        "log_path": str(log_path),
         "timezone": ctx.timezone_name,
     }
     mutates_lake = ctx.job.get("operation", "update") in MUTATING_OPERATIONS
@@ -719,31 +813,35 @@ def main() -> int:
     os.chdir(ctx.repo_root)
     state = read_state()
     prune_run_logs(state)
+    job_state = state.get(ctx.job_name, {})
     if ctx.job.get("only_if_sse_open_date") and not is_sse_open_date(
         ctx.repo_root,
         ctx.config.get("default_raw_dir", "data/raw"),
         ctx.end_date,
     ):
-        state[ctx.job_name] = {
+        state[ctx.job_name] = attach_existing_log_path({
             "status": "ok",
             "returncode": 0,
             "start_date": ctx.start_date,
             "end_date": ctx.end_date,
             "command_hash": payload["command_hash"],
             "config_hash": payload["config_hash"],
-            "log_path": str(log_path),
             "skipped_non_trading_day": True,
             "updated_at": utc_now(),
-        }
+        }, repo_root=ctx.repo_root, previous=job_state)
         write_state(state)
         message = json.dumps({**state[ctx.job_name], "job": ctx.job_name}, ensure_ascii=False)
         print(message)
         return 0
-    job_state = state.get(ctx.job_name, {})
     generation = _read_raw_generation_file(raw_dir) if mutates_lake else {}
     generation_committed = str(generation.get("state", GENERATION_COMMITTED)) == GENERATION_COMMITTED
     if should_skip_completed(ctx, args, job_state, payload) and generation_committed:
-        message = json.dumps({"status": "skipped_already_ok", **payload}, ensure_ascii=False)
+        skipped = attach_existing_log_path(
+            {"status": "skipped_already_ok", **payload},
+            repo_root=ctx.repo_root,
+            previous=job_state,
+        )
+        message = json.dumps(skipped, ensure_ascii=False)
         print(message)
         return 0
 
@@ -753,17 +851,16 @@ def main() -> int:
             int(ctx.job.get("lock_wait_seconds", ctx.config.get("default_lock_wait_seconds", DEFAULT_LOCK_WAIT_SECONDS))),
         )
     except RuntimeError as exc:
-        state[ctx.job_name] = {
+        state[ctx.job_name] = attach_existing_log_path({
             "status": "error",
             "returncode": 1,
             "start_date": ctx.start_date,
             "end_date": ctx.end_date,
             "command_hash": payload["command_hash"],
             "config_hash": payload["config_hash"],
-            "log_path": str(log_path),
             "error": str(exc),
             "updated_at": utc_now(),
-        }
+        }, repo_root=ctx.repo_root, previous=job_state)
         write_state(state)
         message = json.dumps({**state[ctx.job_name], "job": ctx.job_name}, ensure_ascii=False)
         print(message)
@@ -776,7 +873,12 @@ def main() -> int:
         generation = _read_raw_generation_file(raw_dir) if mutates_lake else {}
         generation_committed = str(generation.get("state", GENERATION_COMMITTED)) == GENERATION_COMMITTED
         if should_skip_completed(ctx, args, job_state, payload) and generation_committed:
-            message = json.dumps({"status": "skipped_already_ok_after_lock", **payload}, ensure_ascii=False)
+            skipped = attach_existing_log_path(
+                {"status": "skipped_already_ok_after_lock", **payload},
+                repo_root=ctx.repo_root,
+                previous=job_state,
+            )
+            message = json.dumps(skipped, ensure_ascii=False)
             print(message)
             return 0
         transaction = None
@@ -816,22 +918,37 @@ def main() -> int:
         status = "ok" if returncode == 0 else (
             "not_ready" if no_mutation_retry else "error"
         )
-        state[ctx.job_name] = {
+        state[ctx.job_name] = attach_existing_log_path({
             "status": status,
             "returncode": returncode,
             "start_date": ctx.start_date,
             "end_date": ctx.end_date,
             "command_hash": payload["command_hash"],
             "config_hash": payload["config_hash"],
-            "log_path": str(log_path),
             "updated_at": utc_now(),
-        }
+        }, repo_root=ctx.repo_root, previous=job_state, created=log_path)
         write_state(state)
         message = json.dumps({**state[ctx.job_name], "job": ctx.job_name}, ensure_ascii=False)
         print(message)
         return returncode
     finally:
         lock.release()
+
+
+def main() -> int:
+    args = parse_args()
+    dispatch_log = getattr(args, "dispatch_log", None)
+    if dispatch_log is None:
+        return _run(args)
+    writer = DispatchLogWriter(Path(dispatch_log).resolve())
+    try:
+        with redirect_stdout(writer), redirect_stderr(writer):
+            return _run(args)
+    except Exception:
+        traceback.print_exc(file=writer)
+        return 1
+    finally:
+        writer.flush()
 
 
 if __name__ == "__main__":

@@ -1874,3 +1874,10 @@
 - `results/data_quality` 的八份 JSON 统一为九字段 schema v1 envelope，finding 与 dataset summary 也固定外层字段；revision ledger 的 15,135 行统一为 35 字段事件记录，`event_id` 全唯一。文本审计拆为真正的 text-only 命令，`text_evidence_status.json` 从 75 条/123KiB 降至 20 条/24KiB，夜间全审计实跑由 21m23s 降至 15m49s（约快 26%），各域质量状态不变。
 - TuShare 运行日志归入 `logs/tushare/{cron,dispatch.log,cron_backups}`，详细日志保留 14 天且保护 state 引用；WebUI 关闭逐请求 access log，资源探针改为紧凑 GPU 行。旧日志已可恢复归档后清理，`logs/` 从 74MiB 降至 29MiB；crontab 已重装到新路径。
 - 恢复包：data-quality 迁移前归档 SHA-256 `54a940e7...e7a802`，日志归档 SHA-256 `611f1d88...66f45`。验证：canonical `tests/` 911 passed + 45 subtests（156.42s），focused 197 passed，`git diff --check` clean；正式报告/账本逐记录 schema 校验全部通过。
+
+2026-07-20 数据质量 v2 严格门禁与日志保留闭环
+
+- 统一质量报告升级为仅接受 schema v2；`datasets` 改由 builder 从 `scope.datasets` 和 findings 唯一派生，干净数据集也保留全零摘要。producer 写前、文件 reader、research-release pin/hash 校验和 snapshot gate 共用完整结构/计数/状态/报告类型验证；v1、无版本及未知版本均明确拒绝。
+- 报告发布改为同目录 UUID 临时文件 + `os.replace()`，并发发布不再共享 `<output>.tmp`。八份 live JSON 已结构迁移并验证为 v2，状态未变，迁移前归档 SHA-256 `9882376b...714ef5`。
+- cron dispatch 由 runner 加锁追加，按 5 MiB 保留两个副本；16 个托管任务已重装为 `--dispatch-log`。休市、已完成跳过和锁失败只沿用存在的真实日志，否则不输出/写入 `log_path`；当前 14 条 state 引用全部存在。
+- 经用户确认无生产可用策略后，删除 9 个历史实验、74 GiB snapshot cache 和 9 个共享 research release（约 250 GiB 逻辑占用；未保留恢复副本），保留空根目录和 registry lock。验证：focused 176 tests + 7 subtests；canonical 919 tests + 45 subtests（154.65s），仅既有 warning。

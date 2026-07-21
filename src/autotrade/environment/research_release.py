@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+from autotrade.data_quality import read_quality_report
+
 
 DOMAIN_STATUS_FILES: dict[str, str] = {
     "daily": "base_research_status.json",
@@ -31,6 +33,15 @@ DOMAIN_STATUS_FILES: dict[str, str] = {
     "macro": "macro_context_status.json",
     "text": "text_evidence_status.json",
     "fundamentals": "fundamental_events_status.json",
+}
+DOMAIN_REPORT_TYPES: dict[str, str] = {
+    "daily": "base_research",
+    "intraday_1min": "intraday_minutes",
+    "events": "event_flow",
+    "board_trading": "board_trading",
+    "macro": "macro_context",
+    "text": "text_evidence",
+    "fundamentals": "fundamental_events",
 }
 
 _SCHEMA_VERSION = 2
@@ -584,6 +595,13 @@ def _copy_quality_files(
         if not stat.S_ISREG(mode):
             raise RuntimeError(f"quality status must be a regular non-symlink file: {src}")
         shutil.copy2(src, dst, follow_symlinks=False)
+        try:
+            read_quality_report(
+                dst,
+                expected_report_type=_quality_report_type(name, fundamental_status_name),
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"invalid quality status copied from {src}: {exc}") from exc
         hashes[name] = _file_sha256(dst)
     return hashes
 
@@ -610,10 +628,27 @@ def _verify_quality_hashes(
             raise RuntimeError(f"pinned quality file is missing or invalid: {path}")
         elif _file_sha256(path) != expected:
             raise RuntimeError(f"pinned quality file hash mismatch: {path}")
+        else:
+            try:
+                read_quality_report(
+                    path,
+                    expected_report_type=_quality_report_type(name, fundamental_status_name),
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                raise RuntimeError(f"invalid pinned quality status {path}: {exc}") from exc
 
 
 def _quality_names(fundamental_status_name: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys((*DOMAIN_STATUS_FILES.values(), fundamental_status_name)))
+
+
+def _quality_report_type(name: str, fundamental_status_name: str) -> str:
+    if name == fundamental_status_name:
+        return DOMAIN_REPORT_TYPES["fundamentals"]
+    for domain, filename in DOMAIN_STATUS_FILES.items():
+        if filename == name:
+            return DOMAIN_REPORT_TYPES[domain]
+    raise RuntimeError(f"unknown quality status filename: {name!r}")
 
 
 def _committed_generation_id(generation: dict[str, object]) -> str:
