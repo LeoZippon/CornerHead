@@ -1263,6 +1263,7 @@ class SnapshotBuilder:
         screen: frozenset[str] | None = None,
     ) -> tuple[pd.DataFrame, dict[str, object]]:
         frames: list[pd.DataFrame] = []
+        schema_only: dict[str, pd.DataFrame] = {}
         rules: dict[str, str] = {}
         dataset_build_profile: dict[str, dict[str, object]] = {}
         duplicate_rows_dropped: dict[str, int] = {}
@@ -1303,11 +1304,24 @@ class SnapshotBuilder:
             started = time.perf_counter()
             rows = self._apply_screen(rows, screen)
             screen_seconds = time.perf_counter() - started
-            # Preserve the schema contribution of a non-empty dataset that the
-            # universe screen reduces to zero rows, as the pre-profile path did.
+            # Every configured dataset contributes its schema even without
+            # visible rows in this window (screen-emptied, or coverage starting
+            # after the decision time): the Timeview intersects replay parts to
+            # the frozen snapshot schema, so a missing column here would drop
+            # that dataset's replay data for the whole fold. Zero-row schema
+            # contributions are applied after the union (not concatenated) so
+            # dtype inference never sees empty entries.
             if had_visible_rows:
                 rows.insert(0, "dataset", dataset)
-                frames.append(rows)
+                if len(rows):
+                    frames.append(rows)
+                else:
+                    schema_only[dataset] = rows
+            else:
+                empty = _empty_dataset_frame(dataset_dir)
+                if empty is not None:
+                    empty.insert(0, "dataset", dataset)
+                    schema_only[dataset] = empty
             dataset_build_profile[dataset] = {
                 **read_profile,
                 "rows_output": int(len(rows)),
@@ -1321,6 +1335,17 @@ class SnapshotBuilder:
                 },
             }
         merged = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+        for empty in schema_only.values():
+            for column, dtype in empty.dtypes.items():
+                if column not in merged.columns:
+                    if len(merged) == 0:
+                        merged[column] = pd.Series(dtype=dtype)
+                    else:
+                        # All-NA object padding writes an arrow null-typed
+                        # column, which readers (DuckDB/pandas) unify with any
+                        # concrete replay-part type; a numeric NaN fill would
+                        # conflict with string-typed replay columns.
+                        merged[column] = None
         # units="source": heterogeneous unions keep TuShare per-source units —
         # the daily-domain unit contract does NOT extend to same-named fields
         # here (env docs §1.4; raw unit table in data docs §1.2).
@@ -1967,6 +1992,15 @@ def _profile_key_nulls(frame: pd.DataFrame) -> dict[str, int]:
         if column in frame.columns:
             nulls[column] = int(frame[column].isna().sum())
     return nulls
+
+
+def _empty_dataset_frame(dataset_dir: Path) -> pd.DataFrame | None:
+    """Typed zero-row frame from the newest partition footer: the dataset's
+    schema contribution when no rows are visible in the build window."""
+    latest = max(dataset_dir.rglob("*.parquet"), default=None, key=lambda p: p.name)
+    if latest is None:
+        return None
+    return pq.read_schema(latest).empty_table().to_pandas()
 
 
 def _write(path: Path, frame: pd.DataFrame) -> None:

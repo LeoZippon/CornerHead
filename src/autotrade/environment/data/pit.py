@@ -118,7 +118,11 @@ class PITDataStore:
         frames = []
         for key in self.trade_dates(dataset):
             if start_key <= key <= end_key:
-                frames.append(self.read_trade_date(dataset, key, columns=columns))
+                frame = self.read_trade_date(dataset, key, columns=columns)
+                # Empty partitions are excluded so concat dtype inference never
+                # sees empty entries (deprecated in pandas, warning per call).
+                if not frame.empty:
+                    frames.append(frame)
         if frames:
             return pd.concat(frames, ignore_index=True)
         return pd.DataFrame(columns=columns) if columns else pd.DataFrame()
