@@ -1,3 +1,10 @@
+2026-07-21 分支合流至 main 与单主干化
+
+- 经用户确认合流：工作主干 fix/case-study-remediation（领先 origin/main 301 提交）合并入 main，三方基底与 origin/main 树逐字节一致故零冲突；PR #1（environment 重构）改基至 main 后合并（79598d6）。GitHub 默认分支切换为 main，此后只维护 main。
+- 分支清理：36 个本地分支与 2 个远端分支全部删除；唯一未合并分支 fix/tushare-daily-update-policy-20260601 的实质内容（PR 拆分指南四条）经逐行比对确认已由后续 docs 分支进入 main，按已废弃处理。现仓库仅存 main / origin/main。
+- 兼容回退项返工完成：沙箱镜像按合并后 main 重建，`/opt/at_runtime/driver.py` 与源文件 SHA-256 一致（`4666a61b...`）；受管 console 经 `webui_stack.sh deploy` 切换至 main 代码（PID 2943783，`code_current=true`，版本 79598d6），tunnel PID 828388 保持不变，无运行中实验。
+- 验证：合并后 main 全量 tests/ 919 tests + 45 subtests（150.79s）通过，仅既有 warning；工作树干净。crontab 指向的检出即 main，夜间数据任务按新布局代码运行。
+
 2026-07-21 environment 包结构重构与命名统一
 
 - 六路全量读档确认 src/autotrade 分层依赖严格无环，问题集中在 environment/ 顶层 28 个条目混排五个子系统，以及 web_fetch/web_search 在顶层（宿主服务）与 tools/（Agent 工具合同）双层同名。按"子包=多模块子系统、顶层模块=单一职责组件"重构：新增 web/（fetch/search 宿主服务）与 replay/（engine/driver/market/stats/timeview/state_staging 回放核心）；误名的 features/ 并入 data/，data/ 同时吸收 snapshot、research_release 与 data_summary→summary，成为完整 PIT 数据子系统。broker/broker_core、sandbox 四件套等命名清晰的单模块保持顶层不动，不拆分热点大文件。
