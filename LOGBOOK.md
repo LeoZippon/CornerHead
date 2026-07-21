@@ -2,7 +2,7 @@
 
 - 六路全量读档确认 src/autotrade 分层依赖严格无环，问题集中在 environment/ 顶层 28 个条目混排五个子系统，以及 web_fetch/web_search 在顶层（宿主服务）与 tools/（Agent 工具合同）双层同名。按"子包=多模块子系统、顶层模块=单一职责组件"重构：新增 web/（fetch/search 宿主服务）与 replay/（engine/driver/market/stats/timeview/state_staging 回放核心）；误名的 features/ 并入 data/，data/ 同时吸收 snapshot、research_release 与 data_summary→summary，成为完整 PIT 数据子系统。broker/broker_core、sandbox 四件套等命名清晰的单模块保持顶层不动，不拆分热点大文件。
 - `to_cn_timestamps` 从 snapshot 下沉到 data/pit，timeview 与 nl/retrieval 不再为一个时区助手拉取 2000 行 snapshot 模块。同批边界小修：agent 层跨模块下划线私有导入转正（compact_mapping、drop_leading_orphan_tools）、deepseek 冗余导入删除、tools/__init__ 补齐 ArtifactIOTool 惰性导出。仓库内除 tests 的 mock 字符串外无任何模块路径字面量，历史 logbook 不改写。
-- 沙箱镜像因 driver 烘焙路径改为 `/opt/at_runtime/driver.py` 而重建（缓存层复用），镜像内与源文件 SHA-256 一致（`4666a61b...`）；无运行中实验，受管 console 进程不受磁盘改名影响，下次显式 deploy 生效。
+- 沙箱镜像因 driver 烘焙路径改为 `/opt/at_runtime/driver.py` 而重建（缓存层复用），镜像内与源文件 SHA-256 一致（`4666a61b...`）；验证完成后共享镜像已按待评审的 base 分支回建以保持在线机器自洽，合并后需再执行一次缓存重建。无运行中实验，受管 console 进程不受磁盘改名影响，下次显式 deploy 生效。
 - 验证：compileall 全量通过；35 个关键模块导入冒烟通过；全量 tests/ 919 tests + 45 subtests（161.66s，含真实 Docker Fold/沙箱生命周期）通过，仅既有 warning；Prompt 双次导出 SHA-256 保持 `821a608b...c4d6a3fe` 不变；`git diff --check` 通过。验证前后可用内存 427→430GiB，GPU 占用未变。
 
 2026-07-20 控制台加载最终代码的可验证部署
