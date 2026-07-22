@@ -83,7 +83,7 @@ flowchart LR
 
 Pipeline 由该注册表生成快照换算规则、审计元数据、人读参考表和 Agent 可读的单位文件，任何一处都不另行手工维护单位口径。归一化文件（daily/分钟/竞价/分红送转）存储归一化后的值，source union 保留供应商原始单位。
 
-当前快照可见字段的完整逐列单位表随每次快照生成为 `/mnt/artifacts/unit_reference.json`（Agent 入口经 `data_summary.json` 的 `unit_contract` 指针），人读规则视图为 `docs/units_reference.md`（生成文件，含状态定义与校验说明）。标记为 `unknown` 或未出现在表中的字段，仅可在其所属 dataset 内做与量纲无关的运算（如排序、分位数）；进入绝对阈值、单位换算或跨数据集算术前必须先显式核实单位。观测数值范围只能用于校验，不能反向猜单位。完备性由两道校验保证：快照构建对每一列强制解析并核对 union 清单与物理 schema（缺规则或漏归属即失败）；回归测试对 `configs/data/snapshot_columns.json`（按分区抽样的供应商列清单并集，非全分区扫描）逐列解析——极少数只出现在罕见历史分区的字段以运行时校验兜底。
+当前快照可见字段的完整逐列单位表随每次快照生成为 `/mnt/artifacts/unit_reference.json`（Agent 入口经 `data_summary.json` 的 `unit_contract` 指针），人读规则视图为 `docs/units_reference.md`（生成文件，含状态定义与校验说明）。**unknown 与表外字段政策（权威表述，其余文档与 Prompt 均指向此处）**：`status=unknown` 的字段仅可在其所属 dataset 内做与量纲无关的运算（如排序、分位数），进入绝对阈值、单位换算或跨数据集算术前必须先显式核实单位；未出现在表中的字段视为数据合同破损，完全禁止使用并上报。观测数值范围只能用于校验，不能反向猜单位。完备性由两道校验保证：快照构建对每一列强制解析并对账 union 清单与物理 schema（漏归属即失败；events/macro 要求精确相等，财务域允许 schema 超前于窗口数据）；回归测试对 `configs/data/snapshot_columns.json`（每数据集最多抽样 5 个分区的供应商列清单并集，非全分区扫描）逐列解析——只出现在罕见历史分区的字段以运行时全列校验兜底。
 
 各数据审计报告 `metadata` 中的 `unit_rules` 等字段是注册表的非稳定投影，允许随注册表扩展而变化，不构成报告 schema 版本的一部分。
 

@@ -86,7 +86,21 @@ def make_snapshot_dir(out_dir: Path, *, decision_date: str, kind: str) -> dict[s
         columns=["text_id", "dataset", "ts_codes", "title", "available_at", "source_hash", "library_file"]
     ).to_parquet(out_dir / "text_index.parquet", index=False)
     (out_dir / "text_library").mkdir(exist_ok=True)
-    return finalize_snapshot_dir(out_dir, kind=kind, decision_date=decision_date)
+    # External union snapshots must declare dataset ownership explicitly —
+    # finalize never infers it from file content.
+    return finalize_snapshot_dir(
+        out_dir,
+        kind=kind,
+        decision_date=decision_date,
+        domains={
+            "events": {"dataset_columns": {"margin_secs": ["dataset", "trade_date", "ts_code"]}},
+            "fundamentals": {
+                "dataset_columns": {
+                    "fina_mainbz_vip": ["dataset", "ts_code", "available_at", "end_date", "bz_item"]
+                }
+            },
+        },
+    )
 
 
 def make_replay_dir(out_dir: Path, *, start: str, end: str, label: str) -> dict[str, object]:

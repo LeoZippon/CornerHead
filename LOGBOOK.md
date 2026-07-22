@@ -1,3 +1,7 @@
+2026-07-22 单位体系收敛：单一归属路径、精确对账、规则/逻辑分层
+
+- 按"单一事实源、单一归属路径、单一校验入口、单一 Agent 单位文件"原则收口七项：①删除 finalize_snapshot_dir 的 notna 启发式归属路径（与构建器声明式路径并存且会误伤合法全空字段）——外部组装快照必须显式提供 dataset_columns，夹具改为显式声明；②对账简化：删除零行文件跳过分支，events/macro 强制声明列==物理列（双向精确），仅财务域允许 schema 超前于窗口数据（归属来自供应商 schema）；③unknown 与表外字段政策分离：unknown 仅限 dataset 内量纲无关运算，表外字段视为数据合同破损、完全禁止使用并上报（合同、Prompt、文档同步）；④财务旁路 8 列常量收敛到 fundamental_events.py 单点（snapshot 与 exporter 均引用）；⑤文档/Prompt 去重：权威政策表述唯一落在数据文档 §1.2（environment/agent 设计文档改为指针，清除 §1.4 残留的旧"未知单位不得作为交易依据"冲突句），Fold Prompt 仅保留「数据单位合同」一节为详细规则块（核心合同与 Meta 各余一行指针），抽样清单标注"每数据集最多 5 个分区+运行时全列校验兜底"；⑥units.py（984 行）拆为 unit_rules.py（规则数据层：FieldRule/通用分类器/全部规则，717 行）与 units.py（解析/校验/换算/Agent 产物，291 行），公共 API 经 units 再导出、调用方零改动；⑦测试更名 test_unit_corrections_are_pinned 并新增 status 分层测试（verified 必须携带具名对账证据、量级推断必须为 inferred、量纲语义为 official）。全量 tests 938+45 通过。
+
 2026-07-22 单位注册表复审八项：fund_visitors 文本、清单对账、unknown 政策统一
 
 - 全部证实并修复：①stk_surv.fund_visitors 实为逗号分隔的调研人**姓名**（实读"黄安""江磊,张怡康"），由 count 改 text 并钉死回归；②快照列表读取不再静默跳过坏 parquet——footer 不可读即抛错（只含文件名不含宿主路径，原"容忍损坏文件"的摘要测试改为断言 fail-fast 且不泄露路径）；③财务域逐数据集列归属改从 raw 供应商 footer 抽样并集+PIT 旁路列生成（实证 PIT store 为 union schema 分区，窗口内全空的合法字段会被 notna 归属漏掉；raw∪旁路与 store union 实测完全相等）；④新增清单-物理 schema 对账：union 文件的每个物理列必须归属到某数据集（漏归属即构建/摘要失败），声明超前于物理（财务 schema-forward）为合法并成文；⑤unknown 政策全面统一为"仅可在所属 dataset 内做与量纲无关的运算（排序/分位数），绝对阈值/单位换算/跨数据集算术须先显式核实"（合同、三处 Prompt、三份设计文档、生成文档同步）；⑥finalize_snapshot_dir 写 manifest 前同样强制单位校验（外部组装快照与构建器同门槛）。

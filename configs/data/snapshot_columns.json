@@ -1,5 +1,5 @@
 {
- "note": "SAMPLED union of raw vendor parquet schemas per snapshot dataset (five spread partitions each, not a full-lake scan), plus snapshot-builder provenance columns. Regenerate with scripts/dev/export_units.py --refresh-inventory. Tests resolve every listed column against the unit registry; columns appearing only in unsampled historical partitions are caught by the snapshot build's live full-column validation.",
+ "note": "SAMPLED union of raw vendor parquet schemas per snapshot dataset (up to five spread partitions each, not a full-lake scan), plus snapshot-builder provenance columns. Regenerate with scripts/dev/export_units.py --refresh-inventory. Tests resolve every listed column against the unit registry; columns appearing only in unsampled historical partitions are caught by the snapshot build's live full-column validation.",
  "files": {
   "events.parquet": {
    "margin": [

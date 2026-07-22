@@ -45,9 +45,12 @@ from autotrade.environment.data.contracts import (
 )
 from autotrade.environment.data.pit import concat_rows, parquet_meta, to_cn_timestamps, yyyymmdd
 from autotrade.environment.data.auction import apply_open_auction_correction
-from autotrade.environment.data.fundamental_events import FUNDAMENTAL_EVENT_DATASETS, read_fundamental_events
+from autotrade.environment.data.fundamental_events import (
+    FUNDAMENTAL_EVENT_DATASETS,
+    FUNDAMENTAL_SIDECAR_COLUMNS,
+    read_fundamental_events,
+)
 from autotrade.environment.data.units import (
-    UNION_DOMAIN_BY_FILE,
     normalize_auction_units,
     normalize_daily_units,
     validate_snapshot_units,
@@ -1776,24 +1779,15 @@ def _window_start(decision_time: datetime, months: int) -> pd.Timestamp:
 def finalize_snapshot_dir(snapshot_dir: str | Path, **fields: object) -> dict[str, object]:
     """Stamp an externally assembled snapshot directory with id/hash/manifest.
 
-    Union files present in the directory get their per-dataset column
-    attribution recorded, matching the builder's manifest contract (the unit
-    reference cannot be generated without it).
+    Directories containing union files must supply the builder's
+    ``domains[...]["dataset_columns"]`` explicitly via ``fields`` — dataset
+    ownership is never inferred from file content, and validation below fails
+    without it. Same gate as the builder: every column must classify in the
+    unit registry.
     """
     snapshot_dir = Path(snapshot_dir)
-    domains = dict(fields.pop("domains", None) or {})  # type: ignore[arg-type]
-    for file_name, domain in UNION_DOMAIN_BY_FILE.items():
-        path = snapshot_dir / file_name
-        if path.exists():
-            meta = dict(domains.get(domain, {}))
-            meta.setdefault("dataset_columns", _dataset_column_map(pd.read_parquet(path)))
-            domains[domain] = meta
     manifest: dict[str, object] = {"snapshot_id": new_id("snap"), "created_at": utc_now_iso(), **fields}
-    if domains:
-        manifest["domains"] = domains
     manifest["snapshot_hash"] = _snapshot_hash(snapshot_dir)
-    # Same gate as the builder: an externally staged snapshot is only
-    # consumable if every column classifies in the unit registry.
     validate_snapshot_units(snapshot_dir, manifest)
     (snapshot_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8"
@@ -2050,13 +2044,6 @@ def _write(path: Path, frame: pd.DataFrame) -> None:
     tmp.replace(path)
 
 
-# PIT-store provenance columns stamped onto every fundamental event row.
-_FUNDAMENTAL_SIDECAR_COLUMNS = (
-    "dataset", "source_path", "source_hash", "source_row_id", "business_key",
-    "available_month", "available_at", "available_at_rule",
-)
-
-
 def _fundamental_dataset_columns(raw_dir: Path, datasets: tuple[str, ...]) -> dict[str, list[str]]:
     """Per-dataset columns from the vendor raw schemas plus PIT sidecars.
 
@@ -2069,24 +2056,10 @@ def _fundamental_dataset_columns(raw_dir: Path, datasets: tuple[str, ...]) -> di
         files = sorted((raw_dir / dataset).glob("*.parquet"))
         if not files:
             raise FileNotFoundError(f"missing raw partitions for fundamental dataset: {raw_dir / dataset}")
-        columns = dict.fromkeys(_FUNDAMENTAL_SIDECAR_COLUMNS)
+        columns = dict.fromkeys(FUNDAMENTAL_SIDECAR_COLUMNS)
         for index in sorted({0, len(files) // 2, len(files) - 1}):
             columns.update(dict.fromkeys(pq.read_schema(files[index]).names))
         out[dataset] = list(columns)
-    return out
-
-
-def _dataset_column_map(frame: pd.DataFrame) -> dict[str, list[str]]:
-    """Columns each union dataset actually carries (non-NA in its own rows)."""
-    if frame.empty or "dataset" not in frame.columns:
-        return {}
-    out: dict[str, list[str]] = {}
-    for dataset, group in frame.groupby("dataset", observed=True, sort=True):
-        present = group.notna().any()
-        out[str(dataset)] = [
-            column for column in frame.columns
-            if column == "dataset" or bool(present.get(column, False))
-        ]
     return out
 
 
