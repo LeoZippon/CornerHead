@@ -730,6 +730,16 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             ("20200701", "20200705", "202007"),
         ])
 
+    def test_concat_rows_preserves_schema_when_all_inputs_are_empty(self):
+        from autotrade.environment.data.pit import concat_rows
+
+        left = pd.DataFrame({"ts_code": pd.Series(dtype=object), "close": pd.Series(dtype="float64")})
+        right = pd.DataFrame({"ts_code": pd.Series(dtype=object), "volume": pd.Series(dtype="int64")})
+        merged = concat_rows([left, right], ignore_index=True)
+        self.assertEqual(list(merged.columns), ["ts_code", "close", "volume"])
+        self.assertEqual(str(merged["close"].dtype), "float64")
+        self.assertEqual(len(merged), 0)
+
     def test_dup_key_identical_content_records_no_revision_event(self):
         path = self.raw_dir / "dividend" / "ann_month=202001.parquet"
         rows = pd.DataFrame([
@@ -759,6 +769,18 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             )
         event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
         self.assertEqual(event["comparison_issue"], "duplicate_key_rows")
+
+        # A schema change (added column, even with empty values) is a revision
+        # despite identical row content on the shared columns.
+        widened = changed.copy()
+        widened["note"] = ""
+        with redirect_stdout(io.StringIO()):
+            common.write_parquet_revision_aware(
+                path, widened, api_name="dividend", params={}, fields=list(widened.columns),
+                source_hash="h3", key_columns=["ts_code", "ann_date"], revision_ledger=ledger,
+            )
+        events = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(events), 2)
 
     def test_revision_aware_writer_blocks_key_removal_overwrite(self):
         path = self.raw_dir / "forecast_vip" / "ann_month=202001.parquet"
@@ -1347,8 +1369,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         selected_job = {"operation": "auction_capture", "skip_if_already_ok": True}
         base_config = {
             "schema_version": 1,
-            "schema_version": 1,
-                    "timezone": "Asia/Shanghai",
+            "timezone": "Asia/Shanghai",
             "repo_root": str(self.root),
             "python": "/env/python",
             "default_start_date": "20200101",
@@ -1559,7 +1580,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ).to_parquet(trade_cal, index=False)
         config_path.write_text(json.dumps({
             "schema_version": 1,
-                    "timezone": "Asia/Shanghai",
+            "timezone": "Asia/Shanghai",
             "repo_root": str(self.root),
             "python": "/env/python",
             "default_raw_dir": "raw",
@@ -1599,7 +1620,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         config_path.write_text(json.dumps({
             "schema_version": 1,
-                    "timezone": "Asia/Shanghai",
+            "timezone": "Asia/Shanghai",
             "repo_root": str(self.root),
             "python": "/env/python",
             "default_start_date": "20200101",

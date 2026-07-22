@@ -124,6 +124,17 @@ class ReportingTest(unittest.TestCase):
                 statistics.mean(dev_active) / (statistics.stdev(dev_active) / math.sqrt(len(dev_active))),
             )
 
+    def test_append_stamps_win_over_caller_supplied_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = ExperimentLedger(Path(tmp) / "ledger.jsonl")
+            record = fold_record("fold_2022Q1", 0.03, 0.02)
+            record["schema_version"] = 999
+            record["recorded_at"] = "1999-01-01T00:00:00+00:00"
+            ledger.append(record)
+            stored = ledger.read()[0]
+            self.assertEqual(stored["schema_version"], 1)
+            self.assertNotEqual(stored["recorded_at"], "1999-01-01T00:00:00+00:00")
+
     def test_rerun_supersedes_earlier_fold_and_heldout_records(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

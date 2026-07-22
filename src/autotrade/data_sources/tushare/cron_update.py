@@ -683,13 +683,27 @@ class DispatchLogWriter:
         self._buffer += str(text)
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
-            append_dispatch_log(self.path, line + "\n")
+            self._append(line)
         return len(text)
 
     def flush(self) -> None:
         if self._buffer:
-            append_dispatch_log(self.path, self._buffer)
+            self._append(self._buffer)
             self._buffer = ""
+
+    def _append(self, line: str) -> None:
+        """Strict-JSONL boundary: producers emit single-line JSON, but stray
+        output (e.g. tracebacks arriving through redirect_stderr) is wrapped
+        per line so everything stored stays parseable."""
+        stripped = line.rstrip("\n")
+        if not stripped.strip():
+            return
+        try:
+            json.loads(stripped)
+            record = stripped
+        except ValueError:
+            record = json.dumps({"raw": stripped, "at": utc_now()}, ensure_ascii=False)
+        append_dispatch_log(self.path, record + "\n")
 
 
 def attach_existing_log_path(

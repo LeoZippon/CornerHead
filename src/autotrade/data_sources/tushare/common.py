@@ -1567,8 +1567,14 @@ REVISION_ADDED_REMOVED_ROW_SAMPLE_SIZE = 5
 
 
 def _frames_content_equal(old_df: pd.DataFrame, new_df: pd.DataFrame) -> bool:
-    """Order-insensitive whole-frame equality over the union of columns."""
+    """Order-insensitive whole-frame equality over the union of columns.
+
+    A differing column SET is never equal: padding both sides would let a
+    schema change (added/dropped column with empty-string values) pass as
+    identical content and skip the revision event."""
     if len(old_df) != len(new_df):
+        return False
+    if set(old_df.columns) != set(new_df.columns):
         return False
     columns = sorted(set(old_df.columns) | set(new_df.columns))
 
