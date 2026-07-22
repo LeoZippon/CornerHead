@@ -172,9 +172,12 @@ $CRON_END"
     fi
     rm -f /tmp/webui_crontab_err.$$
     if [ -n "$current" ]; then
-        # Crontab backups are operational maintenance artifacts, not runtime logs.
+        # Crontab backups are operational maintenance artifacts, not runtime
+        # logs; the full crontab may reference unrelated jobs, so keep them
+        # owner-only like the TuShare installer's backups.
         mkdir -p "$REPO/archive/crontab"
-        printf '%s\n' "$current" > "$REPO/archive/crontab/crontab-$(date +%Y%m%d-%H%M%S).bak"
+        chmod 700 "$REPO/archive/crontab"
+        ( umask 077; printf '%s\n' "$current" > "$REPO/archive/crontab/crontab-$(date +%Y%m%d-%H%M%S).bak" )
     fi
     ( printf '%s\n' "$current" | sed "/^${CRON_BEGIN}\$/,/^${CRON_END}\$/d"; echo "$block" ) | crontab -
     crontab -l | grep -qF "$CRON_BEGIN" || { echo "FAILED: managed block missing after install" >&2; exit 1; }

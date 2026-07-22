@@ -21,12 +21,19 @@ def concat_rows(frames: list[pd.DataFrame], **kwargs) -> pd.DataFrame:
     all-NA columns participate in inference) equals today's outcome because
     the columns are parquet-typed; that residual FutureWarning is accepted
     noise and suppressed at this single boundary."""
-    frames = [frame for frame in frames if not frame.empty]
-    if not frames:
-        return pd.DataFrame()
+    non_empty = [frame for frame in frames if not frame.empty]
+    if not non_empty:
+        # Preserve the column union and dtypes of the empty inputs instead of
+        # collapsing to a columnless frame (writers persist the schema; readers
+        # select columns on the result).
+        columns: dict[str, object] = {}
+        for frame in frames:
+            for column in frame.columns:
+                columns.setdefault(column, frame[column].dtype)
+        return pd.DataFrame({column: pd.Series(dtype=dtype) for column, dtype in columns.items()})
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=FutureWarning, message=".*empty or all-NA entries.*")
-        return pd.concat(frames, **kwargs)
+        return pd.concat(non_empty, **kwargs)
 
 
 def parquet_meta(path: Path) -> dict[str, Any]:

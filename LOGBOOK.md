@@ -1,3 +1,8 @@
+2026-07-22 复审六项边界缺口修复
+
+- ①concat_rows 全空输入改为保留列并集与 dtype（原实现坍缩为无列 DataFrame，写端会持久化丢 schema）；②实验账本 stamp 移到 spread 之后，调用方无法再覆盖 schema_version/recorded_at；③_frames_content_equal 先比较列集合——两侧补空使"增删全空列"的 schema 变化可伪装为内容一致而漏记事件，现列集不同即判不等；④WebUI crontab 备份 umask 077 + 目录 700（存量已收紧），与 TuShare 安装器口径一致；⑤DispatchLogWriter 在写入边界把任何非 JSON 行（含经 redirect_stderr 进入的 traceback 逐行）包装为 {"raw",...} 记录，严格 JSONL 从生产者约定升级为写入器保证；⑥批量 sed 遗留清理：一处夹具重复 schema_version 键（dict 字面量静默后者生效）与三处错缩进逐一手工归正。
+- 新增三项定向回归：全空 concat 保 schema、账本 stamp 不可覆盖、键重复下 schema 变化必落账。验证：全量 tests/ 925 tests + 45 subtests（168.75s）通过；compileall、`bash -n`、`git diff --check` 通过。
+
 2026-07-22 六项遗留收尾：summary v2、纯 JSONL dispatch、FutureWarning 清零、合同版本化
 
 - ①revision_summary 样本随 04:00 定时哨兵自动刷新为纯 v2（9 条内嵌事件全为 v2 形状，修复后的比较器实测产出真实新事件）；②dispatch.log 两处残余非 JSON 来源修复：raw generation 发布行与 dry-run 多行 JSON 均改为单行 JSON（03:35 PIT 任务抢在修复同步前打的最后一条 plain 行已锁内清除），现文件全行可 json.loads；④WebUI install-cron 的 crontab 备份同样迁至 archive/crontab/。

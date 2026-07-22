@@ -53,10 +53,12 @@ class ExperimentLedger:
         missing = [key for key in LINK_KEYS if not record.get(key)]
         if missing:
             raise ValueError(f"ledger record missing link keys: {missing}")
+        # Stamps come after the spread so a caller-supplied schema_version or
+        # recorded_at can never override the ledger's own.
         payload = {
+            **sanitize_for_log(record),
             "schema_version": LEDGER_RECORD_SCHEMA_VERSION,
             "recorded_at": utc_now_iso(),
-            **sanitize_for_log(record),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
