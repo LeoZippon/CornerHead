@@ -30,6 +30,14 @@ def write(path: Path, frame: pd.DataFrame) -> None:
 def build_raw(raw: Path) -> None:
     calendar = pd.DataFrame({"cal_date": ["20210930", "20211008", "20211011"], "is_open": ["1", "1", "1"]})
     write(raw / "trade_cal" / "exchange=SSE" / "year=2021.parquet", calendar)
+    # Vendor raw schema for the fundamentals dataset: the builder attributes
+    # fundamentals unit-reference columns from these footers.
+    write(
+        raw / "income_vip" / "period=20210630.parquet",
+        pd.DataFrame(
+            [{"ts_code": "000001.SZ", "ann_date": "20210910", "end_date": "20210630", "basic_eps": 0.5, "revenue": 1_000_000.0, "n_income": 100_000.0}]
+        ),
+    )
     for trade_date in ("20210930", "20211008"):
         write(
             raw / "daily" / f"trade_date={trade_date}.parquet",

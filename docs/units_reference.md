@@ -6,13 +6,16 @@
 
 本表是注册表的**规则视图**（按列名/通配符定位的规则行）。逐列展开后的完整字段级
 单位表随每次快照生成为 `/mnt/artifacts/unit_reference.json`，只包含当前快照实际可见
-的 file/dataset/column；完备性由两道校验保证——快照构建对每一列强制解析（缺规则即
-失败），回归测试对 `configs/data/snapshot_columns.json` 的全量供应商列清单强制解析。
+的 file/dataset/column；完备性由两道校验保证——快照构建对每一列强制解析并核对
+union 清单与物理 schema（缺规则或漏归属即失败），回归测试对
+`configs/data/snapshot_columns.json`（按分区抽样的供应商列清单并集，非全分区扫描）
+逐列解析；只出现在罕见历史分区的字段以运行时校验兜底。
 
 状态含义：`verified` 已与另一数据源或已知外部事实对账（依据见 evidence 列）；
-`official` 依据供应商官方字段合同；`inferred` 仅由本地量级合理性推断；`unknown`
-诚实未解决——此类字段不得进入绝对阈值或跨数据集算术。`factor` 为快照载入时的乘数
-（归一化文件存换算后的值）。
+`official` 依据供应商官方字段合同（evidence 记录本地校验）；`inferred` 仅由本地量级
+合理性推断；`unknown` 诚实未解决——此类字段仅可在其所属 dataset 内做与量纲无关的
+运算（排序、分位数），进入绝对阈值、单位换算或跨数据集算术前必须先显式核实单位。
+`factor` 为快照载入时的乘数（归一化文件存换算后的值）。
 
 ## daily.parquet（日频归一化文件）
 
@@ -66,28 +69,28 @@
 | `margin_detail` | rqyl/rqmcl/rqchl | numeric | shares | — | official | — |
 | `moneyflow` | buy_*_vol/sell_*_vol/net_mf_vol | numeric | hands | — | official | — |
 | `moneyflow` | buy_*_amount/sell_*_amount/net_mf_amount | numeric | 10k_CNY | — | official | 500 means CNY 5m; normalize before mixing with daily/stk_mins |
-| `moneyflow_dc` | close | numeric | CNY_per_share | — | verified | median 11.7 at stock price scale |
+| `moneyflow_dc` | close | numeric | CNY_per_share | — | verified | equals daily close (join ratio 1.0000, n=16446) |
 | `moneyflow_dc` | pct_change/*_rate | numeric | percent | — | official | — |
 | `moneyflow_dc` | net_amount/buy_*_amount | numeric | 10k_CNY | — | inferred | per-stock medians at 10k-CNY scale only |
-| `moneyflow_ths` | latest | numeric | CNY_per_share | — | verified | median 12.8 at stock price scale |
+| `moneyflow_ths` | latest | numeric | CNY_per_share | — | verified | equals daily close (join ratio 1.0000, n=15590) |
 | `moneyflow_ths` | pct_change/*_rate | numeric | percent | — | official | — |
 | `moneyflow_ths` | net_amount/net_d5_amount/buy_*_amount | numeric | 10k_CNY | — | inferred | per-stock medians at 10k-CNY scale only |
 | `moneyflow_ind_dc` | close | numeric | index_points | — | inferred | median 1941 at board index scale |
 | `moneyflow_ind_dc` | pct_change/*_rate | numeric | percent | — | official | — |
-| `moneyflow_ind_dc` | net_amount/buy_*_amount | numeric | CNY | — | verified | industry medians only plausible in CNY (1.5e7 ~ 15m)；industry-level DC flows are CNY, unlike stock-level moneyflow_dc in 10k CNY |
+| `moneyflow_ind_dc` | net_amount/buy_*_amount | numeric | CNY | — | inferred | industry medians only plausible in CNY (1.5e7 ~ 15m)；industry-level DC flows are CNY, unlike stock-level moneyflow_dc in 10k CNY |
 | `moneyflow_ind_dc` | rank | numeric | rank | — | official | — |
 | `moneyflow_ind_dc` | buy_sm_amount_stock | text | — | — | official | name of the top small-order-inflow stock |
 | `moneyflow_ind_ths` | close | numeric | index_points | — | inferred | — |
 | `moneyflow_ind_ths` | pct_change/pct_change_stock | numeric | percent | — | official | — |
 | `moneyflow_ind_ths` | close_price | numeric | CNY_per_share | — | official | leading stock price |
 | `moneyflow_ind_ths` | company_num | numeric | count | — | official | — |
-| `moneyflow_ind_ths` | net_buy_amount/net_sell_amount/net_amount | numeric | 100m_CNY | — | verified | industry medians ~49.5 only plausible as 100m CNY |
+| `moneyflow_ind_ths` | net_buy_amount/net_sell_amount/net_amount | numeric | 100m_CNY | — | inferred | industry medians ~49.5 only plausible as 100m CNY |
 | `moneyflow_cnt_ths` | industry_index | numeric | index_points | — | inferred | values ~3000 at concept index scale |
 | `moneyflow_cnt_ths` | pct_change/pct_change_stock | numeric | percent | — | official | — |
 | `moneyflow_cnt_ths` | close_price | numeric | CNY_per_share | — | official | leading stock price |
 | `moneyflow_cnt_ths` | company_num | numeric | count | — | official | — |
-| `moneyflow_cnt_ths` | net_buy_amount/net_sell_amount/net_amount | numeric | 100m_CNY | — | verified | concept medians ~162 only plausible as 100m CNY |
-| `cyq_perf` | his_low/his_high/cost_5pct/cost_15pct/cost_50pct/cost_85pct/cost_95pct/weight_avg | numeric | CNY_per_share | — | verified | cost percentiles sit at price scale；cost_5pct is the 5th-percentile holder cost PRICE, not a percent |
+| `moneyflow_cnt_ths` | net_buy_amount/net_sell_amount/net_amount | numeric | 100m_CNY | — | inferred | concept medians ~162 only plausible as 100m CNY |
+| `cyq_perf` | his_low/his_high/cost_5pct/cost_15pct/cost_50pct/cost_85pct/cost_95pct/weight_avg | numeric | CNY_per_share | — | verified | cost_50pct/daily close median 1.08 (join, n=16571): price-scale cost distribution；cost_5pct is the 5th-percentile holder cost PRICE, not a percent |
 | `cyq_perf` | winner_rate | numeric | percent | — | official | — |
 | `bak_daily` | open/high/low/close/pre_close/change/avg_price | numeric | CNY_per_share | — | official | — |
 | `bak_daily` | pct_change/turn_over/swing | numeric | percent | — | official | — |
@@ -113,24 +116,24 @@
 | `top10_floatholders` | hold_ratio/hold_float_ratio | numeric | percent | — | official | — |
 | `pledge_detail` | pledge_amount/holding_amount/pledged_amount | numeric | 10k_shares | — | verified | ratios reconcile at 10k-share scale |
 | `pledge_detail` | p_total_ratio/h_total_ratio | numeric | percent | — | official | — |
-| `stk_surv` | fund_visitors | numeric | count | — | official | participating institutions |
+| `stk_surv` | fund_visitors | text | — | — | official | comma-separated visitor NAMES, not a count; derive counts only after delimiter parsing and deduplication |
 | `new_share` | price | numeric | CNY_per_share | — | official | — |
-| `new_share` | pe | numeric | multiple | — | verified | median 15 at issue-PE scale |
+| `new_share` | pe | numeric | multiple | — | official | median 15 at issue-PE scale |
 | `new_share` | amount/market_amount/limit_amount | numeric | 10k_shares | — | official | — |
 | `new_share` | funds | numeric | 100m_CNY | — | inferred | median 4.1 at IPO-proceeds scale only |
 | `new_share` | ballot | numeric | percent | — | official | 0.03 means 0.03% |
-| `stk_holdertrade` | change_vol/after_share/total_share | numeric | shares | — | verified | after_share/total_share at holder position scale；total_share is the holder's post-trade position, not company capital |
+| `stk_holdertrade` | change_vol/after_share/total_share | numeric | shares | — | verified | after_share/(after_ratio%) matches company capital (ratio 0.95, n=3790)；total_share is the holder's post-trade position, not company capital |
 | `stk_holdertrade` | change_ratio/after_ratio | numeric | percent | — | official | — |
-| `stk_holdertrade` | avg_price | numeric | CNY_per_share | — | verified | median 20.6 at price scale |
+| `stk_holdertrade` | avg_price | numeric | CNY_per_share | — | inferred | median 20.6 at price scale |
 | `repurchase` | vol | numeric | shares | — | verified | amount/vol sits at price scale |
 | `repurchase` | amount | numeric | CNY | — | official | — |
-| `repurchase` | high_limit/low_limit | numeric | CNY_per_share | — | verified | medians 15.0/11.45 at price scale；repurchase price band, not amounts |
+| `repurchase` | high_limit/low_limit | numeric | CNY_per_share | — | verified | high_limit/daily close median 1.15 (q10-q90 0.4-1.8): band brackets market price；repurchase price band, not amounts |
 | `share_float_complete` | float_share | numeric | shares | — | verified | float_share/(float_ratio%) matches daily_basic total share capital；NOT 10k shares: 386-share unlock rows exist and reconcile only as shares |
 | `share_float_complete` | float_ratio | numeric | percent | — | official | — |
 | `top_list` | close | numeric | CNY_per_share | — | official | — |
 | `top_list` | pct_change/turnover_rate/net_rate/amount_rate | numeric | percent | — | official | — |
 | `top_list` | amount/l_sell/l_buy/l_amount/net_amount | numeric | CNY | — | official | — |
-| `top_list` | float_values | numeric | CNY | — | verified | median 6e9 at float-market-value scale |
+| `top_list` | float_values | numeric | CNY | — | inferred | median 6e9 at float-market-value scale |
 | `top_inst` | buy/sell/net_buy | numeric | CNY | — | official | — |
 | `top_inst` | buy_rate/sell_rate | numeric | percent | — | official | — |
 | `kpl_list` | pct_chg/bid_pct_chg/rt_pct_chg/turnover_rate | numeric | percent | — | official | — |
@@ -145,7 +148,7 @@
 | `limit_cpt_list` | days/cons_nums/up_nums | numeric | count | — | official | — |
 | `limit_cpt_list` | pct_chg | numeric | percent | — | official | — |
 | `limit_cpt_list` | rank | numeric | rank | — | official | — |
-| `limit_list_ths` | price | numeric | CNY_per_share | — | verified | median 24 at price scale |
+| `limit_list_ths` | price | numeric | CNY_per_share | — | verified | equals daily close (join ratio 1.0000, n=460) |
 | `limit_list_ths` | pct_chg/turnover_rate/limit_up_suc_rate | numeric | percent | — | official | — |
 | `limit_list_ths` | open_num | numeric | count | — | official | — |
 | `limit_list_ths` | free_float | numeric | CNY | — | inferred | median 7.1e9 at float-market-value scale |
@@ -186,14 +189,14 @@
 | `index_daily` | amount | numeric | thousand_CNY | — | official | — |
 | `index_dailybasic` | total_mv/float_mv | numeric | CNY | — | verified | CSI300 total_mv ~1e13 only plausible in CNY；CNY here vs 10k CNY in daily_basic — do not mix scales |
 | `index_dailybasic` | total_share/float_share/free_share | numeric | shares | — | verified | ~1e11 share scale；shares here vs 10k shares in daily_basic |
-| `index_dailybasic` | turnover_rate/turnover_rate_f | numeric | percent | — | verified | median 2.4 at percent scale |
+| `index_dailybasic` | turnover_rate/turnover_rate_f | numeric | percent | — | official | median 2.4 at percent scale |
 | `index_dailybasic` | pe/pe_ttm/pb | numeric | multiple | — | official | — |
 | `sw_daily` | open/low/high/close/change | numeric | index_points | — | official | — |
 | `sw_daily` | pct_change | numeric | percent | — | official | — |
 | `sw_daily` | vol | numeric | 10k_shares | — | official | — |
-| `sw_daily` | amount | numeric | 10k_CNY | — | verified | industry turnover median 6.1e5 == 6.1b CNY |
+| `sw_daily` | amount | numeric | 10k_CNY | — | inferred | industry turnover median 6.1e5 == 6.1b CNY |
 | `sw_daily` | pe/pb | numeric | multiple | — | official | — |
-| `sw_daily` | float_mv/total_mv | numeric | 10k_CNY | — | verified | industry total_mv median 2.5e7 == 250b CNY |
+| `sw_daily` | float_mv/total_mv | numeric | 10k_CNY | — | inferred | industry total_mv median 2.5e7 == 250b CNY |
 | `ci_daily` | open/low/high/close/pre_close/change | numeric | index_points | — | official | — |
 | `ci_daily` | pct_change | numeric | percent | — | official | — |
 | `ci_daily` | vol | numeric | 10k_shares | — | official | — |
@@ -210,7 +213,7 @@
 | `sz_daily_info` | total_share/float_share | numeric | shares | — | inferred | sparse locally |
 | `moneyflow_mkt_dc` | close_sh/close_sz | numeric | index_points | — | official | — |
 | `moneyflow_mkt_dc` | pct_change_sh/pct_change_sz/*_rate | numeric | percent | — | official | — |
-| `moneyflow_mkt_dc` | net_amount/buy_*_amount | numeric | CNY | — | verified | market-wide flows ~ -4.5e10 plausible only in CNY |
+| `moneyflow_mkt_dc` | net_amount/buy_*_amount | numeric | CNY | — | inferred | market-wide flows ~ -4.5e10 plausible only in CNY |
 | `ths_daily` | open/high/low/close/pre_close/change | numeric | index_points | — | official | — |
 | `ths_daily` | avg_price | numeric | CNY_per_share | — | official | — |
 | `ths_daily` | pct_change/turnover_rate | numeric | percent | — | official | — |
@@ -218,7 +221,7 @@
 | `fx_daily` | bid_*/ask_* | numeric | quote_price | — | official | — |
 | `fx_daily` | tick_qty | numeric | count | — | official | quote/tick count, not traded volume |
 | `repo_daily` | repo_maturity | categorical | — | — | official | — |
-| `repo_daily` | pre_close/open/high/low/close/weight/weight_r | numeric | percent | — | verified | repo quotes are annualized rates (~1.5) |
+| `repo_daily` | pre_close/open/high/low/close/weight/weight_r | numeric | percent | — | official | exchange quote convention: annualized rate levels (~1.5) |
 | `repo_daily` | amount | numeric | 10k_CNY | — | verified | GC001 daily ~2.2e8 == ~2.2 trillion CNY |
 | `repo_daily` | num | numeric | count | — | official | — |
 | `us_tycr` | m*/y* | numeric | percent | — | official | — |
@@ -233,13 +236,13 @@
 | `opt_basic` | min_price_chg | text | — | — | official | vendor tick-size field; format varies |
 | `opt_daily` | pre_settle/pre_close/open/high/low/close/settle | numeric | premium_quote_units | — | official | — |
 | `opt_daily` | vol/oi | numeric | contracts | — | official | — |
-| `opt_daily` | amount | numeric | 10k_CNY | — | verified | premium*per_unit*vol reconciles at 10k-CNY scale |
+| `opt_daily` | amount | numeric | 10k_CNY | — | inferred | premium*per_unit*vol lands at 10k-CNY scale (rough) |
 | `cb_basic` | par/issue_price/maturity_call_price | numeric | CNY_per_100_par | — | official | — |
-| `cb_basic` | issue_size/remain_size | numeric | CNY | — | verified | issue_size ~7.5e8 at bond-issue scale |
+| `cb_basic` | issue_size/remain_size | numeric | CNY | — | inferred | issue_size ~7.5e8 at bond-issue scale |
 | `cb_basic` | maturity | numeric | years | — | official | — |
 | `cb_basic` | coupon_rate | numeric | percent | — | official | — |
 | `cb_basic` | pay_per_year | numeric | count | — | official | — |
-| `cb_basic` | first_conv_price/conv_price | numeric | CNY_per_share | — | verified | medians 12-16 at stock price scale；nightly CURRENT-STATE refresh; never feed historical backtests |
+| `cb_basic` | first_conv_price/conv_price | numeric | CNY_per_share | — | inferred | medians 12-16 at stock price scale；nightly CURRENT-STATE refresh; never feed historical backtests |
 | `cb_daily` | pre_close/open/high/low/close/change/bond_value/cb_value | numeric | CNY_per_100_par | — | official | — |
 | `cb_daily` | pct_chg/bond_over_rate/cb_over_rate | numeric | percent | — | official | — |
 | `cb_daily` | vol | numeric | lots | — | official | — |
@@ -256,25 +259,25 @@
 |---|---|---|---|---|---|---|
 | `income_vip` | basic_eps/diluted_eps | numeric | CNY_per_share | — | official | — |
 | `income_vip` | * | numeric | CNY | — | official | income statement amounts (vendor contract is uniform) |
-| `balancesheet_vip` | total_share | numeric | shares | — | verified | median 3.9e8 at share-capital scale；period-end total shares, not the CNY paid-in-capital line |
+| `balancesheet_vip` | total_share | numeric | shares | — | inferred | median 3.9e8 at share-capital scale；period-end total shares, not the CNY paid-in-capital line; excluded from the statement-CNY default |
 | `balancesheet_vip` | * | numeric | CNY | — | official | balance sheet amounts (vendor contract is uniform) |
 | `cashflow_vip` | * | numeric | CNY | — | official | cash flow statement amounts (vendor contract is uniform) |
 | `fina_indicator_vip` | eps/dt_eps/total_revenue_ps/revenue_ps/capital_rese_ps/surplus_rese_ps/undist_profit_ps/diluted2_eps/bps/ocfps/retainedps/cfps/ebit_ps/fcff_ps/fcfe_ps | numeric | CNY_per_share | — | official | — |
-| `fina_indicator_vip` | extra_item/profit_dedt/gross_margin/op_income/ebit/ebitda/fcff/fcfe/current_exint/noncurrent_exint/interestdebt/netdebt/tangible_asset/working_capital/networking_capital/invest_capital/retained_earnings/fixed_assets | numeric | CNY | — | verified | gross_margin median 2.4e8 is a CNY amount；gross_margin is gross PROFIT in CNY; grossprofit_margin is the percent |
-| `fina_indicator_vip` | current_ratio/quick_ratio/cash_ratio/assets_to_eqt/dp_assets_to_eqt/debt_to_eqt/eqt_to_debt/eqt_to_interestdebt/tangibleasset_to_debt/tangasset_to_intdebt/tangibleasset_to_netdebt/ocf_to_debt/ocf_to_shortdebt | numeric | multiple | — | verified | current_ratio median 1.68 = 1.68x, not percent |
-| `fina_indicator_vip` | ar_turn/ca_turn/fa_turn/assets_turn | numeric | times_per_period | — | verified | assets_turn median 0.35 at turnover-frequency scale |
-| `fina_indicator_vip` | turn_days | numeric | days | — | verified | median 180 at days scale |
-| `fina_indicator_vip` | netprofit_margin/grossprofit_margin/cogs_of_sales/expense_of_sales/profit_to_gr/saleexp_to_gr/adminexp_of_gr/finaexp_of_gr/gc_of_gr/op_of_gr/ebit_of_gr/roe/roe_waa/roe_dt/roa/npta/roic/roe_yearly/roa2_yearly/roa_yearly/roa_dp/debt_to_assets/ca_to_assets/nca_to_assets/tbassets_to_totalassets/int_to_talcap/eqt_to_talcapital/currentdebt_to_debt/longdeb_to_debt/profit_to_op/q_*/*_yoy/q_op_qoq | numeric | percent | — | verified | roe median 10.6, debt_to_assets 42.8 at percent scale |
+| `fina_indicator_vip` | extra_item/profit_dedt/gross_margin/op_income/ebit/ebitda/fcff/fcfe/current_exint/noncurrent_exint/interestdebt/netdebt/tangible_asset/working_capital/networking_capital/invest_capital/retained_earnings/fixed_assets | numeric | CNY | — | official | gross_margin median 2.4e8 excludes the percent reading；gross_margin is gross PROFIT in CNY; grossprofit_margin is the percent |
+| `fina_indicator_vip` | current_ratio/quick_ratio/cash_ratio/assets_to_eqt/dp_assets_to_eqt/debt_to_eqt/eqt_to_debt/eqt_to_interestdebt/tangibleasset_to_debt/tangasset_to_intdebt/tangibleasset_to_netdebt/ocf_to_debt/ocf_to_shortdebt | numeric | multiple | — | official | current_ratio median 1.68 = 1.68x, excludes the percent reading |
+| `fina_indicator_vip` | ar_turn/ca_turn/fa_turn/assets_turn | numeric | times_per_period | — | official | assets_turn median 0.35 at turnover-frequency scale |
+| `fina_indicator_vip` | turn_days | numeric | days | — | official | median 180 at days scale |
+| `fina_indicator_vip` | netprofit_margin/grossprofit_margin/cogs_of_sales/expense_of_sales/profit_to_gr/saleexp_to_gr/adminexp_of_gr/finaexp_of_gr/gc_of_gr/op_of_gr/ebit_of_gr/roe/roe_waa/roe_dt/roa/npta/roic/roe_yearly/roa2_yearly/roa_yearly/roa_dp/debt_to_assets/ca_to_assets/nca_to_assets/tbassets_to_totalassets/int_to_talcap/eqt_to_talcapital/currentdebt_to_debt/longdeb_to_debt/profit_to_op/q_*/*_yoy/q_op_qoq | numeric | percent | — | official | roe median 10.6, debt_to_assets 42.8 at percent scale |
 | `fina_indicator_vip` | impai_ttm | numeric | unknown | — | unknown | median -0.63 inconsistent with a CNY amount; resolve before use |
 | `forecast_vip` | p_change_min/p_change_max | numeric | percent | — | official | — |
-| `forecast_vip` | net_profit_min/net_profit_max/last_parent_net | numeric | 10k_CNY | — | verified | last_parent_net matches forecast bounds at 10k-CNY scale；must not be mixed directly with statement net profit in CNY |
-| `express_vip` | revenue/operate_profit/total_profit/n_income/total_assets/total_hldr_eqy_exc_min_int/open_net_assets | numeric | CNY | — | verified | revenue median 4.9e9 at CNY scale |
+| `forecast_vip` | net_profit_min/net_profit_max/last_parent_net | numeric | 10k_CNY | — | verified | last_parent_net*1e4 equals prior-year income n_income_attr_p (ratio 1.0000, n=2570)；must not be mixed directly with statement net profit in CNY |
+| `express_vip` | revenue/operate_profit/total_profit/n_income/total_assets/total_hldr_eqy_exc_min_int/open_net_assets | numeric | CNY | — | verified | revenue equals income_vip same period (ratio 1.0000, n=82) |
 | `express_vip` | diluted_eps/bps/open_bps | numeric | CNY_per_share | — | official | — |
 | `express_vip` | diluted_roe/yoy_net_profit | numeric | percent | — | official | — |
 | `dividend` | cash_div/cash_div_tax | numeric | CNY_per_share | — | verified | median 0.095 per share |
 | `dividend` | stk_div/stk_bo_rate/stk_co_rate | numeric | shares_per_share | — | official | bonus/transfer proportions per held share |
-| `fina_audit` | audit_fees | numeric | CNY | — | verified | median 4e5 at audit-fee scale |
-| `fina_mainbz_vip` | bz_sales/bz_profit/bz_cost | numeric | CNY | — | verified | segment revenue median 1.3e7 at CNY scale |
+| `fina_audit` | audit_fees | numeric | CNY | — | inferred | median 4e5 at audit-fee scale |
+| `fina_mainbz_vip` | bz_sales/bz_profit/bz_cost | numeric | CNY | — | inferred | segment revenue median 1.3e7 at CNY scale |
 
 ## 仅原始湖数据（不进入快照）
 

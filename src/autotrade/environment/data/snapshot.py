@@ -429,7 +429,9 @@ class SnapshotBuilder:
                 "rows": int(len(fundamentals)),
                 "datasets": list(config.fundamental_datasets),
                 "units": "source",
-                "dataset_columns": _dataset_column_map(fundamentals),
+                "dataset_columns": _fundamental_dataset_columns(
+                    self.raw_dir, tuple(config.fundamental_datasets)
+                ),
             }, profile
 
         def build_events(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
@@ -714,7 +716,9 @@ class SnapshotBuilder:
             return {
                 "rows": int(len(fundamentals)),
                 "datasets": list(config.fundamental_datasets),
-                "dataset_columns": _dataset_column_map(fundamentals),
+                "dataset_columns": _fundamental_dataset_columns(
+                    self.raw_dir, tuple(config.fundamental_datasets)
+                ),
             }, profile
 
         def build_events(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
@@ -1788,6 +1792,9 @@ def finalize_snapshot_dir(snapshot_dir: str | Path, **fields: object) -> dict[st
     if domains:
         manifest["domains"] = domains
     manifest["snapshot_hash"] = _snapshot_hash(snapshot_dir)
+    # Same gate as the builder: an externally staged snapshot is only
+    # consumable if every column classifies in the unit registry.
+    validate_snapshot_units(snapshot_dir, manifest)
     (snapshot_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8"
     )
@@ -2041,6 +2048,32 @@ def _write(path: Path, frame: pd.DataFrame) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     frame.to_parquet(tmp, index=False)
     tmp.replace(path)
+
+
+# PIT-store provenance columns stamped onto every fundamental event row.
+_FUNDAMENTAL_SIDECAR_COLUMNS = (
+    "dataset", "source_path", "source_hash", "source_row_id", "business_key",
+    "available_month", "available_at", "available_at_rule",
+)
+
+
+def _fundamental_dataset_columns(raw_dir: Path, datasets: tuple[str, ...]) -> dict[str, list[str]]:
+    """Per-dataset columns from the vendor raw schemas plus PIT sidecars.
+
+    The PIT fundamental store materializes union-schema partitions, so window
+    content cannot attribute columns (an all-NA-in-window legitimate field
+    would be dropped); the raw vendor footers are the schema truth.
+    """
+    out: dict[str, list[str]] = {}
+    for dataset in datasets:
+        files = sorted((raw_dir / dataset).glob("*.parquet"))
+        if not files:
+            raise FileNotFoundError(f"missing raw partitions for fundamental dataset: {raw_dir / dataset}")
+        columns = dict.fromkeys(_FUNDAMENTAL_SIDECAR_COLUMNS)
+        for index in sorted({0, len(files) // 2, len(files) - 1}):
+            columns.update(dict.fromkeys(pq.read_schema(files[index]).names))
+        out[dataset] = list(columns)
+    return out
 
 
 def _dataset_column_map(frame: pd.DataFrame) -> dict[str, list[str]]:

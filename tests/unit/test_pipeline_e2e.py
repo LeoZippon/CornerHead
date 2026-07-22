@@ -368,23 +368,28 @@ class ExperimentCliTest(unittest.TestCase):
         self.assertEqual(summary["tool_result_clear_token_threshold"], 24000)
         self.assertTrue(summary["clear_tool_results"])
 
-    def test_data_summary_metadata_error_redacts_host_paths(self):
+    def test_data_summary_fails_fast_on_corrupt_files_without_host_paths(self):
+        # A snapshot view containing an unreadable parquet is a broken
+        # snapshot: summary generation must fail loudly (a silently skipped
+        # file would leave the unit table claiming full coverage), and the
+        # error must not leak host paths.
         with tempfile.TemporaryDirectory() as tmp:
             snapshot_dir = Path(tmp) / "snapshot"
             snapshot_dir.mkdir()
             (snapshot_dir / "manifest.json").write_text('{"kind":"decision_input"}', encoding="utf-8")
             (snapshot_dir / "broken.parquet").write_text("not parquet", encoding="utf-8")
 
-            summary = write_agent_data_summary(
-                Path(tmp) / "data_summary.json",
-                kind="fold",
-                fold_id="fold_x",
-                views={"snapshot": (snapshot_dir, "/mnt/snapshot")},
-            )
+            with self.assertRaises(ValueError) as ctx:
+                write_agent_data_summary(
+                    Path(tmp) / "data_summary.json",
+                    kind="fold",
+                    fold_id="fold_x",
+                    views={"snapshot": (snapshot_dir, "/mnt/snapshot")},
+                )
 
-            error = summary["views"]["snapshot"]["files"][0]["metadata_error"]
-            self.assertNotIn(str(snapshot_dir), error)
-            self.assertNotIn(str(Path(tmp)), error)
+            self.assertIn("broken.parquet", str(ctx.exception))
+            self.assertNotIn(str(snapshot_dir), str(ctx.exception))
+            self.assertNotIn(str(Path(tmp)), str(ctx.exception))
 
 
 class PipelineEndToEndTest(unittest.TestCase):
@@ -653,7 +658,7 @@ class PipelineEndToEndTest(unittest.TestCase):
                 ("events.parquet", "share_float_complete", "float_share"), records
             )
             self.assertIn(
-                "must not be used", unit_reference["unknown_unit_policy"]
+                "scale-agnostic", unit_reference["unknown_unit_policy"]
             )
             self.assertIn("large_table_guidance", data_summary)
             self.assertEqual(sorted(data_summary["views"]), ["snapshot", "train", "valid"])

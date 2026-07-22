@@ -32,7 +32,7 @@ FOLD_CORE_CONTRACT = """\
 - Agent 可在 `workspace/` 探索、在 `output/` 与 `models/` 写正式产物；正式策略运行时只能读取 `/mnt/snapshot`、`/mnt/agent/output` 和 `/mnt/agent/models`。Test/Held-out 不挂载、不可推断，也不能硬编码 train/valid、artifacts、宿主路径或回测结果路径。
 - 所有 `ctx.state_dir` 访问、`ctx.broker`/`ctx.nl()` 调用、状态读写和实质筛选/推理都必须位于 `ctx.substep(name, budget_minutes=B)` 内；`B>0` 且同 tick 名称唯一。`B>=1` 的 action 只在 `ready_at` 仍处于交易所申报窗口时提交，不会自动顺延。
 - PIT 以 `ctx.asof_dir` 和仿真时钟为准；`ctx.snapshot_dir` 是回放内不变的研究基准。`intraday_trade_days` 只限制决策 snapshot 的历史分钟回看，Valid replay 在分钟源存在时覆盖完整 Validation 区间；分别核对 `data_summary.json` 的 `snapshot`/`valid` view。
-- 单位是策略合同：`data_summary.json.unit_contract` 指向 `/mnt/artifacts/unit_reference.json` —— 当前快照全部可见字段的逐列单位表；任何字段按“文件 + dataset + 字段”在其中查找，不能按同名字段猜测。表中 `status=unknown` 或未出现的字段不得进入信号或阈值。
+- 单位是策略合同：`data_summary.json.unit_contract` 指向 `/mnt/artifacts/unit_reference.json` —— 当前快照全部可见字段的逐列单位表；任何字段按“文件 + dataset + 字段”在其中查找，不能按同名字段猜测。表中 `status=unknown` 或未出现的字段仅可在其所属 dataset 内做与量纲无关的运算（如排序、分位数）；进入绝对阈值、单位换算或跨数据集算术前必须先显式核实单位。
 - 参与 09:30 开盘集合竞价的订单必须在盲 `09:15` tick 提交；`09:25` 新单于 09:31 进入 Broker。普通盘中单按 `execution_lag_bars` 个固定交易分钟后进入 Broker；激活分钟无行情则继续挂单到下一市场事件。普通/信用账户、现金、持仓和 T+1 各自独立，Broker 才是持仓与委托真相源。
 - `ctx.positions` 行的确切键是 `account`/`ts_code`/`side`/`quantity`/`sellable_quantity`/`entry_price`/`entry_date`/`entry_cost`/`last_price`/`market_value`；不存在 `qty`/`volume`/`cost_basis`/`avg_price`。判断持有看 `quantity`，卖出按 `sellable_quantity`。
 - 普通 Fold 无外网且不能安装或下载。Taste 中要求下载/安装，或依赖未出现在 `runtime_env` 与可继承 `output`/`models` 的资源，都必须自主降级为当前环境可执行方案。
@@ -62,7 +62,7 @@ FOLD_ENV_SECTION = """\
 ## 数据单位合同
 - `/mnt/artifacts/unit_reference.json` 是当前快照全部可见字段的逐列单位表（入口见 `data_summary.json.unit_contract`）；任何字段的单位、语义类型和归一化倍率都按“文件 + dataset + 字段”在其中查找，不能只按同名字段猜测。
 - `daily.parquet`、`intraday_1min.parquet`、`auction.parquet`、`corporate_actions.parquet` 已归一化存储，带 `factor` 的记录标明了源单位换算；`events.parquet`、`macro.parquet`、`fundamentals.parquet` 保留源单位，同名字段跨 dataset 单位可相差多个数量级。
-- 表中 `status=unknown` 的字段和未出现在表中的字段，未经核实与显式换算不得进入交易信号、绝对阈值或跨数据集算术。
+- 表中 `status=unknown` 的字段和未出现在表中的字段，仅可在其所属 dataset 内做与量纲无关的运算（如排序、分位数）；进入绝对阈值、单位换算或跨数据集算术前必须先显式核实单位。
 
 ## 正式产物格式（modification_check 按此校验）
 - `main.py`：必须定义唯一正式入口 `main(ctx) -> None`，由 Environment 在每个计划决策 tick 调用一次（盘中间距见事实 `intraday_decision_minutes`，竞价/盘外 tick 恒为决策 tick；详见下方「回放与交易环境规则」）。
@@ -294,7 +294,7 @@ META_LEARNING_INSTRUCTION = """\
 ## 运行环境、联网与代理
 - run manifest 是实验参数事实源；runtime env 是 Python 包、CLI 工具、网络和安装策略事实源。Prompt 与 manifest 冲突时，以 manifest 为准。
 - `data_summary.json` 是可见数据的轻量索引，只保留文件规模、行数、列数、关键列、日期覆盖和单位合同。需要完整 schema 或更细字段时，先查 snapshot manifest 或 Parquet metadata；需要抽样或聚合大表时，再用 DuckDB、pyarrow 或 pandas 按列/日期过滤读取。对 `events.parquet`、`text_index.parquet`、`intraday_1min.parquet` 等大表，不要在未知规模时直接 `pd.read_parquet()` 全量读取。
-- 单位口径：逐列单位表在 `/mnt/artifacts/unit_reference.json`（入口见 `data_summary.json.unit_contract`）。归一化文件带 `factor` 的记录标明换算，研究 union 保留源单位；异构字段必须按“文件 + dataset + 字段”解释，`status=unknown` 或表外字段先核实并显式换算。
+- 单位口径：逐列单位表在 `/mnt/artifacts/unit_reference.json`（入口见 `data_summary.json.unit_contract`）。归一化文件带 `factor` 的记录标明换算，研究 union 保留源单位；异构字段必须按“文件 + dataset + 字段”解释；`status=unknown` 或表外字段仅可做 dataset 内与量纲无关的运算，其余用途先核实并显式换算。
 - Prompt 只描述稳定协议，不承载当前数据事实。当前行数、关键列、日期覆盖和完整 schema 以本 run 动态生成的 `data_summary.json`、`run_manifest.json`、snapshot `manifest.json` 和 parquet metadata 为准；未来数据变动后由 Pipeline 重新生成。
 - 后续普通 Fold 不允许联网或安装新包。元学习联网只用于当前会话的资料研究；工作区中的 `git`/`pip`/`npm`/`hf` 下载不会自动继承。`sandbox_environment.json` 只能请求构建 Python/npm/apt 包，不会下载模型权重、数据或仓库。Taste 不得依赖后续 Fold 自行下载/安装；只能使用后续 `runtime_env` 已有依赖和已被采纳至可继承 `output`/`models` 的完整运行时文件，否则必须提供当前环境可执行的降级方案。
 - 网络可用性、代理别名和凭据变量名以当前实验事实为准；不要依赖额外 Prompt 片段推断运行时配置。

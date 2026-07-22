@@ -456,6 +456,45 @@ class UnitRegistryProjectionTest(unittest.TestCase):
         for file, dataset, column, unit in expectations:
             record = resolve_field(file, dataset, column)
             self.assertEqual(record["source_unit"], unit, (file, dataset, column))
+        # fund_visitors stores comma-separated visitor NAMES — it must never
+        # regress to a numeric count reading.
+        surv = resolve_field("events.parquet", "stk_surv", "fund_visitors")
+        self.assertEqual(surv["semantic_type"], "text")
+        self.assertIsNone(surv["source_unit"])
+
+    def test_snapshot_column_map_reconciles_manifest_and_fails_on_corrupt_files(self):
+        from autotrade.environment.data.units import snapshot_column_map
+
+        with tempfile.TemporaryDirectory() as tmp:
+            view = Path(tmp)
+            pd.DataFrame(
+                [{"dataset": "margin_secs", "ts_code": "000001.SZ", "orphan_col": 1.0}]
+            ).to_parquet(view / "events.parquet", index=False)
+            manifest = {
+                "domains": {
+                    "events": {"dataset_columns": {"margin_secs": ["dataset", "ts_code"]}}
+                }
+            }
+            # A physical column not attributed to any dataset must fail loudly,
+            # not silently under-cover the unit table.
+            with self.assertRaises(ValueError) as ctx:
+                snapshot_column_map(view, manifest)
+            self.assertIn("orphan_col", str(ctx.exception))
+            # Declared-but-not-yet-materialized columns are legitimate
+            # (fundamentals attribution comes from the vendor schema).
+            manifest["domains"]["events"]["dataset_columns"]["margin_secs"] = [
+                "dataset", "ts_code", "orphan_col", "future_col",
+            ]
+            column_map = snapshot_column_map(view, manifest)
+            self.assertIn("future_col", column_map[("events.parquet", "margin_secs")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            view = Path(tmp)
+            (view / "broken.parquet").write_text("not parquet", encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                snapshot_column_map(view, {"domains": {}})
+            self.assertIn("broken.parquet", str(ctx.exception))
+            self.assertNotIn(tmp, str(ctx.exception))
 
     def test_unresolved_column_fails_fast_with_full_listing(self):
         from autotrade.environment.data.units import UnresolvedUnitError, build_unit_reference
