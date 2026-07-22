@@ -79,26 +79,58 @@ flowchart LR
 
 ### 1.2 原始单位
 
+机读单一事实源是 `src/autotrade/environment/data/units.py` 的 `SOURCE_UNIT_RULES`（dataset 或 dataset.字段族 → 规则）：Agent 合同（经 `data_summary.json` 下发，离线 Fold Agent 可完整读取）与各数据审计报告的 `unit_rules` 元数据均由它投影，本表与其内容对齐。带"实测"的条目经真实数据比对核验。
+
+**主交易文件（归一化前的源单位）**
+
 | 数据 | 单位规则 |
 |---|---|
+| `daily` 价格字段 | 元/股 |
 | `daily.vol` | 手 |
 | `daily.amount` | 千元 |
-| `stk_mins.vol` | 股 |
-| `stk_mins.amount` | 元 |
-| `daily_basic.total_share/float_share/free_share` | 万股 |
-| `daily_basic.total_mv/circ_mv` | 万元 |
+| `daily.pct_chg/turnover_rate(_f)/dv_ratio/dv_ttm` | 百分数值；载入 snapshot 时乘 0.01 归一为小数 |
+| `stk_mins` 价格字段 | 元/股 |
+| `stk_mins.vol` / `stk_mins.amount` | 股 / 元 |
+| `stk_auction.price/pre_close` | 元/股 |
+| `stk_auction.vol` / `stk_auction.amount` | 股 / 元 |
 | `stk_auction.turnover_rate` | 百分数值；`0.5` 表示 0.5% |
 | `stk_auction.volume_ratio` | 无量纲量比；`1.2` 表示 1.2 倍 |
 | `stk_auction.float_share` | 万股；与 `daily_basic.float_share` 同源口径 |
-| `bak_daily.amount` | 万元；和 `daily.amount` 比较时乘以 10 |
-| 财报主表金额字段 | 元 |
-| `forecast_vip` 利润预测字段 | 万元 |
-| 宏观金额字段 | 保持 TuShare 官方单位，常见为亿元 |
-| `moneyflow` | 量为手，金额为万元 |
-| `margin` / `margin_detail` | 金额为元 |
-| `block_trade.vol` | 万股 |
 
-`bak_basic` 不含 `vol` / `amount`，不能用于成交量或成交额口径对齐。
+**日频跨源高风险口径（bak 系与 daily_basic 相差 10^4）**
+
+| 数据 | 单位规则 |
+|---|---|
+| `daily_basic.total_share/float_share/free_share` | 万股 |
+| `daily_basic.total_mv/circ_mv` | 万元 |
+| `bak_daily.vol` | 手，与 `daily.vol` 同量级（实测比值 1.0） |
+| `bak_daily.amount` | 万元；和 `daily.amount` 比较时乘以 10（实测） |
+| `bak_daily.total_share/float_share` | 亿股；和 `daily_basic` 股本比较时乘以 10000（实测） |
+| `bak_daily.total_mv/float_mv` | 亿元；和 `daily_basic` 市值比较时乘以 10000（实测） |
+| `bak_basic` 股本/资产字段 | 亿股 / 亿元；`bak_basic` 不含 `vol`/`amount`，不能用于成交量或成交额口径对齐 |
+
+**财务域**
+
+| 数据 | 单位规则 |
+|---|---|
+| 财报主表金额字段 | 元 |
+| `forecast_vip` 利润预测字段 | 万元；不得与元口径的财报净利润直接混算 |
+| `dividend.cash_div/cash_div_tax` | 每股现金分红（元/股）；`base_share` 出现时为万股 |
+| `fina_indicator_vip` | 混合表：每股类为元/股、比率类为百分数值、另含无量纲与元金额字段，须按字段族处理 |
+
+**资金流与事件类**
+
+| 数据 | 单位规则 |
+|---|---|
+| `moneyflow` | 量为手，金额为万元（`500` 即 500 万元） |
+| `margin` / `margin_detail` | 金额为元；`rqyl` 为融券余量（股） |
+| `top_list` / `top_inst` / `hm_detail` | 买卖/净额为元；比率与换手为百分数值 |
+| `block_trade` | `price` 元/股、`vol` 万股、`amount` 万元（实测 `price×vol≈amount`） |
+| `repurchase` | `vol` 股、`amount` 及上下限为元（实测金额/量为价格量级） |
+| `share_float`（含 complete/ann_date 变体） | `float_share` 万股、`float_ratio` 百分数值 |
+| `stk_holdertrade` | `change_vol/after_share` 股；比例字段为百分数值 |
+
+**宏观与跨资产只读上下文（不可交易）**：单位必须按 `dataset+字段族` 逐条解释，不存在统一"亿元"规则。高风险条目：`fut_daily/opt_daily` 的 `vol/oi` 为手/张、`amount` 为万元；`cb_daily` 价格为百元面值报价、量为手、额为万元、溢价率为百分数值；`fx_daily.tick_qty` 是报价笔数而非成交量；利率/收益率类（shibor 族、`yc_cb` 等）为百分数值；`index_daily.pct_chg` 为百分数值（`5%=5.0`）。完整清单见 `SOURCE_UNIT_RULES`。
 
 数据层只记录和审计原始单位，不改写原始字段。daily、分钟和竞价交易文件的单位归一，以及其他研究域的源单位使用规则见 Environment 的“单位合同”。
 

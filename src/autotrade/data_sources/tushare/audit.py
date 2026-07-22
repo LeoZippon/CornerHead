@@ -22,6 +22,7 @@ else:
     from .common import *  # noqa: F401,F403
 
 from autotrade.data_quality import build_quality_report, write_quality_report
+from autotrade.environment.data.units import SOURCE_UNIT_RULES
 
 def audit_trade_date_dataset(raw_dir: Path, spec: TradeDateDataset, expected_dates: set[str], add) -> None:
     files = sorted((raw_dir / spec.api_name).glob("trade_date=*.parquet"))
@@ -1643,22 +1644,28 @@ def existing_partition_values(raw_dir: Path, datasets: list[str], prefix: str) -
     return values
 
 def integrated_unit_rules() -> dict[str, str]:
-    return {
-        "daily.vol": "hands; multiply by 100 for shares",
-        "daily.amount": "thousand CNY",
-        "bak_daily.vol": "same empirical scale as daily.vol in API case studies",
-        "bak_daily.amount": "10k CNY inferred by API case studies; multiply by 10 before comparing with daily.amount",
-        "daily_basic.total_share/float_share/free_share": "10k shares",
-        "daily_basic.total_mv/circ_mv": "10k CNY",
-        "bak_daily.total_share/float_share": "100m shares; multiply by 10000 before comparing with daily_basic share fields",
-        "bak_daily.total_mv/float_mv": "100m CNY inferred by case studies; multiply by 10000 before comparing with daily_basic market value fields",
-        "bak_basic.float_share/total_share": "100m shares; bak_basic has no volume or amount fields",
-        "bak_basic.total_assets/liquid_assets/fixed_assets": "100m CNY style snapshot fields; use only as a supplemental coarse snapshot",
-        "fundamental.statement_amount_fields": "income_vip/balancesheet_vip/cashflow_vip amount fields are CNY/yuan unless the field is explicitly per-share or ratio",
-        "fundamental.forecast_profit_fields": "forecast_vip net_profit_min/net_profit_max are 10k CNY and must not be mixed directly with statement net profit in CNY",
-        "fundamental.dividend_cash_fields": "dividend cash_div/cash_div_tax are per-share cash dividend fields; base_share is 10k shares when present",
-        "fundamental.fina_indicator_vip": "mixed table: per-share fields, ratios/percent fields, and CNY amount fields; handle by field family",
-    }
+    """Projection of the shared SOURCE_UNIT_RULES registry (environment/data/units.py)."""
+    keys = (
+        "daily.prices",
+        "daily.vol",
+        "daily.amount",
+        "daily.percent_family",
+        "stk_mins",
+        "stk_auction",
+        "daily_basic.total_share/float_share/free_share",
+        "daily_basic.total_mv/circ_mv",
+        "bak_daily.vol",
+        "bak_daily.amount",
+        "bak_daily.total_share/float_share",
+        "bak_daily.total_mv/float_mv",
+        "bak_basic.float_share/total_share",
+        "bak_basic.total_assets/liquid_assets/fixed_assets",
+        "fundamental.statement_amount_fields",
+        "fundamental.forecast_profit_fields",
+        "fundamental.dividend_cash_fields",
+        "fundamental.fina_indicator_vip",
+    )
+    return {key: SOURCE_UNIT_RULES[key] for key in keys}
 
 def audit_integrated_filesystem(raw_dir: Path, datasets: list[str], add) -> None:
     parquet_files: list[Path] = []
@@ -2165,23 +2172,26 @@ def macro_pit_rules() -> dict[str, str]:
     }
 
 def macro_unit_rules() -> dict[str, str]:
-    return {
-        "cn_gdp": "GDP and industry value fields are 100m CNY style macro levels; *_yoy fields are percent.",
-        "cn_cpi/cn_ppi": "index and inflation fields are official CPI/PPI values, month-on-month/year-on-year/accumulated percent fields by column suffix.",
-        "cn_pmi": "PMI fields are diffusion-index levels.",
-        "cn_m": "m0/m1/m2 are 100m CNY; *_yoy and *_mom are percent.",
-        "sf_month": "social financing flow/stock fields are official 100m CNY style macro levels.",
-        "shibor/shibor_lpr/libor/hibor/us_rates": "rate columns are percent levels unless a field name/document explicitly states otherwise.",
-        "repo_daily": "bond repo price/rate/amount fields are preserved in official raw units; normalize before cross-asset factor use.",
-        "index_global": "global index OHLC fields are index points; vol/amount availability varies by market and source.",
-        "fx_daily": "FX quote fields are bid/ask prices; tick_qty is quote/tick count, not stock volume.",
-        "eco_cal": "economic-calendar actual/previous/forecast values are heterogeneous by event and must not be pooled without event-specific parsing.",
-        "monetary_policy": "text/PDF evidence; no numeric unit.",
-        "fut_daily": "futures prices are contract quote units (index points for CFFEX); vol/oi are lots (手); amount is 万元; multiplier from fut_basic converts to notional.",
-        "opt_daily": "option prices are premium quote units; vol/oi are contracts (手); amount is 万元; exercise_price from opt_basic shares the underlying quote unit.",
-        "cb_daily": "CB prices are per-100-par CNY; vol is lots (手), amount is 万元; bond_over_rate/cb_over_rate are percent.",
-        "yc_cb": "yield is percent per annum; curve_term is years; curve_type 0=YTM, 1=spot.",
-    }
+    """Projection of the shared SOURCE_UNIT_RULES registry (environment/data/units.py)."""
+    keys = (
+        "cn_gdp",
+        "cn_cpi/cn_ppi",
+        "cn_pmi",
+        "cn_m",
+        "sf_month",
+        "shibor/shibor_lpr/libor/hibor/us_rates",
+        "repo_daily",
+        "index_daily",
+        "index_global",
+        "fx_daily",
+        "eco_cal",
+        "monetary_policy",
+        "fut_daily",
+        "opt_daily",
+        "cb_daily",
+        "yc_cb",
+    )
+    return {key: SOURCE_UNIT_RULES[key] for key in keys}
 
 def audit_macro_dataset(raw_dir: Path, spec: MacroDataset, expected_paths: set[Path], add) -> None:
     audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
@@ -2296,16 +2306,18 @@ def expected_event_paths(raw_dir: Path, spec: EventDataset, start_date: str, end
     raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {spec.api_name}")
 
 def event_unit_rules() -> dict[str, str]:
-    return {
-        "margin/margin_detail": "financing/margin balance and amount fields are preserved in TuShare raw units; rqyl is securities-lending quantity.",
-        "margin_secs": "margin eligibility table has no numeric market amount; exchange is SSE/SZSE/BSE and does not guarantee broker-level borrow inventory.",
-        "moneyflow": "volume fields are raw TuShare moneyflow volume units and amount fields are raw TuShare amount units; normalize before mixing with daily/stk_mins.",
-        "stk_holdernumber": "holder_num is shareholder account count.",
-        "stk_holdertrade": "change_vol/after_share/total_share are raw share fields; ratios are percent-style raw fields.",
-        "repurchase": "vol/amount/high_limit/low_limit are raw TuShare repurchase units; treat as event evidence until normalized.",
-        "share_float": "float_share and float_ratio are raw unlock-share and ratio fields; field availability should be based on ann_date, not float_date, when ann_date exists.",
-        "block_trade": "price/vol/amount are raw block-trade fields; block_trade is sparse and zero-row trade dates are expected.",
-    }
+    """Projection of the shared SOURCE_UNIT_RULES registry (environment/data/units.py)."""
+    keys = (
+        "margin/margin_detail",
+        "margin_secs",
+        "moneyflow",
+        "stk_holdernumber",
+        "stk_holdertrade",
+        "repurchase",
+        "share_float",
+        "block_trade",
+    )
+    return {key: SOURCE_UNIT_RULES[key] for key in keys}
 
 def event_pit_rules() -> dict[str, str]:
     return {
@@ -2596,17 +2608,19 @@ def board_pit_rules() -> dict[str, dict[str, str]]:
     }
 
 def board_unit_rules() -> dict[str, str]:
-    return {
-        "kpl_list": "amount/free_float/limit_order/lu_limit_order style fields are preserved in official raw units, mostly CNY-level amounts from source.",
-        "limit_step": "nums is a consecutive-limit count label; no monetary unit.",
-        "limit_cpt_list": "up_nums/cons_nums are counts; pct_chg is percent; rank is source rank.",
-        "limit_list_ths": "price/current monetary fields are preserved in official raw units; pct_chg/turnover/rise_rate style fields are percent or source ratios as named.",
-        "top_list": "amount and Dragon-Tiger buy/sell/net fields are CNY amounts; rates are percent.",
-        "top_inst": "buy/sell/net_buy fields are CNY amounts; buy_rate/sell_rate are percent.",
-        "hm_detail": "buy_amount/sell_amount/net_amount are CNY amounts.",
-        "ths_hot/dc_hot": "rank/hot are source popularity ranks/scores; pct_change is percent; current_price is CNY price for A-share rows.",
-        "hm_list": "static text/reference metadata; no numeric unit.",
-    }
+    """Projection of the shared SOURCE_UNIT_RULES registry (environment/data/units.py)."""
+    keys = (
+        "kpl_list",
+        "limit_step",
+        "limit_cpt_list",
+        "limit_list_ths",
+        "top_list",
+        "top_inst",
+        "hm_detail",
+        "ths_hot/dc_hot",
+        "hm_list",
+    )
+    return {key: SOURCE_UNIT_RULES[key] for key in keys}
 
 def audit_board_trading_only(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
