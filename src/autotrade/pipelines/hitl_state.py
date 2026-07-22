@@ -317,8 +317,25 @@ class ControlState:
         }
 
 
+def _require_hitl_version(payload: dict[str, object], path: Path) -> None:
+    """An existing HITL record must carry the current schema_version exactly
+    (strict int; JSON true/1.0/"1" all reject). No legacy tolerance: loading a
+    foreign or future format under the current structure and writing it back
+    would silently drop its fields. A missing file (empty payload) is simply
+    'no record yet', not a version violation."""
+    if not payload:
+        return
+    version = payload.get("schema_version")
+    if type(version) is not int or version != HITL_STATE_SCHEMA_VERSION:
+        raise ValueError(
+            f"HITL record schema_version {version!r} != {HITL_STATE_SCHEMA_VERSION} in {path}; "
+            "migrate the file before reading"
+        )
+
+
 def read_control(path: Path) -> ControlState:
     payload = read_json(path)
+    _require_hitl_version(payload, path)
     mode = str(payload.get("mode") or "manual")
     if mode not in CONTROL_MODES:
         mode = "manual"
@@ -567,7 +584,9 @@ class StatusReporter:
 
 
 def read_status(path: Path) -> dict[str, object]:
-    return read_json(path)
+    payload = read_json(path)
+    _require_hitl_version(payload, path)
+    return payload
 
 
 def proc_start_ticks(pid: int) -> int | None:

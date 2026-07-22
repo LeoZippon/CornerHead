@@ -134,9 +134,11 @@ class ReportingTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "schema_version"):
                 ExperimentLedger(path).read()
             # Unknown version: newer formats must not be silently misread.
-            path.write_text(json.dumps({**record, "schema_version": 2}) + "\n", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "schema_version"):
-                ExperimentLedger(path).read()
+            # true/1.0/"1" must also reject (bool subclasses int; 1.0 == 1).
+            for bad in (2, True, 1.0, "1"):
+                path.write_text(json.dumps({**record, "schema_version": bad}) + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "schema_version"):
+                    ExperimentLedger(path).read()
 
     def test_append_stamps_win_over_caller_supplied_fields(self):
         with tempfile.TemporaryDirectory() as tmp:

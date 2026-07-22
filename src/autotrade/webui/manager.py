@@ -23,6 +23,7 @@ from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines.hitl_state import (
     CONTROL_NAME,
     HITL_DIR_NAME,
+    HITL_STATE_SCHEMA_VERSION,
     PARAMS_NAME,
     SCHEDULE_NAME,
     STATUS_NAME,
@@ -374,7 +375,12 @@ class ExperimentManager:
         status_path = experiment_dir / HITL_DIR_NAME / STATUS_NAME
         old_status = read_status(status_path)
         progress = {key: old_status[key] for key in ("total_sessions", "completed_sessions") if key in old_status}
-        write_json_atomic(status_path, {**progress, "state": "launching", "launched_at": utc_now_iso()})
+        write_json_atomic(status_path, {
+            "schema_version": HITL_STATE_SCHEMA_VERSION,
+            **progress,
+            "state": "launching",
+            "launched_at": utc_now_iso(),
+        })
         self.log_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.log_dir / f"{experiment_id}.log"
         with log_path.open("ab") as log:
