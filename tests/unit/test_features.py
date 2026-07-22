@@ -2,6 +2,7 @@
 
 
 # Source: test_auction_correction.py
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -324,80 +325,187 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
 
 
 class UnitRegistryProjectionTest(unittest.TestCase):
-    def test_registry_is_structured_and_covers_default_snapshot_datasets(self):
-        from autotrade.environment.data.snapshot import SnapshotConfig
-        from autotrade.environment.data.units import UNIT_RULES, registry_datasets
+    """The column-level unit registry: structure, coverage, projections."""
 
-        keys = [(rule.file, rule.dataset, rule.fields) for rule in UNIT_RULES]
+    @staticmethod
+    def _inventory_column_map() -> dict[tuple[str, str | None], list[str]]:
+        repo_root = Path(__file__).resolve().parents[2]
+        inventory = json.loads(
+            (repo_root / "configs" / "data" / "snapshot_columns.json").read_text(encoding="utf-8")
+        )
+        column_map: dict[tuple[str, str | None], list[str]] = {
+            (file, dataset): columns
+            for file, datasets in inventory["files"].items()
+            for dataset, columns in datasets.items()
+        }
+        # Builder-defined single-schema snapshot files (columns are a code
+        # contract, pinned here; the snapshot build re-validates live).
+        column_map[("daily.parquet", None)] = [
+            "ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change",
+            "pct_chg", "vol", "amount", "close_basic", "turnover_rate", "turnover_rate_f",
+            "volume_ratio", "pe", "pe_ttm", "pb", "ps", "ps_ttm", "dv_ratio", "dv_ttm",
+            "total_share", "float_share", "free_share", "total_mv", "circ_mv",
+            "pre_close_limit", "up_limit", "down_limit", "adj_factor", "is_suspended",
+        ]
+        column_map[("auction.parquet", None)] = [
+            "ts_code", "trade_date", "session", "price", "vol", "amount", "pre_close",
+            "turnover_rate", "volume_ratio", "float_share", "available_at", "available_at_rule",
+        ]
+        column_map[("intraday_1min.parquet", None)] = [
+            "ts_code", "trade_time", "open", "high", "low", "close", "vol", "amount",
+            "trade_date", "auction_market_bucket", "auction_open_bar", "vol_pit", "amount_pit",
+            "auction_vol_correction_factor", "auction_amount_correction_factor",
+            "auction_correction_rule",
+        ]
+        column_map[("corporate_actions.parquet", None)] = [
+            "ts_code", "ex_date", "record_date", "pay_date", "div_listdate",
+            "cash_per_share", "stock_per_share",
+        ]
+        column_map[("text_index.parquet", None)] = [
+            "text_id", "dataset", "ts_codes", "title", "available_at", "source_hash",
+            "library_file",
+        ]
+        column_map[("universe.parquet", None)] = [
+            "ts_code", "exchange", "list_date", "market", "name", "l1_code", "l1_name",
+        ]
+        return column_map
+
+    def test_every_inventory_column_resolves(self):
+        from autotrade.environment.data.units import build_unit_reference
+
+        # Full-column resolution over the committed vendor schema inventory:
+        # an unregistered column or two overlapping rules both raise here.
+        records = build_unit_reference(self._inventory_column_map())
+        self.assertGreater(len(records), 1500)
+        for record in records:
+            if record["semantic_type"] == "numeric":
+                self.assertTrue(record["source_unit"], record)
+                self.assertEqual(
+                    record["status"] == "unknown", record["source_unit"] == "unknown", record
+                )
+            else:
+                self.assertIsNone(record["source_unit"], record)
+
+    def test_registry_structure_and_default_dataset_coverage(self):
+        from autotrade.environment.data.snapshot import SnapshotConfig
+        from autotrade.environment.data.units import (
+            FIELD_RULES,
+            NO_NUMERIC_DATASETS,
+            rules_for,
+        )
+
+        keys = [(rule.file, rule.dataset, rule.columns) for rule in FIELD_RULES]
         self.assertEqual(len(keys), len(set(keys)), "duplicate registry rows")
-        for rule in UNIT_RULES:
-            self.assertIn(rule.status, {"verified", "official", "inferred"}, rule.key())
-            self.assertTrue(rule.source_unit, rule.key())
+        for rule in FIELD_RULES:
+            self.assertIn(rule.status, {"verified", "official", "inferred", "unknown"}, rule.key())
+            self.assertTrue(rule.columns, rule.key())
+            if rule.semantic == "numeric":
+                self.assertTrue(rule.source_unit, rule.key())
             if rule.factor is not None:
-                self.assertTrue(rule.columns, rule.key())
                 self.assertTrue(rule.normalized_unit, rule.key())
             if rule.status == "verified":
                 self.assertTrue(rule.evidence, rule.key())
-        # Every default snapshot dataset id must carry at least one unit rule,
-        # keyed exactly (no composite or alias keys can satisfy this).
+        # Every default snapshot dataset is either ruled under its OWN file
+        # (a fundamentals dataset registered under events.parquet fails here)
+        # or a declared no-numeric dataset.
         config = SnapshotConfig()
-        defaults = set(config.events_datasets) | set(config.macro_datasets) | set(config.fundamental_datasets)
-        self.assertEqual(sorted(defaults - registry_datasets()), [])
+        domain_files = (
+            ("events.parquet", config.events_datasets),
+            ("macro.parquet", config.macro_datasets),
+            ("fundamentals.parquet", config.fundamental_datasets),
+        )
+        for file, datasets in domain_files:
+            for dataset in datasets:
+                rules = rules_for(datasets=(dataset,))
+                if dataset in NO_NUMERIC_DATASETS:
+                    self.assertEqual(rules, (), dataset)
+                    continue
+                self.assertTrue(rules, f"no unit rules for default dataset {dataset}")
+                self.assertEqual({rule.file for rule in rules}, {file}, dataset)
 
-    def test_audit_verified_unit_corrections_are_pinned(self):
-        from autotrade.environment.data.units import rules_for
+    def test_conversion_rules_never_overlap(self):
+        from autotrade.environment.data.units import (
+            AUCTION_UNIT_CONVERSIONS,
+            DAILY_UNIT_CONVERSIONS,
+        )
 
-        # The two unit errors proven by back-calculation against the live lake
-        # (2026-07 audit) must never regress to the old readings.
-        share_float = [
-            rule for rule in rules_for(file="events.parquet", datasets=("share_float_complete",))
-            if "float_share" in rule.fields
+        # A column multiplied by two factors would corrupt snapshot values.
+        for table in (DAILY_UNIT_CONVERSIONS, AUCTION_UNIT_CONVERSIONS):
+            columns = [column for column, _, _ in table]
+            self.assertEqual(len(columns), len(set(columns)), table)
+
+    def test_verified_unit_corrections_are_pinned(self):
+        from autotrade.environment.data.units import resolve_field
+
+        expectations = [
+            # (file, dataset, column, source_unit) — errors proven by
+            # back-calculation/reconciliation must never regress.
+            ("events.parquet", "share_float_complete", "float_share", "shares"),
+            ("events.parquet", "repurchase", "high_limit", "CNY_per_share"),
+            ("events.parquet", "cyq_perf", "cost_5pct", "CNY_per_share"),
+            ("events.parquet", "cyq_perf", "winner_rate", "percent"),
+            ("fundamentals.parquet", "fina_indicator_vip", "current_ratio", "multiple"),
+            ("fundamentals.parquet", "fina_indicator_vip", "assets_turn", "times_per_period"),
+            ("fundamentals.parquet", "fina_indicator_vip", "roe", "percent"),
+            ("fundamentals.parquet", "fina_indicator_vip", "gross_margin", "CNY"),
+            ("fundamentals.parquet", "balancesheet_vip", "total_share", "shares"),
+            ("daily.parquet", None, "volume_ratio", "multiple"),
+            ("daily.parquet", None, "close_basic", "CNY_per_share"),
+            ("macro.parquet", "repo_daily", "close", "percent"),
         ]
-        self.assertEqual([rule.source_unit for rule in share_float], ["shares"])
-        self.assertEqual(share_float[0].status, "verified")
-        limits = [
-            rule for rule in rules_for(file="events.parquet", datasets=("repurchase",))
-            if "high_limit" in rule.fields
-        ]
-        self.assertEqual([rule.source_unit for rule in limits], ["CNY_per_share"])
-        self.assertEqual(limits[0].status, "verified")
+        for file, dataset, column, unit in expectations:
+            record = resolve_field(file, dataset, column)
+            self.assertEqual(record["source_unit"], unit, (file, dataset, column))
 
-    def test_all_projections_derive_from_the_registry(self):
+    def test_unresolved_column_fails_fast_with_full_listing(self):
+        from autotrade.environment.data.units import UnresolvedUnitError, build_unit_reference
+
+        with self.assertRaises(UnresolvedUnitError) as ctx:
+            build_unit_reference({("events.parquet", "margin"): ["rzye", "made_up_a", "made_up_b"]})
+        self.assertIn("made_up_a", str(ctx.exception))
+        self.assertIn("made_up_b", str(ctx.exception))
+
+    def test_audit_projections_derive_from_registry(self):
         from autotrade.data_sources.tushare.audit import (
             board_unit_rules,
             event_unit_rules,
             integrated_unit_rules,
             macro_unit_rules,
         )
-        from autotrade.environment.data.contracts import default_tushare_contracts
-        from autotrade.environment.data.units import (
-            AGENT_UNIT_CONTRACT,
-            AUCTION_UNIT_CONVERSIONS,
-            DAILY_UNIT_CONVERSIONS,
-            UNIT_RULES,
-            column_source_units,
-            rules_text,
+        from autotrade.data_sources.tushare.common import (
+            BOARD_TRADING_DATASETS,
+            EVENT_FLOW_SPECS,
+            MACRO_SPECS,
         )
+        from autotrade.environment.data.units import FIELD_RULES
 
-        # Agent contract ships exactly the agent-visible structured records.
-        self.assertEqual(
-            AGENT_UNIT_CONTRACT["source_unit_rules"],
-            [rule.to_record() for rule in UNIT_RULES if rule.agent_visible],
-        )
-        # Audit metadata values are the registry's own text projection.
-        full_projection = rules_text(UNIT_RULES)
-        for rules in (macro_unit_rules(), event_unit_rules(), board_unit_rules(), integrated_unit_rules()):
-            self.assertTrue(rules)
-            for key, text in rules.items():
-                self.assertEqual(text, full_projection[key], key)
-        # Snapshot conversion tables are derived from factor-carrying rules.
-        derived = {
-            (column, rule.factor)
-            for rule in UNIT_RULES
-            if rule.factor is not None and rule.file in {"daily.parquet", "auction.parquet"}
-            for column in rule.columns
+        registry_records = [rule.to_record() for rule in FIELD_RULES]
+        expected_event_ids = {
+            "share_float_complete" if name == "share_float" else name for name in EVENT_FLOW_SPECS
         }
-        self.assertEqual({(c, f) for c, f, _ in DAILY_UNIT_CONVERSIONS + AUCTION_UNIT_CONVERSIONS}, derived)
+        domain_expectations = (
+            (macro_unit_rules(), set(MACRO_SPECS)),
+            (event_unit_rules(), expected_event_ids),
+            (board_unit_rules(), set(BOARD_TRADING_DATASETS)),
+        )
+        for projection, expected_datasets in domain_expectations:
+            self.assertEqual(set(projection), expected_datasets)
+            for dataset, records in projection.items():
+                for record in records:
+                    self.assertIn(record, registry_records, dataset)
+        for records in integrated_unit_rules().values():
+            for record in records:
+                self.assertIn(record, registry_records)
+
+    def test_agent_contract_is_a_pointer_not_a_copy(self):
+        from autotrade.environment.data.contracts import default_tushare_contracts
+        from autotrade.environment.data.units import AGENT_UNIT_CONTRACT, column_source_units
+
+        self.assertEqual(
+            AGENT_UNIT_CONTRACT["unit_reference"], "/mnt/artifacts/unit_reference.json"
+        )
+        # No embedded rule table: the contract stays a constant-size pointer.
+        self.assertLess(len(json.dumps(AGENT_UNIT_CONTRACT)), 1200)
         # Raw dataset contracts reuse the registry's column-level source units.
         daily_units = column_source_units("daily.parquet")
         for contract in default_tushare_contracts().values():

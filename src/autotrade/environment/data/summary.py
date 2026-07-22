@@ -7,7 +7,11 @@ import re
 from pathlib import Path
 from typing import Mapping
 
-from autotrade.environment.data.units import AGENT_UNIT_CONTRACT
+from autotrade.environment.data.units import (
+    AGENT_UNIT_CONTRACT,
+    build_unit_reference,
+    snapshot_column_map,
+)
 from autotrade.environment.runtime import utc_now_iso
 
 LARGE_TABLE_ROW_THRESHOLD = 1_000_000
@@ -85,6 +89,11 @@ def write_agent_data_summary(
     `views` maps a logical name such as `snapshot` or `valid` to
     `(host_snapshot_dir, sandbox_mount_path)`. The summary intentionally
     exposes only sandbox mount paths, not host filesystem paths.
+
+    The per-column unit table for every file/dataset visible in the given
+    views is written as the sibling ``unit_reference.json`` (the contract in
+    the summary only points to it), so the Agent loads full unit facts on
+    demand instead of carrying them in every summary read.
     """
     summary: dict[str, object] = {
         "generated_at": utc_now_iso(),
@@ -101,6 +110,7 @@ def write_agent_data_summary(
         )
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_unit_reference(output_path.parent / "unit_reference.json", views)
     # Compact (un-indented) JSON keeps this index a single cat-able, low-token
     # read; use jq for ad-hoc human formatting.
     output_path.write_text(
@@ -108,6 +118,29 @@ def write_agent_data_summary(
         encoding="utf-8",
     )
     return summary
+
+
+def _write_unit_reference(path: Path, views: Mapping[str, tuple[Path, str]]) -> None:
+    """Per-column unit records for every (file, dataset, column) in the views."""
+    column_map: dict[tuple[str, str | None], list[str]] = {}
+    for view_dir, _mount in views.values():
+        view_dir = Path(view_dir)
+        manifest = _read_json(view_dir / "manifest.json")
+        for key, columns in snapshot_column_map(view_dir, manifest).items():
+            merged = dict.fromkeys(column_map.get(key, []))
+            merged.update(dict.fromkeys(columns))
+            column_map[key] = list(merged)
+    records = build_unit_reference(column_map)
+    payload = {
+        "generated_at": utc_now_iso(),
+        "identity_rule": AGENT_UNIT_CONTRACT["identity_rule"],
+        "unknown_unit_policy": AGENT_UNIT_CONTRACT["unknown_unit_policy"],
+        "records": records,
+    }
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
 
 
 def _snapshot_view_summary(view_dir: Path, mount_path: str, *, detailed: bool = True) -> dict[str, object]:

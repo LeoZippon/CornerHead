@@ -79,28 +79,13 @@ flowchart LR
 
 ### 1.2 原始单位
 
-机读单一事实源是 `src/autotrade/environment/data/units.py` 的 `UNIT_RULES`：结构化注册表，每条规则以 `file + dataset + 字段族` 定位（dataset 使用与快照完全一致的标识，不用组合键或别名），并携带 `source_unit / factor / normalized_unit / columns / status / evidence / agent_visible` 字段。它单向投影到全部消费面，任何一处都不得另行手工维护单位口径：
+单位元数据的机读事实源是 `src/autotrade/environment/data/units.py`（列级注册表 `FIELD_RULES` + 通用列分类器）。异构数据集内的字段必须用 `文件 + dataset + 列` 三元组定位，仅按列名匹配无效。
 
-1. 快照换算表 `DAILY_UNIT_CONVERSIONS`/`AUCTION_UNIT_CONVERSIONS` 与 `DatasetContract.unit_rules` 由带 `factor`/`columns` 的规则派生；
-2. Agent 合同 `AGENT_UNIT_CONTRACT["source_unit_rules"]`（经 `data_summary.json` 下发，仅含 `agent_visible` 条目，离线 Fold Agent 可完整读取）；
-3. 各数据审计报告的 `unit_rules` 元数据按各审计域自己的数据集清单投影，清单中的数据集缺少注册表规则即抛错；
-4. 人读完整单位表 `docs/units_reference.md` 由 `scripts/dev/export_units.py` 生成，禁止手工编辑，回归测试重新生成并比对。
+Pipeline 由该注册表生成快照换算规则、审计元数据、人读参考表和 Agent 可读的单位文件，任何一处都不另行手工维护单位口径。归一化文件（daily/分钟/竞价/分红送转）存储归一化后的值，source union 保留供应商原始单位。
 
-`status=verified` 的条目已经真实数据比对核验（如 `share_float_complete.float_share` 为股、`repurchase.high_limit/low_limit` 为元/股均由回算核验），`official` 依据供应商官方字段合同，`inferred` 仅由局部证据推断。注册表必须覆盖全部默认快照数据集（回归测试强制包含关系）。
+当前快照可见字段的完整逐列单位表随每次快照生成为 `/mnt/artifacts/unit_reference.json`（Agent 入口经 `data_summary.json` 的 `unit_contract` 指针），人读规则视图为 `docs/units_reference.md`（生成文件，含状态定义与校验说明）。标记为 `unknown` 或未出现在表中的字段，在正式解决前不得用于绝对阈值或跨数据集计算；观测数值范围只能用于校验，不能反向猜单位。完备性由两道校验保证：快照构建对每一列强制解析（缺规则即失败），回归测试对 `configs/data/snapshot_columns.json` 的供应商列清单全量解析。
 
-数据层只记录和审计原始单位，不改写原始字段。daily、分钟和竞价交易文件的单位归一，以及其他研究域的源单位使用规则见 Environment 的“单位合同”。宏观与跨资产只读上下文不存在统一“亿元”规则，单位必须按 `dataset+字段族` 逐条解释；同名列在不同 `dataset` 下量级可以相差 10^4（如 `index_dailybasic` 为元/股 vs `daily_basic` 为万元/万股，`daily_info` 为亿股/亿元 vs `sz_daily_info` 为元），严禁靠列名猜单位。
-
-**单位文档的完整性边界**
-
-不维护“仓库全部 raw 表 × 全部字段”的人工逐列单位抄录。大量字段是标识、日期、文本、类别或无量纲计数；其余源表 schema 会随供应商扩展。完整复制官方字段表会快速漂移，并把真正危险的跨源换算淹没在低价值文本中。
-
-单位合同按使用风险分层：
-
-1. Agent 直接使用的归一化文件必须完整声明字段族和换算因子；当前 `daily.parquet`、`intraday_1min.parquet` 和 `auction.parquet` 属于这一层。
-2. `events.parquet`、`macro.parquet`、`fundamentals.parquet` 等异构 source union 保留源单位，按字段族为全部默认快照数据集显式维护规则（回归测试强制覆盖），但不逐列抄录供应商全字段表。规则必须用“文件 + `dataset` + 字段”定位，不能靠同名列。
-3. 仅 raw 留档、文本、标识、类别和未进入数值研究的字段，以本地审计中的官方引用和供应商字段合同为准，不重复抄写到 Agent Prompt。
-
-未映射的 source 字段不是“默认无量纲”：在核实上游合同并显式换算前，不得用于绝对阈值或跨数据集算术。某个新字段族一旦进入正式策略研究，同一变更必须补齐 `UNIT_RULES` 注册表条目和回归测试；Agent 合同、审计元数据与 `docs/units_reference.md` 由投影自动跟随，不单独修改。实际运行的优先级为：归一化 snapshot 合同与 `unit_conversions` > 本仓库 dataset-specific 规则 > 上游官方字段合同；观测数值范围只能用于校验，不能反向猜单位。
+各数据审计报告 `metadata` 中的 `unit_rules` 等字段是注册表的非稳定投影，允许随注册表扩展而变化，不构成报告 schema 版本的一部分。
 
 ### 1.3 基础研究数据
 

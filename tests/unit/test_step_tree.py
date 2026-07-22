@@ -398,9 +398,11 @@ class PhasePromptTest(unittest.TestCase):
         fold_prompt = build_system_prompt(fold_info={"fold_id": "f"}, acceptance_rules={})
         meta_prompt = build_meta_learning_prompt()
         for prompt in (fold_prompt, meta_prompt):
-            self.assertIn("5%=0.05", prompt)
-            self.assertIn("500", prompt)
-            self.assertIn("5%=5.0", prompt)
+            # Prompts point at the per-run unit table instead of hand-copying
+            # unit examples (a second source of truth that can drift).
+            self.assertIn("unit_reference.json", prompt)
+            self.assertNotIn("5%=0.05", prompt)
+            self.assertNotIn("moneyflow.*_amount", prompt)
 
     def test_fold_facts_opaque_parent_artifact_id(self):
         # Frozen artifact ids embed the raw fold label of the fold that produced

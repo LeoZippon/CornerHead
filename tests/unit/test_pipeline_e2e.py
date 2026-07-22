@@ -617,40 +617,43 @@ class PipelineEndToEndTest(unittest.TestCase):
             data_summary = captured_meta["data_summary"]
             self.assertEqual(data_summary["kind"], "meta_learning")
             self.assertNotIn("schema_version", data_summary)
+            # The contract is a constant-size pointer; the per-column table is
+            # the sibling unit_reference.json artifact.
             self.assertEqual(
-                data_summary["unit_contract"]["daily.parquet"]["conversion_factors"]["dv_ttm"],
-                0.01,
+                data_summary["unit_contract"]["unit_reference"],
+                "/mnt/artifacts/unit_reference.json",
             )
-            self.assertEqual(
-                data_summary["unit_contract"]["auction.parquet"]["conversion_factors"],
-                {"turnover_rate": 0.01, "float_share": 10_000.0},
+            self.assertNotIn("source_unit_rules", data_summary["unit_contract"])
+            unit_reference = json.loads(
+                (meta_run_dir / "unit_reference.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(
-                data_summary["unit_contract"]["auction.parquet"]["units"]["volume_ratio"],
-                "dimensionless_ratio",
-            )
-            # Source units resolve through the full structured registry shipped
-            # to the sandbox (dataset-qualified; offline Fold Agents read it here).
             records = {
-                (record["dataset"], record["fields"]): record
-                for record in data_summary["unit_contract"]["source_unit_rules"]
-                if "dataset" in record
+                (record["file"], record["dataset"], record["column"]): record
+                for record in unit_reference["records"]
             }
             self.assertEqual(
-                records[("moneyflow", "buy_*_amount/sell_*_amount/net_mf_amount")]["source_unit"],
-                "10k_CNY",
+                records[("daily.parquet", None, "vol")],
+                {
+                    "file": "daily.parquet",
+                    "dataset": None,
+                    "column": "vol",
+                    "semantic_type": "numeric",
+                    "source_unit": "hands",
+                    "factor": 100.0,
+                    "normalized_unit": "shares",
+                    "status": "verified",
+                },
             )
-            self.assertEqual(records[("block_trade", "vol")]["source_unit"], "10k_shares")
             self.assertEqual(
-                records[("share_float_complete", "float_share")]["source_unit"], "shares"
+                records[("events.parquet", "margin_secs", "ts_code")]["semantic_type"],
+                "identifier",
+            )
+            # Only file/dataset/column tuples visible in THIS run's views ship.
+            self.assertNotIn(
+                ("events.parquet", "share_float_complete", "float_share"), records
             )
             self.assertIn(
-                "not an exhaustive",
-                data_summary["unit_contract"]["coverage"]["source_unions"],
-            )
-            self.assertIn(
-                "cross-dataset calculation",
-                data_summary["unit_contract"]["unknown_source_unit_policy"],
+                "must not be used", unit_reference["unknown_unit_policy"]
             )
             self.assertIn("large_table_guidance", data_summary)
             self.assertEqual(sorted(data_summary["views"]), ["snapshot", "train", "valid"])

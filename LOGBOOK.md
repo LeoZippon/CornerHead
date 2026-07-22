@@ -1,7 +1,13 @@
+2026-07-22 列级单位注册表与逐快照 unit_reference.json
+
+- 复审证实上一轮"数据集级覆盖"仍留字段级缺口并全部修复：cyq_perf 的 cost_*pct 被两条规则同时匹配（实为持仓成本分位**价格**，元/股，仅 winner_rate 为百分数）；fina_indicator_vip 把 current_ratio(1.68 倍)/ar_turn(次)/assets_to_eqt(倍)/turn_days(天) 一律标成百分数、gross_margin(2.4e8) 实为毛利额元；daily.parquet 漏 change/close_basic/pre_close_limit/volume_ratio/pe 族 10 列；balancesheet_vip.total_share 实为股（3.9e8），须从报表"金额默认元"规则中显式排除。
+- 注册表升级为列级：`FieldRule` 以显式列名/通配符定位（废除自由文本字段族），加通用列分类器（标识/日期/文本/类别）与仅限报表金额的数据集默认规则；解析对每列强制唯一匹配（重叠即报错，换算列不可能被乘两次）。真实快照 schema 全量枚举核验（daily 32 列、events 37 数据集、macro 34、fundamentals 465 列含 fina_indicator 109 列逐列归类），1684 个供应商列全部可解析：1012 数值列（739 official/214 verified/30 inferred/29 诚实 unknown——slb 系、eco_cal、kpl 竞价族等本地全空字段不再假装有单位），status 按纪律重分类（仅量级推断一律降为 inferred，如 moneyflow_dc/new_share.funds）。
+- 交付面重构：快照构建捕获 union 域 `dataset_columns` 并对每列强制解析单位（缺规则即构建失败，缓存格式 v7）；每次生成 data_summary 时同级产出 `/mnt/artifacts/unit_reference.json`（仅当前视图可见的 file/dataset/column 逐列记录，Agent 按需加载）；`unit_contract` 收缩为常量指针（<1.2KB，不再随 Fold 下发 143 条全量规则）；系统 Prompt 删除手工复制的 moneyflow/index_daily 单位示例，只留查找纪律。审计四投影按域数据集清单输出结构化记录并带拼写守卫。新增 configs/data/snapshot_columns.json 供应商列清单（--refresh-inventory 再生），回归测试全列解析+文件维度覆盖+钉死纠错+文档新鲜度。§1.2 精简为三要素（事实源位置/查找规则/Agent 入口与 unknown 政策），审计 metadata 声明为非稳定投影。全量 tests 936+45 通过。
+
 2026-07-22 结构化单位注册表：纠正 share_float 口径并统一六处事实源
 
 - 审计 Agent 复核证实两处已录单位错误，采纳并修复：`share_float_complete.float_share` 实为股（回算核验：float_share/(float_ratio%) 与 daily_basic.total_share×10⁴ 比对，比值中位 0.849≈1，n=189；若为万股应为 1e-4）——上一轮以中位数 609 反推"万股"违反了"数值范围只能校验、不能反猜单位"的自定纪律；`repurchase.high_limit/low_limit` 为元/股（中位 15.0/11.45，价格量级）。
-- 注册表由自由文本 dict 重构为 `UnitRule` 冻结 dataclass（file+dataset+字段族定位，携 source_unit/factor/columns/status/evidence/agent_visible），150 条规则全部使用与快照一致的精确 dataset 标识（废除 margin/margin_detail、cn_cpi/cn_ppi、share_float 等组合键），经补充实测覆盖全部 81 个默认快照数据集（37 事件+34 宏观+10 财务；此前三域命中率仅约 14/37、14/34、0/10）。高危新录：moneyflow_ind_dc 为元而 moneyflow_dc 为万元、ind_ths/cnt_ths 为亿元；index_dailybasic 元/股 vs daily_basic 万元/万股；daily_info 亿股/亿元 vs sz_daily_info 元；express_vip 为元非万元。
+- 注册表由自由文本 dict 重构为 `UnitRule` 冻结 dataclass（file+dataset+字段族定位，携 source_unit/factor/columns/status/evidence/agent_visible），150 条规则全部使用与快照一致的精确 dataset 标识（废除 margin/margin_detail、cn_cpi/cn_ppi、share_float 等组合键），经补充实测在**数据集层面**覆盖全部 81 个默认快照数据集（37 事件+34 宏观+10 财务；此前三域命中率仅约 14/37、14/34、0/10）。字段级完备性此轮未达成（字段族仍为自由文本，测试只验证每数据集至少一条规则），见下一条目。高危新录：moneyflow_ind_dc 为元而 moneyflow_dc 为万元、ind_ths/cnt_ths 为亿元；index_dailybasic 元/股 vs daily_basic 万元/万股；daily_info 亿股/亿元 vs sz_daily_info 元；express_vip 为元非万元。
 - 六处事实源归一到注册表：快照换算表与 DatasetContract.unit_rules 由带 factor/columns 的规则派生（列×因子集合与旧表逐项相等，快照字节不变）；audit 四个投影函数改按各域数据集清单选取、清单缺规则即抛错（手工键元组废除），audit_unit_schema 与 stk_mins 两处内嵌字典同步收编；Agent 合同随 data_summary 下发结构化记录（仅 agent_visible）；新增 scripts/dev/export_units.py 生成 docs/units_reference.md 专用文档，§1.2 收敛为注册表说明+分层边界。新增覆盖⊆、钉死纠错、投影派生、文档新鲜度四类回归（新鲜度测试当场抓到一次真实过期）。全量 tests 932+45 通过，PROMPTS.md 字节不变。
 
 2026-07-22 数据集限定单位注册表与三向投影

@@ -43,7 +43,7 @@ Agent 遵循以下使用原则：
 - 正式策略代码只能依赖当前 `ctx`、`/mnt/snapshot`、`output` 自身和 `/mnt/agent/models`；不得硬编码研究槽、结果槽、宿主路径或测试区间。
 - `workspace/` 是临时探索区，不冻结、不回放、不复制到下一 Fold；`output/` 是正式策略代码来源；`models/` 是可选正式模型参数来源。
 - 正式回放在一次性隔离容器中执行，看不到开发 `workspace`、阶段槽或结果目录；短窗口 Probe 的 `ctx.nl()` 只返回 `withheld_probe`，因此 `runtime_representative=false` 时墙钟不能外推完整 Valid，但 `nl_cost` 的完整窗口逻辑调用投影和 provider 结构上界可用于成本预检；拒单反馈只含未提交原因和粗粒度策略类别，不含市场/资格信息、收益或成交；完整 Valid 保留完整审计。
-- 数据域用途、字段、单位、可见时间、窗口覆盖和路径权限，以本次运行的 `data_summary.json` 与清单为准；完整文件明细、单位合同和包/CLI 清单不重复内联进系统 Prompt。`daily.parquet` 比例是小数（5%=0.05）；`auction.parquet` 的换手为小数、量比为无量纲倍数、流通股本为股；`events.parquet` 的 `moneyflow.*_amount` 是万元（500=人民币 500 万元），`macro.parquet` 的 `index_daily.pct_chg` 是百分数值（5%=5.0）；异构字段按“文件 + dataset + 字段”识别并显式换算，不能按同名列猜单位。
+- 数据域用途、字段、单位、可见时间、窗口覆盖和路径权限，以本次运行的 `data_summary.json` 与清单为准；完整文件明细、单位表和包/CLI 清单不重复内联进系统 Prompt。单位按 `/mnt/artifacts/unit_reference.json`（当前快照全部可见字段的逐列单位表，入口经 `data_summary.json.unit_contract` 指针）以“文件 + dataset + 字段”查找并显式换算，不能按同名列猜单位；`status=unknown` 或表外字段不得进入信号或阈值。Prompt 只保留该查找纪律，不手工复制具体单位示例。
 - 工具通过原生 function calling 调用；不要在正文里手写 JSON 动作。先用 `grep/glob/read` 做只读定位，再用受控写工具或 Shell 修改正式产物。
 - 大表先看 Parquet metadata，再用 DuckDB、pyarrow 或 pandas 按列/日期过滤读取；不要在未知规模时直接全量 `pd.read_parquet()`。
 - `ctx.asof_dir`、`ctx.snapshot_dir`、`ctx.model_dir` 和 `ctx.state_dir` 是路径字符串，先用 `Path(str(...))` 转换再拼接；Timeview 是 parts 目录：Pandas 直接读目录，DuckDB 使用 `目录/*.parquet`；空 glob 表示该时点没有可见行。

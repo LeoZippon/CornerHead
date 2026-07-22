@@ -46,7 +46,12 @@ from autotrade.environment.data.contracts import (
 from autotrade.environment.data.pit import concat_rows, parquet_meta, to_cn_timestamps, yyyymmdd
 from autotrade.environment.data.auction import apply_open_auction_correction
 from autotrade.environment.data.fundamental_events import FUNDAMENTAL_EVENT_DATASETS, read_fundamental_events
-from autotrade.environment.data.units import normalize_auction_units, normalize_daily_units
+from autotrade.environment.data.units import (
+    UNION_DOMAIN_BY_FILE,
+    normalize_auction_units,
+    normalize_daily_units,
+    validate_snapshot_units,
+)
 from autotrade.environment.data.research_release import DOMAIN_REPORT_TYPES, DOMAIN_STATUS_FILES
 from autotrade.environment.runtime import new_id, utc_now_iso
 
@@ -424,6 +429,7 @@ class SnapshotBuilder:
                 "rows": int(len(fundamentals)),
                 "datasets": list(config.fundamental_datasets),
                 "units": "source",
+                "dataset_columns": _dataset_column_map(fundamentals),
             }, profile
 
         def build_events(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
@@ -520,6 +526,9 @@ class SnapshotBuilder:
             "snapshot_hash": "",
         }
         manifest["snapshot_hash"] = _snapshot_hash(output_dir)
+        # Every column in every written file must classify in the unit
+        # registry before the snapshot becomes consumable.
+        validate_snapshot_units(output_dir, manifest)
         _write_manifest(output_dir, manifest)
         return manifest
 
@@ -702,7 +711,11 @@ class SnapshotBuilder:
             profile = _write_with_profile(
                 output_dir / "fundamentals.parquet", fundamentals, build_seconds=time.perf_counter() - started
             )
-            return {"rows": int(len(fundamentals)), "datasets": list(config.fundamental_datasets)}, profile
+            return {
+                "rows": int(len(fundamentals)),
+                "datasets": list(config.fundamental_datasets),
+                "dataset_columns": _dataset_column_map(fundamentals),
+            }, profile
 
         def build_events(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
@@ -805,6 +818,9 @@ class SnapshotBuilder:
             "snapshot_hash": "",
         }
         manifest["snapshot_hash"] = _snapshot_hash(output_dir)
+        # Every column in every written file must classify in the unit
+        # registry before the snapshot becomes consumable.
+        validate_snapshot_units(output_dir, manifest)
         _write_manifest(output_dir, manifest)
         return manifest
 
@@ -1265,6 +1281,9 @@ class SnapshotBuilder:
         frames: list[pd.DataFrame] = []
         schema_only: dict[str, pd.DataFrame] = {}
         rules: dict[str, str] = {}
+        # Per-dataset column attribution for the unit reference: the union file
+        # schema alone cannot say which dataset a column belongs to.
+        dataset_columns: dict[str, list[str]] = {}
         dataset_build_profile: dict[str, dict[str, object]] = {}
         duplicate_rows_dropped: dict[str, int] = {}
         nat_counts: dict[str, int] = {}
@@ -1314,10 +1333,12 @@ class SnapshotBuilder:
             if had_visible_rows and len(rows):
                 rows.insert(0, "dataset", dataset)
                 frames.append(rows)
+                dataset_columns[dataset] = list(rows.columns)
             else:
                 schema = _dataset_footer_schema(dataset_dir)
                 if schema is not None:
                     schema_only[dataset] = schema
+                    dataset_columns[dataset] = ["dataset", *schema.names]
             dataset_build_profile[dataset] = {
                 **read_profile,
                 "rows_output": int(len(rows)),
@@ -1352,6 +1373,7 @@ class SnapshotBuilder:
             "datasets": list(datasets),
             "units": "source",
             "availability_rules": rules,
+            "dataset_columns": dataset_columns,
             "dataset_build_profile": dataset_build_profile,
         }
         if duplicate_rows_dropped:
@@ -1748,9 +1770,23 @@ def _window_start(decision_time: datetime, months: int) -> pd.Timestamp:
 
 
 def finalize_snapshot_dir(snapshot_dir: str | Path, **fields: object) -> dict[str, object]:
-    """Stamp an externally assembled snapshot directory with id/hash/manifest."""
+    """Stamp an externally assembled snapshot directory with id/hash/manifest.
+
+    Union files present in the directory get their per-dataset column
+    attribution recorded, matching the builder's manifest contract (the unit
+    reference cannot be generated without it).
+    """
     snapshot_dir = Path(snapshot_dir)
+    domains = dict(fields.pop("domains", None) or {})  # type: ignore[arg-type]
+    for file_name, domain in UNION_DOMAIN_BY_FILE.items():
+        path = snapshot_dir / file_name
+        if path.exists():
+            meta = dict(domains.get(domain, {}))
+            meta.setdefault("dataset_columns", _dataset_column_map(pd.read_parquet(path)))
+            domains[domain] = meta
     manifest: dict[str, object] = {"snapshot_id": new_id("snap"), "created_at": utc_now_iso(), **fields}
+    if domains:
+        manifest["domains"] = domains
     manifest["snapshot_hash"] = _snapshot_hash(snapshot_dir)
     (snapshot_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8"
@@ -2005,6 +2041,20 @@ def _write(path: Path, frame: pd.DataFrame) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     frame.to_parquet(tmp, index=False)
     tmp.replace(path)
+
+
+def _dataset_column_map(frame: pd.DataFrame) -> dict[str, list[str]]:
+    """Columns each union dataset actually carries (non-NA in its own rows)."""
+    if frame.empty or "dataset" not in frame.columns:
+        return {}
+    out: dict[str, list[str]] = {}
+    for dataset, group in frame.groupby("dataset", observed=True, sort=True):
+        present = group.notna().any()
+        out[str(dataset)] = [
+            column for column in frame.columns
+            if column == "dataset" or bool(present.get(column, False))
+        ]
+    return out
 
 
 def _write_manifest(output_dir: Path, manifest: dict[str, object]) -> None:
