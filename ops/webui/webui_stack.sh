@@ -177,7 +177,9 @@ $CRON_END"
         # owner-only like the TuShare installer's backups.
         mkdir -p "$REPO/archive/crontab"
         chmod 700 "$REPO/archive/crontab"
-        ( umask 077; printf '%s\n' "$current" > "$REPO/archive/crontab/crontab-$(date +%Y%m%d-%H%M%S).bak" )
+        # Source prefix + pid: never collides with the TuShare installer's
+        # backups (or a same-second rerun of this script).
+        ( umask 077; printf '%s\n' "$current" > "$REPO/archive/crontab/crontab-webui-$(date +%Y%m%d-%H%M%S)-$$.bak" )
     fi
     ( printf '%s\n' "$current" | sed "/^${CRON_BEGIN}\$/,/^${CRON_END}\$/d"; echo "$block" ) | crontab -
     crontab -l | grep -qF "$CRON_BEGIN" || { echo "FAILED: managed block missing after install" >&2; exit 1; }
