@@ -434,7 +434,7 @@ class UnitRegistryProjectionTest(unittest.TestCase):
             columns = [column for column, _, _ in table]
             self.assertEqual(len(columns), len(set(columns)), table)
 
-    def test_verified_unit_corrections_are_pinned(self):
+    def test_unit_corrections_are_pinned(self):
         from autotrade.environment.data.units import resolve_field
 
         expectations = [
@@ -462,6 +462,43 @@ class UnitRegistryProjectionTest(unittest.TestCase):
         self.assertEqual(surv["semantic_type"], "text")
         self.assertIsNone(surv["source_unit"])
 
+    def test_status_tiers_reflect_their_evidence_class(self):
+        from autotrade.environment.data.units import resolve_field
+
+        # verified ⇒ a NAMED reconciliation against another source or known
+        # external truth; magnitude-only readings stay inferred; vendor-doc
+        # semantics validated by range stay official.
+        verified = [
+            ("events.parquet", "share_float_complete", "float_share", "daily_basic"),
+            ("events.parquet", "repurchase", "high_limit", "close"),
+            ("events.parquet", "moneyflow_dc", "close", "ratio 1.0000"),
+            ("fundamentals.parquet", "forecast_vip", "net_profit_min", "ratio 1.0000"),
+            ("fundamentals.parquet", "express_vip", "revenue", "income_vip"),
+        ]
+        from autotrade.environment.data.unit_rules import FIELD_RULES
+
+        for file, dataset, column, evidence_fragment in verified:
+            record = resolve_field(file, dataset, column)
+            self.assertEqual(record["status"], "verified", (dataset, column))
+            rules = [
+                rule for rule in FIELD_RULES
+                if rule.file == file and rule.dataset == dataset and column in rule.columns
+            ]
+            self.assertEqual(len(rules), 1, (dataset, column))
+            self.assertIn(evidence_fragment, rules[0].evidence, (dataset, column))
+        for dataset, column in (
+            ("moneyflow_ind_dc", "net_amount"),
+            ("moneyflow_ind_ths", "net_amount"),
+            ("moneyflow_cnt_ths", "net_amount"),
+        ):
+            self.assertEqual(
+                resolve_field("events.parquet", dataset, column)["status"], "inferred", dataset
+            )
+        self.assertEqual(
+            resolve_field("fundamentals.parquet", "fina_indicator_vip", "current_ratio")["status"],
+            "official",
+        )
+
     def test_snapshot_column_map_reconciles_manifest_and_fails_on_corrupt_files(self):
         from autotrade.environment.data.units import snapshot_column_map
 
@@ -480,13 +517,29 @@ class UnitRegistryProjectionTest(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 snapshot_column_map(view, manifest)
             self.assertIn("orphan_col", str(ctx.exception))
-            # Declared-but-not-yet-materialized columns are legitimate
-            # (fundamentals attribution comes from the vendor schema).
+            # events/macro require EXACT match: declaring a non-physical
+            # column is also a broken manifest.
             manifest["domains"]["events"]["dataset_columns"]["margin_secs"] = [
                 "dataset", "ts_code", "orphan_col", "future_col",
             ]
+            with self.assertRaises(ValueError) as ctx:
+                snapshot_column_map(view, manifest)
+            self.assertIn("future_col", str(ctx.exception))
+            # fundamentals attribution comes from the vendor schema and may
+            # legitimately run ahead of window content (schema-forward).
+            pd.DataFrame(
+                [{"dataset": "fina_audit", "ts_code": "000001.SZ", "audit_fees": 1.0}]
+            ).to_parquet(view / "fundamentals.parquet", index=False)
+            manifest["domains"]["events"]["dataset_columns"]["margin_secs"] = [
+                "dataset", "ts_code", "orphan_col",
+            ]
+            manifest["domains"]["fundamentals"] = {
+                "dataset_columns": {
+                    "fina_audit": ["dataset", "ts_code", "audit_fees", "future_col"]
+                }
+            }
             column_map = snapshot_column_map(view, manifest)
-            self.assertIn("future_col", column_map[("events.parquet", "margin_secs")])
+            self.assertIn("future_col", column_map[("fundamentals.parquet", "fina_audit")])
 
         with tempfile.TemporaryDirectory() as tmp:
             view = Path(tmp)

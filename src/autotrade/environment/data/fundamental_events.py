@@ -14,6 +14,14 @@ from autotrade.environment.data.contracts import CN_TZ
 from autotrade.environment.data.pit import concat_rows, yyyymmdd
 
 
+# Provenance/PIT columns the store stamps onto every fundamental event row on
+# top of the raw vendor schema (single source; snapshot attribution and the
+# schema-inventory exporter both reference it).
+FUNDAMENTAL_SIDECAR_COLUMNS = (
+    "dataset", "source_path", "source_hash", "source_row_id", "business_key",
+    "available_month", "available_at", "available_at_rule",
+)
+
 FUNDAMENTAL_EVENT_DATASETS = (
     "income_vip",
     "balancesheet_vip",

@@ -113,21 +113,20 @@ def render_units_markdown() -> str:
 def refresh_inventory() -> None:
     import pyarrow.parquet as pq
 
-    from autotrade.environment.data.fundamental_events import FUNDAMENTAL_EVENT_DATASETS
+    from autotrade.environment.data.fundamental_events import (
+        FUNDAMENTAL_EVENT_DATASETS,
+        FUNDAMENTAL_SIDECAR_COLUMNS,
+    )
     from autotrade.environment.data.snapshot import SnapshotConfig
 
     raw = REPO_ROOT / "data" / "raw"
     if not raw.exists():
         raise FileNotFoundError(f"raw lake not available at {raw}; run on the data host")
     config = SnapshotConfig()
-    fund_sidecars = [
-        "dataset", "source_path", "source_hash", "source_row_id", "business_key",
-        "available_month", "available_at", "available_at_rule",
-    ]
     plans = [
         ("events.parquet", tuple(config.events_datasets), ["dataset"]),
         ("macro.parquet", tuple(config.macro_datasets), ["dataset"]),
-        ("fundamentals.parquet", tuple(FUNDAMENTAL_EVENT_DATASETS), fund_sidecars),
+        ("fundamentals.parquet", tuple(FUNDAMENTAL_EVENT_DATASETS), list(FUNDAMENTAL_SIDECAR_COLUMNS)),
     ]
     files: dict[str, dict[str, list[str]]] = {}
     for file, datasets, extra in plans:
@@ -142,11 +141,11 @@ def refresh_inventory() -> None:
             files.setdefault(file, {})[dataset] = sorted(columns)
     inventory = {
         "note": (
-            "SAMPLED union of raw vendor parquet schemas per snapshot dataset (five spread partitions "
-            "each, not a full-lake scan), plus snapshot-builder provenance columns. Regenerate with "
-            "scripts/dev/export_units.py --refresh-inventory. Tests resolve every listed column against "
-            "the unit registry; columns appearing only in unsampled historical partitions are caught by "
-            "the snapshot build's live full-column validation."
+            "SAMPLED union of raw vendor parquet schemas per snapshot dataset (up to five spread "
+            "partitions each, not a full-lake scan), plus snapshot-builder provenance columns. "
+            "Regenerate with scripts/dev/export_units.py --refresh-inventory. Tests resolve every "
+            "listed column against the unit registry; columns appearing only in unsampled historical "
+            "partitions are caught by the snapshot build's live full-column validation."
         ),
         "files": files,
     }
