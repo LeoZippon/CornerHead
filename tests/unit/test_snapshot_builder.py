@@ -599,7 +599,7 @@ class SnapshotBuilderTest(unittest.TestCase):
                     {
                         "column": "float_share",
                         "factor": 10_000.0,
-                        "rule": "ten_thousand_shares->shares",
+                        "rule": "10k_shares->shares",
                     },
                 ],
             )

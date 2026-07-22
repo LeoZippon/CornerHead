@@ -626,18 +626,23 @@ class PipelineEndToEndTest(unittest.TestCase):
                 {"turnover_rate": 0.01, "float_share": 10_000.0},
             )
             self.assertEqual(
-                data_summary["unit_contract"]["auction.parquet"]["volume_ratio"],
-                "dimensionless ratio; 1.2=1.2x",
+                data_summary["unit_contract"]["auction.parquet"]["units"]["volume_ratio"],
+                "dimensionless_ratio",
             )
-            # Source units resolve through the full registry shipped to the
-            # sandbox (dataset-qualified; offline Fold Agents read it here).
-            self.assertIn(
-                "amount fields are 10k CNY",
-                data_summary["unit_contract"]["source_unit_rules"]["moneyflow"],
+            # Source units resolve through the full structured registry shipped
+            # to the sandbox (dataset-qualified; offline Fold Agents read it here).
+            records = {
+                (record["dataset"], record["fields"]): record
+                for record in data_summary["unit_contract"]["source_unit_rules"]
+                if "dataset" in record
+            }
+            self.assertEqual(
+                records[("moneyflow", "buy_*_amount/sell_*_amount/net_mf_amount")]["source_unit"],
+                "10k_CNY",
             )
-            self.assertIn(
-                "10k shares",
-                data_summary["unit_contract"]["source_unit_rules"]["block_trade"],
+            self.assertEqual(records[("block_trade", "vol")]["source_unit"], "10k_shares")
+            self.assertEqual(
+                records[("share_float_complete", "float_share")]["source_unit"], "shares"
             )
             self.assertIn(
                 "not an exhaustive",

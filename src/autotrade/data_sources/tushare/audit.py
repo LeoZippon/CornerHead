@@ -22,7 +22,7 @@ else:
     from .common import *  # noqa: F401,F403
 
 from autotrade.data_quality import build_quality_report, write_quality_report
-from autotrade.environment.data.units import SOURCE_UNIT_RULES
+from autotrade.environment.data.units import column_source_units, dataset_rules_text, rules_for, rules_text
 
 def audit_trade_date_dataset(raw_dir: Path, spec: TradeDateDataset, expected_dates: set[str], add) -> None:
     files = sorted((raw_dir / spec.api_name).glob("trade_date=*.parquet"))
@@ -926,8 +926,7 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
                 args.output_dataset: {
                     "source": f"derived from {STK_MINS_DATASET} or daily incremental {STK_MINS_API_NAME}",
                     "partition": "one full-market parquet per trade_date",
-                    "vol": "shares",
-                    "amount": "CNY",
+                    **column_source_units("intraday_1min.parquet"),
                     "available_at": "bar close time from trade_time",
                 }
             },
@@ -1141,7 +1140,7 @@ def audit_stk_mins_completeness(raw_dir: Path, args: argparse.Namespace, add) ->
         "zero_sample": zero_files[:20],
         "exact_limit_sample": exact_limit_files[:20],
         "schema_missing_sample": schema_missing[:10],
-        "unit_rules": {"vol": "shares", "amount": "CNY", "official_page_limit": STK_MINS_PAGE_LIMIT, "doc_ref": INTEGRATED_DOC_REFS[STK_MINS_DATASET]},
+        "unit_rules": {**column_source_units("intraday_1min.parquet"), "official_page_limit": STK_MINS_PAGE_LIMIT, "doc_ref": INTEGRATED_DOC_REFS[STK_MINS_DATASET]},
     })
     audit_stk_mins_sample(files, args.sample_limit, add)
 
@@ -1523,17 +1522,11 @@ def audit_unit_schema(raw_dir: Path, add) -> None:
         "daily_has_vol_amount": {"vol": "vol" in daily_schema, "amount": "amount" in daily_schema},
         "daily_basic_has_vol_amount": {"vol": "vol" in daily_basic_schema, "amount": "amount" in daily_basic_schema},
         "bak_basic_has_vol_amount": {"vol": "vol" in bak_basic_schema, "amount": "amount" in bak_basic_schema},
-        "unit_rules": {
-            "daily.vol": "hands; multiply by 100 for shares",
-            "daily.amount": "thousand CNY",
-            "daily_basic.total_share/float_share/free_share": "10k shares",
-            "daily_basic.total_mv/circ_mv": "10k CNY",
-            "bak_basic.float_share/total_share": "100m shares per official document; no volume or amount fields",
-            "bak_daily.vol": "inferred directly comparable to daily.vol from sample probes",
-            "bak_daily.amount": "inferred 10k CNY from sample probes; multiply by 10 to compare with daily.amount in thousand CNY",
-            "bak_daily.total_share/float_share": "100m shares per official document; multiply by 10000 to compare with daily_basic share fields",
-            "bak_daily.total_mv/float_mv": "inferred 100m CNY from sample probes; multiply by 10000 to compare with daily_basic market value fields",
-        },
+        "unit_rules": rules_text(
+            rules_for(file="daily.parquet")
+            + rules_for(file="events.parquet", datasets=("bak_daily",))
+            + rules_for(file="raw_only", datasets=("bak_basic",))
+        ),
         "doc_refs": SEMANTIC_DOC_REFS,
     })
     if "vol" not in bak_basic_schema and "amount" not in bak_basic_schema:
@@ -1644,28 +1637,16 @@ def existing_partition_values(raw_dir: Path, datasets: list[str], prefix: str) -
     return values
 
 def integrated_unit_rules() -> dict[str, str]:
-    """Projection of the shared SOURCE_UNIT_RULES registry (environment/data/units.py)."""
-    keys = (
-        "daily.prices",
-        "daily.vol",
-        "daily.amount",
-        "daily.percent_family",
-        "stk_mins",
-        "stk_auction",
-        "daily_basic.total_share/float_share/free_share",
-        "daily_basic.total_mv/circ_mv",
-        "bak_daily.vol",
-        "bak_daily.amount",
-        "bak_daily.total_share/float_share",
-        "bak_daily.total_mv/float_mv",
-        "bak_basic.float_share/total_share",
-        "bak_basic.total_assets/liquid_assets/fixed_assets",
-        "fundamental.statement_amount_fields",
-        "fundamental.forecast_profit_fields",
-        "fundamental.dividend_cash_fields",
-        "fundamental.fina_indicator_vip",
+    """Projection of the shared unit registry (environment/data/units.py) over the integrated daily-domain files."""
+    rules = (
+        rules_for(file="daily.parquet")
+        + rules_for(file="intraday_1min.parquet")
+        + rules_for(file="auction.parquet")
+        + rules_for(file="events.parquet", datasets=("bak_daily",))
+        + rules_for(file="raw_only", datasets=("bak_basic",))
+        + rules_for(file="fundamentals.parquet")
     )
-    return {key: SOURCE_UNIT_RULES[key] for key in keys}
+    return rules_text(rules)
 
 def audit_integrated_filesystem(raw_dir: Path, datasets: list[str], add) -> None:
     parquet_files: list[Path] = []
@@ -2172,26 +2153,8 @@ def macro_pit_rules() -> dict[str, str]:
     }
 
 def macro_unit_rules() -> dict[str, str]:
-    """Projection of the shared SOURCE_UNIT_RULES registry (environment/data/units.py)."""
-    keys = (
-        "cn_gdp",
-        "cn_cpi/cn_ppi",
-        "cn_pmi",
-        "cn_m",
-        "sf_month",
-        "shibor/shibor_lpr/libor/hibor/us_rates",
-        "repo_daily",
-        "index_daily",
-        "index_global",
-        "fx_daily",
-        "eco_cal",
-        "monetary_policy",
-        "fut_daily",
-        "opt_daily",
-        "cb_daily",
-        "yc_cb",
-    )
-    return {key: SOURCE_UNIT_RULES[key] for key in keys}
+    """Projection of the shared unit registry (environment/data/units.py) over all MACRO_SPECS datasets."""
+    return dataset_rules_text("macro.parquet", tuple(MACRO_SPECS))
 
 def audit_macro_dataset(raw_dir: Path, spec: MacroDataset, expected_paths: set[Path], add) -> None:
     audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
@@ -2305,19 +2268,13 @@ def expected_event_paths(raw_dir: Path, spec: EventDataset, start_date: str, end
         return {raw_dir / spec.api_name / f"date={day}.parquet" for day in date_range_days(start, end_date)}
     raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {spec.api_name}")
 
+# Raw event/flow datasets whose snapshot dataset id differs from the api name.
+SNAPSHOT_EVENT_ID_BY_RAW = {"share_float": "share_float_complete"}
+
 def event_unit_rules() -> dict[str, str]:
-    """Projection of the shared SOURCE_UNIT_RULES registry (environment/data/units.py)."""
-    keys = (
-        "margin/margin_detail",
-        "margin_secs",
-        "moneyflow",
-        "stk_holdernumber",
-        "stk_holdertrade",
-        "repurchase",
-        "share_float",
-        "block_trade",
-    )
-    return {key: SOURCE_UNIT_RULES[key] for key in keys}
+    """Projection of the shared unit registry (environment/data/units.py) over all EVENT_FLOW_SPECS datasets."""
+    datasets = tuple(SNAPSHOT_EVENT_ID_BY_RAW.get(name, name) for name in EVENT_FLOW_SPECS)
+    return dataset_rules_text("events.parquet", datasets)
 
 def event_pit_rules() -> dict[str, str]:
     return {
@@ -2608,19 +2565,8 @@ def board_pit_rules() -> dict[str, dict[str, str]]:
     }
 
 def board_unit_rules() -> dict[str, str]:
-    """Projection of the shared SOURCE_UNIT_RULES registry (environment/data/units.py)."""
-    keys = (
-        "kpl_list",
-        "limit_step",
-        "limit_cpt_list",
-        "limit_list_ths",
-        "top_list",
-        "top_inst",
-        "hm_detail",
-        "ths_hot/dc_hot",
-        "hm_list",
-    )
-    return {key: SOURCE_UNIT_RULES[key] for key in keys}
+    """Projection of the shared unit registry (environment/data/units.py) over all BOARD_TRADING_DATASETS."""
+    return dataset_rules_text("events.parquet", tuple(BOARD_TRADING_DATASETS))
 
 def audit_board_trading_only(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
@@ -3053,8 +2999,7 @@ def audit_intraday_only(args: argparse.Namespace) -> int:
         metadata={
             "unit_rules": {
                 STK_MINS_DATASET: {
-                    "vol": "shares",
-                    "amount": "CNY",
+                    **column_source_units("intraday_1min.parquet"),
                     "available_at": "source trade_time in Asia/Shanghai; use as bar-close availability",
                     "auction_bars": "opening and closing auction are represented by 09:30 and 15:00 1-minute bars; no separate auction dataset is required for historical intraday minute",
                 }
