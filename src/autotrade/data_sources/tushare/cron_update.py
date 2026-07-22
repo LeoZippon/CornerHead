@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-import hashlib
 import json
 import os
 import subprocess
@@ -19,7 +18,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .common import NO_MUTATION_RETRY_EXIT_CODE, normalize_date_key, read_many
+from autotrade.environment.data.contracts import (
+    GENERATION_COMMITTED,
+    GENERATION_IN_PROGRESS,
+    GENERATION_SCHEMA_VERSION,
+    RAW_GENERATION_FILENAME,
+)
+
+from .common import NO_MUTATION_RETRY_EXIT_CODE, normalize_date_key, read_many, stable_hash
 
 
 DEFAULT_CONFIG = Path("configs/tushare_update_schedule.json")
@@ -32,10 +38,9 @@ DISPATCH_LOG_BACKUPS = 2
 DEFAULT_LOCK_WAIT_SECONDS = 900
 # Job operations that mutate the raw/PIT lake and therefore publish a new
 # generation on success; audit-only jobs must not churn snapshot cache keys.
+# The generation schema/state contract itself is owned by
+# autotrade.environment.data.contracts so writer and PIT consumers cannot drift.
 MUTATING_OPERATIONS = {"update", "download_tier", "download_event_flow", "pit_event_pipeline", "auction_capture"}
-GENERATION_SCHEMA_VERSION = 2
-GENERATION_COMMITTED = "committed"
-GENERATION_IN_PROGRESS = {"updating", "dirty"}
 
 
 @dataclass
@@ -443,11 +448,6 @@ def write_state(state: dict) -> None:
     tmp.replace(STATE_PATH)
 
 
-def stable_hash(value: object) -> str:
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
 def job_config_hash(ctx: RunContext) -> str:
     """Hash only schedule inputs that can affect this job.
 
@@ -529,7 +529,8 @@ def utc_now() -> str:
 
 
 def _read_raw_generation_file(raw_dir: Path) -> dict:
-    path = raw_dir / ".raw_generation.json"
+    """Writer-side lenient read: recovery must see updating/dirty/legacy states."""
+    path = raw_dir / RAW_GENERATION_FILENAME
     if not path.exists():
         return {}
     try:
@@ -540,7 +541,7 @@ def _read_raw_generation_file(raw_dir: Path) -> dict:
 
 def _write_raw_generation_file(raw_dir: Path, payload: dict) -> None:
     raw_dir.mkdir(parents=True, exist_ok=True)
-    path = raw_dir / ".raw_generation.json"
+    path = raw_dir / RAW_GENERATION_FILENAME
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
@@ -551,7 +552,7 @@ def _restore_raw_generation_file(raw_dir: Path, payload: dict) -> None:
     if payload:
         _write_raw_generation_file(raw_dir, payload)
     else:
-        (raw_dir / ".raw_generation.json").unlink(missing_ok=True)
+        (raw_dir / RAW_GENERATION_FILENAME).unlink(missing_ok=True)
 
 
 def write_raw_generation(raw_dir: Path, *, transaction: dict | None = None) -> dict:

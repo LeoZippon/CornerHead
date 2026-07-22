@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from functools import lru_cache
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from autotrade.environment.data.units import column_source_units
@@ -18,6 +20,51 @@ _DAILY_SOURCE_UNITS = column_source_units("daily.parquet")
 # how PIT consumers interpret the lake); the ingest adapter under
 # ``autotrade.data_sources`` imports them so both sides cannot drift.
 # ---------------------------------------------------------------------------
+
+# Raw-lake generation stamp published by the cron updater after each fully
+# successful mutation run. One schema, one committed-acceptance rule: the
+# updater writes it, and every PIT consumer (snapshot builds, research-release
+# pinning) must apply the same strictness when reading it back.
+RAW_GENERATION_FILENAME = ".raw_generation.json"
+GENERATION_SCHEMA_VERSION = 2
+GENERATION_COMMITTED = "committed"
+GENERATION_IN_PROGRESS = frozenset({"updating", "dirty"})
+
+
+def require_committed_generation(payload: dict[str, object]) -> None:
+    """Fail unless ``payload`` is an explicit schema-v2 committed record.
+
+    The updater always writes ``schema_version`` and ``state``; a stamp
+    missing either is malformed, not implicitly committed.
+    """
+    if payload.get("schema_version") != GENERATION_SCHEMA_VERSION or "state" not in payload:
+        raise RuntimeError("raw generation is not an explicit schema-v2 committed record")
+    state = str(payload.get("state"))
+    if state != GENERATION_COMMITTED:
+        transaction = payload.get("transaction") or {}
+        job = transaction.get("job", "unknown") if isinstance(transaction, dict) else "unknown"
+        raise RuntimeError(f"raw lake generation is not committed: state={state} job={job}")
+
+
+def read_committed_raw_generation(raw_dir: str | Path | None) -> dict[str, object] | None:
+    """Read the raw-lake generation stamp; ``None`` for unstamped lakes
+    (manual/test raw dirs). A stamp that exists must pass
+    :func:`require_committed_generation`."""
+    if raw_dir is None:
+        return None
+    path = Path(raw_dir) / RAW_GENERATION_FILENAME
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid raw generation record: {path}: {exc}") from exc
+    try:
+        require_committed_generation(payload)
+    except RuntimeError as exc:
+        raise RuntimeError(f"{exc} path={path}") from None
+    return payload
+
 
 # From this deployment date onward a missing observed stk_auction availability
 # must fall back to the sidecar fetch time, not the historical 09:29 imputation.

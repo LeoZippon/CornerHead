@@ -217,7 +217,13 @@ class CachingSnapshotProviderGenerationTest(unittest.TestCase):
             self.assertEqual(provider.builds, 1)  # same generation -> cache hit
 
             (raw / ".raw_generation.json").write_text(
-                json.dumps({"generation_id": "gen2", "completed_at": "now"}), encoding="utf-8"
+                json.dumps({
+                    "schema_version": 2,
+                    "state": "committed",
+                    "generation_id": "gen2",
+                    "completed_at": "now",
+                }),
+                encoding="utf-8",
             )
             caching.replay_slot("20220101", "20220131", Path(tmp) / "out3", label="valid")
             self.assertEqual(provider.builds, 2)  # new generation -> rebuild

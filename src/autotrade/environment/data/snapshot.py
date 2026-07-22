@@ -42,6 +42,7 @@ from autotrade.environment.data.contracts import (
     CN_TZ,
     STK_AUCTION_OBSERVED_AVAILABILITY_START,
     STK_AUCTION_PRICE_ABS_TOLERANCE,
+    read_committed_raw_generation,
 )
 from autotrade.environment.data.pit import concat_rows, parquet_meta, to_cn_timestamps, yyyymmdd
 from autotrade.environment.data.auction import apply_open_auction_correction
@@ -328,9 +329,9 @@ class SnapshotBuilder:
             fd = os.open(lock_path, os.O_RDONLY)
             fcntl.flock(fd, fcntl.LOCK_SH)
         try:
-            generation = read_raw_generation(self.raw_dir)
+            generation = read_committed_raw_generation(self.raw_dir)
             yield generation
-            if read_raw_generation(self.raw_dir) != generation:
+            if read_committed_raw_generation(self.raw_dir) != generation:
                 raise RuntimeError(f"raw lake generation changed during snapshot build under {self.raw_dir}")
         finally:
             if fd is not None:
@@ -569,7 +570,7 @@ class SnapshotBuilder:
         # nightly cadence after each mutating job, so hard-gating would lock
         # experiments out for hours every night; the shared flock and the
         # generation-keyed snapshot cache carry the hard guarantees.
-        generation = read_raw_generation(self.raw_dir) or {}
+        generation = read_committed_raw_generation(self.raw_dir) or {}
         generation_at = str(generation.get("completed_at", ""))
         warnings: dict[str, str] = {}
         for domain, filename, critical in self._DOMAIN_STATUS_FILES:
@@ -1807,25 +1808,6 @@ def verify_snapshot_hash(snapshot_dir: str | Path) -> None:
     actual = _snapshot_hash(Path(snapshot_dir))
     if manifest.get("snapshot_hash") != actual:
         raise ValueError(f"snapshot hash mismatch in {snapshot_dir}: manifest={manifest.get('snapshot_hash')} actual={actual}")
-
-
-def read_raw_generation(raw_dir: str | Path | None) -> dict[str, object] | None:
-    """Raw-lake generation stamp published by the cron updater after each
-    fully-successful mutation run; None for lakes without one (manual/test)."""
-    if raw_dir is None:
-        return None
-    path = Path(raw_dir) / ".raw_generation.json"
-    if not path.exists():
-        return None
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    state = str(payload.get("state", "committed"))
-    if state != "committed":
-        transaction = payload.get("transaction") or {}
-        raise RuntimeError(
-            "raw lake generation is not committed: "
-            f"state={state} job={transaction.get('job', 'unknown')} path={path}"
-        )
-    return payload
 
 
 def _partition_overlaps(stem: str, start_day: str, end_day: str) -> bool:

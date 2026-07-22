@@ -1038,7 +1038,12 @@ class SnapshotBuilderTest(unittest.TestCase):
                 created_at="2021-10-01T00:00:00+00:00",
             )
             (raw / ".raw_generation.json").write_text(
-                json.dumps({"generation_id": "g2", "completed_at": "2021-10-07T00:00:00+00:00"}),
+                json.dumps({
+                    "schema_version": 2,
+                    "state": "committed",
+                    "generation_id": "g2",
+                    "completed_at": "2021-10-07T00:00:00+00:00",
+                }),
                 encoding="utf-8",
             )
             manifest = SnapshotBuilder(raw, events_root, status_path).build_decision_snapshot(
@@ -1057,7 +1062,12 @@ class SnapshotBuilderTest(unittest.TestCase):
             build_fundamental_events(events_root)
             status_path = Path(tmp) / "fundamental_events_status.json"
             write_fundamental_status(status_path)
-            generation = {"generation_id": "abc123", "completed_at": "2021-10-08T01:00:00+00:00"}
+            generation = {
+                "schema_version": 2,
+                "state": "committed",
+                "generation_id": "abc123",
+                "completed_at": "2021-10-08T01:00:00+00:00",
+            }
             (raw / ".raw_generation.json").write_text(json.dumps(generation), encoding="utf-8")
             builder = SnapshotBuilder(raw, events_root, status_path)
 
@@ -1070,7 +1080,12 @@ class SnapshotBuilderTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "generation changed"):
                 with builder._raw_lake_guard():
                     (raw / ".raw_generation.json").write_text(
-                        json.dumps({"generation_id": "def456", "completed_at": "2021-10-08T02:00:00+00:00"}),
+                        json.dumps({
+                            "schema_version": 2,
+                            "state": "committed",
+                            "generation_id": "def456",
+                            "completed_at": "2021-10-08T02:00:00+00:00",
+                        }),
                         encoding="utf-8",
                     )
 
@@ -1089,6 +1104,20 @@ class SnapshotBuilderTest(unittest.TestCase):
             )
             builder = SnapshotBuilder(raw, Path(tmp) / "fund_events")
             with self.assertRaisesRegex(RuntimeError, "generation is not committed"):
+                builder.build_decision_snapshot(DECISION, Path(tmp) / "snap", CONFIG)
+
+    def test_partial_raw_generation_stamp_fails_closed(self):
+        # The updater always writes schema_version and state; a stamp missing
+        # either must not be implicitly treated as committed.
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            build_raw(raw)
+            (raw / ".raw_generation.json").write_text(
+                json.dumps({"generation_id": "old", "completed_at": "2021-10-08T01:00:00+00:00"}),
+                encoding="utf-8",
+            )
+            builder = SnapshotBuilder(raw, Path(tmp) / "fund_events")
+            with self.assertRaisesRegex(RuntimeError, "not an explicit schema-v2 committed record"):
                 builder.build_decision_snapshot(DECISION, Path(tmp) / "snap", CONFIG)
 
     def test_replay_slot_builds_corporate_actions_from_dividend_events(self):
