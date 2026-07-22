@@ -321,3 +321,25 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
                 "fundamental_events_partitions",
                 [finding["check"] for finding in required_report["findings"]],
             )
+
+
+class UnitRegistryProjectionTest(unittest.TestCase):
+    def test_source_unit_rules_is_the_single_projection_source(self):
+        from autotrade.data_sources.tushare.audit import (
+            board_unit_rules,
+            event_unit_rules,
+            integrated_unit_rules,
+            macro_unit_rules,
+        )
+        from autotrade.environment.data.units import AGENT_UNIT_CONTRACT, SOURCE_UNIT_RULES
+
+        # Every registry rule is a non-empty description.
+        for key, rule in SOURCE_UNIT_RULES.items():
+            self.assertTrue(isinstance(rule, str) and rule, key)
+        # The Agent contract ships the registry itself (data_summary carries it
+        # into the sandbox, so offline Fold Agents can resolve source units).
+        self.assertIs(AGENT_UNIT_CONTRACT["source_unit_rules"], SOURCE_UNIT_RULES)
+        # Audit report metadata is a projection of the same registry.
+        for rules in (macro_unit_rules(), event_unit_rules(), board_unit_rules(), integrated_unit_rules()):
+            for key, rule in rules.items():
+                self.assertEqual(rule, SOURCE_UNIT_RULES[key], key)

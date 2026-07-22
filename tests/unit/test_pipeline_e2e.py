@@ -629,9 +629,15 @@ class PipelineEndToEndTest(unittest.TestCase):
                 data_summary["unit_contract"]["auction.parquet"]["volume_ratio"],
                 "dimensionless ratio; 1.2=1.2x",
             )
-            self.assertEqual(
-                data_summary["unit_contract"]["events.parquet"]["datasets"]["moneyflow"]["*_amount"],
-                "10k_CNY; 500 means CNY 5m",
+            # Source units resolve through the full registry shipped to the
+            # sandbox (dataset-qualified; offline Fold Agents read it here).
+            self.assertIn(
+                "amount fields are 10k CNY",
+                data_summary["unit_contract"]["source_unit_rules"]["moneyflow"],
+            )
+            self.assertIn(
+                "10k shares",
+                data_summary["unit_contract"]["source_unit_rules"]["block_trade"],
             )
             self.assertIn(
                 "not an exhaustive",

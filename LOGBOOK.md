@@ -1,3 +1,7 @@
+2026-07-22 数据集限定单位注册表与三向投影
+
+- 证实 §1.2 六组缺口：知识大多已存在但三处失散（units.py Agent 合同仅两条 union 规则、audit.py 四个静态字典最全、文档最薄），block_trade/repurchase 口径无处钉死。全部规则先经真实数据核验（bak 系 ×10/×10⁴ 比值 1.0、block_trade price×vol≈amount、share_float 万股、dividend 元/股等）再入册。采纳用户方案：environment/data/units.py 新增 SOURCE_UNIT_RULES 单一注册表（约 50 条 dataset+字段族级规则，仍守"不做逐列百科"边界），三向投影——Agent 合同整表随 data_summary 下发（离线 Fold Agent 从此可解析全部已录源单位）、audit 四函数改为注册表键选取、docs §1.2 重写为经核验的完整分组表并废除"宏观常见亿元"泛化句。新增投影一致性回归。全量 tests 929+45 通过，PROMPTS.md 字节不变。
+
 2026-07-22 复审四轮：WebUI 账本单一事实源、严格类型、HITL 版本化
 
 - 关键项：registry 逐行裸解析绕过账本校验，控制台继承/回滚/重跑/揭示决策可用管线拒绝的账本——现委托 ExperimentLedger.read() 单一校验读取器，失败走既有 unreadable 状态；版本比较改 type(version) is int 严格判定（true/1.0/"1" 回归覆盖）；read_control/read_status 对存在记录强制同规校验（缺失文件=尚无记录），manager launching 存根补 stamp；11 处 status、3 处账本追加、2 处 control 夹具逐一手工补章（放弃正则批处理）。全量 tests 928+45 通过，三个在营实验三类文件实读验证。
