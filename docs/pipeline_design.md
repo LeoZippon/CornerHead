@@ -437,7 +437,7 @@ experiments/<experiment_id>/
 
 | 路径 | 写入方 | 用途 |
 |---|---|---|
-| `ledgers/experiment_ledger.jsonl` | Pipeline | Fold、meta-learning、held-out 主账本 |
+| `ledgers/experiment_ledger.jsonl` | Pipeline | Fold、meta-learning、held-out 主账本；每条记录 stamp `schema_version`，版本不匹配（含缺失）一律视为不兼容并拒绝加载 |
 | `strategy_artifacts/` | Pipeline | 冻结策略产物和对应模型参数产物 |
 | `meta_learning/` | Pipeline | 元学习 Taste；trace 由账本 `agent_trace_ref` 指向 canonical run 目录 |
 | `artifacts/<run_id>/` | Environment | Sandbox run manifest、trace、results、logs |

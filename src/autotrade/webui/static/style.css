@@ -138,10 +138,13 @@ main { max-width: 1380px; margin: 1.6rem auto; padding: 0 clamp(14px, 3vw, 34px)
 .badge.state-running_session, .badge.state-starting { background: var(--accent-soft); color: var(--run); }
 .badge.state-launching { background: var(--accent-soft); color: var(--run); animation: launch-pulse 1.2s ease-in-out infinite; }
 @keyframes launch-pulse { 50% { opacity: 0.45; } }
-.badge.state-waiting_user, .badge.state-paused { background: var(--warn-soft); color: var(--warn); }
+.badge.state-waiting_user, .badge.state-waiting_step_user, .badge.state-waiting_user_reply,
+.badge.state-paused { background: var(--warn-soft); color: var(--warn); }
 .badge.state-completed { background: var(--ok-soft); color: var(--ok); }
-.badge.state-stopped, .badge.state-created, .badge.state-legacy { background: var(--chip-bg); color: var(--muted); }
-.badge.state-failed, .badge.state-unreadable, .badge.state-interrupted { background: var(--bad-soft); color: var(--bad); }
+.badge.state-stopped, .badge.state-created, .badge.state-legacy,
+.badge.state-unknown { background: var(--chip-bg); color: var(--muted); }
+.badge.state-failed, .badge.state-unreadable, .badge.state-interrupted,
+.badge.state-terminated { background: var(--bad-soft); color: var(--bad); }
 .badge.kind { background: var(--chip-bg); color: var(--muted); font-weight: 500; }
 
 /* cards grid (homepage) */
