@@ -1,3 +1,9 @@
+2026-07-22 结构化单位注册表：纠正 share_float 口径并统一六处事实源
+
+- 审计 Agent 复核证实两处已录单位错误，采纳并修复：`share_float_complete.float_share` 实为股（回算核验：float_share/(float_ratio%) 与 daily_basic.total_share×10⁴ 比对，比值中位 0.849≈1，n=189；若为万股应为 1e-4）——上一轮以中位数 609 反推"万股"违反了"数值范围只能校验、不能反猜单位"的自定纪律；`repurchase.high_limit/low_limit` 为元/股（中位 15.0/11.45，价格量级）。
+- 注册表由自由文本 dict 重构为 `UnitRule` 冻结 dataclass（file+dataset+字段族定位，携 source_unit/factor/columns/status/evidence/agent_visible），150 条规则全部使用与快照一致的精确 dataset 标识（废除 margin/margin_detail、cn_cpi/cn_ppi、share_float 等组合键），经补充实测覆盖全部 81 个默认快照数据集（37 事件+34 宏观+10 财务；此前三域命中率仅约 14/37、14/34、0/10）。高危新录：moneyflow_ind_dc 为元而 moneyflow_dc 为万元、ind_ths/cnt_ths 为亿元；index_dailybasic 元/股 vs daily_basic 万元/万股；daily_info 亿股/亿元 vs sz_daily_info 元；express_vip 为元非万元。
+- 六处事实源归一到注册表：快照换算表与 DatasetContract.unit_rules 由带 factor/columns 的规则派生（列×因子集合与旧表逐项相等，快照字节不变）；audit 四个投影函数改按各域数据集清单选取、清单缺规则即抛错（手工键元组废除），audit_unit_schema 与 stk_mins 两处内嵌字典同步收编；Agent 合同随 data_summary 下发结构化记录（仅 agent_visible）；新增 scripts/dev/export_units.py 生成 docs/units_reference.md 专用文档，§1.2 收敛为注册表说明+分层边界。新增覆盖⊆、钉死纠错、投影派生、文档新鲜度四类回归（新鲜度测试当场抓到一次真实过期）。全量 tests 932+45 通过，PROMPTS.md 字节不变。
+
 2026-07-22 数据集限定单位注册表与三向投影
 
 - 证实 §1.2 六组缺口：知识大多已存在但三处失散（units.py Agent 合同仅两条 union 规则、audit.py 四个静态字典最全、文档最薄），block_trade/repurchase 口径无处钉死。全部规则先经真实数据核验（bak 系 ×10/×10⁴ 比值 1.0、block_trade price×vol≈amount、share_float 万股、dividend 元/股等）再入册。采纳用户方案：environment/data/units.py 新增 SOURCE_UNIT_RULES 单一注册表（约 50 条 dataset+字段族级规则，仍守"不做逐列百科"边界），三向投影——Agent 合同整表随 data_summary 下发（离线 Fold Agent 从此可解析全部已录源单位）、audit 四函数改为注册表键选取、docs §1.2 重写为经核验的完整分组表并废除"宏观常见亿元"泛化句。新增投影一致性回归。全量 tests 929+45 通过，PROMPTS.md 字节不变。

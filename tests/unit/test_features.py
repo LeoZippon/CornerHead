@@ -324,22 +324,98 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
 
 
 class UnitRegistryProjectionTest(unittest.TestCase):
-    def test_source_unit_rules_is_the_single_projection_source(self):
+    def test_registry_is_structured_and_covers_default_snapshot_datasets(self):
+        from autotrade.environment.data.snapshot import SnapshotConfig
+        from autotrade.environment.data.units import UNIT_RULES, registry_datasets
+
+        keys = [(rule.file, rule.dataset, rule.fields) for rule in UNIT_RULES]
+        self.assertEqual(len(keys), len(set(keys)), "duplicate registry rows")
+        for rule in UNIT_RULES:
+            self.assertIn(rule.status, {"verified", "official", "inferred"}, rule.key())
+            self.assertTrue(rule.source_unit, rule.key())
+            if rule.factor is not None:
+                self.assertTrue(rule.columns, rule.key())
+                self.assertTrue(rule.normalized_unit, rule.key())
+            if rule.status == "verified":
+                self.assertTrue(rule.evidence, rule.key())
+        # Every default snapshot dataset id must carry at least one unit rule,
+        # keyed exactly (no composite or alias keys can satisfy this).
+        config = SnapshotConfig()
+        defaults = set(config.events_datasets) | set(config.macro_datasets) | set(config.fundamental_datasets)
+        self.assertEqual(sorted(defaults - registry_datasets()), [])
+
+    def test_audit_verified_unit_corrections_are_pinned(self):
+        from autotrade.environment.data.units import rules_for
+
+        # The two unit errors proven by back-calculation against the live lake
+        # (2026-07 audit) must never regress to the old readings.
+        share_float = [
+            rule for rule in rules_for(file="events.parquet", datasets=("share_float_complete",))
+            if "float_share" in rule.fields
+        ]
+        self.assertEqual([rule.source_unit for rule in share_float], ["shares"])
+        self.assertEqual(share_float[0].status, "verified")
+        limits = [
+            rule for rule in rules_for(file="events.parquet", datasets=("repurchase",))
+            if "high_limit" in rule.fields
+        ]
+        self.assertEqual([rule.source_unit for rule in limits], ["CNY_per_share"])
+        self.assertEqual(limits[0].status, "verified")
+
+    def test_all_projections_derive_from_the_registry(self):
         from autotrade.data_sources.tushare.audit import (
             board_unit_rules,
             event_unit_rules,
             integrated_unit_rules,
             macro_unit_rules,
         )
-        from autotrade.environment.data.units import AGENT_UNIT_CONTRACT, SOURCE_UNIT_RULES
+        from autotrade.environment.data.contracts import default_tushare_contracts
+        from autotrade.environment.data.units import (
+            AGENT_UNIT_CONTRACT,
+            AUCTION_UNIT_CONVERSIONS,
+            DAILY_UNIT_CONVERSIONS,
+            UNIT_RULES,
+            column_source_units,
+            rules_text,
+        )
 
-        # Every registry rule is a non-empty description.
-        for key, rule in SOURCE_UNIT_RULES.items():
-            self.assertTrue(isinstance(rule, str) and rule, key)
-        # The Agent contract ships the registry itself (data_summary carries it
-        # into the sandbox, so offline Fold Agents can resolve source units).
-        self.assertIs(AGENT_UNIT_CONTRACT["source_unit_rules"], SOURCE_UNIT_RULES)
-        # Audit report metadata is a projection of the same registry.
+        # Agent contract ships exactly the agent-visible structured records.
+        self.assertEqual(
+            AGENT_UNIT_CONTRACT["source_unit_rules"],
+            [rule.to_record() for rule in UNIT_RULES if rule.agent_visible],
+        )
+        # Audit metadata values are the registry's own text projection.
+        full_projection = rules_text(UNIT_RULES)
         for rules in (macro_unit_rules(), event_unit_rules(), board_unit_rules(), integrated_unit_rules()):
-            for key, rule in rules.items():
-                self.assertEqual(rule, SOURCE_UNIT_RULES[key], key)
+            self.assertTrue(rules)
+            for key, text in rules.items():
+                self.assertEqual(text, full_projection[key], key)
+        # Snapshot conversion tables are derived from factor-carrying rules.
+        derived = {
+            (column, rule.factor)
+            for rule in UNIT_RULES
+            if rule.factor is not None and rule.file in {"daily.parquet", "auction.parquet"}
+            for column in rule.columns
+        }
+        self.assertEqual({(c, f) for c, f, _ in DAILY_UNIT_CONVERSIONS + AUCTION_UNIT_CONVERSIONS}, derived)
+        # Raw dataset contracts reuse the registry's column-level source units.
+        daily_units = column_source_units("daily.parquet")
+        for contract in default_tushare_contracts().values():
+            for column, unit in (contract.unit_rules or {}).items():
+                self.assertEqual(unit, daily_units[column], contract.dataset)
+
+    def test_units_reference_doc_is_fresh(self):
+        import importlib.util
+
+        repo_root = Path(__file__).resolve().parents[2]
+        spec = importlib.util.spec_from_file_location(
+            "export_units", repo_root / "scripts" / "dev" / "export_units.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        committed = (repo_root / "docs" / "units_reference.md").read_text(encoding="utf-8")
+        self.assertEqual(
+            committed,
+            module.render_units_markdown(),
+            "docs/units_reference.md is stale; run scripts/dev/export_units.py",
+        )

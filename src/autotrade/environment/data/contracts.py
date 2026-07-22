@@ -5,7 +5,13 @@ from datetime import date, datetime, time, timedelta
 from functools import lru_cache
 from zoneinfo import ZoneInfo
 
+from autotrade.environment.data.units import column_source_units
+
 CN_TZ = ZoneInfo("Asia/Shanghai")
+
+# Source units for the daily-domain raw datasets, single-sourced from the unit
+# registry (their columns form the normalized daily.parquet union).
+_DAILY_SOURCE_UNITS = column_source_units("daily.parquet")
 
 # ---------------------------------------------------------------------------
 # Raw-lake research contract. The environment owns these values (they define
@@ -58,28 +64,28 @@ def default_tushare_contracts() -> dict[str, DatasetContract]:
             dataset="daily",
             partition_key="trade_date",
             available_time=time(17, 30),
-            unit_rules={"vol": "hands", "amount": "thousand_cny"},
+            unit_rules={column: _DAILY_SOURCE_UNITS[column] for column in ("vol", "amount")},
             pit_notes="Use for close-to-close research or next-trade-date decisions, not same-day 09:25 decisions.",
         ),
         "daily_basic": DatasetContract(
             dataset="daily_basic",
             partition_key="trade_date",
             available_time=time(18, 0),
-            unit_rules={"total_share": "ten_thousand_shares", "total_mv": "ten_thousand_cny"},
+            unit_rules={column: _DAILY_SOURCE_UNITS[column] for column in ("total_share", "total_mv")},
             pit_notes="Valuation and share fields are available after market close; use next trade date for decisions.",
         ),
         "adj_factor": DatasetContract(
             dataset="adj_factor",
             partition_key="trade_date",
             available_time=time(9, 30),
-            unit_rules={"adj_factor": "ratio"},
+            unit_rules={column: _DAILY_SOURCE_UNITS[column] for column in ("adj_factor",)},
             pit_notes="Raw trade_date alone is not enough for intraday PIT; conservative daily replay should use prior close factors.",
         ),
         "stk_limit": DatasetContract(
             dataset="stk_limit",
             partition_key="trade_date",
             available_time=time(8, 45),
-            unit_rules={"up_limit": "cny_per_share", "down_limit": "cny_per_share"},
+            unit_rules={column: _DAILY_SOURCE_UNITS[column] for column in ("up_limit", "down_limit")},
             pit_notes="Can be used before the trading session if the source timestamp is trusted.",
         ),
         "suspend_d": DatasetContract(
