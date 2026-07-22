@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import subprocess
 import time
@@ -15,6 +16,9 @@ END = "# END MacroQuant TuShare update"
 REPO_ROOT = Path("/Data/lzp/MacroQuant")
 TEMPLATE = REPO_ROOT / "ops/cron/tushare_update.cron"
 BACKUP_DIR = REPO_ROOT / "archive" / "crontab"
+# Shared with ops/webui/webui_stack.sh install-cron: both installers do a
+# crontab read-modify-write and must serialize on the same lock.
+CRONTAB_LOCK = REPO_ROOT / ".runtime" / "crontab.lock"
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,20 +101,27 @@ def main() -> int:
     args = parse_args()
     if not TEMPLATE.exists():
         raise FileNotFoundError(f"cron template not found: {TEMPLATE}")
-    current = current_crontab()
-    updated = replace_managed_block(current, build_managed_block())
     if args.dry_run:
-        print(updated, end="")
+        print(replace_managed_block(current_crontab(), build_managed_block()), end="")
         return 0
-    if current.strip():
-        # Source prefix + pid: two installers (or two runs) in the same second
-        # can never silently overwrite each other's backup.
-        backup = BACKUP_DIR / f"crontab-tushare-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}.bak"
-        write_private_backup(backup, current)
-        print(f"backed up current crontab to {backup}")
-    subprocess.run(["crontab", "-"], input=updated, text=True, check=True)
-    installed = subprocess.run(["crontab", "-l"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-    verify_installed_crontab(updated, installed.stdout)
+    # One flock spans the whole read-modify-write-verify transaction, shared
+    # with ops/webui/webui_stack.sh install-cron: without it the later writer
+    # would silently erase the managed block the earlier writer just added.
+    lock_path = CRONTAB_LOCK
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        current = current_crontab()
+        updated = replace_managed_block(current, build_managed_block())
+        if current.strip():
+            # Source prefix + pid: two installers (or two runs) in the same
+            # second can never silently overwrite each other's backup.
+            backup = BACKUP_DIR / f"crontab-tushare-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}.bak"
+            write_private_backup(backup, current)
+            print(f"backed up current crontab to {backup}")
+        subprocess.run(["crontab", "-"], input=updated, text=True, check=True)
+        installed = subprocess.run(["crontab", "-l"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        verify_installed_crontab(updated, installed.stdout)
     print("installed MacroQuant TuShare cron block")
     return 0
 
