@@ -89,9 +89,8 @@ For experiment, training, inference, evaluation, or data-processing jobs:
 - Maintain a minimalist code architecture and implementation while ensuring logical correctness and completeness.
 - Achieve optimal performance while keeping the environment as close to real-world conditions as possible.
 - Maximize the Agent’s autonomy while lowering the complexity of interactions between the Agent and the environment.
-- Freeze the scope and define contracts and invariants before auditing or changing code.
-- Require reproducible evidence and material impact; distinguish blocking defects from suggestions and accepted limitations.
-- Fix one root cause per small, self-contained change and improve overall code health; redesign when exceptions or complexity keep growing.
+- Audit principle: freeze the scope and define contracts and invariants first; require reproducible evidence of material impact, and distinguish defects from suggestions and accepted limitations.
+- Code repair principle: fix one root cause per small, self-contained change and leave overall code health better; redesign instead of stacking exceptions when complexity keeps growing.
 - Prefer explicit failure over silent fallback or false success when correctness cannot be guaranteed.
 - Test invariants, negative paths, and realistic end-to-end behavior rather than only the current implementation's happy path.
 - Record irreducible limitations honestly; do not add speculative abstractions, compatibility branches, or unsupported recovery behavior.
