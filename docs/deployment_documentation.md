@@ -476,63 +476,23 @@ setx CQ_MAX_PRINCIPAL "100000"
 
 本金环境变量同样属于草案。目标实现若未显式设置上限，可以读取券商账户总资产作为本金口径，但上线前必须与回测资金口径一致并写入冻结配置。
 
-### 4.2 订单协议草案
+### 4.2 订单协议（schema_version 2）
 
-本节定义本机与 QMT 客户端之间订单 payload 的目标字段和执行语义。
-
-协议 schema_version 2 已由 `ops/qmt/qmt_client_bridge.py` 实现并冻结；精确字段、严格类型校验（拒绝 NaN/Infinity、布尔必须为 JSON true/false）、逐单意图/终态日志与交易日测试流程见 [`ops/qmt/README.md`](../ops/qmt/README.md)。以下示例只作语义摘要。
+本节记录本机与 QMT 客户端之间订单 payload 的执行语义。协议已由 `ops/qmt/qmt_client_bridge.py` 实现并冻结；精确字段、唯一权威 payload 示例、严格类型校验（拒绝 NaN/Infinity、布尔必须为 JSON true/false、同包逐单 remark 幂等键必须互不相同）、逐单意图/终态日志与交易日测试流程见 [`ops/qmt/README.md`](../ops/qmt/README.md)，本文不再复制示例。
 
 **必要语义**
 
-- 全局唯一身份和逐单幂等键；重复到达不得重复下单。
-- 决策时间、冻结策略、配置、数据和研究账本证据。
-- 每笔订单明确账户、动作、证券、数量和价格约束。
-- dry-run 与 live 的独立授权字段。
-- 提交、委托、成交和拒绝的分离回写。
+- 全局唯一 `payload_id` 和逐单幂等 remark（`MQ:<payload_id>:<序号或自定义 remark>`）；重复到达不得重复下单，同包 remark 冲突在校验期整包拒绝。
+- 每笔订单只携带 `code`/`side`/`volume`/`price`（可选 `remark`）；`op_type`、价格类型等柜台参数由客户端配置派生，payload 不携带。
+- dry-run 与 live 由三重独立闸门控制：配置 `execution.enabled` ∧ payload `execute` ∧ `confirm == payload_id`。
+- 提交、委托、成交和拒绝的分离回写（`execute_*.json` / `error_*.json` / 逐单 journal）。
+- 决策时间与冻结策略/配置/数据/账本 hash 暂不进入 payload——属未实现的目标语义；接入实盘前由决策侧凭 `payload_id` 与研究账本线下对账。
 
-**Payload Schema**
+**决策侧拆单要求**
 
-```json
-{
-  "schema_version": 2,
-  "project_id": "macroquant",
-  "strategy_id": "macroquant_hl_daily_rebalance",
-  "payload_id": "macroquant_hl_daily_rebalance_20260601",
-  "trade_date": "20260601",
-  "decision_time": "2026-05-31T20:30:00+08:00",
-  "action": "rebalance",
-  "execute": false,
-  "confirm": null,
-  "principal_mode": "account_total_asset",
-  "daily_buy_limit_ratio": 0.5,
-  "model_id": "frozen_model_or_rule_id",
-  "config_hash": "<hash>",
-  "data_contract_hash": "<hash>",
-  "ledger_hash": "<hash>",
-  "orders": [
-    {
-      "code": "000001.SZ",
-      "side": "BUY",
-      "op_type": 33,
-      "volume": 100,
-      "price_type": "LATEST",
-      "limit_price": null,
-      "reason": "budgeted_buy",
-      "risk_tags": []
-    }
-  ]
-}
-```
-
-`op_type` 取官方 passorder 操作码（普通 23/24；信用 27/28/29/31/32/33/34），与当前模拟 Broker 的动作映射一致；`side` 保留为人读冗余，执行器以 `op_type` 为准并校验两者一致。
-
-**执行语义**
-
-- 无 `principal` 时，远端读取账户 `total_asset`。
-- 每日买入预算可设为 `min(account_cash, total_asset * daily_buy_limit_ratio)`。
-- 已有持仓和在途委托必须先对账。任何增仓都要由决策侧明确表达并保持幂等；执行侧不得自行推断再平衡意图或一概跳过已有持仓。
+- 已有持仓和在途委托必须先对账；任何增仓都要由决策侧明确表达并保持幂等，执行侧不得自行推断再平衡意图。
 - 卖出只根据远端策略 state 和 broker 可用持仓生成，不卖出非本策略仓位。
-- `rebalance` 最终应在本机拆成明确的 BUY/SELL 订单，远端不负责理解研究语义。
+- 再平衡必须在本机拆成明确的 BUY/SELL 订单，远端不负责理解研究语义。
 
 ### 4.3 Dry-run 与实盘执行
 

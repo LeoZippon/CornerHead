@@ -403,6 +403,40 @@ class QmtClientBridgeTest(unittest.TestCase):
         bool_volume = [{"code": "600000.SH", "side": "BUY", "volume": True, "price": 10.0}]
         self.assertTrue(any("volume" in e for e in errors(orders=bool_volume)))
 
+    def test_payload_rejects_colliding_order_remarks(self):
+        # The broker-side idempotency wall keys on the remark; a payload whose
+        # orders share one remark identity must be rejected before submission.
+        bridge = _load_bridge()
+        config = self._execution_config()
+
+        def payload(orders):
+            return {
+                "schema_version": 2, "payload_id": "p", "strategy_id": "s1",
+                "trade_date": bridge._today(), "execute": False, "confirm": "",
+                "orders": orders,
+            }
+
+        explicit = [
+            {"code": "600000.SH", "side": "BUY", "volume": 100, "price": 10.0, "remark": "dup"},
+            {"code": "600016.SH", "side": "BUY", "volume": 100, "price": 10.0, "remark": "dup"},
+        ]
+        self.assertTrue(any("collides" in e for e in bridge._validate_payload(payload(explicit), config)))
+
+        # An explicit remark equal to another order's positional index shares
+        # that order's default identity: orders[2] remark "1" == orders[1] default.
+        positional = [
+            {"code": "600000.SH", "side": "BUY", "volume": 100, "price": 10.0},
+            {"code": "600016.SH", "side": "BUY", "volume": 100, "price": 10.0},
+            {"code": "600028.SH", "side": "BUY", "volume": 100, "price": 10.0, "remark": "1"},
+        ]
+        self.assertTrue(any("collides" in e for e in bridge._validate_payload(payload(positional), config)))
+
+        distinct = [
+            {"code": "600000.SH", "side": "BUY", "volume": 100, "price": 10.0},
+            {"code": "600016.SH", "side": "SELL", "volume": 100, "price": 10.0, "remark": "exit-leg"},
+        ]
+        self.assertEqual(bridge._validate_payload(payload(distinct), config), [])
+
     def test_export_dedup_keys_are_day_scoped_and_state_is_pruned(self):
         bridge = _load_bridge()
         with tempfile.TemporaryDirectory() as tmp:

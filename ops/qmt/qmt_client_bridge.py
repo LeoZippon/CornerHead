@@ -374,6 +374,7 @@ def _validate_payload(payload, config):
         return errors
     total_notional = 0.0
     seen_keys = set()
+    seen_remarks = set()
     for index, order in enumerate(orders):
         prefix = "orders[%d]" % index
         if not isinstance(order, dict):
@@ -406,6 +407,14 @@ def _validate_payload(payload, config):
         if key in seen_keys:
             errors.append(prefix + " duplicates %s %s" % (side, code))
         seen_keys.add(key)
+        # The broker-side idempotency wall keys on the remark; two orders in
+        # one payload sharing a remark (explicit remark collision, or an
+        # explicit remark equal to another order's positional index) would be
+        # submitted under one identity and silently defeat replay protection.
+        remark_suffix = str(order.get("remark") or index)
+        if remark_suffix in seen_remarks:
+            errors.append(prefix + " remark %r collides with another order in this payload" % remark_suffix)
+        seen_remarks.add(remark_suffix)
     if total_notional > execution["max_payload_notional"]:
         errors.append("payload notional %.2f exceeds max_payload_notional" % total_notional)
     return errors
