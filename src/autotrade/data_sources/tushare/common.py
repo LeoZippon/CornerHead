@@ -562,6 +562,28 @@ class MacroDataset:
                 return self.loop_start_dates[self.loop_values.index(value)]
         return self.start_date
 
+@dataclass(frozen=True)
+class AvailabilityRule:
+    """Official per-dataset PIT publication time.
+
+    ``available_at`` is stamped as ``clock`` on the source date shifted by
+    ``day_offset`` days, tagged with ``rule``. ``only_when_is_new`` restricts
+    the rule to latest-snapshot pulls (request param is_new=Y); every other
+    case falls back to conservative date EOD.
+    """
+
+    clock: str
+    rule: str
+    day_offset: int = 0
+    only_when_is_new: bool = False
+
+OFFICIAL_NEXT_DAY_09 = AvailabilityRule("09:00:00", "official_next_day_09_from:trade_date", day_offset=1)
+OFFICIAL_PREOPEN_09 = AvailabilityRule("09:00:00", "official_preopen_09_from:trade_date")
+OFFICIAL_19 = AvailabilityRule("19:00:00", "official_19_from:trade_date")
+OFFICIAL_NEXT_DAY_0830 = AvailabilityRule("08:30:00", "official_next_day_0830_from:trade_date", day_offset=1)
+OFFICIAL_20 = AvailabilityRule("20:00:00", "official_20_from:trade_date")
+OFFICIAL_LATEST_2230 = AvailabilityRule("22:30:00", "official_latest_2230_from:trade_date", only_when_is_new=True)
+
 @dataclass
 class EventDataset:
     api_name: str
@@ -573,6 +595,7 @@ class EventDataset:
     start_date: str = "20100101"
     fallback_date_column: str = ""
     zero_rows_ok: bool = True
+    availability: AvailabilityRule | None = None
 
 @dataclass
 class BoardTradingDataset:
@@ -585,6 +608,7 @@ class BoardTradingDataset:
     time_column: str = ""
     start_date: str = "20200101"
     zero_rows_ok: bool = True
+    availability: AvailabilityRule | None = None
 
 FUNDAMENTAL_SPECS = {
     "income_vip": FundamentalDataset(
@@ -1065,6 +1089,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "exchange_id"),
         date_column="trade_date",
         zero_rows_ok=False,
+        availability=OFFICIAL_NEXT_DAY_09,
     ),
     "margin_detail": EventDataset(
         api_name="margin_detail",
@@ -1074,6 +1099,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
         zero_rows_ok=False,
+        availability=OFFICIAL_NEXT_DAY_09,
     ),
     "margin_secs": EventDataset(
         api_name="margin_secs",
@@ -1083,6 +1109,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "ts_code", "exchange"),
         date_column="trade_date",
         zero_rows_ok=False,
+        availability=OFFICIAL_PREOPEN_09,
     ),
     "moneyflow": EventDataset(
         api_name="moneyflow",
@@ -1092,6 +1119,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
         zero_rows_ok=False,
+        availability=OFFICIAL_19,
     ),
     "moneyflow_dc": EventDataset(
         api_name="moneyflow_dc",
@@ -1101,6 +1129,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
         start_date="20231201",
+        availability=OFFICIAL_19,
     ),
     "moneyflow_ths": EventDataset(
         api_name="moneyflow_ths",
@@ -1110,6 +1139,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
         start_date="20250101",
+        availability=OFFICIAL_19,
     ),
     "moneyflow_ind_dc": EventDataset(
         api_name="moneyflow_ind_dc",
@@ -1119,6 +1149,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "content_type", "ts_code"),
         date_column="trade_date",
         start_date="20231201",
+        availability=OFFICIAL_19,
     ),
     "moneyflow_ind_ths": EventDataset(
         api_name="moneyflow_ind_ths",
@@ -1128,6 +1159,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
         start_date="20250101",
+        availability=OFFICIAL_19,
     ),
     "moneyflow_cnt_ths": EventDataset(
         api_name="moneyflow_cnt_ths",
@@ -1137,6 +1169,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
         start_date="20250101",
+        availability=OFFICIAL_19,
     ),
     "cyq_perf": EventDataset(
         api_name="cyq_perf",
@@ -1146,6 +1179,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
         start_date="20180102",
+        availability=OFFICIAL_19,
     ),
     "bak_daily": EventDataset(
         api_name="bak_daily",
@@ -1155,6 +1189,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
         start_date="20170103",
+        availability=OFFICIAL_19,
     ),
     "stk_premarket": EventDataset(
         api_name="stk_premarket",
@@ -1164,6 +1199,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
         start_date="20200101",
+        availability=OFFICIAL_PREOPEN_09,
     ),
     "slb_len": EventDataset(
         api_name="slb_len",
@@ -1174,6 +1210,7 @@ EVENT_FLOW_SPECS = {
         date_column="trade_date",
         zero_rows_ok=True,
         start_date="20200101",
+        availability=OFFICIAL_19,
     ),
     "slb_len_mm": EventDataset(
         api_name="slb_len_mm",
@@ -1184,6 +1221,7 @@ EVENT_FLOW_SPECS = {
         date_column="trade_date",
         zero_rows_ok=True,
         start_date="20200101",
+        availability=OFFICIAL_19,
     ),
     "stk_holdernumber": EventDataset(
         api_name="stk_holdernumber",
@@ -1243,6 +1281,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("ts_code", "ann_date", "holder_name", "holder_type", "in_de", "begin_date", "close_date"),
         date_column="ann_date",
         zero_rows_ok=True,
+        availability=AvailabilityRule("19:00:00", "official_19_from:ann_date"),
     ),
     "repurchase": EventDataset(
         api_name="repurchase",
@@ -1272,6 +1311,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "ts_code", "price", "vol", "amount", "buyer", "seller"),
         date_column="trade_date",
         zero_rows_ok=True,
+        availability=AvailabilityRule("21:00:00", "official_21_from:trade_date"),
     ),
 }
 
@@ -1282,6 +1322,7 @@ BOARD_TRADING_SPECS = {
         fields="ts_code,name,trade_date,lu_time,ld_time,open_time,last_time,lu_desc,tag,theme,net_change,bid_amount,status,bid_change,bid_turnover,lu_bid_vol,pct_chg,bid_pct_chg,rt_pct_chg,limit_order,amount,turnover_rate,free_float,lu_limit_order",
         page_limit=8000,
         key_columns=("trade_date", "ts_code", "tag", "status", "lu_time", "open_time", "last_time"),
+        availability=OFFICIAL_NEXT_DAY_0830,
     ),
     "kpl_concept_cons": BoardTradingDataset(
         api_name="kpl_concept_cons",
@@ -1290,6 +1331,7 @@ BOARD_TRADING_SPECS = {
         page_limit=3000,
         key_columns=("trade_date", "con_code", "ts_code"),
         start_date="20250101",
+        availability=OFFICIAL_NEXT_DAY_0830,
     ),
     "dc_index": BoardTradingDataset(
         api_name="dc_index",
@@ -1298,6 +1340,7 @@ BOARD_TRADING_SPECS = {
         page_limit=5000,
         key_columns=("trade_date", "ts_code"),
         start_date="20250101",
+        availability=OFFICIAL_20,
     ),
     "dc_member": BoardTradingDataset(
         api_name="dc_member",
@@ -1306,6 +1349,7 @@ BOARD_TRADING_SPECS = {
         page_limit=8000,
         key_columns=("trade_date", "ts_code", "con_code"),
         start_date="20250101",
+        availability=OFFICIAL_20,
     ),
     "limit_step": BoardTradingDataset(
         api_name="limit_step",
@@ -1328,6 +1372,7 @@ BOARD_TRADING_SPECS = {
         page_limit=8000,
         key_columns=("trade_date", "ts_code", "limit_type", "tag", "status", "first_lu_time", "last_lu_time", "first_ld_time", "last_ld_time"),
         start_date="20231101",
+        availability=AvailabilityRule("16:00:00", "official_16_from:trade_date"),
     ),
     "top_list": BoardTradingDataset(
         api_name="top_list",
@@ -1352,6 +1397,7 @@ BOARD_TRADING_SPECS = {
             "reason",
         ),
         zero_rows_ok=True,
+        availability=OFFICIAL_20,
     ),
     "top_inst": BoardTradingDataset(
         api_name="top_inst",
@@ -1360,6 +1406,7 @@ BOARD_TRADING_SPECS = {
         page_limit=10000,
         key_columns=("trade_date", "ts_code", "exalter", "buy", "sell", "net_buy", "side", "reason"),
         zero_rows_ok=True,
+        availability=OFFICIAL_20,
     ),
     "hm_list": BoardTradingDataset(
         api_name="hm_list",
@@ -1385,6 +1432,7 @@ BOARD_TRADING_SPECS = {
         page_limit=2000,
         key_columns=("trade_date", "data_type", "ts_code", "rank_time", "rank"),
         time_column="rank_time",
+        availability=OFFICIAL_LATEST_2230,
     ),
     "dc_hot": BoardTradingDataset(
         api_name="dc_hot",
@@ -1393,6 +1441,7 @@ BOARD_TRADING_SPECS = {
         page_limit=2000,
         key_columns=("trade_date", "data_type", "ts_code", "rank_time", "rank"),
         time_column="rank_time",
+        availability=OFFICIAL_LATEST_2230,
     ),
 }
 
@@ -1939,31 +1988,32 @@ def latest_sse_calendar_date(raw_dir: Path) -> str:
         raise RuntimeError("SSE trade_cal has no parseable cal_date values; refresh reference trade_cal first")
     return str(dates.max())
 
+def select_datasets(
+    values: Iterable[str] | None,
+    *,
+    default: Iterable[str],
+    allowed: Iterable[str],
+    label: str,
+) -> list[str]:
+    """Resolve an optional CLI dataset list: fall back to ``default`` when
+    empty and fail explicitly on names missing from ``allowed``."""
+    datasets = list(values or default)
+    invalid = sorted(set(datasets) - set(allowed))
+    if invalid:
+        raise RuntimeError(f"unknown {label} datasets: {invalid}; supported={sorted(allowed)}")
+    return datasets
+
 def selected_daily_datasets(args: argparse.Namespace) -> list[str]:
     datasets = list(args.datasets or DAILY_REQUIRED_DATASETS)
     if getattr(args, "include_limit_list", False) and "limit_list_d" not in datasets:
         datasets.append("limit_list_d")
-    invalid = sorted(set(datasets) - set(DAILY_SPECS))
-    if invalid:
-        raise RuntimeError(f"unknown daily market datasets: {invalid}")
-    return datasets
+    return select_datasets(datasets, default=DAILY_REQUIRED_DATASETS, allowed=DAILY_SPECS, label="daily market")
 
 def partition_date(path: Path) -> str:
     return path.stem.split("=", 1)[1] if "=" in path.stem else ""
 
-def selected_fundamental_datasets(args: argparse.Namespace) -> list[str]:
-    datasets = list(args.datasets or FUNDAMENTAL_DATASETS)
-    invalid = sorted(set(datasets) - set(FUNDAMENTAL_SPECS))
-    if invalid:
-        raise RuntimeError(f"unknown fundamental datasets: {invalid}")
-    return datasets
-
-def selected_integrated_fundamental_datasets(args: argparse.Namespace) -> list[str]:
-    datasets = list(getattr(args, "fundamental_datasets", None) or FUNDAMENTAL_DATASETS)
-    invalid = sorted(set(datasets) - set(FUNDAMENTAL_SPECS))
-    if invalid:
-        raise RuntimeError(f"unknown fundamental datasets: {invalid}")
-    return datasets
+def selected_fundamental_datasets(values: Iterable[str] | None) -> list[str]:
+    return select_datasets(values, default=FUNDAMENTAL_DATASETS, allowed=FUNDAMENTAL_SPECS, label="fundamental")
 
 def parse_yyyymmdd(value: str) -> date:
     return datetime.strptime(value, "%Y%m%d").date()
@@ -2082,11 +2132,7 @@ def augment_macro_frame(df: pd.DataFrame, spec: MacroDataset) -> pd.DataFrame:
 
 def selected_macro_datasets(args: argparse.Namespace) -> list[str]:
     default = GLOBAL_CONTEXT_DEFAULT_DATASETS if args.tier == "global" else MACRO_REGIME_DEFAULT_DATASETS
-    datasets = list(args.datasets or default)
-    invalid = sorted(set(datasets) - set(MACRO_SPECS))
-    if invalid:
-        raise RuntimeError(f"unknown macro/global datasets: {invalid}; supported={sorted(MACRO_SPECS)}")
-    return datasets
+    return select_datasets(args.datasets, default=default, allowed=MACRO_SPECS, label="macro/global")
 
 def macro_page_limit(spec: MacroDataset, requested: int | None) -> int:
     if spec.page_limit is not None:
@@ -2138,21 +2184,13 @@ def write_macro_result(
     return len(df)
 
 def selected_event_flow_datasets(args: argparse.Namespace) -> list[str]:
-    datasets = list(args.datasets or EVENT_FLOW_DATASETS)
-    invalid = sorted(set(datasets) - set(EVENT_FLOW_SPECS))
-    if invalid:
-        raise RuntimeError(f"unknown event/flow datasets: {invalid}; supported={sorted(EVENT_FLOW_SPECS)}")
-    return datasets
+    return select_datasets(args.datasets, default=EVENT_FLOW_DATASETS, allowed=EVENT_FLOW_SPECS, label="event/flow")
 
 def event_page_limit(spec: EventDataset, requested: int | None) -> int:
     return min(requested or spec.page_limit, spec.page_limit)
 
 def selected_board_trading_datasets(args: argparse.Namespace) -> list[str]:
-    datasets = list(getattr(args, "datasets", None) or BOARD_TRADING_DEFAULT_DATASETS)
-    invalid = sorted(set(datasets) - set(BOARD_TRADING_SPECS))
-    if invalid:
-        raise RuntimeError(f"unknown board-trading datasets: {invalid}; supported={sorted(BOARD_TRADING_SPECS)}")
-    return datasets
+    return select_datasets(getattr(args, "datasets", None), default=BOARD_TRADING_DEFAULT_DATASETS, allowed=BOARD_TRADING_SPECS, label="board-trading")
 
 def board_page_limit(spec: BoardTradingDataset, requested: int | None) -> int:
     return min(requested or spec.page_limit, spec.page_limit)
@@ -2200,25 +2238,24 @@ def margin_missing_exchanges(trade_date: str, present: Iterable[str]) -> list[st
         required.add("BSE")
     return sorted(required - {str(item) for item in present})
 
-def event_available_at(value: str, api_name: str) -> tuple[str, str]:
+def official_available_at(
+    value: str,
+    availability: AvailabilityRule | None,
+    params: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Stamp the spec's official publication time, or conservative date EOD."""
     text = str(value or "").strip()
     if not re.fullmatch(r"\d{8}", text):
         return "", "missing_source_date"
-    if api_name in {"margin", "margin_detail"}:
-        next_day = parse_yyyymmdd(text) + timedelta(days=1)
-        return local_time(format_yyyymmdd(next_day), "09:00:00"), "official_next_day_09_from:trade_date"
-    if api_name == "margin_secs":
-        return local_time(text, "09:00:00"), "official_preopen_09_from:trade_date"
-    if api_name == "stk_premarket":
-        return local_time(text, "09:00:00"), "official_preopen_09_from:trade_date"
-    if api_name in {"moneyflow_dc", "moneyflow_ths", "moneyflow_ind_dc", "moneyflow_ind_ths",
-                    "moneyflow_cnt_ths", "cyq_perf", "bak_daily", "slb_len", "slb_len_mm"}:
-        return local_time(text, "19:00:00"), "official_19_from:trade_date"
-    if api_name in {"moneyflow", "stk_holdertrade"}:
-        return local_time(text, "19:00:00"), f"official_19_from:{'trade_date' if api_name == 'moneyflow' else 'ann_date'}"
-    if api_name == "block_trade":
-        return local_time(text, "21:00:00"), "official_21_from:trade_date"
-    return local_eod(text), "conservative_date_eod"
+    rule = availability
+    if rule is not None and rule.only_when_is_new and (params or {}).get("is_new") != "Y":
+        rule = None
+    if rule is None:
+        return local_eod(text), "conservative_date_eod"
+    day = text
+    if rule.day_offset:
+        day = format_yyyymmdd(parse_yyyymmdd(text) + timedelta(days=rule.day_offset))
+    return local_time(day, rule.clock), rule.rule
 
 def augment_event_frame(df: pd.DataFrame, spec: EventDataset) -> pd.DataFrame:
     out = df.copy()
@@ -2228,7 +2265,7 @@ def augment_event_frame(df: pd.DataFrame, spec: EventDataset) -> pd.DataFrame:
         out["available_at_rule"] = "missing_source_date"
     if spec.date_column and spec.date_column in out.columns:
         date_values = out[spec.date_column].astype(str).str.strip()
-        derived = date_values.map(lambda item: event_available_at(item, spec.api_name))
+        derived = date_values.map(lambda item: official_available_at(item, spec.availability))
         available = derived.map(lambda item: item[0])
         rules = derived.map(lambda item: item[1])
         mask = available.astype(str).str.strip().ne("")
@@ -2237,7 +2274,7 @@ def augment_event_frame(df: pd.DataFrame, spec: EventDataset) -> pd.DataFrame:
     if spec.fallback_date_column and spec.fallback_date_column in out.columns:
         missing = out["available_at"].astype(str).str.strip().eq("")
         fallback_values = out[spec.fallback_date_column].astype(str).str.strip()
-        derived = fallback_values.map(lambda item: event_available_at(item, spec.api_name))
+        derived = fallback_values.map(lambda item: official_available_at(item, spec.availability))
         available = derived.map(lambda item: item[0])
         mask = missing & available.astype(str).str.strip().ne("")
         out.loc[mask, "available_at"] = available[mask]
@@ -2271,23 +2308,6 @@ def write_event_result(
         return 0
     return len(df)
 
-def board_available_at(value: str, api_name: str, params: dict[str, Any] | None = None) -> tuple[str, str]:
-    text = str(value or "").strip()
-    if not re.fullmatch(r"\d{8}", text):
-        return "", "missing_source_date"
-    if api_name in {"kpl_list", "kpl_concept_cons"}:
-        next_day = parse_yyyymmdd(text) + timedelta(days=1)
-        return local_time(format_yyyymmdd(next_day), "08:30:00"), "official_next_day_0830_from:trade_date"
-    if api_name in {"dc_index", "dc_member"}:
-        return local_time(text, "20:00:00"), "official_20_from:trade_date"
-    if api_name == "limit_list_ths":
-        return local_time(text, "16:00:00"), "official_16_from:trade_date"
-    if api_name in {"top_list", "top_inst"}:
-        return local_time(text, "20:00:00"), "official_20_from:trade_date"
-    if api_name in {"ths_hot", "dc_hot"} and (params or {}).get("is_new") == "Y":
-        return local_time(text, "22:30:00"), "official_latest_2230_from:trade_date"
-    return local_eod(text), "conservative_date_eod"
-
 def normalize_source_datetime(value: Any) -> str:
     text = str(value or "").strip()
     if not text or text in {"nan", "None"}:
@@ -2312,7 +2332,7 @@ def augment_board_frame(df: pd.DataFrame, spec: BoardTradingDataset, params: dic
     if spec.date_column and spec.date_column in out.columns:
         missing = out["available_at"].astype(str).str.strip().eq("")
         date_values = out[spec.date_column].astype(str).str.strip()
-        derived = date_values.map(lambda item: board_available_at(item, spec.api_name, params))
+        derived = date_values.map(lambda item: official_available_at(item, spec.availability, params))
         available = derived.map(lambda item: item[0])
         rules = derived.map(lambda item: item[1])
         mask = missing & available.astype(str).str.strip().ne("")
@@ -2349,14 +2369,10 @@ def write_board_result(
         return 0
     return len(df)
 
-def selected_intraday_datasets(args: argparse.Namespace) -> list[str]:
-    datasets = list(args.datasets or INTRADAY_DATASETS)
+def selected_intraday_datasets(values: Iterable[str] | None) -> list[str]:
     aliases = {"stk_mins": STK_MINS_DATASET, "stk_mins_1min": STK_MINS_DATASET}
-    normalized = [aliases.get(str(name), str(name)) for name in datasets]
-    invalid = sorted(set(normalized) - set(INTRADAY_DATASETS))
-    if invalid:
-        raise RuntimeError(f"unknown intraday minute datasets: {invalid}; supported={INTRADAY_DATASETS}")
-    return normalized
+    normalized = [aliases.get(str(name), str(name)) for name in values or INTRADAY_DATASETS]
+    return select_datasets(normalized, default=INTRADAY_DATASETS, allowed=INTRADAY_DATASETS, label="intraday minute")
 
 def clean_yyyymmdd(value: Any) -> str:
     text = str(value or "").strip()
@@ -2570,22 +2586,10 @@ def intraday_expected_codes_for_day(raw_dir: Path, args: argparse.Namespace, tra
         codes = set(sorted(codes)[: int(args.max_codes)])
     return codes
 
-def selected_integrated_intraday_datasets(args: argparse.Namespace) -> list[str]:
-    datasets = list(getattr(args, "intraday_datasets", None) or INTRADAY_DATASETS)
-    aliases = {"stk_mins": STK_MINS_DATASET, "stk_mins_1min": STK_MINS_DATASET}
-    normalized = [aliases.get(str(name), str(name)) for name in datasets]
-    invalid = sorted(set(normalized) - set(INTRADAY_DATASETS))
-    if invalid:
-        raise RuntimeError(f"unknown intraday minute datasets: {invalid}; supported={INTRADAY_DATASETS}")
-    return normalized
-
-def selected_text_datasets(args: argparse.Namespace) -> list[str]:
-    datasets = list(args.datasets or TEXT_DEFAULT_DATASETS)
-    invalid = sorted(set(datasets) - set(TEXT_SPECS))
-    if invalid:
-        raise RuntimeError(f"unknown text datasets: {invalid}")
-    if "news" in datasets:
-        selected_news_sources(args.news_src)
+def selected_text_datasets(values: Iterable[str] | None, *, news_src: list[str] | None = None) -> list[str]:
+    datasets = select_datasets(values, default=TEXT_DEFAULT_DATASETS, allowed=TEXT_SPECS, label="text")
+    if news_src is not None and "news" in datasets:
+        selected_news_sources(news_src)
     return datasets
 
 def selected_news_sources(values: list[str] | None) -> list[str]:
