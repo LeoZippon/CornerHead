@@ -4,7 +4,6 @@
 
 - Python Environment is `quant` installed at `~/miniconda3/envs/quant` with Python 3.11.
 - Use that installation for environment activation and package management.
-- The previous `stock` environment may still exist for historical runs, but new local scripts, tests, cron jobs, and non-Docker tools should use `quant`.
 - Docker sandbox Python is independent from the local conda environment; rebuild `ops/docker/sandbox.Dockerfile` when sandbox dependencies change.
 - Prefer explicit environment setup over ad hoc local Python changes.
 - The real writable repository root on this machine is `/Data/lzp/MacroQuant`.
@@ -90,15 +89,18 @@ For experiment, training, inference, evaluation, or data-processing jobs:
 - Maintain a minimalist code architecture and implementation while ensuring logical correctness and completeness.
 - Achieve optimal performance while keeping the environment as close to real-world conditions as possible.
 - Maximize the Agent’s autonomy while lowering the complexity of interactions between the Agent and the environment.
+- Freeze the scope and define contracts and invariants before auditing or changing code.
+- Require reproducible evidence and material impact; distinguish blocking defects from suggestions and accepted limitations.
+- Fix one root cause per small, self-contained change and improve overall code health; redesign when exceptions or complexity keep growing.
+- Prefer explicit failure over silent fallback or false success when correctness cannot be guaranteed.
+- Test invariants, negative paths, and realistic end-to-end behavior rather than only the current implementation's happy path.
+- Record irreducible limitations honestly; do not add speculative abstractions, compatibility branches, or unsupported recovery behavior.
 
 ## Operational Guardrails
 
-- Avoid over-engineering.
 - Fully read sufficient code and supporting documentation to form a sound design idea before writing or modifying any code.
 - Treat resource checks and logging as mandatory steps, not optional cleanup.
 - Keep the repository organized, clean and tidy.
-- Prefer fail-fast behavior in core pipelines. Missing data files, cache splits, scaler/meta artifacts, or model weights should raise explicit errors instead of silently falling back.
 - Route every production live raw/PIT source mutation through the updater's exclusive lock and temp-plus-replace; never modify a hardlinked source file in place.
 - When starting a sub-agent, always choose the best performing ones.
-- Do not add compatibility or fallback branches unless they are required by a real supported workflow and their trigger conditions are explicit.
 - Dare to break thinking inertia and rethink when necessary.
