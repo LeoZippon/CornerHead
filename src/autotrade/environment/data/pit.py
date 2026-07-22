@@ -33,7 +33,16 @@ def concat_rows(frames: list[pd.DataFrame], **kwargs) -> pd.DataFrame:
         return pd.DataFrame({column: pd.Series(dtype=dtype) for column, dtype in columns.items()})
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=FutureWarning, message=".*empty or all-NA entries.*")
-        return pd.concat(non_empty, **kwargs)
+        merged = pd.concat(non_empty, **kwargs)
+    # Empty inputs still contribute schema: columns only they carry are added
+    # as typed all-NA via reindex (integer dtypes promote to float, exactly as
+    # a plain concat would have produced).
+    for frame in frames:
+        if frame.empty:
+            for column in frame.columns:
+                if column not in merged.columns:
+                    merged[column] = pd.Series(dtype=frame[column].dtype).reindex(merged.index)
+    return merged
 
 
 def parquet_meta(path: Path) -> dict[str, Any]:

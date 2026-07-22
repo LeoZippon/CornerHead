@@ -740,6 +740,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(str(merged["close"].dtype), "float64")
         self.assertEqual(len(merged), 0)
 
+        # Mixed inputs: an empty frame's extra columns still enter the schema.
+        rows = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+        widened = concat_rows([rows, right], ignore_index=True)
+        self.assertIn("volume", widened.columns)
+        self.assertEqual(len(widened), 1)
+        self.assertTrue(widened["volume"].isna().all())
+
     def test_dup_key_identical_content_records_no_revision_event(self):
         path = self.raw_dir / "dividend" / "ann_month=202001.parquet"
         rows = pd.DataFrame([

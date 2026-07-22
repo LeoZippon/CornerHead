@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -102,7 +103,9 @@ def main() -> int:
         print(updated, end="")
         return 0
     if current.strip():
-        backup = BACKUP_DIR / f"crontab-{time.strftime('%Y%m%d-%H%M%S')}.bak"
+        # Source prefix + pid: two installers (or two runs) in the same second
+        # can never silently overwrite each other's backup.
+        backup = BACKUP_DIR / f"crontab-tushare-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}.bak"
         write_private_backup(backup, current)
         print(f"backed up current crontab to {backup}")
     subprocess.run(["crontab", "-"], input=updated, text=True, check=True)

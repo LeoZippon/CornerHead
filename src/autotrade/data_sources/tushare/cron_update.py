@@ -645,12 +645,21 @@ def append_dispatch_log(
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = text.encode("utf-8")
     if len(encoded) > max_bytes:
-        marker = b"[dispatch fragment truncated]\n"
-        if len(marker) >= max_bytes:
-            encoded = encoded[-max_bytes:]
+        # An over-cap record must stay one valid JSON line: keep a bounded
+        # character prefix of the original as a payload field and re-serialize
+        # (byte-slicing serialized JSON corrupts the line). keep = max_bytes/8
+        # bounds the escaped size well below the cap at any realistic setting.
+        keep = max(1024, max_bytes // 8)
+        wrapped = (json.dumps(
+            {"raw_truncated": text[:keep], "original_bytes": len(encoded), "at": utc_now()},
+            ensure_ascii=False,
+        ) + "\n").encode("utf-8")
+        if len(wrapped) <= max_bytes:
+            encoded = wrapped
         else:
-            tail = encoded[-(max_bytes - len(marker)) :]
-            encoded = marker + tail.decode("utf-8", errors="ignore").encode("utf-8")
+            # Degenerate caps (unit tests use tens of bytes) cannot hold any
+            # JSON envelope; preserve the hard size bound with a raw tail.
+            encoded = encoded[-max_bytes:]
     lock_path = path.parent / f".{path.name}.lock"
     with lock_path.open("a+b") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
