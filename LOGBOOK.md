@@ -1,3 +1,8 @@
+2026-07-22 单位注册表复审八项：fund_visitors 文本、清单对账、unknown 政策统一
+
+- 全部证实并修复：①stk_surv.fund_visitors 实为逗号分隔的调研人**姓名**（实读"黄安""江磊,张怡康"），由 count 改 text 并钉死回归；②快照列表读取不再静默跳过坏 parquet——footer 不可读即抛错（只含文件名不含宿主路径，原"容忍损坏文件"的摘要测试改为断言 fail-fast 且不泄露路径）；③财务域逐数据集列归属改从 raw 供应商 footer 抽样并集+PIT 旁路列生成（实证 PIT store 为 union schema 分区，窗口内全空的合法字段会被 notna 归属漏掉；raw∪旁路与 store union 实测完全相等）；④新增清单-物理 schema 对账：union 文件的每个物理列必须归属到某数据集（漏归属即构建/摘要失败），声明超前于物理（财务 schema-forward）为合法并成文；⑤unknown 政策全面统一为"仅可在所属 dataset 内做与量纲无关的运算（排序/分位数），绝对阈值/单位换算/跨数据集算术须先显式核实"（合同、三处 Prompt、三份设计文档、生成文档同步）；⑥finalize_snapshot_dir 写 manifest 前同样强制单位校验（外部组装快照与构建器同门槛）。
+- ⑦证据分级按严格定义重整：新做 7 项真实对账升级证据——moneyflow_dc.close 与 moneyflow_ths.latest 联表等于 daily 收盘（比值 1.0000，n=1.6万/1.6万）、limit_list_ths.price 同（1.0000）、cyq_perf cost_50pct/收盘中位 1.08、express_vip 营收=income_vip 同期（1.0000）、forecast last_parent_net×1e4=上年归母净利（1.0000，n=2570）、stk_holdertrade 回算股本比值 0.95、repurchase 上限/收盘中位 1.15（区间包络市价）；纯量级推断一律降为 inferred（moneyflow_ind_dc/ind_ths/cnt_ths/mkt_dc 资金流、cb_basic 规模与转股价、opt_daily 金额、fina_audit/fina_mainbz、sw_daily 金额市值、top_list.float_values、holdertrade 均价、balancesheet.total_share 等），供应商合同语义经量级排除验证者归 official（fina_indicator 各族、repo 利率报价、new_share.pe 等）。⑧清单如实标注为"按分区抽样并集"（运行时全列校验兜底），财务旁路列补 available_at/available_at_rule。全量 tests 937+45 通过。
+
 2026-07-22 列级单位注册表与逐快照 unit_reference.json
 
 - 复审证实上一轮"数据集级覆盖"仍留字段级缺口并全部修复：cyq_perf 的 cost_*pct 被两条规则同时匹配（实为持仓成本分位**价格**，元/股，仅 winner_rate 为百分数）；fina_indicator_vip 把 current_ratio(1.68 倍)/ar_turn(次)/assets_to_eqt(倍)/turn_days(天) 一律标成百分数、gross_margin(2.4e8) 实为毛利额元；daily.parquet 漏 change/close_basic/pre_close_limit/volume_ratio/pe 族 10 列；balancesheet_vip.total_share 实为股（3.9e8），须从报表"金额默认元"规则中显式排除。
