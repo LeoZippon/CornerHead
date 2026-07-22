@@ -1,5 +1,6 @@
 import math
 import statistics
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -123,6 +124,19 @@ class ReportingTest(unittest.TestCase):
                 summary["development"]["active_return_tstat"],
                 statistics.mean(dev_active) / (statistics.stdev(dev_active) / math.sqrt(len(dev_active))),
             )
+
+    def test_read_rejects_unversioned_and_unknown_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.jsonl"
+            record = fold_record("fold_2022Q1", 0.03, 0.02)
+            # Missing version: legacy formats are not tolerated — migrate.
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "schema_version"):
+                ExperimentLedger(path).read()
+            # Unknown version: newer formats must not be silently misread.
+            path.write_text(json.dumps({**record, "schema_version": 2}) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "schema_version"):
+                ExperimentLedger(path).read()
 
     def test_append_stamps_win_over_caller_supplied_fields(self):
         with tempfile.TemporaryDirectory() as tmp:

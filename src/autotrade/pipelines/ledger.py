@@ -68,6 +68,16 @@ class ExperimentLedger:
         if not self.path.exists():
             return []
         records = [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        for record in records:
+            version = record.get("schema_version")
+            if version != LEDGER_RECORD_SCHEMA_VERSION:
+                # Fail-fast, no legacy tolerance: a missing or unknown version
+                # means a foreign/newer format that older code must not
+                # silently misinterpret — migrate the ledger, don't guess.
+                raise ValueError(
+                    f"ledger record schema_version {version!r} != "
+                    f"{LEDGER_RECORD_SCHEMA_VERSION} in {self.path}; migrate the ledger before reading"
+                )
         if record_type is None:
             return records
         return [record for record in records if record.get("record_type") == record_type]

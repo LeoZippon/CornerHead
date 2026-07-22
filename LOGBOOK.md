@@ -1,3 +1,7 @@
+2026-07-22 账本版本严格读取与状态徽章补全
+
+- 按用户裁决取消历史兼容：账本读取仅接受当前 schema_version，缺失或不等一律拒绝（回归覆盖两类拒绝）；三个在营实验共 9 条 pre-stamp 记录归档后原子补章并经账本与控制台双通道验证；pipeline 文档只写"不匹配即不兼容"裸规则。首页 waiting_step_user/waiting_user_reply/terminated/unknown 四个状态徽章缺 CSS 规则致无底色边框，16 个状态现全量映射到样式族并程序化校验。全量 tests 927+45 通过，SPA 已部署。
+
 2026-07-22 复审三轮：crontab 事务锁、JSONL 下限、concat_rows 定位收敛
 
 - 两个 crontab 安装器共享 .runtime/crontab.lock 的单一 flock 覆盖完整读改写校验事务（并发丢块风险闭合，dry-run 不加锁）；dispatch 记录上限强制 ≥1KiB 且超限包装按转义上界证明必然合法入 cap（删除退化回退，新增中文超限记录回归）；concat_rows 收敛为仅行并集原语（去 **kwargs，固定语义，16 个调用点收窄，文档化列序合同），并补上 snapshot 三处漏转的 union（此前 import 实为未用）。全量 tests 926+45 通过。
