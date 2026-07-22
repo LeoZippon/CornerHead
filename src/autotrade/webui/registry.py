@@ -1,10 +1,9 @@
 """Experiment discovery and read-model assembly for the HITL console.
 
 Everything here is read-only over ``experiments/<id>/``: the append-only
-ledger, the hitl/ control-plane files, and frozen artifacts. Legacy
-experiments (no hitl/ directory, e.g. pre-console CLI runs) are listed
-best-effort and marked read-only; unparseable ones still appear so they can be
-deleted, they just carry an error note instead of metrics.
+ledger, the hitl/ control-plane files, and frozen artifacts. Unparseable
+experiments still appear in listings so they can be deleted; they carry an
+error note instead of metrics.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from typing import Mapping
 
 from autotrade.pipelines.fold_analysis import analysis_paths
 from autotrade.pipelines.ledger import ExperimentLedger, latest_fold_records, latest_heldout_records
-from autotrade.pipelines.meta_schedule import meta_record_id, meta_record_session_key
+from autotrade.pipelines.meta_schedule import meta_record_id
 from autotrade.pipelines.hitl_state import (
     ANALYSIS_DIR_NAME,
     CONTROL_NAME,
@@ -89,16 +88,13 @@ TEST_FIELDS = ("test_result",)
 def test_results_revealed(experiment_dir: Path) -> bool:
     """P1-7: test/held-out results are hidden from the console until the
     researcher explicitly reveals them (which seals the experiment against
-    further learning). Legacy experiments without a control plane are
-    read-only history — nothing can leak forward, so they show everything.
-    Held-out is the terminal evaluation: once every scheduled held-out period
-    is recorded, no learning session can ever follow, so results auto-reveal
-    (and the same seal applies). Partial held-out does not auto-reveal — the
-    worker may still need resume to finish the remaining periods."""
-    control_path = experiment_dir / HITL_DIR_NAME / CONTROL_NAME
-    if not control_path.exists():
-        return True
-    if read_control(control_path).test_revealed:
+    further learning). Held-out is the terminal evaluation: once every
+    scheduled held-out period is recorded, no learning session can ever
+    follow, so results auto-reveal (and the same seal applies). Partial
+    held-out does not auto-reveal — the worker may still need resume to
+    finish the remaining periods. A missing control.json (transient
+    mid-creation state) reads as an empty control plane: not revealed."""
+    if read_control(experiment_dir / HITL_DIR_NAME / CONTROL_NAME).test_revealed:
         return True
     return heldout_complete(experiment_dir)
 
@@ -130,8 +126,7 @@ def sealed_result_prefixes(experiment_dir: Path) -> tuple[str, ...]:
     """Central reveal gate for artifact routes (style, orders, CSV, result-name
     enumeration): result names / style prefixes starting with these carry
     test-period evidence and must stay invisible pre-reveal — respond 404 and
-    filter listings, never confirm existence. Empty once revealed (and for
-    legacy experiments without a control file, mirroring test_results_revealed)."""
+    filter listings, never confirm existence. Empty once revealed."""
     return () if test_results_revealed(experiment_dir) else ("test", "heldout")
 
 
@@ -174,11 +169,13 @@ def _metric_series(records: list[dict[str, object]], result_key: str, metric: st
 
 
 def experiment_state(experiment_dir: Path) -> dict[str, object]:
-    """Effective lifecycle state combining status.json and pid liveness."""
-    hitl_dir = experiment_dir / HITL_DIR_NAME
-    if not hitl_dir.is_dir():
-        return {"kind": "legacy", "state": "legacy", "worker_alive": False}
-    status = read_status(hitl_dir / STATUS_NAME)
+    """Effective lifecycle state combining status.json and pid liveness.
+
+    A missing/empty status.json reads as "created" — the pre-first-spawn
+    state. This keeps the function total for the transient windows a listing
+    thread can observe (hitl/ mid-mkdir during creation, mid-rmtree during
+    delete); mutating operations re-check the control plane themselves."""
+    status = read_status(experiment_dir / HITL_DIR_NAME / STATUS_NAME)
     if not status:
         return {"kind": "hitl", "state": "created", "worker_alive": False}
     state = str(status.get("state") or "unknown")
@@ -287,7 +284,7 @@ def summarize_experiment(experiment_dir: Path) -> dict[str, object]:
             }
         )
     except Exception as exc:  # noqa: BLE001 - unreadable experiments stay listed for deletion
-        summary.update({"kind": summary.get("kind", "legacy"), "state": "unreadable", "error": f"{type(exc).__name__}: {exc}"})
+        summary.update({"state": "unreadable", "error": f"{type(exc).__name__}: {exc}"})
     return summary
 
 
@@ -343,59 +340,34 @@ def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, o
     heldout_records = latest_heldout_records(records)
     schedule = read_json(hitl_dir / SCHEDULE_NAME)
     sessions_plan = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
-    control = read_control(hitl_dir / CONTROL_NAME) if (hitl_dir / CONTROL_NAME).exists() else None
-    # Legacy (no control file) is read-only history; a fully recorded held-out
-    # means the terminal evaluation finished, so results auto-reveal (mirrors
-    # test_results_revealed, reusing the records already in hand).
-    revealed = control is None or control.test_revealed or heldout_complete(experiment_dir, records)
+    control = read_control(hitl_dir / CONTROL_NAME)
+    # A fully recorded held-out means the terminal evaluation finished, so
+    # results auto-reveal (mirrors test_results_revealed, reusing the records
+    # already in hand).
+    revealed = control.test_revealed or heldout_complete(experiment_dir, records)
+    # No schedule.json yet (worker not started) -> no session rows.
     sessions: list[dict[str, object]] = []
-    if sessions_plan:
-        for planned in sessions_plan:
-            entry = dict(planned)
-            kind = str(entry.get("kind"))
-            epoch_id = str(entry.get("epoch_id"))
-            if kind == "fold":
-                record = fold_map.get((epoch_id, str(entry.get("fold_id"))))
-                if record is not None:
-                    entry["record"] = guarded_fold_view(record)
-                    entry["analysis_available"] = analysis_available(hitl_dir, epoch_id, str(entry.get("fold_id")))
-            elif kind == "meta_learning":
-                record = meta_map.get(str(entry.get("meta_learning_id") or epoch_id))
-                if record is not None:
-                    entry["record"] = _public_meta_view(record)
-            elif kind == "heldout":
-                if heldout_records:
-                    entry["records"] = [_public_heldout_view(record, revealed) for record in heldout_records]
-            sessions.append(entry)
-    else:
-        # Legacy experiment: synthesize session rows from ledger records only.
-        for record in records:
-            kind = str(record.get("record_type"))
-            if kind not in ("fold", "meta_learning", "heldout"):
-                continue  # attempt_failed etc. are audit evidence, not sessions
-            entry: dict[str, object] = {
-                "key": (
-                    meta_record_session_key(record)
-                    if kind == "meta_learning"
-                    else f"{record.get('epoch_id')}/{record.get('fold_id')}"
-                ),
-                "kind": kind,
-                "epoch_id": record.get("epoch_id"),
-                "fold_id": record.get("fold_id"),
-            }
-            if kind == "fold":
+    for planned in sessions_plan:
+        entry = dict(planned)
+        kind = str(entry.get("kind"))
+        epoch_id = str(entry.get("epoch_id"))
+        if kind == "fold":
+            record = fold_map.get((epoch_id, str(entry.get("fold_id"))))
+            if record is not None:
                 entry["record"] = guarded_fold_view(record)
-                for field in ("validation_period", "test_period", "input_window"):
-                    entry[field] = record.get(field)
-            elif kind == "meta_learning":
+                entry["analysis_available"] = analysis_available(hitl_dir, epoch_id, str(entry.get("fold_id")))
+        elif kind == "meta_learning":
+            record = meta_map.get(str(entry.get("meta_learning_id") or epoch_id))
+            if record is not None:
                 entry["record"] = _public_meta_view(record)
-            else:
-                entry["record"] = _public_heldout_view(record, revealed)
-            sessions.append(entry)
+        elif kind == "heldout":
+            if heldout_records:
+                entry["records"] = [_public_heldout_view(record, revealed) for record in heldout_records]
+        sessions.append(entry)
     detail.update(
         {
             "sessions": sessions,
-            "control": control.to_record() if control is not None else None,
+            "control": control.to_record(),
             # Effective reveal state (manual reveal OR held-out completed); the
             # UI must key on this, not on the raw control flag.
             "test_revealed": revealed,

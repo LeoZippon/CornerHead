@@ -19,18 +19,10 @@ from autotrade.pipelines.hitl_state import HITL_DIR_NAME, SCHEDULE_NAME, read_js
 from .registry import latest_fold_records, read_ledger_records
 
 
-def node_layout(steps_root: Path, node_id: str) -> str | None:
-    """Snapshot layout of a node dir: "split" (output/+models/), "flat" (legacy
-    pre-2026-07-10: artifact files at the node root), or None (no snapshot).
-
-    The console stays readable for legacy trees — download works for both
-    layouts; only rollback (parent override / step_rollback) requires "split"."""
-    node_dir = steps_root / node_id
-    if (node_dir / NODE_OUTPUT_DIR).is_dir():
-        return "split"
-    if (node_dir / "main.py").is_file():
-        return "flat"
-    return None
+def _has_snapshot(steps_root: Path, node_id: str) -> bool:
+    """Whether the node dir holds a strategy snapshot (output/ tree + optional
+    models/); failed attempts record no snapshot."""
+    return (steps_root / node_id / NODE_OUTPUT_DIR).is_dir()
 
 
 def fold_sessions(experiment_dir: Path) -> list[dict[str, str]]:
@@ -78,7 +70,6 @@ def step_tree_view(experiment_dir: Path) -> dict[str, object]:
         frozen_for = (
             frozen_hashes.get((str(node_hash), model_hash or None), []) if node.get("complete_validation") else []
         )
-        layout = node_layout(tree.root, node_id)
         nodes.append(
             {
                 "node_id": node_id,
@@ -95,8 +86,7 @@ def step_tree_view(experiment_dir: Path) -> dict[str, object]:
                 "model_artifact_hash": model_hash,
                 "created_at": node.get("created_at"),
                 "attachments": sorted(dict(node.get("attachments") or {})),
-                "has_snapshot": layout is not None,
-                "restorable": layout == "split",
+                "has_snapshot": _has_snapshot(tree.root, node_id),
                 "frozen_for": sorted(frozen_for),
                 "is_current": node_id == tree.current_node_id,
             }
@@ -119,7 +109,7 @@ def node_export_dir_from_root(steps_root: Path, node_id: str) -> Path:
     node = tree.get_node(node_id)  # raises ValueError for unknown ids
     if node.get("status") == "failed" or not node.get("complete_validation"):
         raise ValueError(f"step node {node_id} is a failed attempt without a snapshot")
-    if node_layout(tree.root, str(node["node_id"])) is None:
+    if not _has_snapshot(tree.root, str(node["node_id"])):
         raise ValueError(f"step node snapshot is missing on disk: {node_id}")
     return tree.root / str(node["node_id"])
 

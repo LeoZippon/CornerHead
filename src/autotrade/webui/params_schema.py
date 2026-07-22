@@ -5,10 +5,11 @@ turn mirror the run_experiment.py CLI dests); defaults are read from there so
 this schema can never drift from the worker. Descriptions follow
 docs/parameters_reference.md.
 
-Deliberately NOT exposed in the form: ``SERVER_MANAGED_KEYS`` are forced to
-manager-owned values on creation, and ``HIDDEN_KEYS`` (operator-only: source
-roots, ``local_dev``, credential env names, proxy paths) are rejected by the
-console API entirely — they can only be set in a worker-side ``params.json``.
+Deliberately NOT exposed in the form: ``experiments_root``/``work_root`` are
+force-overwritten with manager-owned values on creation (ExperimentManager),
+and ``HIDDEN_KEYS`` (operator-only: source roots, ``local_dev``, credential
+env names, proxy paths) are rejected by the console API entirely — they can
+only be set in a worker-side ``params.json``.
 
 Period labels are error-prone to type, so the four period fields render as
 dropdowns whenever the server can enumerate valid labels from the SSE trading
@@ -53,7 +54,6 @@ def _dataset_labels() -> dict[str, str]:
 
 _DATASET_LABELS = _dataset_labels()
 
-SERVER_MANAGED_KEYS = ("experiments_root", "work_root")
 HIDDEN_KEYS = (
     "raw_dir",
     "fundamental_events_root",

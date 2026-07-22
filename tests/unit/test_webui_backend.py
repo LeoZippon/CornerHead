@@ -43,7 +43,6 @@ class WebuiBackendTest(unittest.TestCase):
         self.experiments_root = self.repo_root / "experiments"
         self.experiments_root.mkdir(parents=True)
         self._build_hitl_experiment("exp_hitl")
-        self._build_legacy_experiment("exp_legacy")
         self.app = create_app(self.repo_root, self.experiments_root)
         self.client = TestClient(self.app)
 
@@ -171,26 +170,6 @@ class WebuiBackendTest(unittest.TestCase):
         (analysis_dir / "epoch_001__fold_2022Q1.md").write_text("## 策略逻辑概述\nok\n", encoding="utf-8")
         return experiment_dir
 
-    def _build_legacy_experiment(self, experiment_id: str) -> Path:
-        experiment_dir = self.experiments_root / experiment_id
-        experiment_dir.mkdir(parents=True)
-        _write_ledger(
-            experiment_dir,
-            [
-                {
-                    "record_type": "fold",
-                    "experiment_id": experiment_id,
-                    "epoch_id": "epoch_001",
-                    "fold_id": "fold_2021Q4",
-                    "run_id": "run_legacy",
-                    "fold_status": "no_update",
-                    "validation_result": {"total_return": -0.02},
-                    "test_result": {"total_return": 0.01},
-                }
-            ],
-        )
-        return experiment_dir
-
     # ---- schema & listing ------------------------------------------------------
     def test_frontend_assets_use_clean_urls_and_revalidate(self) -> None:
         index = self.client.get("/")
@@ -313,9 +292,6 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertTrue(hitl["test_revealed"])
         self.assertAlmostEqual(hitl["metrics"]["cum_test_return"], 0.20)
         self.assertEqual(hitl["folds_recorded"], 1)
-        legacy = by_id["exp_legacy"]
-        self.assertEqual(legacy["kind"], "legacy")
-        self.assertEqual(legacy["state"], "legacy")
 
     def test_heldout_completion_auto_reveals_and_seals(self) -> None:
         from autotrade.webui.registry import test_results_revealed
@@ -586,8 +562,6 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(
             self.client.post("/api/experiments/exp_hitl/control", json={"action": "bogus"}).status_code, 400
         )
-        legacy = self.client.post("/api/experiments/exp_legacy/control", json={"action": "pause"})
-        self.assertEqual(legacy.status_code, 400)
 
     def test_prompt_override_and_rerun_fold_controls(self) -> None:
         override = self.client.post(
@@ -704,7 +678,11 @@ class WebuiBackendTest(unittest.TestCase):
             ["epoch_001/fold_2022Q1", "epoch_001/fold_2022Q2"],
         )
         # Experiments without a tree return an empty payload, not an error.
-        empty = self.client.get("/api/experiments/exp_legacy/steps").json()
+        bare = self.experiments_root / "exp_notree"
+        (bare / "hitl").mkdir(parents=True)
+        write_json_atomic(bare / "hitl" / "params.json", {"experiment_id": "exp_notree"})
+        write_control(bare / "hitl" / "control.json", ControlState())
+        empty = self.client.get("/api/experiments/exp_notree/steps").json()
         self.assertEqual(empty["nodes"], [])
 
     def test_step_node_zip_contains_source_and_results(self) -> None:
@@ -783,36 +761,6 @@ class WebuiBackendTest(unittest.TestCase):
         refused = self.client.get("/api/experiments/exp_hitl/current-step/source.zip")
         self.assertEqual(refused.status_code, 404)
         self.assertFalse(self.client.get("/api/experiments/exp_hitl/current-step").json()["available"])
-
-    def _make_node_legacy(self, experiment_id: str, node_id: str) -> None:
-        """Rewrite a node dir into the pre-2026-07-10 flat layout (files at root)."""
-        import shutil
-
-        node_dir = self.experiments_root / experiment_id / "steps" / node_id
-        output = node_dir / "output"
-        for child in list(output.iterdir()):
-            shutil.move(str(child), str(node_dir / child.name))
-        output.rmdir()
-        shutil.rmtree(node_dir / "models", ignore_errors=True)
-
-    def test_legacy_flat_nodes_stay_downloadable_but_not_restorable(self) -> None:
-        node_id = self._build_step_tree("exp_hitl", with_failed=False)
-        self._make_node_legacy("exp_hitl", node_id)
-        payload = self.client.get("/api/experiments/exp_hitl/steps").json()
-        node = next(n for n in payload["nodes"] if n["node_id"] == node_id)
-        self.assertTrue(node["has_snapshot"])
-        self.assertFalse(node["restorable"])
-        response = self.client.get(f"/api/experiments/exp_hitl/steps/{node_id}/source.zip")
-        self.assertEqual(response.status_code, 200, response.text)
-        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-            names = set(archive.namelist())
-        self.assertIn("main.py", names)  # flat layout exported verbatim
-        refused = self.client.post(
-            "/api/experiments/exp_hitl/control",
-            json={"action": "set_parent_override", "session_key": "epoch_001/fold_2022Q1", "directive": node_id},
-        )
-        self.assertEqual(refused.status_code, 400)
-        self.assertIn("旧格式", refused.json()["detail"])
 
     def test_set_parent_override_control(self) -> None:
         node_id = self._build_step_tree("exp_hitl")
@@ -1410,7 +1358,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(payload["benchmark"]["dates"], [])
 
     def test_delete_requires_confirm_and_no_live_worker(self) -> None:
-        missing_confirm = self.client.delete("/api/experiments/exp_legacy")
+        missing_confirm = self.client.delete("/api/experiments/exp_hitl")
         self.assertEqual(missing_confirm.status_code, 400)
         # Simulate a live worker on the HITL experiment (our own pid is alive;
         # liveness requires the recorded kernel start ticks to match).
@@ -1422,9 +1370,43 @@ class WebuiBackendTest(unittest.TestCase):
         )
         alive = self.client.delete("/api/experiments/exp_hitl", params={"confirm": "exp_hitl"})
         self.assertEqual(alive.status_code, 409)
-        gone = self.client.delete("/api/experiments/exp_legacy", params={"confirm": "exp_legacy"})
+        write_json_atomic(
+            self.experiments_root / "exp_hitl" / "hitl" / "status.json",
+            {"schema_version": 1, "pid": 999_999_999, "state": "stopped"},
+        )
+        gone = self.client.delete("/api/experiments/exp_hitl", params={"confirm": "exp_hitl"})
         self.assertEqual(gone.status_code, 200)
-        self.assertFalse((self.experiments_root / "exp_legacy").exists())
+        self.assertFalse((self.experiments_root / "exp_hitl").exists())
+
+    def test_delete_refused_while_analysis_pending(self) -> None:
+        # AnalysisService worker threads keep writing into hitl/analysis/ after
+        # their HTTP request returns; deleting the experiment tree under them
+        # would race those writes. The server wires the service's pending view
+        # into the manager, which must refuse with 409 until the work drains.
+        from autotrade.webui.analysis import AnalysisService
+
+        manager = ExperimentManager(
+            self.repo_root, self.experiments_root,
+            analysis_pending=lambda experiment_id: experiment_id == "exp_hitl",
+        )
+        write_json_atomic(
+            self.experiments_root / "exp_hitl" / "hitl" / "status.json",
+            {"schema_version": 1, "pid": 999_999_999, "state": "stopped"},
+        )
+        with self.assertRaisesRegex(ManagerError, "analysis in progress"):
+            manager.delete_experiment("exp_hitl")
+        self.assertTrue((self.experiments_root / "exp_hitl").exists())
+        # End-to-end through create_app: the wiring exists and maps to 409.
+        with patch.object(AnalysisService, "pending_for_experiment", return_value=True) as pending:
+            client = TestClient(create_app(self.repo_root, self.experiments_root))
+            refused = client.delete("/api/experiments/exp_hitl", params={"confirm": "exp_hitl"})
+            self.assertEqual(refused.status_code, 409)
+            self.assertIn("analysis in progress", refused.json()["detail"])
+            self.assertTrue((self.experiments_root / "exp_hitl").exists())
+            pending.return_value = False  # analysis drained -> delete proceeds
+            done = client.delete("/api/experiments/exp_hitl", params={"confirm": "exp_hitl"})
+            self.assertEqual(done.status_code, 200)
+            self.assertFalse((self.experiments_root / "exp_hitl").exists())
 
     def test_trace_stats_counts_and_backtest_credit(self) -> None:
         stats = self.client.get("/api/experiments/exp_hitl/trace/stats", params={"run_id": "run_001"}).json()
@@ -1707,10 +1689,6 @@ class WebuiBackendTest(unittest.TestCase):
         # Indistinguishable from a run without a rollup: existence must not leak.
         absent = self.client.get(url, params={"run_id": "run_missing", "prefix": "valid"})
         self.assertEqual(hidden.json()["detail"], absent.json()["detail"])
-        # Legacy read-only experiments (no control file) stay fully visible.
-        from autotrade.webui.registry import sealed_result_prefixes
-
-        self.assertEqual(sealed_result_prefixes(self.experiments_root / "exp_legacy"), ())
         self._reveal()
         revealed = self.client.get(url, params={"run_id": "run_001", "prefix": "test"})
         self.assertEqual(revealed.status_code, 200, revealed.text)
