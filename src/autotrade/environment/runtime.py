@@ -570,7 +570,9 @@ def _agent_visible_experiment_parameters(record: dict[str, object]) -> dict[str,
     return {
         key: value
         for key, value in record.items()
-        if key != "periods" and not str(key).startswith("heldout_")
+        if key != "periods"
+        and not str(key).startswith("test_")
+        and not str(key).startswith("heldout_")
     }
 
 
