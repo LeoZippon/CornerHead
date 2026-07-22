@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Mapping
 
 from autotrade.pipelines.fold_analysis import analysis_paths
-from autotrade.pipelines.ledger import latest_fold_records, latest_heldout_records
+from autotrade.pipelines.ledger import ExperimentLedger, latest_fold_records, latest_heldout_records
 from autotrade.pipelines.meta_schedule import meta_record_id, meta_record_session_key
 from autotrade.pipelines.hitl_state import (
     ANALYSIS_DIR_NAME,
@@ -136,21 +136,12 @@ def sealed_result_prefixes(experiment_dir: Path) -> tuple[str, ...]:
 
 
 def read_ledger_records(experiment_dir: Path) -> list[dict[str, object]]:
-    path = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
-    if not path.exists():
-        return []
-    records: list[dict[str, object]] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(record, dict):
-            records.append(record)
-    return records
+    """The single validating reader shared with the pipeline: a ledger the
+    pipeline would reject (unparseable line, wrong schema_version) must not
+    drive console decisions either — inheritance, rollback, rerun and reveal
+    all key off these records. Failures surface through the experiment's
+    ``unreadable`` state rather than a silently skimmed partial view."""
+    return ExperimentLedger(experiment_dir / "ledgers" / "experiment_ledger.jsonl").read()
 
 
 def _compound(returns: list[float]) -> float | None:

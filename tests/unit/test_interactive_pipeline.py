@@ -59,6 +59,34 @@ def _weekday_trading_days(first: str, last: str) -> list[str]:
 TRADING_DAYS = _weekday_trading_days("2020-01-01", "2023-12-31")
 
 
+class HitlVersionPolicyTest(unittest.TestCase):
+    def test_control_and_status_reject_missing_or_unknown_versions(self):
+        import json as _json
+        import tempfile as _tempfile
+
+        from autotrade.pipelines.hitl_state import read_control, read_status
+
+        with _tempfile.TemporaryDirectory() as tmp:
+            control = Path(tmp) / "control.json"
+            status = Path(tmp) / "status.json"
+            # Missing files are 'no record yet', not a violation.
+            self.assertEqual(read_status(status), {})
+            self.assertEqual(read_control(control).mode, "manual")
+            for bad in ({}, {"schema_version": 2}, {"schema_version": True}, {"schema_version": 1.0}, {"schema_version": "1"}):
+                payload = {"mode": "manual", "state": "paused", **bad}
+                control.write_text(_json.dumps(payload), encoding="utf-8")
+                status.write_text(_json.dumps(payload), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "schema_version"):
+                    read_control(control)
+                with self.assertRaisesRegex(ValueError, "schema_version"):
+                    read_status(status)
+            ok = {"schema_version": 1, "mode": "auto", "state": "paused"}
+            control.write_text(_json.dumps(ok), encoding="utf-8")
+            status.write_text(_json.dumps(ok), encoding="utf-8")
+            self.assertEqual(read_control(control).mode, "auto")
+            self.assertEqual(read_status(status)["state"], "paused")
+
+
 class WorkerEntrypointTest(unittest.TestCase):
     def test_worker_restores_child_exit_status_after_console_sigchld_ignore(self) -> None:
         from scripts.experiments import run_interactive_experiment
@@ -1171,12 +1199,12 @@ class ControlFileTest(unittest.TestCase):
             self.assertEqual((state.mode, state.request, state.approved_sessions, state.directives), ("auto", "pause", ("a",), {"a": "d"}))
             self.assertEqual((state.prompt_overrides, state.rerun_sessions), ({"a": "P"}, {"a": "r1"}))
             self.assertEqual(state.parent_overrides, {"a": "n1"})
-            path.write_text(json.dumps({"mode": "bogus", "request": "bogus"}), encoding="utf-8")
+            path.write_text(json.dumps({"schema_version": 1, "mode": "bogus", "request": "bogus"}), encoding="utf-8")
             state = read_control(path)
             self.assertEqual((state.mode, state.request), ("manual", None))
             self.assertEqual(read_control(Path(tmp) / "missing.json").mode, "manual")
             # "step" is the first-class per-step approval tier, never downgraded.
-            path.write_text(json.dumps({"mode": "step"}), encoding="utf-8")
+            path.write_text(json.dumps({"schema_version": 1, "mode": "step"}), encoding="utf-8")
             self.assertEqual(read_control(path).mode, "step")
 
 

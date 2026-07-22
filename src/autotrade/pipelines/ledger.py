@@ -70,7 +70,9 @@ class ExperimentLedger:
         records = [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines() if line.strip()]
         for record in records:
             version = record.get("schema_version")
-            if version != LEDGER_RECORD_SCHEMA_VERSION:
+            # type() check: JSON true/1.0 must not pass as 1 (bool subclasses
+            # int and floats compare equal), and "1" must not pass either.
+            if type(version) is not int or version != LEDGER_RECORD_SCHEMA_VERSION:
                 # Fail-fast, no legacy tolerance: a missing or unknown version
                 # means a foreign/newer format that older code must not
                 # silently misinterpret — migrate the ledger, don't guess.

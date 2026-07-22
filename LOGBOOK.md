@@ -1,3 +1,7 @@
+2026-07-22 复审四轮：WebUI 账本单一事实源、严格类型、HITL 版本化
+
+- 关键项：registry 逐行裸解析绕过账本校验，控制台继承/回滚/重跑/揭示决策可用管线拒绝的账本——现委托 ExperimentLedger.read() 单一校验读取器，失败走既有 unreadable 状态；版本比较改 type(version) is int 严格判定（true/1.0/"1" 回归覆盖）；read_control/read_status 对存在记录强制同规校验（缺失文件=尚无记录），manager launching 存根补 stamp；11 处 status、3 处账本追加、2 处 control 夹具逐一手工补章（放弃正则批处理）。全量 tests 928+45 通过，三个在营实验三类文件实读验证。
+
 2026-07-22 账本版本严格读取与状态徽章补全
 
 - 按用户裁决取消历史兼容：账本读取仅接受当前 schema_version，缺失或不等一律拒绝（回归覆盖两类拒绝）；三个在营实验共 9 条 pre-stamp 记录归档后原子补章并经账本与控制台双通道验证；pipeline 文档只写"不匹配即不兼容"裸规则。首页 waiting_step_user/waiting_user_reply/terminated/unknown 四个状态徽章缺 CSS 规则致无底色边框，16 个状态现全量映射到样式族并程序化校验。全量 tests 927+45 通过，SPA 已部署。

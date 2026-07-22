@@ -29,7 +29,10 @@ from autotrade.webui.traces import read_trace_page, read_trace_tail, trace_stats
 def _write_ledger(experiment_dir: Path, records: list[dict[str, object]]) -> None:
     ledger = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
     ledger.parent.mkdir(parents=True, exist_ok=True)
-    ledger.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    ledger.write_text(
+        "".join(json.dumps({"schema_version": 1, **record}) + "\n" for record in records),
+        encoding="utf-8",
+    )
 
 
 class WebuiBackendTest(unittest.TestCase):
@@ -64,7 +67,7 @@ class WebuiBackendTest(unittest.TestCase):
         write_control(hitl / "control.json", ControlState(mode="manual"))
         write_json_atomic(
             hitl / "status.json",
-            {"pid": 999_999_999, "state": "running_session", "session_key": "epoch_001/fold_2022Q2"},
+            {"schema_version": 1, "pid": 999_999_999, "state": "running_session", "session_key": "epoch_001/fold_2022Q2"},
         )
         write_json_atomic(
             hitl / "schedule.json",
@@ -333,6 +336,7 @@ class WebuiBackendTest(unittest.TestCase):
         ledger_path = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
         with ledger_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({
+                "schema_version": 1,
                 "record_type": "heldout", "experiment_id": "exp_hitl", "epoch_id": "epoch_001",
                 "fold_id": "heldout_2023Q2", "run_id": "run_heldout_2",
                 "test_result": {"total_return": 0.01, "sharpe": 0.1, "max_drawdown": 0.02},
@@ -357,6 +361,7 @@ class WebuiBackendTest(unittest.TestCase):
         write_json_atomic(
             self.experiments_root / "exp_hitl" / "hitl" / "status.json",
             {
+                "schema_version": 1,
                 "pid": 999_999_999,
                 "state": "waiting_user_reply",
                 "session_key": "epoch_001/fold_2022Q2",
@@ -742,7 +747,7 @@ class WebuiBackendTest(unittest.TestCase):
         status_path = self.experiments_root / "exp_hitl" / "hitl" / "status.json"
         write_json_atomic(
             status_path,
-            {"state": "waiting_step_user", "run_id": run_id, "epoch_id": "epoch_001",
+            {"schema_version": 1, "state": "waiting_step_user", "run_id": run_id, "epoch_id": "epoch_001",
              "fold_id": "fold_2022Q2", "session_key": "epoch_001/fold_2022Q2", "awaiting_step": 2},
         )
 
@@ -770,11 +775,11 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertIn("策略逻辑", analysis["content"])
 
         # Agent questions can download the latest completed Step too.
-        write_json_atomic(status_path, {"state": "waiting_user_reply", "run_id": run_id})
+        write_json_atomic(status_path, {"schema_version": 1, "state": "waiting_user_reply", "run_id": run_id})
         question_download = self.client.get("/api/experiments/exp_hitl/current-step/source.zip")
         self.assertEqual(question_download.status_code, 200)
 
-        write_json_atomic(status_path, {"state": "running_session", "run_id": run_id})
+        write_json_atomic(status_path, {"schema_version": 1, "state": "running_session", "run_id": run_id})
         refused = self.client.get("/api/experiments/exp_hitl/current-step/source.zip")
         self.assertEqual(refused.status_code, 404)
         self.assertFalse(self.client.get("/api/experiments/exp_hitl/current-step").json()["available"])
@@ -886,6 +891,7 @@ class WebuiBackendTest(unittest.TestCase):
             write_json_atomic(
                 hitl_dir / "status.json",
                 {
+                    "schema_version": 1,
                     "pid": proc.pid,
                     "pid_start_ticks": proc_start_ticks(proc.pid),
                     "state": "running_session",
@@ -942,6 +948,7 @@ class WebuiBackendTest(unittest.TestCase):
             write_json_atomic(
                 hitl_dir / "status.json",
                 {
+                    "schema_version": 1,
                     "pid": proc.pid,
                     "pid_start_ticks": proc_start_ticks(proc.pid),
                     "state": "running_session",
@@ -977,6 +984,7 @@ class WebuiBackendTest(unittest.TestCase):
             write_json_atomic(
                 hitl_dir / "status.json",
                 {
+                    "schema_version": 1,
                     "pid": proc.pid,
                     "pid_start_ticks": proc_start_ticks(proc.pid),
                     "state": "running_session",
@@ -1000,13 +1008,13 @@ class WebuiBackendTest(unittest.TestCase):
                          json={"action": "set_step_gate", "session_key": "epoch_001/fold_2022Q2", "directive": "1"})
         write_json_atomic(
             self.experiments_root / "exp_hitl" / "hitl" / "status.json",
-            {"pid": 999_999_999, "state": "waiting_step_user",
+            {"schema_version": 1, "pid": 999_999_999, "state": "waiting_step_user",
              "session_key": "epoch_001/fold_2022Q2", "awaiting_step": 2},
         )
         self.client.post("/api/experiments/exp_hitl/control",
                          json={"action": "approve_step", "session_key": "epoch_001/fold_2022Q2", "directive": "旧指令"})
         write_json_atomic(self.experiments_root / "exp_hitl" / "hitl" / "status.json",
-                          {"pid": 999_999_999, "state": "stopped"})
+                          {"schema_version": 1, "pid": 999_999_999, "state": "stopped"})
         # rerun of the latest recorded fold (Q1) clears ITS step state only —
         # seed Q1 state directly via the control file.
         from autotrade.pipelines.hitl_state import read_control, write_control as wc, CONTROL_NAME
@@ -1032,6 +1040,7 @@ class WebuiBackendTest(unittest.TestCase):
         ledger = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
         with ledger.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({
+                "schema_version": 1,
                 "record_type": "fold", "experiment_id": "exp_hitl", "epoch_id": "epoch_001",
                 "fold_id": "fold_2022Q2", "run_id": "run_002", "fold_status": "frozen",
                 "frozen_strategy_artifact_id": "strategy_epoch_001_fold_2022Q2x",
@@ -1063,7 +1072,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(refused.status_code, 400)
         write_json_atomic(
             self.experiments_root / "exp_hitl" / "hitl" / "status.json",
-            {"pid": 999_999_999, "state": "waiting_step_user",
+            {"schema_version": 1, "pid": 999_999_999, "state": "waiting_step_user",
              "session_key": "epoch_001/fold_2022Q2", "awaiting_step": 3},
         )
         ok = self.client.post(
@@ -1102,7 +1111,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(refused.status_code, 400)
         write_json_atomic(
             self.experiments_root / "exp_hitl" / "hitl" / "status.json",
-            {"pid": 999_999_999, "state": "waiting_user_reply",
+            {"schema_version": 1, "pid": 999_999_999, "state": "waiting_user_reply",
              "session_key": "epoch_001/fold_2022Q2",
              "awaiting_question": {
                  "index": 2,
@@ -1122,7 +1131,7 @@ class WebuiBackendTest(unittest.TestCase):
         # Empty reply still releases (recorded as "").
         write_json_atomic(
             self.experiments_root / "exp_hitl" / "hitl" / "status.json",
-            {"pid": 999_999_999, "state": "waiting_user_reply",
+            {"schema_version": 1, "pid": 999_999_999, "state": "waiting_user_reply",
              "session_key": "epoch_001/fold_2022Q2",
              "awaiting_question": {"index": 3, "question": "继续？"}},
         )
@@ -1139,7 +1148,7 @@ class WebuiBackendTest(unittest.TestCase):
 
         experiment_dir = self.experiments_root / "exp_hitl"
         status_path = experiment_dir / "hitl" / "status.json"
-        write_json_atomic(status_path, {"pid": 999_999_999, "state": "stopped",
+        write_json_atomic(status_path, {"schema_version": 1, "pid": 999_999_999, "state": "stopped",
                                         "total_sessions": 4, "completed_sessions": 2})
         manager = ExperimentManager(self.repo_root, self.experiments_root)
         with patch("autotrade.webui.manager.subprocess.Popen", return_value=SimpleNamespace(pid=4242)):
@@ -1166,7 +1175,7 @@ class WebuiBackendTest(unittest.TestCase):
             manager.delete_experiment("exp_hitl")
         self.assertIn("exp_hitl", manager.running_experiments())
         # A stale stub (worker never wrote status) degrades to interrupted.
-        write_json_atomic(status_path, {"state": "launching", "launched_at": "2020-01-01T00:00:00+00:00"})
+        write_json_atomic(status_path, {"schema_version": 1, "state": "launching", "launched_at": "2020-01-01T00:00:00+00:00"})
         self.assertEqual(experiment_state(experiment_dir)["state"], "interrupted")
 
     def test_rollback_drops_later_records_and_archives_artifacts(self) -> None:
@@ -1181,6 +1190,7 @@ class WebuiBackendTest(unittest.TestCase):
         ledger = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
         with ledger.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({
+                "schema_version": 1,
                 "record_type": "fold", "experiment_id": "exp_hitl", "epoch_id": "epoch_001",
                 "fold_id": "fold_2022Q2", "run_id": "run_002", "fold_status": "frozen",
                 "frozen_strategy_artifact_id": "strategy_epoch_001_fold_2022Q2",
@@ -1304,6 +1314,7 @@ class WebuiBackendTest(unittest.TestCase):
         )
         ledger = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
         record = {
+            "schema_version": 1,
             "record_type": "fold",
             "experiment_id": "exp_hitl",
             "epoch_id": "epoch_002",
@@ -1407,7 +1418,7 @@ class WebuiBackendTest(unittest.TestCase):
 
         write_json_atomic(
             self.experiments_root / "exp_hitl" / "hitl" / "status.json",
-            {"pid": os.getpid(), "pid_start_ticks": proc_start_ticks(os.getpid()), "state": "running_session"},
+            {"schema_version": 1, "pid": os.getpid(), "pid_start_ticks": proc_start_ticks(os.getpid()), "state": "running_session"},
         )
         alive = self.client.delete("/api/experiments/exp_hitl", params={"confirm": "exp_hitl"})
         self.assertEqual(alive.status_code, 409)
