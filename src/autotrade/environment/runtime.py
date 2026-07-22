@@ -55,6 +55,7 @@ ARTIFACT_TOP_LEVEL = (
     "run_manifest.json",
     "runtime_env.json",
     "data_summary.json",
+    "unit_reference.json",
     "agent_trace.jsonl",
     "parent_output",
     "parent_models",

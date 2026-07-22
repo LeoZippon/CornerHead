@@ -22,7 +22,7 @@ else:
     from .common import *  # noqa: F401,F403
 
 from autotrade.data_quality import build_quality_report, write_quality_report
-from autotrade.environment.data.units import column_source_units, dataset_rules_text, rules_for, rules_text
+from autotrade.environment.data.units import column_source_units, dataset_rules_records, rules_for
 
 def audit_trade_date_dataset(raw_dir: Path, spec: TradeDateDataset, expected_dates: set[str], add) -> None:
     files = sorted((raw_dir / spec.api_name).glob("trade_date=*.parquet"))
@@ -1522,11 +1522,14 @@ def audit_unit_schema(raw_dir: Path, add) -> None:
         "daily_has_vol_amount": {"vol": "vol" in daily_schema, "amount": "amount" in daily_schema},
         "daily_basic_has_vol_amount": {"vol": "vol" in daily_basic_schema, "amount": "amount" in daily_basic_schema},
         "bak_basic_has_vol_amount": {"vol": "vol" in bak_basic_schema, "amount": "amount" in bak_basic_schema},
-        "unit_rules": rules_text(
-            rules_for(file="daily.parquet")
-            + rules_for(file="events.parquet", datasets=("bak_daily",))
-            + rules_for(file="raw_only", datasets=("bak_basic",))
-        ),
+        "unit_rules": [
+            rule.to_record()
+            for rule in (
+                rules_for(file="daily.parquet")
+                + rules_for(file="events.parquet", datasets=("bak_daily",))
+                + rules_for(file="raw_only", datasets=("bak_basic",))
+            )
+        ],
         "doc_refs": SEMANTIC_DOC_REFS,
     })
     if "vol" not in bak_basic_schema and "amount" not in bak_basic_schema:
@@ -1636,7 +1639,7 @@ def existing_partition_values(raw_dir: Path, datasets: list[str], prefix: str) -
         values[dataset] = sorted(fundamental_partition_value(path, prefix) for path in (raw_dir / dataset).glob(f"{prefix}=*.parquet"))
     return values
 
-def integrated_unit_rules() -> dict[str, str]:
+def integrated_unit_rules() -> dict[str, list[dict[str, object]]]:
     """Projection of the shared unit registry (environment/data/units.py) over the integrated daily-domain files."""
     rules = (
         rules_for(file="daily.parquet")
@@ -1646,7 +1649,10 @@ def integrated_unit_rules() -> dict[str, str]:
         + rules_for(file="raw_only", datasets=("bak_basic",))
         + rules_for(file="fundamentals.parquet")
     )
-    return rules_text(rules)
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for rule in rules:
+        grouped.setdefault(rule.dataset or rule.file, []).append(rule.to_record())
+    return grouped
 
 def audit_integrated_filesystem(raw_dir: Path, datasets: list[str], add) -> None:
     parquet_files: list[Path] = []
@@ -2152,9 +2158,9 @@ def macro_pit_rules() -> dict[str, str]:
         "derivatives_registry": "fut_basic/opt_basic/cb_basic rows become visible at their list_date; cb_call announcements at ann_date end-of-day (redemption events are evening disclosures). WARNING: cb_basic is a nightly CURRENT-STATE refresh — conv_price/remain_size/newest_rating/delist_date must never feed historical backtests; derive the as-of conversion price from cb_daily (100 * stock close / cb_value), use cb_over_rate for as-of premium and cb_call for redemption outcomes.",
     }
 
-def macro_unit_rules() -> dict[str, str]:
+def macro_unit_rules() -> dict[str, list[dict[str, object]]]:
     """Projection of the shared unit registry (environment/data/units.py) over all MACRO_SPECS datasets."""
-    return dataset_rules_text("macro.parquet", tuple(MACRO_SPECS))
+    return dataset_rules_records(tuple(MACRO_SPECS))
 
 def audit_macro_dataset(raw_dir: Path, spec: MacroDataset, expected_paths: set[Path], add) -> None:
     audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
@@ -2271,10 +2277,10 @@ def expected_event_paths(raw_dir: Path, spec: EventDataset, start_date: str, end
 # Raw event/flow datasets whose snapshot dataset id differs from the api name.
 SNAPSHOT_EVENT_ID_BY_RAW = {"share_float": "share_float_complete"}
 
-def event_unit_rules() -> dict[str, str]:
+def event_unit_rules() -> dict[str, list[dict[str, object]]]:
     """Projection of the shared unit registry (environment/data/units.py) over all EVENT_FLOW_SPECS datasets."""
     datasets = tuple(SNAPSHOT_EVENT_ID_BY_RAW.get(name, name) for name in EVENT_FLOW_SPECS)
-    return dataset_rules_text("events.parquet", datasets)
+    return dataset_rules_records(datasets)
 
 def event_pit_rules() -> dict[str, str]:
     return {
@@ -2564,9 +2570,9 @@ def board_pit_rules() -> dict[str, dict[str, str]]:
         "dc_hot": {"available_at": "rank_time when returned; is_new=Y falls back to 22:30", "usage": "intraday/evening hot-list evidence by observable rank_time"},
     }
 
-def board_unit_rules() -> dict[str, str]:
+def board_unit_rules() -> dict[str, list[dict[str, object]]]:
     """Projection of the shared unit registry (environment/data/units.py) over all BOARD_TRADING_DATASETS."""
-    return dataset_rules_text("events.parquet", tuple(BOARD_TRADING_DATASETS))
+    return dataset_rules_records(tuple(BOARD_TRADING_DATASETS))
 
 def audit_board_trading_only(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()

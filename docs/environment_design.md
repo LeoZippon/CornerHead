@@ -196,7 +196,7 @@ available_at <= visibility_cutoff
 
 **单位合同**
 
-raw 侧单位的机读事实源是 `environment/data/units.py` 的 `UNIT_RULES` 结构化注册表；分层边界见 Data 文档 §1.2，完整生成表见 `docs/units_reference.md`。
+单位的机读事实源是 `environment/data/units.py` 的列级注册表 `FIELD_RULES`；查找规则与校验边界见 Data 文档 §1.2，规则视图见 `docs/units_reference.md`。每次快照构建对全部列强制解析单位（缺规则即构建失败），并在写 `data_summary.json` 时把当前视图可见字段的逐列单位表生成为同级 `/mnt/artifacts/unit_reference.json`。
 
 **适用范围：Agent 直接使用的交易文件**。快照构建对以下文件执行统一合同，决策快照与回放槽使用相同换算：
 
@@ -218,9 +218,8 @@ raw 侧单位的机读事实源是 `environment/data/units.py` 的 `UNIT_RULES` 
 events、macro、fundamentals 和 text 保留源单位：
 
 - 异构 union 的字段按来源解释；同名字段跨域不同单位是常态。
-- 快照清单为 daily 附转换清单，为其他数值研究域标记源单位口径；Agent 轻量 `data_summary.json` 和实验事实另投影统一的 `unit_contract` 索引，避免要求 Agent 从多份 domain metadata 猜测。
-- 合同中的关键可执行例子固定为：daily 比例 5%=`0.05`；`events.parquet` 的 `moneyflow.*_amount` 为万元，500=人民币 500 万元；`macro.parquet` 的 `index_daily.pct_chg` 为百分数值，5%=`5.0`，不能再乘 100。
-- Agent 不得把 daily 单位合同外推到其他域；跨域计算必须显式换算成派生列。
+- 快照清单为 daily 附转换清单并记录 union 域的 `dataset_columns`；`data_summary.json` 的 `unit_contract` 只是常量指针（查找规则 + unknown 政策 + `unit_reference.json` 路径），逐列单位事实全部在 `/mnt/artifacts/unit_reference.json`，Agent 按需加载。
+- Agent 不得把 daily 单位合同外推到其他域；跨域计算必须显式换算成派生列；`status=unknown` 或表外字段不得进入信号或阈值。
 - 精确源单位见 `docs/units_reference.md`（由注册表生成）。
 
 daily 与 auction 的原始单位和转换规则写入快照清单。研究域保留源单位，策略在跨域计算前必须显式换算；未知单位字段不得作为交易依据。这是策略与审计约束，Broker 无法根据字段血缘自动识别并拒绝订单。
