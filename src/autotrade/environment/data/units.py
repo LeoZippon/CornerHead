@@ -260,13 +260,13 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               ("buy_*_amount", "sell_*_amount", "net_mf_amount"), source_unit="10k_CNY",
               note="500 means CNY 5m; normalize before mixing with daily/stk_mins"),
     FieldRule("events.parquet", "moneyflow_dc", ("close",), source_unit="CNY_per_share",
-              status="verified", evidence="median 11.7 at stock price scale"),
+              status="verified", evidence="equals daily close (join ratio 1.0000, n=16446)"),
     FieldRule("events.parquet", "moneyflow_dc", ("pct_change", "*_rate"), source_unit="percent"),
     FieldRule("events.parquet", "moneyflow_dc", ("net_amount", "buy_*_amount"),
               source_unit="10k_CNY",
               status="inferred", evidence="per-stock medians at 10k-CNY scale only"),
     FieldRule("events.parquet", "moneyflow_ths", ("latest",), source_unit="CNY_per_share",
-              status="verified", evidence="median 12.8 at stock price scale"),
+              status="verified", evidence="equals daily close (join ratio 1.0000, n=15590)"),
     FieldRule("events.parquet", "moneyflow_ths", ("pct_change", "*_rate"), source_unit="percent"),
     FieldRule("events.parquet", "moneyflow_ths",
               ("net_amount", "net_d5_amount", "buy_*_amount"), source_unit="10k_CNY",
@@ -277,7 +277,7 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               source_unit="percent"),
     FieldRule("events.parquet", "moneyflow_ind_dc", ("net_amount", "buy_*_amount"),
               source_unit="CNY",
-              status="verified", evidence="industry medians only plausible in CNY (1.5e7 ~ 15m)",
+              status="inferred", evidence="industry medians only plausible in CNY (1.5e7 ~ 15m)",
               note="industry-level DC flows are CNY, unlike stock-level moneyflow_dc in 10k CNY"),
     FieldRule("events.parquet", "moneyflow_ind_dc", ("rank",), source_unit="rank"),
     FieldRule("events.parquet", "moneyflow_ind_dc", ("buy_sm_amount_stock",), semantic="text",
@@ -291,7 +291,7 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("events.parquet", "moneyflow_ind_ths", ("company_num",), source_unit="count"),
     FieldRule("events.parquet", "moneyflow_ind_ths",
               ("net_buy_amount", "net_sell_amount", "net_amount"), source_unit="100m_CNY",
-              status="verified", evidence="industry medians ~49.5 only plausible as 100m CNY"),
+              status="inferred", evidence="industry medians ~49.5 only plausible as 100m CNY"),
     FieldRule("events.parquet", "moneyflow_cnt_ths", ("industry_index",),
               source_unit="index_points",
               status="inferred", evidence="values ~3000 at concept index scale"),
@@ -302,12 +302,13 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("events.parquet", "moneyflow_cnt_ths", ("company_num",), source_unit="count"),
     FieldRule("events.parquet", "moneyflow_cnt_ths",
               ("net_buy_amount", "net_sell_amount", "net_amount"), source_unit="100m_CNY",
-              status="verified", evidence="concept medians ~162 only plausible as 100m CNY"),
+              status="inferred", evidence="concept medians ~162 only plausible as 100m CNY"),
     FieldRule("events.parquet", "cyq_perf",
               ("his_low", "his_high", "cost_5pct", "cost_15pct", "cost_50pct",
                "cost_85pct", "cost_95pct", "weight_avg"),
               source_unit="CNY_per_share",
-              status="verified", evidence="cost percentiles sit at price scale",
+              status="verified",
+              evidence="cost_50pct/daily close median 1.08 (join, n=16571): price-scale cost distribution",
               note="cost_5pct is the 5th-percentile holder cost PRICE, not a percent"),
     FieldRule("events.parquet", "cyq_perf", ("winner_rate",), source_unit="percent"),
     FieldRule("events.parquet", "bak_daily",
@@ -371,11 +372,12 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               status="verified", evidence="ratios reconcile at 10k-share scale"),
     FieldRule("events.parquet", "pledge_detail", ("p_total_ratio", "h_total_ratio"),
               source_unit="percent"),
-    FieldRule("events.parquet", "stk_surv", ("fund_visitors",), source_unit="count",
-              note="participating institutions"),
+    FieldRule("events.parquet", "stk_surv", ("fund_visitors",), semantic="text",
+              note="comma-separated visitor NAMES, not a count; derive counts only "
+                   "after delimiter parsing and deduplication"),
     FieldRule("events.parquet", "new_share", ("price",), source_unit="CNY_per_share"),
     FieldRule("events.parquet", "new_share", ("pe",), source_unit="multiple",
-              status="verified", evidence="median 15 at issue-PE scale"),
+              evidence="median 15 at issue-PE scale"),
     FieldRule("events.parquet", "new_share", ("amount", "market_amount", "limit_amount"),
               source_unit="10k_shares"),
     FieldRule("events.parquet", "new_share", ("funds",), source_unit="100m_CNY",
@@ -384,18 +386,20 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               note="0.03 means 0.03%"),
     FieldRule("events.parquet", "stk_holdertrade",
               ("change_vol", "after_share", "total_share"), source_unit="shares",
-              status="verified", evidence="after_share/total_share at holder position scale",
+              status="verified",
+              evidence="after_share/(after_ratio%) matches company capital (ratio 0.95, n=3790)",
               note="total_share is the holder's post-trade position, not company capital"),
     FieldRule("events.parquet", "stk_holdertrade", ("change_ratio", "after_ratio"),
               source_unit="percent"),
     FieldRule("events.parquet", "stk_holdertrade", ("avg_price",), source_unit="CNY_per_share",
-              status="verified", evidence="median 20.6 at price scale"),
+              status="inferred", evidence="median 20.6 at price scale"),
     FieldRule("events.parquet", "repurchase", ("vol",), source_unit="shares",
               status="verified", evidence="amount/vol sits at price scale"),
     FieldRule("events.parquet", "repurchase", ("amount",), source_unit="CNY"),
     FieldRule("events.parquet", "repurchase", ("high_limit", "low_limit"),
               source_unit="CNY_per_share",
-              status="verified", evidence="medians 15.0/11.45 at price scale",
+              status="verified",
+              evidence="high_limit/daily close median 1.15 (q10-q90 0.4-1.8): band brackets market price",
               note="repurchase price band, not amounts"),
     FieldRule("events.parquet", "share_float_complete", ("float_share",),
               source_unit="shares", status="verified",
@@ -410,7 +414,7 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("events.parquet", "top_list",
               ("amount", "l_sell", "l_buy", "l_amount", "net_amount"), source_unit="CNY"),
     FieldRule("events.parquet", "top_list", ("float_values",), source_unit="CNY",
-              status="verified", evidence="median 6e9 at float-market-value scale"),
+              status="inferred", evidence="median 6e9 at float-market-value scale"),
     FieldRule("events.parquet", "top_inst", ("buy", "sell", "net_buy"), source_unit="CNY"),
     FieldRule("events.parquet", "top_inst", ("buy_rate", "sell_rate"), source_unit="percent"),
     FieldRule("events.parquet", "kpl_list",
@@ -439,7 +443,7 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("events.parquet", "limit_cpt_list", ("pct_chg",), source_unit="percent"),
     FieldRule("events.parquet", "limit_cpt_list", ("rank",), source_unit="rank"),
     FieldRule("events.parquet", "limit_list_ths", ("price",), source_unit="CNY_per_share",
-              status="verified", evidence="median 24 at price scale"),
+              status="verified", evidence="equals daily close (join ratio 1.0000, n=460)"),
     FieldRule("events.parquet", "limit_list_ths",
               ("pct_chg", "turnover_rate", "limit_up_suc_rate"), source_unit="percent"),
     FieldRule("events.parquet", "limit_list_ths", ("open_num",), source_unit="count"),
@@ -508,8 +512,7 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               status="verified", evidence="~1e11 share scale",
               note="shares here vs 10k shares in daily_basic"),
     FieldRule("macro.parquet", "index_dailybasic", ("turnover_rate", "turnover_rate_f"),
-              source_unit="percent",
-              status="verified", evidence="median 2.4 at percent scale"),
+              source_unit="percent", evidence="median 2.4 at percent scale"),
     FieldRule("macro.parquet", "index_dailybasic", ("pe", "pe_ttm", "pb"),
               source_unit="multiple"),
     FieldRule("macro.parquet", "sw_daily",
@@ -517,10 +520,10 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("macro.parquet", "sw_daily", ("pct_change",), source_unit="percent"),
     FieldRule("macro.parquet", "sw_daily", ("vol",), source_unit="10k_shares"),
     FieldRule("macro.parquet", "sw_daily", ("amount",), source_unit="10k_CNY",
-              status="verified", evidence="industry turnover median 6.1e5 == 6.1b CNY"),
+              status="inferred", evidence="industry turnover median 6.1e5 == 6.1b CNY"),
     FieldRule("macro.parquet", "sw_daily", ("pe", "pb"), source_unit="multiple"),
     FieldRule("macro.parquet", "sw_daily", ("float_mv", "total_mv"), source_unit="10k_CNY",
-              status="verified", evidence="industry total_mv median 2.5e7 == 250b CNY"),
+              status="inferred", evidence="industry total_mv median 2.5e7 == 250b CNY"),
     FieldRule("macro.parquet", "ci_daily",
               ("open", "low", "high", "close", "pre_close", "change"),
               source_unit="index_points"),
@@ -554,7 +557,7 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               ("pct_change_sh", "pct_change_sz", "*_rate"), source_unit="percent"),
     FieldRule("macro.parquet", "moneyflow_mkt_dc", ("net_amount", "buy_*_amount"),
               source_unit="CNY",
-              status="verified", evidence="market-wide flows ~ -4.5e10 plausible only in CNY"),
+              status="inferred", evidence="market-wide flows ~ -4.5e10 plausible only in CNY"),
     # broker_recommend is a monthly text list: identifiers only.
     FieldRule("macro.parquet", "ths_daily",
               ("open", "high", "low", "close", "pre_close", "change"),
@@ -572,7 +575,7 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("macro.parquet", "repo_daily",
               ("pre_close", "open", "high", "low", "close", "weight", "weight_r"),
               source_unit="percent",
-              status="verified", evidence="repo quotes are annualized rates (~1.5)"),
+              evidence="exchange quote convention: annualized rate levels (~1.5)"),
     FieldRule("macro.parquet", "repo_daily", ("amount",), source_unit="10k_CNY",
               status="verified", evidence="GC001 daily ~2.2e8 == ~2.2 trillion CNY"),
     FieldRule("macro.parquet", "repo_daily", ("num",), source_unit="count"),
@@ -600,17 +603,17 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               source_unit="premium_quote_units"),
     FieldRule("macro.parquet", "opt_daily", ("vol", "oi"), source_unit="contracts"),
     FieldRule("macro.parquet", "opt_daily", ("amount",), source_unit="10k_CNY",
-              status="verified", evidence="premium*per_unit*vol reconciles at 10k-CNY scale"),
+              status="inferred", evidence="premium*per_unit*vol lands at 10k-CNY scale (rough)"),
     FieldRule("macro.parquet", "cb_basic", ("par", "issue_price", "maturity_call_price"),
               source_unit="CNY_per_100_par"),
     FieldRule("macro.parquet", "cb_basic", ("issue_size", "remain_size"), source_unit="CNY",
-              status="verified", evidence="issue_size ~7.5e8 at bond-issue scale"),
+              status="inferred", evidence="issue_size ~7.5e8 at bond-issue scale"),
     FieldRule("macro.parquet", "cb_basic", ("maturity",), source_unit="years"),
     FieldRule("macro.parquet", "cb_basic", ("coupon_rate",), source_unit="percent"),
     FieldRule("macro.parquet", "cb_basic", ("pay_per_year",), source_unit="count"),
     FieldRule("macro.parquet", "cb_basic", ("first_conv_price", "conv_price"),
               source_unit="CNY_per_share",
-              status="verified", evidence="medians 12-16 at stock price scale",
+              status="inferred", evidence="medians 12-16 at stock price scale",
               note="nightly CURRENT-STATE refresh; never feed historical backtests"),
     FieldRule("macro.parquet", "cb_daily",
               ("pre_close", "open", "high", "low", "close", "change", "bond_value",
@@ -636,8 +639,9 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               note="income statement amounts (vendor contract is uniform)"),
     FieldRule("fundamentals.parquet", "balancesheet_vip", ("total_share",),
               source_unit="shares",
-              status="verified", evidence="median 3.9e8 at share-capital scale",
-              note="period-end total shares, not the CNY paid-in-capital line"),
+              status="inferred", evidence="median 3.9e8 at share-capital scale",
+              note="period-end total shares, not the CNY paid-in-capital line; "
+                   "excluded from the statement-CNY default"),
     FieldRule("fundamentals.parquet", "balancesheet_vip", ("*",), source_unit="CNY",
               note="balance sheet amounts (vendor contract is uniform)"),
     FieldRule("fundamentals.parquet", "cashflow_vip", ("*",), source_unit="CNY",
@@ -653,7 +657,7 @@ FIELD_RULES: tuple[FieldRule, ...] = (
                "netdebt", "tangible_asset", "working_capital", "networking_capital",
                "invest_capital", "retained_earnings", "fixed_assets"),
               source_unit="CNY",
-              status="verified", evidence="gross_margin median 2.4e8 is a CNY amount",
+              evidence="gross_margin median 2.4e8 excludes the percent reading",
               note="gross_margin is gross PROFIT in CNY; grossprofit_margin is the percent"),
     FieldRule("fundamentals.parquet", "fina_indicator_vip",
               ("current_ratio", "quick_ratio", "cash_ratio", "assets_to_eqt",
@@ -661,14 +665,13 @@ FIELD_RULES: tuple[FieldRule, ...] = (
                "tangibleasset_to_debt", "tangasset_to_intdebt", "tangibleasset_to_netdebt",
                "ocf_to_debt", "ocf_to_shortdebt"),
               source_unit="multiple",
-              status="verified", evidence="current_ratio median 1.68 = 1.68x, not percent"),
+              evidence="current_ratio median 1.68 = 1.68x, excludes the percent reading"),
     FieldRule("fundamentals.parquet", "fina_indicator_vip",
               ("ar_turn", "ca_turn", "fa_turn", "assets_turn"),
               source_unit="times_per_period",
-              status="verified", evidence="assets_turn median 0.35 at turnover-frequency scale"),
+              evidence="assets_turn median 0.35 at turnover-frequency scale"),
     FieldRule("fundamentals.parquet", "fina_indicator_vip", ("turn_days",),
-              source_unit="days",
-              status="verified", evidence="median 180 at days scale"),
+              source_unit="days", evidence="median 180 at days scale"),
     FieldRule("fundamentals.parquet", "fina_indicator_vip",
               ("netprofit_margin", "grossprofit_margin", "cogs_of_sales", "expense_of_sales",
                "profit_to_gr", "saleexp_to_gr", "adminexp_of_gr", "finaexp_of_gr",
@@ -678,7 +681,7 @@ FIELD_RULES: tuple[FieldRule, ...] = (
                "int_to_talcap", "eqt_to_talcapital", "currentdebt_to_debt",
                "longdeb_to_debt", "profit_to_op", "q_*", "*_yoy", "q_op_qoq"),
               source_unit="percent",
-              status="verified", evidence="roe median 10.6, debt_to_assets 42.8 at percent scale"),
+              evidence="roe median 10.6, debt_to_assets 42.8 at percent scale"),
     FieldRule("fundamentals.parquet", "fina_indicator_vip", ("impai_ttm",),
               source_unit="unknown", status="unknown",
               note="median -0.63 inconsistent with a CNY amount; resolve before use"),
@@ -687,13 +690,15 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("fundamentals.parquet", "forecast_vip",
               ("net_profit_min", "net_profit_max", "last_parent_net"),
               source_unit="10k_CNY",
-              status="verified", evidence="last_parent_net matches forecast bounds at 10k-CNY scale",
+              status="verified",
+              evidence="last_parent_net*1e4 equals prior-year income n_income_attr_p (ratio 1.0000, n=2570)",
               note="must not be mixed directly with statement net profit in CNY"),
     FieldRule("fundamentals.parquet", "express_vip",
               ("revenue", "operate_profit", "total_profit", "n_income", "total_assets",
                "total_hldr_eqy_exc_min_int", "open_net_assets"),
               source_unit="CNY",
-              status="verified", evidence="revenue median 4.9e9 at CNY scale"),
+              status="verified",
+              evidence="revenue equals income_vip same period (ratio 1.0000, n=82)"),
     FieldRule("fundamentals.parquet", "express_vip",
               ("diluted_eps", "bps", "open_bps"), source_unit="CNY_per_share"),
     FieldRule("fundamentals.parquet", "express_vip", ("diluted_roe", "yoy_net_profit"),
@@ -705,10 +710,10 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               ("stk_div", "stk_bo_rate", "stk_co_rate"), source_unit="shares_per_share",
               note="bonus/transfer proportions per held share"),
     FieldRule("fundamentals.parquet", "fina_audit", ("audit_fees",), source_unit="CNY",
-              status="verified", evidence="median 4e5 at audit-fee scale"),
+              status="inferred", evidence="median 4e5 at audit-fee scale"),
     FieldRule("fundamentals.parquet", "fina_mainbz_vip",
               ("bz_sales", "bz_profit", "bz_cost"), source_unit="CNY",
-              status="verified", evidence="segment revenue median 1.3e7 at CNY scale"),
+              status="inferred", evidence="segment revenue median 1.3e7 at CNY scale"),
     # disclosure_date carries dates only.
     # ============== raw-lake datasets never included in snapshots ===========
     FieldRule("raw_only", "bak_basic", ("total_share", "float_share"),
@@ -832,16 +837,18 @@ def snapshot_column_map(view_dir, manifest: dict[str, object]) -> dict[tuple[str
     domains = manifest.get("domains", {})
     column_map: dict[tuple[str, str | None], list[str]] = {}
     for path in sorted(view_dir.glob("*.parquet")):
+        try:
+            parquet = pq.ParquetFile(path)
+            physical = list(parquet.schema_arrow.names)
+            rows = parquet.metadata.num_rows
+        except Exception as exc:
+            raise ValueError(
+                f"unreadable parquet footer for snapshot file {path.name}: "
+                f"{type(exc).__name__}"
+            ) from exc
         domain = UNION_DOMAIN_BY_FILE.get(path.name)
         if domain is None:
-            try:
-                column_map[(path.name, None)] = list(pq.read_schema(path).names)
-            except Exception:
-                # An unreadable footer means the Agent cannot read the file
-                # either; the summary records its metadata_error and the file
-                # contributes no unit records (absent columns stay forbidden
-                # under the unknown-unit policy).
-                pass
+            column_map[(path.name, None)] = physical
             continue
         meta = domains.get(domain)
         if not isinstance(meta, dict) or "dataset_columns" not in meta:
@@ -849,8 +856,21 @@ def snapshot_column_map(view_dir, manifest: dict[str, object]) -> dict[tuple[str
                 f"snapshot manifest domain '{domain}' lacks dataset_columns for {path.name}; "
                 "incompatible snapshot format — rebuild the snapshot"
             )
+        declared: set[str] = set()
         for dataset, columns in meta["dataset_columns"].items():
             column_map[(path.name, dataset)] = list(columns)
+            declared.update(columns)
+        # Reconcile the manifest against the physical schema: every physical
+        # column must be attributed to a dataset, or the unit table would
+        # silently under-cover the file. The reverse (declared but not yet
+        # materialized in this window) is legitimate for fundamentals, whose
+        # attribution comes from the vendor schema rather than window content.
+        unattributed = sorted(set(physical) - declared) if rows else []
+        if unattributed:
+            raise ValueError(
+                f"snapshot manifest domain '{domain}' does not attribute physical "
+                f"columns of {path.name} to any dataset: {unattributed}"
+            )
     return column_map
 
 
@@ -933,8 +953,10 @@ AGENT_UNIT_CONTRACT: dict[str, str] = {
         "records carrying a factor show the applied source->normalized conversion"
     ),
     "unknown_unit_policy": (
-        "columns whose unit_reference entry has status 'unknown' must not be used for "
-        "absolute thresholds or cross-dataset arithmetic until explicitly resolved"
+        "columns whose unit_reference entry has status 'unknown' (and columns absent from "
+        "the table) may be used only for scale-agnostic operations inside their own dataset, "
+        "such as ranking or quantiles; absolute thresholds, unit conversion, and "
+        "cross-dataset arithmetic require explicitly resolving the unit first"
     ),
 }
 

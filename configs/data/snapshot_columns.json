@@ -1,5 +1,5 @@
 {
- "note": "Sampled union of raw vendor parquet schemas per snapshot dataset, plus snapshot-builder provenance columns. Regenerate with scripts/dev/export_units.py --refresh-inventory. Tests resolve every column against the unit registry; the snapshot build re-validates live.",
+ "note": "SAMPLED union of raw vendor parquet schemas per snapshot dataset (five spread partitions each, not a full-lake scan), plus snapshot-builder provenance columns. Regenerate with scripts/dev/export_units.py --refresh-inventory. Tests resolve every listed column against the unit registry; columns appearing only in unsampled historical partitions are caught by the snapshot build's live full-column validation.",
  "files": {
   "events.parquet": {
    "margin": [
@@ -1191,6 +1191,8 @@
     "ann_date",
     "ass_invest_income",
     "assets_impair_loss",
+    "available_at",
+    "available_at_rule",
     "available_month",
     "basic_eps",
     "biz_tax_surchg",
@@ -1290,6 +1292,8 @@
     "agency_bus_liab",
     "amor_exp",
     "ann_date",
+    "available_at",
+    "available_at_rule",
     "available_month",
     "bond_payable",
     "business_key",
@@ -1440,6 +1444,8 @@
    "cashflow_vip": [
     "amort_intang_assets",
     "ann_date",
+    "available_at",
+    "available_at_rule",
     "available_month",
     "beg_bal_cash",
     "beg_bal_cash_equ",
@@ -1549,6 +1555,8 @@
     "assets_to_eqt",
     "assets_turn",
     "assets_yoy",
+    "available_at",
+    "available_at_rule",
     "available_month",
     "basic_eps_yoy",
     "bps",
@@ -1661,6 +1669,8 @@
    ],
    "forecast_vip": [
     "ann_date",
+    "available_at",
+    "available_at_rule",
     "available_month",
     "business_key",
     "change_reason",
@@ -1682,6 +1692,8 @@
    ],
    "express_vip": [
     "ann_date",
+    "available_at",
+    "available_at_rule",
     "available_month",
     "bps",
     "business_key",
@@ -1707,6 +1719,8 @@
    ],
    "dividend": [
     "ann_date",
+    "available_at",
+    "available_at_rule",
     "available_month",
     "business_key",
     "cash_div",
@@ -1733,6 +1747,8 @@
     "audit_fees",
     "audit_result",
     "audit_sign",
+    "available_at",
+    "available_at_rule",
     "available_month",
     "business_key",
     "dataset",
@@ -1743,6 +1759,8 @@
     "ts_code"
    ],
    "fina_mainbz_vip": [
+    "available_at",
+    "available_at_rule",
     "available_month",
     "business_key",
     "bz_code",
@@ -1761,6 +1779,8 @@
    "disclosure_date": [
     "actual_date",
     "ann_date",
+    "available_at",
+    "available_at_rule",
     "available_month",
     "business_key",
     "dataset",

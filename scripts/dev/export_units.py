@@ -60,13 +60,16 @@ def render_units_markdown() -> str:
         "",
         "本表是注册表的**规则视图**（按列名/通配符定位的规则行）。逐列展开后的完整字段级",
         "单位表随每次快照生成为 `/mnt/artifacts/unit_reference.json`，只包含当前快照实际可见",
-        "的 file/dataset/column；完备性由两道校验保证——快照构建对每一列强制解析（缺规则即",
-        "失败），回归测试对 `configs/data/snapshot_columns.json` 的全量供应商列清单强制解析。",
+        "的 file/dataset/column；完备性由两道校验保证——快照构建对每一列强制解析并核对",
+        "union 清单与物理 schema（缺规则或漏归属即失败），回归测试对",
+        "`configs/data/snapshot_columns.json`（按分区抽样的供应商列清单并集，非全分区扫描）",
+        "逐列解析；只出现在罕见历史分区的字段以运行时校验兜底。",
         "",
         "状态含义：`verified` 已与另一数据源或已知外部事实对账（依据见 evidence 列）；",
-        "`official` 依据供应商官方字段合同；`inferred` 仅由本地量级合理性推断；`unknown`",
-        "诚实未解决——此类字段不得进入绝对阈值或跨数据集算术。`factor` 为快照载入时的乘数",
-        "（归一化文件存换算后的值）。",
+        "`official` 依据供应商官方字段合同（evidence 记录本地校验）；`inferred` 仅由本地量级",
+        "合理性推断；`unknown` 诚实未解决——此类字段仅可在其所属 dataset 内做与量纲无关的",
+        "运算（排序、分位数），进入绝对阈值、单位换算或跨数据集算术前必须先显式核实单位。",
+        "`factor` 为快照载入时的乘数（归一化文件存换算后的值）。",
     ]
     files = list(dict.fromkeys(rule.file for rule in FIELD_RULES))
     for file in files:
@@ -117,7 +120,10 @@ def refresh_inventory() -> None:
     if not raw.exists():
         raise FileNotFoundError(f"raw lake not available at {raw}; run on the data host")
     config = SnapshotConfig()
-    fund_sidecars = ["dataset", "source_path", "source_hash", "source_row_id", "business_key", "available_month"]
+    fund_sidecars = [
+        "dataset", "source_path", "source_hash", "source_row_id", "business_key",
+        "available_month", "available_at", "available_at_rule",
+    ]
     plans = [
         ("events.parquet", tuple(config.events_datasets), ["dataset"]),
         ("macro.parquet", tuple(config.macro_datasets), ["dataset"]),
@@ -136,9 +142,11 @@ def refresh_inventory() -> None:
             files.setdefault(file, {})[dataset] = sorted(columns)
     inventory = {
         "note": (
-            "Sampled union of raw vendor parquet schemas per snapshot dataset, plus snapshot-builder "
-            "provenance columns. Regenerate with scripts/dev/export_units.py --refresh-inventory. "
-            "Tests resolve every column against the unit registry; the snapshot build re-validates live."
+            "SAMPLED union of raw vendor parquet schemas per snapshot dataset (five spread partitions "
+            "each, not a full-lake scan), plus snapshot-builder provenance columns. Regenerate with "
+            "scripts/dev/export_units.py --refresh-inventory. Tests resolve every listed column against "
+            "the unit registry; columns appearing only in unsampled historical partitions are caught by "
+            "the snapshot build's live full-column validation."
         ),
         "files": files,
     }
