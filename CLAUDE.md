@@ -3,11 +3,7 @@
 ## Environment
 
 - Python Environment is `quant` installed at `~/miniconda3/envs/quant` with Python 3.11.
-- Use that installation for environment activation and package management.
 - Docker sandbox Python is independent from the local conda environment; rebuild `ops/docker/sandbox.Dockerfile` when sandbox dependencies change.
-- Prefer explicit environment setup over ad hoc local Python changes.
-- The real writable repository root on this machine is `/Data/lzp/MacroQuant`.
-- Paths under `/home/coder/projects/...` may be wrapper artifacts and should not be trusted for writes.
 - Before editing or running commands that write files, confirm the real path with `pwd -P` or `realpath`.
 
 ## Repository Organization
@@ -19,14 +15,9 @@
 ## Git and GitHub
 
 - The canonical remote repository is already configured; prefer SSH Git operations and keep `origin` aligned with it.
-- Work on reviewable branches and pull requests for non-trivial changes. Do not push directly to shared `main` unless explicitly requested.
 - Use branch prefixes by change type: `fix/` for bug or data-integrity fixes, `feat/` for new capabilities, `docs/` for documentation-only updates, `refactor/` for internal restructuring, `test/` for tests, `ops/` for deployment/scheduling changes, and `chore/` for maintenance.
 - Keep commits focused and self-contained. Code, tests, and living documentation for the same behavior change should usually be committed together.
-- For broad work, split commits by the smallest coherent review and revert unit.
-- Split work into multiple PRs when changes can be reviewed, tested, deployed, or reverted independently, such as data-ingestion fixes, Agent logic, Environment logic, ops/cron changes, and documentation-only updates.
-- Keep one PR when the changes are tightly coupled and must land together to keep the repository runnable. Small follow-up docs/log updates may stay in the current PR when they do not distract from the main review.
-- Do not mix unrelated changes in one PR solely because they were done in the same session.
-- Use concise imperative commit subjects, for example `Harden TuShare cron ingestion`; add a short body when validation commands or operational impact matter.
+- Use concise imperative commit subjects; add a short body when validation commands or operational impact matter.
 - PR titles, descriptions, review comments, and discussion comments may be written in Chinese when that is clearer for project collaboration.
 - Prefer concise English imperative commit subjects for tooling/search consistency. Chinese commit subjects are acceptable for human-facing milestones or domain-specific wording; commit bodies may use Chinese for context and validation details.
 - Before committing, remove generated caches such as `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `*.pyc`, and `*.pyo`; never commit runtime logs, local state, data dumps, API keys, scratch notebooks, or ignored artifacts.
@@ -40,12 +31,10 @@
 ## Logging
 
 - Record logs promptly for every training, inference, evaluation, or data-processing run.
-- Record every real LLM provider API call to the local conversation-log JSONL contract for audit and possible future distillation. Logs must include prompts/messages and raw provider responses, but must never include API keys or Authorization headers.
 - Use `@LOGBOOK.md` as the concise current logbook: keep entries short and focused on what was tried, the key result, and the current conclusion.
 - Use `@docs/logbook/DETAILED_LOGBOOK.md` as the detailed durable logbook: include the date, task, key command or config, resource checks, important artifact/log paths, and final result or conclusion.
 - For routine context gathering, read `@LOGBOOK.md` first. Read `@docs/logbook/DETAILED_LOGBOOK.md` only when detailed historical commands, paths, or experiment context are needed.
 - Runtime log files under `logs/` may be kept locally for debugging, but they must not be committed to Git.
-- If a script supports file logging, you may save logs to disk locally, but durable summaries in Git must still be written back to both the concise and detailed logbooks at the appropriate granularity.
 
 ## Living Documentation
 
@@ -89,8 +78,8 @@ For experiment, training, inference, evaluation, or data-processing jobs:
 - Maintain a minimalist code architecture and implementation while ensuring logical correctness and completeness.
 - Achieve optimal performance while keeping the environment as close to real-world conditions as possible.
 - Maximize the Agent’s autonomy while lowering the complexity of interactions between the Agent and the environment.
-- Audit principle: freeze the scope and define contracts and invariants first; require reproducible evidence of material impact, and distinguish defects from suggestions and accepted limitations.
-- Code repair principle: fix one root cause per small, self-contained change and leave overall code health better; redesign instead of stacking exceptions when complexity keeps growing.
+- Freeze the scope and define contracts and invariants first; require reproducible evidence of material impact, and distinguish defects from suggestions and accepted limitations.
+- Fix one root cause per small, self-contained change and leave overall code health better; redesign instead of stacking exceptions when complexity keeps growing.
 - Prefer explicit failure over silent fallback or false success when correctness cannot be guaranteed.
 - Test invariants, negative paths, and realistic end-to-end behavior rather than only the current implementation's happy path.
 - Record irreducible limitations honestly; do not add speculative abstractions, compatibility branches, or unsupported recovery behavior.
@@ -100,6 +89,6 @@ For experiment, training, inference, evaluation, or data-processing jobs:
 - Fully read sufficient code and supporting documentation to form a sound design idea before writing or modifying any code.
 - Treat resource checks and logging as mandatory steps, not optional cleanup.
 - Keep the repository organized, clean and tidy.
-- Route every production live raw/PIT source mutation through the updater's exclusive lock and temp-plus-replace; never modify a hardlinked source file in place.
 - When starting a sub-agent, always choose the best performing ones.
+- Include the three repository design principles above explicitly in every sub-agent's task prompt.
 - Dare to break thinking inertia and rethink when necessary.
