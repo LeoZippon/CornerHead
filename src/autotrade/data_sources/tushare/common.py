@@ -1817,10 +1817,15 @@ def write_parquet_revision_aware(
     source: str = "force_refresh",
     allow_empty_revision_overwrite: bool = False,
     allow_key_removal_overwrite: bool = False,
+    revision_comparison_old_df: pd.DataFrame | None = None,
+    revision_comparison_new_df: pd.DataFrame | None = None,
+    existing_df: pd.DataFrame | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> bool:
+    if (revision_comparison_old_df is None) != (revision_comparison_new_df is None):
+        raise ValueError("revision comparison frames must be provided together")
     if path.exists():
-        old_df = pd.read_parquet(path)
+        old_df = existing_df if existing_df is not None else pd.read_parquet(path)
         old_meta = parquet_meta(path)
         write_action = "overwrite"
         if len(old_df) > 0 and df.empty and not allow_empty_revision_overwrite:
@@ -1829,18 +1834,28 @@ def write_parquet_revision_aware(
             dataset=api_name,
             partition=path.with_suffix("").name,
             path=path,
-            old_df=old_df,
-            new_df=df,
+            old_df=revision_comparison_old_df if revision_comparison_old_df is not None else old_df,
+            new_df=revision_comparison_new_df if revision_comparison_new_df is not None else df,
             key_columns=key_columns,
             source=source,
         )
+        if event and revision_comparison_old_df is not None:
+            # The event diff is restricted to a caller-proven affected slice,
+            # while partition row counts continue to describe the durable file.
+            event["old_rows"] = int(len(old_df))
+            event["new_rows"] = int(len(df))
         # A re-pull that DROPS existing keys is destructive (the ann_month
         # truncated-window class silently deleted announcements). Blocked by
         # default; accepting a genuine source retraction means deleting the
         # partition file first or passing allow_key_removal_overwrite.
         if write_action == "overwrite" and event and event["removed_keys"] and not allow_key_removal_overwrite:
             write_action = "skipped_key_removal_overwrite"
-        if write_action == "overwrite" and event and event["removed_keys"] and allow_key_removal_overwrite:
+        if (
+            write_action == "overwrite"
+            and event
+            and event["removed_keys"]
+            and allow_key_removal_overwrite
+        ):
             # Full-partition pulls accept key removals as source corrections, but a
             # transiently truncated (non-empty) response must not wipe a partition:
             # a disproportionate shrink (>20 keys AND >20% of existing keys) blocks.

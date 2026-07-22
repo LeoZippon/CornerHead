@@ -24,12 +24,13 @@ import pyarrow.parquet as pq
 
 from autotrade.environment.artifacts import (
     ArtifactError,
-    READONLY_FILES,
     artifact_hash,
     combined_artifact_hash,
     load_model_artifacts,
     load_strategy_artifact,
+    make_formal_artifacts_readonly,
     model_artifact_hash,
+    restore_formal_artifacts_writable,
 )
 from autotrade.environment.replay.stats import compute_return_stats
 from autotrade.environment.broker import (
@@ -43,7 +44,7 @@ from autotrade.environment.replay.engine import BacktestError, MainPolicyRunner,
 from autotrade.environment.nl.service import StrategyNLService, cleanup_nl_rpc_files, prepare_nl_rpc_files
 from autotrade.environment.replay.market import ParquetMinuteReplaySource
 from autotrade.environment.identity import agent_visible_ref
-from autotrade.environment.runtime import chmod_tree, new_id, sanitize_for_log, utc_now_iso
+from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.data.snapshot import load_snapshot_manifest
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.replay.style import replay_style_analysis
@@ -1325,20 +1326,6 @@ def _formal_artifacts_readonly(paths, *, restore_writable: bool):
     finally:
         if restore_writable:
             restore_formal_artifacts_writable(paths)
-
-
-def make_formal_artifacts_readonly(paths) -> None:
-    chmod_tree(paths.agent_output, file_mode=0o444, dir_mode=0o555)
-    chmod_tree(paths.model_artifacts, file_mode=0o444, dir_mode=0o555)
-
-
-def restore_formal_artifacts_writable(paths) -> None:
-    chmod_tree(paths.agent_output, file_mode=0o666, dir_mode=0o777)
-    chmod_tree(paths.model_artifacts, file_mode=0o666, dir_mode=0o777)
-    for relpath in READONLY_FILES:
-        target = paths.agent_output / relpath
-        if target.exists():
-            target.chmod(0o444)
 
 
 def nl_call_budget(manifest, replay_daily) -> int | None:

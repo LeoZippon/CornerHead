@@ -16,7 +16,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from autotrade.environment.runtime import RUNTIME_CACHE_DIR_NAMES, RUNTIME_CACHE_SUFFIXES
+from autotrade.environment.runtime import RUNTIME_CACHE_DIR_NAMES, RUNTIME_CACHE_SUFFIXES, chmod_tree
 
 REQUIRED_FILES = ("main.py",)
 ARTIFACT_METADATA_FILES = frozenset({"manifest.json"})
@@ -60,6 +60,24 @@ MODEL_ARTIFACT_ALLOWED_SUFFIXES = frozenset(
         ".yml",
     }
 )
+
+
+def make_formal_artifacts_readonly(paths) -> None:
+    """Lock the strategy and model artifacts for formal validation/freeze."""
+    chmod_tree(paths.agent_output, file_mode=0o444, dir_mode=0o555)
+    chmod_tree(paths.model_artifacts, file_mode=0o444, dir_mode=0o555)
+
+
+def restore_formal_artifacts_writable(paths) -> None:
+    """Unlock formal artifacts while retaining immutable template files."""
+    chmod_tree(paths.agent_output, file_mode=0o666, dir_mode=0o777)
+    chmod_tree(paths.model_artifacts, file_mode=0o666, dir_mode=0o777)
+    for relpath in READONLY_FILES:
+        target = paths.agent_output / relpath
+        if target.exists():
+            target.chmod(0o444)
+
+
 # Mount paths a formal strategy must never hardcode. "/mnt/snapshots/" (plural,
 # the staged alias root) is not mounted into the formal run. "/mnt/runtime/"
 # subpaths ARE mounted there (state/staging/asof/rpc — two of them writable),

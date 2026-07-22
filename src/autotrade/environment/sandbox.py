@@ -22,7 +22,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from autotrade.environment.artifacts import READONLY_FILES, copy_artifact, copy_model_artifacts, init_from_template
+from autotrade.environment.artifacts import (
+    copy_artifact,
+    copy_model_artifacts,
+    init_from_template,
+    make_formal_artifacts_readonly,
+    restore_formal_artifacts_writable,
+)
 from autotrade.environment.runtime import (
     chmod_tree,
     AGENT_TOP_LEVEL,
@@ -256,18 +262,12 @@ class LocalSandbox:
 
     def lock_agent_output(self) -> None:
         """Filesystem write lock after finish_fold / during frozen phases."""
-        chmod_tree(self.paths.agent_output, file_mode=0o444, dir_mode=0o555)
-        chmod_tree(self.paths.model_artifacts, file_mode=0o444, dir_mode=0o555)
+        make_formal_artifacts_readonly(self.paths)
 
     def unlock_agent_output(self) -> None:
         # World-writable so the container agent (subuid in rootless Docker) can
         # edit the formal files; READMEs stay read-only.
-        chmod_tree(self.paths.agent_output, file_mode=0o666, dir_mode=0o777)
-        chmod_tree(self.paths.model_artifacts, file_mode=0o666, dir_mode=0o777)
-        for relpath in READONLY_FILES:
-            target = self.paths.agent_output / relpath
-            if target.exists():
-                target.chmod(0o444)
+        restore_formal_artifacts_writable(self.paths)
 
     def collect_artifacts(self, dest_dir: Path) -> Path:
         """Collect runtime outputs into the host experiment run directory.

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-import sys
+import json
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
@@ -13,15 +13,102 @@ from typing import Any
 import pandas as pd
 import pyarrow.parquet as pq
 
-if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-    from autotrade.data_sources.tushare import common as core
-    from autotrade.data_sources.tushare.common import *  # noqa: F401,F403
-else:
-    from . import common as core
-    from .common import *  # noqa: F401,F403
+from . import common as core
+from .common import (
+    BAK_BASIC_SPEC,
+    BASE_RESEARCH_STATUS_PATH,
+    BOARD_TRADING_DATASETS,
+    BOARD_TRADING_DEFAULT_DATASETS,
+    BOARD_TRADING_SPECS,
+    BOARD_TRADING_STATUS_PATH,
+    DAILY_OPTIONAL_DATASETS,
+    DAILY_REQUIRED_DATASETS,
+    DAILY_SPECS,
+    EVENT_FLOW_DATASETS,
+    EVENT_FLOW_SPECS,
+    EVENT_FLOW_STATUS_PATH,
+    FUNDAMENTAL_DATASETS,
+    FUNDAMENTAL_SPECS,
+    INTEGRATED_DOC_REFS,
+    INTRADAY_MINUTES_STATUS_PATH,
+    MACRO_CONTEXT_STATUS_PATH,
+    MACRO_DATASETS,
+    MACRO_RETAINED_FLOOR,
+    MACRO_SPECS,
+    REFERENCE_DATASETS,
+    REVISION_SUMMARY_PATH,
+    SEMANTIC_DOC_REFS,
+    SHARE_FLOAT_ROW_LIMIT,
+    STK_MINS_API_NAME,
+    STK_MINS_DATASET,
+    STK_MINS_PAGE_LIMIT,
+    STK_MINS_REQUIRED_COLUMNS,
+    TEXT_DEFAULT_DATASETS,
+    TEXT_EVIDENCE_STATUS_PATH,
+    TEXT_SPECS,
+    TRADE_DATE_PAGE_LIMIT,
+    BoardTradingDataset,
+    EventDataset,
+    FundamentalDataset,
+    MacroDataset,
+    TextDataset,
+    TradeDateDataset,
+    TuShareClient,
+    active_year_windows,
+    append_jsonl,
+    append_jsonl_unique,
+    augment_board_frame,
+    augment_event_frame,
+    board_page_limit,
+    build_revision_event,
+    canonical_revision_value,
+    date_range_days,
+    event_page_limit,
+    file_sha256,
+    frame,
+    has_pagination_probe,
+    intraday_expected_codes_for_day,
+    latest_sse_calendar_date,
+    load_minute_universe,
+    load_sse_open_dates,
+    load_stock_codes,
+    load_token,
+    margin_missing_exchanges,
+    month_end_from_yyyymm,
+    month_windows,
+    parquet_meta,
+    parquet_rows,
+    partition_date,
+    quarter_periods,
+    query_paged,
+    read_many,
+    safe_partition_value,
+    selected_board_dc_hot_markets,
+    selected_board_dc_hot_types,
+    selected_board_hot_is_new,
+    selected_board_kpl_tags,
+    selected_board_ths_hot_markets,
+    selected_board_ths_limit_types,
+    selected_board_trading_datasets,
+    selected_cn_index_codes,
+    selected_daily_datasets,
+    selected_eco_filter_values,
+    selected_event_flow_datasets,
+    selected_fx_codes,
+    selected_index_codes,
+    selected_integrated_fundamental_datasets,
+    selected_integrated_intraday_datasets,
+    selected_libor_currencies,
+    selected_news_sources,
+    stable_hash,
+    stk_mins_by_date_path,
+    validate_stk_mins_by_date_frame,
+    yyyymmdd_to_month,
+    yyyymmdd_to_quarter,
+)
 
 from autotrade.data_quality import build_quality_report, write_quality_report
+from autotrade.environment.data.auction import AuctionCorrectionConfig, market_bucket
 from autotrade.environment.data.units import column_source_units, dataset_rules_records, rules_for
 
 def audit_trade_date_dataset(raw_dir: Path, spec: TradeDateDataset, expected_dates: set[str], add) -> None:
@@ -943,20 +1030,6 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
     print(f"intraday by-date audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
     return 1 if counts["error"] else 0
 
-def auction_alignment_bucket(ts_code: object) -> str:
-    text = str(ts_code or "").strip().upper()
-    if text.endswith(".SZ") and text.startswith("00"):
-        return "sz_main_00"
-    if text.endswith(".SZ") and text.startswith("30"):
-        return "sz_gem_30"
-    if text.endswith(".SH") and text.startswith("60"):
-        return "sh_main_60"
-    if text.endswith(".SH") and text.startswith("68"):
-        return "sh_star_68"
-    if text.endswith(".BJ"):
-        return "bj"
-    return "other"
-
 def numeric_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     left = pd.to_numeric(numerator, errors="coerce")
     right = pd.to_numeric(denominator, errors="coerce")
@@ -979,9 +1052,6 @@ def grouped_ratio_stats(df: pd.DataFrame, columns: list[str]) -> dict[str, dict[
         result[str(bucket)] = item
     return result
 
-def factor_for_auction_bucket(bucket: str) -> float:
-    return {"sz_main_00": 0.76, "sz_gem_30": 0.58}.get(bucket, 1.0)
-
 def audit_auction_alignment(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = (repo_root / args.raw_dir).resolve()
@@ -995,6 +1065,7 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
         findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
 
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
+    correction = AuctionCorrectionConfig()
     auction_day_stats: list[dict[str, Any]] = []
     daily_day_stats: list[dict[str, Any]] = []
     missing_minute_dates: list[str] = []
@@ -1010,12 +1081,15 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
         open_bar = minutes[hhmm.eq("09:30")].copy()
         auction = api_frame(client, "stk_auction", {"trade_date": trade_date}, "ts_code,trade_date,vol,amount")
         merged = open_bar.merge(auction, on="ts_code", suffixes=("_minute", "_auction"))
-        merged["bucket"] = merged["ts_code"].map(auction_alignment_bucket)
+        merged["bucket"] = merged["ts_code"].map(market_bucket)
         merged["vol_ratio"] = numeric_ratio(merged["vol_minute"], merged["vol_auction"])
         merged["amount_ratio"] = numeric_ratio(merged["amount_minute"], merged["amount_auction"])
-        merged["factor"] = merged["bucket"].map(factor_for_auction_bucket)
-        merged["vol_ratio_after_factor"] = merged["vol_ratio"] * merged["factor"]
-        merged["amount_ratio_after_factor"] = merged["amount_ratio"] * merged["factor"]
+        merged["vol_ratio_after_factor"] = merged["vol_ratio"] * merged["bucket"].map(
+            lambda bucket: correction.volume_factors.get(bucket, 1.0)
+        )
+        merged["amount_ratio_after_factor"] = merged["amount_ratio"] * merged["bucket"].map(
+            lambda bucket: correction.amount_factors.get(bucket, 1.0)
+        )
         auction_day_stats.append({
             "trade_date": trade_date,
             "minute_open_rows": int(len(open_bar)),
@@ -1031,7 +1105,7 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
         daily = pd.read_parquet(daily_path, columns=["ts_code", "vol", "amount"])
         minute_sum = minutes.groupby("ts_code", as_index=False)[["vol", "amount"]].sum()
         daily_merge = minute_sum.merge(daily, on="ts_code", suffixes=("_minute_sum", "_daily"))
-        daily_merge["bucket"] = daily_merge["ts_code"].map(auction_alignment_bucket)
+        daily_merge["bucket"] = daily_merge["ts_code"].map(market_bucket)
         daily_merge["minute_to_daily_vol_ratio"] = numeric_ratio(daily_merge["vol_minute_sum"], daily_merge["vol_daily"])
         daily_merge["minute_to_daily_amount_ratio"] = numeric_ratio(daily_merge["amount_minute_sum"], daily_merge["amount_daily"])
         daily_day_stats.append({
@@ -1048,7 +1122,10 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
     add("warning" if not auction_day_stats else "info", "minute_0930_vs_stk_auction", "09:30 minute bar against live stk_auction ratios by market bucket", {
         "days": auction_day_stats,
         "expected_pattern": "SH/BJ buckets should stay near 1.0; historical SZ 09:30 minute bars are adjusted in PIT snapshot construction before comparing with live stk_auction.",
-        "correction_factors": {"sz_main_00": 0.76, "sz_gem_30": 0.58, "others": 1.0},
+        "correction_factors": {
+            "volume": {**correction.volume_factors, "others": 1.0},
+            "amount": {**correction.amount_factors, "others": 1.0},
+        },
     })
     add("warning" if not daily_day_stats else "info", "minute_sum_vs_daily_units", "full-day minute sums against daily unit ratios", {
         "days": daily_day_stats,
