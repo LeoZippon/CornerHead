@@ -1,3 +1,7 @@
+2026-07-22 复审三轮：crontab 事务锁、JSONL 下限、concat_rows 定位收敛
+
+- 两个 crontab 安装器共享 .runtime/crontab.lock 的单一 flock 覆盖完整读改写校验事务（并发丢块风险闭合，dry-run 不加锁）；dispatch 记录上限强制 ≥1KiB 且超限包装按转义上界证明必然合法入 cap（删除退化回退，新增中文超限记录回归）；concat_rows 收敛为仅行并集原语（去 **kwargs，固定语义，16 个调用点收窄，文档化列序合同），并补上 snapshot 三处漏转的 union（此前 import 实为未用）。全量 tests 926+45 通过。
+
 2026-07-22 复审二轮：concat 混合 schema、备份重名、JSONL 上限收口
 
 - concat_rows 修复补全：空表独有的列不再因预过滤而丢失（混合输入后置补列，int 提升 float 与原生 concat 一致，补测覆盖）；两个 crontab 安装器备份文件名加来源前缀+pid，同秒运行不再互相覆盖；dispatch 单记录超 5MiB 上限时改为“截断原始字段后重新序列化”的合法 JSON 记录（退化极小上限保硬性字节界并注释成文）。全量 tests 925+45 通过。

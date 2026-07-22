@@ -1330,7 +1330,7 @@ class SnapshotBuilder:
                     "screen_seconds": round(screen_seconds, 3),
                 },
             }
-        merged = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+        merged = concat_rows(frames) if frames else pd.DataFrame()
         if schema_only and "dataset" not in merged.columns:
             merged.insert(0, "dataset", pd.Series([None] * len(merged), dtype=pd.ArrowDtype(pa.string()), index=merged.index))
         for schema in schema_only.values():
@@ -1410,7 +1410,7 @@ class SnapshotBuilder:
         if nat_counts is not None and nat_dropped:
             nat_counts[dataset_dir.name] = nat_counts.get(dataset_dir.name, 0) + nat_dropped
         started = time.perf_counter()
-        merged = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+        merged = concat_rows(frames) if frames else pd.DataFrame()
         concat_seconds = time.perf_counter() - started
         return merged, {
             "partition_files": len(paths),
@@ -1666,7 +1666,7 @@ class SnapshotBuilder:
                 frames.append(frame[cols])
         if not frames:
             return pd.DataFrame()
-        merged = pd.concat(frames, ignore_index=True)
+        merged = concat_rows(frames)
         if "in_date" in merged.columns:
             merged = merged[merged["in_date"].fillna("").astype(str) <= decision_day]
         if "out_date" in merged.columns:

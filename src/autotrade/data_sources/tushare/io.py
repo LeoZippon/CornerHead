@@ -146,7 +146,7 @@ def append_jsonl_unique(path: Path, payload: dict[str, Any], *, key: str) -> boo
 
 def read_many(files: list[Path], columns: list[str] | None = None) -> pd.DataFrame:
     frames = [pd.read_parquet(path, columns=columns) for path in files]
-    return concat_rows(frames, ignore_index=True) if frames else pd.DataFrame()
+    return concat_rows(frames) if frames else pd.DataFrame()
 
 
 def parquet_rows(path: Path) -> int:

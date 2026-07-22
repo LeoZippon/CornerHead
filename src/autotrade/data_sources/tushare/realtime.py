@@ -63,7 +63,7 @@ class RealtimeMinuteFeed:
             result = self.client.query("rt_min", {"ts_code": ts_code, "freq": RT_MIN_FREQ})
             if result.items:
                 parts.append(pd.DataFrame(result.items, columns=result.fields))
-        merged = normalize_rt_minutes(concat_rows(parts, ignore_index=True)) if parts else normalize_rt_minutes(pd.DataFrame())
+        merged = normalize_rt_minutes(concat_rows(parts)) if parts else normalize_rt_minutes(pd.DataFrame())
         fresh_mask = [
             (row.ts_code, row.trade_time) not in self._seen for row in merged.itertuples(index=False)
         ]
@@ -95,7 +95,7 @@ class RealtimeMinuteStore:
             path = self.partition_path(str(trade_date))
             merged = group
             if path.exists():
-                merged = concat_rows([pd.read_parquet(path), group], ignore_index=True)
+                merged = concat_rows([pd.read_parquet(path), group])
             merged = (
                 merged.drop_duplicates(["ts_code", "trade_time"], keep="last")
                 .sort_values(["trade_time", "ts_code"])

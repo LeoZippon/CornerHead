@@ -12,15 +12,19 @@ import pandas as pd
 from autotrade.environment.data.contracts import CN_TZ
 
 
-def concat_rows(frames: list[pd.DataFrame], **kwargs) -> pd.DataFrame:
-    """Row-union concat for parquet-sourced frames.
+def concat_rows(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """Row-union for parquet-sourced frames — deliberately NOT a ``pd.concat``
+    drop-in: always a fresh RangeIndex over the outer column union, column
+    order follows the non-empty inputs (schema-only columns from empty inputs
+    append after), and no join/axis/key options exist.
 
-    Empty inputs are dropped (their inclusion in dtype inference is deprecated
-    and warns per call). Real frames may still carry all-NA columns — genuine
-    sparse schema, not removable — for which pandas' future behavior (typed
-    all-NA columns participate in inference) equals today's outcome because
-    the columns are parquet-typed; that residual FutureWarning is accepted
-    noise and suppressed at this single boundary."""
+    Empty inputs are excluded from the concat (their inclusion in dtype
+    inference is deprecated and warns per call) but still contribute schema.
+    Real frames may carry all-NA columns — genuine sparse schema, not
+    removable — for which pandas' future behavior (typed all-NA columns
+    participate in inference) equals today's outcome because the columns are
+    parquet-typed; that residual FutureWarning is accepted noise and
+    suppressed at this single boundary."""
     non_empty = [frame for frame in frames if not frame.empty]
     if not non_empty:
         # Preserve the column union and dtypes of the empty inputs instead of
@@ -33,7 +37,7 @@ def concat_rows(frames: list[pd.DataFrame], **kwargs) -> pd.DataFrame:
         return pd.DataFrame({column: pd.Series(dtype=dtype) for column, dtype in columns.items()})
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=FutureWarning, message=".*empty or all-NA entries.*")
-        merged = pd.concat(non_empty, **kwargs)
+        merged = pd.concat(non_empty, ignore_index=True, sort=False)
     # Empty inputs still contribute schema: columns only they carry are added
     # as typed all-NA via reindex (integer dtypes promote to float, exactly as
     # a plain concat would have produced).

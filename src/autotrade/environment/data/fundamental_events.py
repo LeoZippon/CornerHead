@@ -74,7 +74,7 @@ class FundamentalEventsBuilder:
         frames = [frame for frame in frames if not frame.empty]
         if not frames:
             return pd.DataFrame(columns=self._event_columns())
-        events = concat_rows(frames, ignore_index=True)
+        events = concat_rows(frames)
         events = events[events["available_at"].astype(str).str.strip().ne("")].copy()
         if events.empty:
             return pd.DataFrame(columns=self._event_columns())
@@ -111,7 +111,7 @@ class FundamentalEventsBuilder:
             path.parent.mkdir(parents=True, exist_ok=True)
             if path.exists() and month not in replace_months:
                 existing = pd.read_parquet(path)
-                group = concat_rows([existing, group], ignore_index=True)
+                group = concat_rows([existing, group])
             dedupe_cols = [col for col in ["dataset", "business_key", "available_at"] if col in group.columns]
             if dedupe_cols:
                 group = group.drop_duplicates(dedupe_cols, keep="last")
@@ -142,7 +142,7 @@ class FundamentalEventsBuilder:
             frames.append(df)
         if not frames:
             return pd.DataFrame(columns=self._event_columns())
-        return concat_rows(frames, ignore_index=True)
+        return concat_rows(frames)
 
     def _statement_availability(self) -> dict[tuple[str, str], str]:
         availability: dict[tuple[str, str], str] = {}
@@ -344,7 +344,7 @@ def read_fundamental_events(
         return pd.DataFrame()
     if not frames:
         return pd.DataFrame()
-    events = concat_rows(frames, ignore_index=True)
+    events = concat_rows(frames)
     parsed = pd.to_datetime(events["available_at"], errors="coerce")
     visible = parsed <= max_ts
     if min_ts is not None:

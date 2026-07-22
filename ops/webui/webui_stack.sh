@@ -155,6 +155,11 @@ sync_static() {
 install_cron() {
     local self="$REPO/ops/webui/webui_stack.sh"
     local block current
+    # One flock spans the whole crontab read-modify-write-verify transaction,
+    # shared with ops/cron/install_tushare_cron.py: without it the later
+    # writer would silently erase the managed block the earlier one added.
+    exec 8>"$REPO/.runtime/crontab.lock"
+    flock -w 30 8 || { echo "FAILED: another crontab installer holds the lock" >&2; exit 1; }
     block="$CRON_BEGIN
 */2 * * * * $self ensure >> $LOG_DIR/keepalive.log 2>&1
 @reboot sleep 30 && $self ensure >> $LOG_DIR/keepalive.log 2>&1

@@ -735,14 +735,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         left = pd.DataFrame({"ts_code": pd.Series(dtype=object), "close": pd.Series(dtype="float64")})
         right = pd.DataFrame({"ts_code": pd.Series(dtype=object), "volume": pd.Series(dtype="int64")})
-        merged = concat_rows([left, right], ignore_index=True)
+        merged = concat_rows([left, right])
         self.assertEqual(list(merged.columns), ["ts_code", "close", "volume"])
         self.assertEqual(str(merged["close"].dtype), "float64")
         self.assertEqual(len(merged), 0)
 
         # Mixed inputs: an empty frame's extra columns still enter the schema.
         rows = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
-        widened = concat_rows([rows, right], ignore_index=True)
+        widened = concat_rows([rows, right])
         self.assertIn("volume", widened.columns)
         self.assertEqual(len(widened), 1)
         self.assertTrue(widened["volume"].isna().all())
@@ -1470,18 +1470,30 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_dispatch_log_rotation_is_size_bounded(self):
         dispatch = self.root / "logs" / "tushare" / "dispatch.log"
 
-        for index in range(5):
-            cron_update.append_dispatch_log(
-                dispatch,
-                f"line-{index}\n",
-                max_bytes=12,
-                backups=2,
-            )
+        line = json.dumps({"status": "ok", "pad": "x" * 400}) + "\n"
+        for _ in range(5):
+            cron_update.append_dispatch_log(dispatch, line, max_bytes=1024, backups=2)
 
         retained = [dispatch, dispatch.with_name("dispatch.log.1"), dispatch.with_name("dispatch.log.2")]
         self.assertTrue(all(path.is_file() for path in retained))
-        self.assertTrue(all(path.stat().st_size <= 12 for path in retained))
+        self.assertTrue(all(path.stat().st_size <= 1024 for path in retained))
         self.assertFalse(dispatch.with_name("dispatch.log.3").exists())
+        # Below the 1 KiB floor no valid-JSON truncation envelope could fit.
+        with self.assertRaises(ValueError):
+            cron_update.append_dispatch_log(dispatch, line, max_bytes=12, backups=2)
+
+    def test_dispatch_log_caps_oversized_records_as_valid_json(self):
+        dispatch = self.root / "logs" / "tushare" / "dispatch.log"
+        huge = json.dumps({"status": "ok", "detail": "夏" * 5000}) + "\n"
+
+        cron_update.append_dispatch_log(dispatch, huge, max_bytes=2048, backups=2)
+
+        lines = dispatch.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        record = json.loads(lines[0])  # must stay one valid JSON line
+        self.assertIn("raw_truncated", record)
+        self.assertEqual(record["original_bytes"], len(huge.encode("utf-8")))
+        self.assertLessEqual(dispatch.stat().st_size, 2048)
 
     def test_log_path_helper_reuses_only_existing_runtime_logs(self):
         existing = self.root / "logs" / "previous.log"
