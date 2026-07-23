@@ -86,6 +86,18 @@ def agent_visible_tool_result(record: dict[str, object]) -> dict[str, object]:
     return project(record)  # type: ignore[return-value]
 
 
+def llm_observation(record: dict[str, object]) -> dict[str, object]:
+    """Project a tool summary for an Agent-visible channel: host coordinates
+    are removed (same rule as the trace projection) and the static
+    ``tool_spec`` echo is dropped — identical native tool definitions already
+    ride on every provider call, so re-embedding ~2KB per observation only
+    burns Agent context. Error paths attach ``tool_spec`` deliberately and the
+    trace/host manifest keep the full record."""
+    projected = dict(agent_visible_tool_result(record))
+    projected.pop("tool_spec", None)
+    return projected
+
+
 class ToolSchemaError(ToolError):
     """Action payload failed the Runner-side tool schema."""
 
