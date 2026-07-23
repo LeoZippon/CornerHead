@@ -467,9 +467,8 @@ class DefaultsDriftTest(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[2]
         parser = build_parser(repo_root)
         skip = {
-            # Legacy quarter conveniences and repo-root-resolved path defaults
-            # (PARAM_DEFAULTS keeps them repo-relative by design).
-            "first_test_quarter", "last_test_quarter",
+            # Repo-root-resolved path defaults (PARAM_DEFAULTS keeps them
+            # repo-relative by design).
             "raw_dir", "fundamental_events_root", "fundamental_events_status",
             "experiments_root", "work_root", "template_dir",
         }
@@ -483,6 +482,124 @@ class DefaultsDriftTest(unittest.TestCase):
             if cli_default != expected:
                 mismatches[action.dest] = (cli_default, expected)
         self.assertEqual(mismatches, {})
+
+
+class ConfigBuilderCompletenessTest(unittest.TestCase):
+    """Every ExperimentConfig field must flow through the single shared builder
+    (assembly.build_experiment_config, consumed by run_experiment,
+    run_audit_session, and the HITL worker) or be explicitly recorded here as
+    not entrypoint-configurable — a future field cannot silently reach only one
+    entrypoint again (the H1 drift this batch consolidated away)."""
+
+    # Dataclass-default-only knobs: deliberately no CLI/HITL surface.
+    NOT_ENTRYPOINT_CONFIGURABLE = {
+        "afterhours_decision_time",
+        "backtest_final_eval_max_seconds_per_decision",
+        "backtest_final_eval_max_seconds_per_trading_day",
+        "timeview_enabled",
+        "step_constraints",
+        "regularization_constraints",
+    }
+    # Fields the builder composes from renamed keys, several keys, or explicit
+    # builder parameters (sandbox_spec and the meta specs derived from it).
+    COMPOSED_SOURCES = {
+        "step_tree_enabled": ("disable_step_tree",),
+        "use_docker": ("local_dev",),
+        "meta_sandbox_rebuild_enabled": ("disable_meta_sandbox_rebuild",),
+        "acceptance": ("min_return", "min_sharpe", "max_drawdown"),
+        "broker_profile": (
+            "stock_initial_cash", "credit_initial_cash", "commission_bps", "slippage_bps",
+            "max_total_holdings", "max_single_name_weight", "fin_rate_annual", "slo_rate_annual",
+        ),
+        "snapshot_config": ("window_months", "intraday_trade_days"),
+        "sandbox_spec": ("gpu_count",),
+        "meta_learning_sandbox_spec": ("meta_learning_network",),
+        "meta_learning_managed_proxy": ("meta_learning_network",),
+    }
+    PATH_FIELDS = {"experiments_root", "work_root", "template_dir"}
+    # One valid non-default value per direct-named configurable field; the
+    # coverage assertion below forces this map to grow with the dataclass.
+    DIRECT_OVERRIDES = {
+        "experiment_id": "exp_builder_completeness",
+        "first_test_period": "2022Q1",
+        "last_test_period": "2022Q2",
+        "heldout_first_period": "2023Q1",
+        "heldout_last_period": "2023Q2",
+        "fold_period": "quarter",
+        "epochs": 5,
+        "window_months": 9,
+        "max_fold_minutes": 33,
+        "finalize_before_deadline_seconds": 240,
+        "per_call_timeout_seconds": 111,
+        "max_steps_per_fold": 4,
+        "max_backtests_per_fold": 9,
+        "offsession_tick_minutes": 15,
+        "intraday_decision_minutes": 5,
+        "execution_lag_bars": 3,
+        "decision_max_sim_minutes": 12.5,
+        "backtest_max_seconds_per_decision": 100.0,
+        "backtest_max_seconds_per_trading_day": 200.0,
+        "nl_max_calls_per_decision_day": 6,
+        "nl_max_calls_per_backtest": 44,
+        "nl_failure_policy": "fail",
+        "convergence_start_epoch": 2,
+        "meta_learning_directive": "研究方向：事件驱动",
+        "fold_exploration_directive": "探索方向：低换手",
+        "meta_learning_fold_interval": 2,
+        "meta_memory_max_epochs": 1,
+        "record_failed_attempts": False,
+        "meta_sandbox_rebuild_timeout_seconds": 900,
+        "meta_sandbox_image_keep": 2,
+    }
+
+    def test_every_field_has_a_builder_source_or_is_recorded(self):
+        for field_obj in fields(ExperimentConfig):
+            name = field_obj.name
+            if name in self.NOT_ENTRYPOINT_CONFIGURABLE:
+                self.assertNotIn(name, PARAM_DEFAULTS, name)
+                continue
+            for source in self.COMPOSED_SOURCES.get(name, (name,)):
+                self.assertIn(
+                    source, PARAM_DEFAULTS,
+                    f"ExperimentConfig.{name} has no PARAM_DEFAULTS source {source!r}; wire it "
+                    "through assembly.build_experiment_config (and PARAM_DEFAULTS) or record it "
+                    "in NOT_ENTRYPOINT_CONFIGURABLE",
+                )
+
+    def test_builder_propagates_every_direct_field(self):
+        from autotrade.environment.sandbox import SandboxSpec
+        from autotrade.pipelines.assembly import build_experiment_config
+        from autotrade.pipelines.hitl_state import resolve_options
+
+        direct_fields = {
+            field_obj.name
+            for field_obj in fields(ExperimentConfig)
+            if field_obj.name not in self.NOT_ENTRYPOINT_CONFIGURABLE
+            and field_obj.name not in self.COMPOSED_SOURCES
+            and field_obj.name not in self.PATH_FIELDS
+        }
+        self.assertEqual(
+            sorted(direct_fields), sorted(self.DIRECT_OVERRIDES),
+            "extend DIRECT_OVERRIDES (and the builder) when ExperimentConfig gains a field",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp).resolve()
+            options = resolve_options(
+                {**self.DIRECT_OVERRIDES, "min_return": 0.01, "disable_step_tree": True, "local_dev": True},
+                repo_root,
+            )
+            config = build_experiment_config(
+                options, repo_root=repo_root, sandbox_spec=SandboxSpec(gpu=None)
+            )
+            for name in self.PATH_FIELDS:
+                self.assertEqual(getattr(config, name), (repo_root / PARAM_DEFAULTS[name]).resolve(), name)
+        for name, expected in self.DIRECT_OVERRIDES.items():
+            self.assertEqual(getattr(config, name), expected, name)
+        # Renamed/composed knobs land too (spot-checks; broker/session budgets
+        # are covered by the interactive worker's extended-params test).
+        self.assertEqual(config.acceptance.min_return, 0.01)
+        self.assertFalse(config.step_tree_enabled)
+        self.assertFalse(config.use_docker)
 
 
 if __name__ == "__main__":

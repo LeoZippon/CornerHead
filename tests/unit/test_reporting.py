@@ -76,17 +76,10 @@ class ReportingTest(unittest.TestCase):
                     },
                 }
             )
-            (tmp / "reports").mkdir()
-            (tmp / "reports" / "fold_returns.png").write_text("legacy", encoding="utf-8")
-            (tmp / "reports" / "cumulative_test_return.png").write_text("legacy", encoding="utf-8")
-            (tmp / "reports" / "summary.json").write_text("legacy", encoding="utf-8")
             summary = build_experiment_report(tmp / "ledger.jsonl", tmp / "reports")
             self.assertTrue((tmp / "reports" / "epoch_comparison_returns.png").exists())
             self.assertTrue((tmp / "reports" / "epoch_returns" / "epoch_001_returns.png").exists())
             self.assertTrue((tmp / "reports" / "epoch_returns" / "epoch_002_returns.png").exists())
-            self.assertFalse((tmp / "reports" / "fold_returns.png").exists())
-            self.assertFalse((tmp / "reports" / "cumulative_test_return.png").exists())
-            self.assertFalse((tmp / "reports" / "summary.json").exists())
             self.assertEqual(summary["folds"], 4)
             self.assertEqual(summary["heldout_periods"], 1)
             self.assertEqual(

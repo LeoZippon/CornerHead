@@ -12,6 +12,7 @@ import argparse
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parents[1]
@@ -33,12 +34,10 @@ from _cli import (
     add_path_arguments,
     add_snapshot_window_arguments,
     add_web_search_arguments,
-    build_meta_learning_sandbox_spec,
-    build_meta_learning_managed_proxy_spec,
+    build_experiment_config,
     build_pipeline,
     build_proxies,
     build_session_builders,
-    build_snapshot_config,
     build_web_search_providers,
     require_generic_period_args,
     resolve_meta_learning_directive,
@@ -46,12 +45,7 @@ from _cli import (
 
 from autotrade.environment.artifacts import artifact_hash, model_artifact_hash
 from autotrade.environment.sandbox import DEFAULT_IMAGE, SandboxSpec
-from autotrade.pipelines import (
-    AcceptanceRules,
-    ExperimentConfig,
-    FrozenArtifact,
-    load_sse_trading_days,
-)
+from autotrade.pipelines import FrozenArtifact, load_sse_trading_days
 from autotrade.pipelines.folds import build_fold_schedule
 
 
@@ -194,56 +188,23 @@ def main() -> int:
     return 0
 
 
-def _build_config(repo_root: Path, args: argparse.Namespace, meta_learning_directive: str) -> ExperimentConfig:
-    snapshot_config = build_snapshot_config(args)
+def _build_config(repo_root: Path, args: argparse.Namespace, meta_learning_directive: str):
     sandbox_overrides: dict[str, object] = {}
     if args.sandbox_image:
         sandbox_overrides["image"] = args.sandbox_image
     if args.gpu_devices:
         sandbox_overrides["gpu"] = _parse_gpu_devices(args.gpu_devices)
         sandbox_overrides["gpu_count"] = len(sandbox_overrides["gpu"])
-    sandbox_spec = SandboxSpec.from_host_fraction(**sandbox_overrides)
-    meta_learning_sandbox_spec = build_meta_learning_sandbox_spec(
+    config = build_experiment_config(
         args,
-        sandbox_spec,
         repo_root=repo_root,
+        sandbox_spec=SandboxSpec.from_host_fraction(**sandbox_overrides),
+        meta_learning_directive=meta_learning_directive,
         extra_dotenv_keys=(args.tavily_api_key_env, args.semantic_scholar_api_key_env),
     )
-    meta_learning_managed_proxy = build_meta_learning_managed_proxy_spec(
-        args,
-        repo_root=repo_root,
-        sandbox_spec=meta_learning_sandbox_spec,
-    )
-    return ExperimentConfig(
-        experiment_id=args.experiment_id,
-        experiments_root=args.experiments_root.resolve(),
-        work_root=args.work_root.resolve(),
-        template_dir=args.template_dir.resolve(),
-        first_test_period=args.first_test_period,
-        last_test_period=args.last_test_period,
-        heldout_first_period=args.heldout_first_period,
-        heldout_last_period=args.heldout_last_period,
-        fold_period=args.fold_period,
-        epochs=1,
-        window_months=args.window_months,
-        max_fold_minutes=args.max_fold_minutes,
-        snapshot_config=snapshot_config,
-        nl_failure_policy="return_error_with_audit",
-        convergence_start_epoch=3,
-        meta_learning_directive=meta_learning_directive,
-        step_tree_enabled=True,
-        acceptance=AcceptanceRules(
-            min_return=args.min_return,
-            min_sharpe=args.min_sharpe,
-            max_drawdown=args.max_drawdown,
-            require_complete_validation=True,
-        ),
-        sandbox_spec=sandbox_spec,
-        meta_learning_sandbox_spec=meta_learning_sandbox_spec,
-        meta_learning_managed_proxy=meta_learning_managed_proxy,
-        meta_sandbox_rebuild_enabled=not args.disable_meta_sandbox_rebuild,
-        use_docker=not args.local_dev,
-    )
+    # One audited session, never a multi-epoch schedule: an explicit override
+    # of the shared builder's default rather than a fourth hand-written config.
+    return replace(config, epochs=1)
 
 
 def _parent_artifact(args: argparse.Namespace) -> FrozenArtifact | None:

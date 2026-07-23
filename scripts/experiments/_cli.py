@@ -23,6 +23,7 @@ from autotrade.pipelines.assembly import (  # noqa: F401
     DEFAULT_META_PROXY_ALIASES,
     DEFAULT_NL_MODEL,
     ProxyBundle,
+    build_experiment_config,
     build_meta_learning_managed_proxy_spec,
     build_meta_learning_sandbox_spec,
     build_pipeline,

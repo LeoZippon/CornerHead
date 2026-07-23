@@ -47,15 +47,15 @@ from .hitl_state import (
     ControlState,
     HELDOUT_SESSION_KEY,
     HITL_DIR_NAME,
+    LIVE_RUN_STATES,
     PARAMS_NAME,
     SCHEDULE_NAME,
     STATUS_NAME,
     StatusReporter,
-    _LIVE_RUN_STATES,
-    _epoch_ids,
     assert_node_not_from_later_fold,
     build_session_plan,
     fold_session_key,
+    iter_development_sessions,
     meta_session_key,
     read_control,
     read_json,
@@ -65,12 +65,7 @@ from .hitl_state import (
     status_pid_alive,
     write_control,
 )
-from .meta_schedule import (
-    meta_learning_id,
-    meta_learning_trigger_counts,
-    meta_record_id,
-    meta_record_session_key,
-)
+from .meta_schedule import meta_learning_id, meta_record_id
 
 
 class ExperimentStopped(SessionInterrupt):
@@ -82,92 +77,14 @@ class ExperimentStopped(SessionInterrupt):
 
 
 def build_config_from_options(options: SimpleNamespace, *, repo_root: Path) -> ExperimentConfig:
-    """Mirror run_experiment.py's config construction from resolved options."""
-    from dataclasses import replace as dc_replace
-
-    from .assembly import (
-        build_meta_learning_managed_proxy_spec,
-        build_meta_learning_sandbox_spec,
-        build_snapshot_config,
-    )
-    from autotrade.environment.broker import BrokerProfile
+    """Rebuild the worker's ExperimentConfig from resolved HITL options via the
+    shared builder used by every experiment entrypoint (assembly)."""
     from autotrade.environment.sandbox import SandboxSpec
 
-    from .config import AcceptanceRules
+    from .assembly import build_experiment_config
 
     sandbox_spec = SandboxSpec.from_host_fraction(gpu_count=int(options.gpu_count))
-    meta_learning_sandbox_spec = build_meta_learning_sandbox_spec(options, sandbox_spec, repo_root=repo_root)
-    meta_learning_managed_proxy = build_meta_learning_managed_proxy_spec(
-        options,
-        repo_root=repo_root,
-        sandbox_spec=meta_learning_sandbox_spec,
-    )
-    broker_profile = dc_replace(
-        BrokerProfile(),
-        stock_initial_cash=float(options.stock_initial_cash),
-        credit_initial_cash=float(options.credit_initial_cash),
-        commission_bps=float(options.commission_bps),
-        slippage_bps=float(options.slippage_bps),
-        max_total_holdings=int(options.max_total_holdings) if options.max_total_holdings is not None else None,
-        max_single_name_weight=(
-            float(options.max_single_name_weight) if options.max_single_name_weight is not None else None
-        ),
-        fin_rate_annual=float(options.fin_rate_annual),
-        slo_rate_annual=float(options.slo_rate_annual),
-    )
-    return ExperimentConfig(
-        experiment_id=str(options.experiment_id),
-        experiments_root=options.experiments_root.resolve(),
-        work_root=options.work_root.resolve(),
-        template_dir=options.template_dir.resolve(),
-        first_test_period=str(options.first_test_period),
-        last_test_period=str(options.last_test_period),
-        heldout_first_period=str(options.heldout_first_period),
-        heldout_last_period=str(options.heldout_last_period),
-        fold_period=str(options.fold_period),
-        epochs=int(options.epochs),
-        window_months=int(options.window_months),
-        max_fold_minutes=int(options.max_fold_minutes),
-        finalize_before_deadline_seconds=int(options.finalize_before_deadline_seconds),
-        per_call_timeout_seconds=int(options.per_call_timeout_seconds),
-        max_steps_per_fold=int(options.max_steps_per_fold),
-        max_backtests_per_fold=int(options.max_backtests_per_fold),
-        offsession_tick_minutes=int(options.offsession_tick_minutes),
-        intraday_decision_minutes=int(options.intraday_decision_minutes),
-        execution_lag_bars=int(options.execution_lag_bars),
-        decision_max_sim_minutes=(
-            float(options.decision_max_sim_minutes) if options.decision_max_sim_minutes is not None else None
-        ),
-        backtest_max_seconds_per_decision=float(options.backtest_max_seconds_per_decision),
-        backtest_max_seconds_per_trading_day=float(options.backtest_max_seconds_per_trading_day),
-        nl_max_calls_per_decision_day=int(options.nl_max_calls_per_decision_day),
-        nl_max_calls_per_backtest=(
-            int(options.nl_max_calls_per_backtest) if options.nl_max_calls_per_backtest is not None else None
-        ),
-        snapshot_config=build_snapshot_config(options),
-        nl_failure_policy=str(options.nl_failure_policy),
-        convergence_start_epoch=int(options.convergence_start_epoch),
-        meta_learning_directive=str(options.meta_learning_directive),
-        fold_exploration_directive=str(options.fold_exploration_directive),
-        meta_learning_fold_interval=int(options.meta_learning_fold_interval),
-        meta_memory_max_epochs=int(options.meta_memory_max_epochs),
-        step_tree_enabled=not bool(options.disable_step_tree),
-        record_failed_attempts=bool(options.record_failed_attempts),
-        acceptance=AcceptanceRules(
-            min_return=float(options.min_return),
-            min_sharpe=float(options.min_sharpe),
-            max_drawdown=float(options.max_drawdown),
-            require_complete_validation=True,
-        ),
-        broker_profile=broker_profile,
-        sandbox_spec=sandbox_spec,
-        meta_learning_sandbox_spec=meta_learning_sandbox_spec,
-        meta_learning_managed_proxy=meta_learning_managed_proxy,
-        meta_sandbox_rebuild_enabled=not bool(options.disable_meta_sandbox_rebuild),
-        meta_sandbox_rebuild_timeout_seconds=int(options.meta_sandbox_rebuild_timeout_seconds),
-        meta_sandbox_image_keep=int(options.meta_sandbox_image_keep),
-        use_docker=not bool(options.local_dev),
-    )
+    return build_experiment_config(options, repo_root=repo_root, sandbox_spec=sandbox_spec)
 
 
 # ---------------------------------------------------------------------------
@@ -258,80 +175,79 @@ class InteractiveExperimentRunner:
         # sessions still restore to keep the parent chain intact) and falls
         # through to held-out with the latest frozen artifact.
         skip_now = lambda: parent is not None and read_control(self.control_path).skip_to_heldout  # noqa: E731
-        skipping = False
-        meta_triggers = set(
-            meta_learning_trigger_counts(len(folds), self.config.meta_learning_fold_interval)
-        )
-        for epoch_id in _epoch_ids(self.config.epochs):
-            if skipping:
-                break
-            for fold_index, fold in enumerate(folds):
-                if meta_enabled and fold_index in meta_triggers:
-                    meta_id = meta_learning_id(epoch_id, fold_index)
-                    key = meta_session_key(epoch_id, fold_index)
-                    restored = meta_records.get(meta_id)
-                    if restored is not None:
-                        parent, taste_prompt = self._restore_meta(restored, parent)
-                    elif skip_now():
-                        skipping = True
-                        break
-                    else:
-                        # A killed Meta run may have frozen its regularized
-                        # artifact before the ledger append; refuse to guess.
-                        meta_candidate = (
-                            Path(self.config.experiment_dir) / "strategy_artifacts" / epoch_id
-                            / f"strategy_{meta_id}_meta_learning"
+        for planned in iter_development_sessions(
+            self.config.epochs,
+            folds,
+            meta_enabled=meta_enabled,
+            meta_learning_fold_interval=self.config.meta_learning_fold_interval,
+        ):
+            epoch_id, fold_index, fold = planned.epoch_id, planned.fold_index, planned.fold
+            if planned.kind == "meta_learning":
+                meta_id = meta_learning_id(epoch_id, fold_index)
+                key = meta_session_key(epoch_id, fold_index)
+                restored = meta_records.get(meta_id)
+                if restored is not None:
+                    parent, taste_prompt = self._restore_meta(restored, parent)
+                elif skip_now():
+                    break
+                else:
+                    # A killed Meta run may have frozen its regularized
+                    # artifact before the ledger append; refuse to guess.
+                    meta_candidate = (
+                        Path(self.config.experiment_dir) / "strategy_artifacts" / epoch_id
+                        / f"strategy_{meta_id}_meta_learning"
+                    )
+                    if meta_candidate.exists():
+                        raise RuntimeError(
+                            "orphan frozen meta-learning artifact without a ledger record: "
+                            f"{meta_candidate}; inspect and remove it manually before resuming"
                         )
-                        if meta_candidate.exists():
-                            raise RuntimeError(
-                                "orphan frozen meta-learning artifact without a ledger record: "
-                                f"{meta_candidate}; inspect and remove it manually before resuming"
-                            )
-                        if prefetch_pool is not None:
-                            # Warm the exact upcoming Fold while waiting at the
-                            # Meta gate; both runs share the same snapshot keys.
-                            pregate_control = read_control(self.control_path)
-                            fold_key = fold_session_key(epoch_id, fold.fold_id)
-                            if _fold_needs_run(
-                                fold_records.get((epoch_id, fold.fold_id)),
-                                pregate_control.rerun_sessions.get(fold_key),
+                    if prefetch_pool is not None:
+                        # Warm the exact upcoming Fold while waiting at the
+                        # Meta gate; both runs share the same snapshot keys.
+                        pregate_control = read_control(self.control_path)
+                        fold_key = fold_session_key(epoch_id, fold.fold_id)
+                        if _fold_needs_run(
+                            fold_records.get((epoch_id, fold.fold_id)),
+                            pregate_control.rerun_sessions.get(fold_key),
+                        ):
+                            job_key = (epoch_id, fold.fold_id)
+                            if job_key not in early_prefetches:
+                                early_prefetches[job_key] = prefetch_pool.submit(
+                                    prefetch_method, fold
+                                )
+                    directive = self._gate(key, phase="meta_learning", epoch_id=epoch_id)
+                    control = read_control(self.control_path)
+                    agent_ready_hook = None
+                    if prefetch_pool is not None:
+
+                        def agent_ready_hook(
+                            upcoming_fold=fold,
+                            upcoming_epoch=epoch_id,
+                        ) -> None:
+                            # Start only after the Meta container and
+                            # ToolContext are ready, preserving its view.
+                            live_control = read_control(self.control_path)
+                            if live_control.request is not None:
+                                return
+                            fold_key = fold_session_key(upcoming_epoch, upcoming_fold.fold_id)
+                            if not _fold_needs_run(
+                                fold_records.get((upcoming_epoch, upcoming_fold.fold_id)),
+                                live_control.rerun_sessions.get(fold_key),
                             ):
-                                job_key = (epoch_id, fold.fold_id)
-                                if job_key not in early_prefetches:
-                                    early_prefetches[job_key] = prefetch_pool.submit(
-                                        prefetch_method, fold
-                                    )
-                        directive = self._gate(key, phase="meta_learning", epoch_id=epoch_id)
-                        control = read_control(self.control_path)
-                        agent_ready_hook = None
-                        if prefetch_pool is not None:
+                                return
+                            job_key = (upcoming_epoch, upcoming_fold.fold_id)
+                            if job_key not in early_prefetches:
+                                early_prefetches[job_key] = prefetch_pool.submit(
+                                    prefetch_method, upcoming_fold
+                                )
 
-                            def agent_ready_hook(
-                                upcoming_fold=fold,
-                                upcoming_epoch=epoch_id,
-                            ) -> None:
-                                # Start only after the Meta container and
-                                # ToolContext are ready, preserving its view.
-                                live_control = read_control(self.control_path)
-                                if live_control.request is not None:
-                                    return
-                                fold_key = fold_session_key(upcoming_epoch, upcoming_fold.fold_id)
-                                if not _fold_needs_run(
-                                    fold_records.get((upcoming_epoch, upcoming_fold.fold_id)),
-                                    live_control.rerun_sessions.get(fold_key),
-                                ):
-                                    return
-                                job_key = (upcoming_epoch, upcoming_fold.fold_id)
-                                if job_key not in early_prefetches:
-                                    early_prefetches[job_key] = prefetch_pool.submit(
-                                        prefetch_method, upcoming_fold
-                                    )
-
-                        self.status.set(
-                            state="running_session", phase="meta_learning", session_key=key,
-                            epoch_id=epoch_id, fold_id=None, run_id=None, trace_path=None,
-                            session_started_at=utc_now_iso(), fold_deadline_at=None,
-                        )
+                    self.status.set(
+                        state="running_session", phase="meta_learning", session_key=key,
+                        epoch_id=epoch_id, fold_id=None, run_id=None, trace_path=None,
+                        session_started_at=utc_now_iso(), fold_deadline_at=None,
+                    )
+                    try:
                         parent, taste_prompt = self.pipeline.run_meta_learning(
                             epoch_id=epoch_id,
                             meta_learning_id=meta_id,
@@ -345,83 +261,87 @@ class InteractiveExperimentRunner:
                             agent_ready_hook=agent_ready_hook,
                             environment_progress_hook=self._environment_progress_hook,
                         )
+                    finally:
+                        # Clear the host-only stage on failure too, or a failed
+                        # worker's status keeps a stale "running" stage forever.
                         self._clear_environment_progress()
-                    completed += 1
-                    self.status.set(completed_sessions=completed)
+                completed += 1
+                self.status.set(completed_sessions=completed)
+                continue
 
-                key = fold_session_key(epoch_id, fold.fold_id)
-                restored = fold_records.get((epoch_id, fold.fold_id))
-                rerun_id = read_control(self.control_path).rerun_sessions.get(key)
-                needs_rerun = (
-                    restored is not None
-                    and rerun_id is not None
-                    and str(restored.get("rerun_id") or "") != rerun_id
+            key = fold_session_key(epoch_id, fold.fold_id)
+            restored = fold_records.get((epoch_id, fold.fold_id))
+            rerun_id = read_control(self.control_path).rerun_sessions.get(key)
+            needs_rerun = (
+                restored is not None
+                and rerun_id is not None
+                and str(restored.get("rerun_id") or "") != rerun_id
+            )
+            if needs_rerun:
+                current_position = next(
+                    index for index, session in enumerate(sessions) if session.get("key") == key
                 )
-                if needs_rerun:
-                    current_position = next(
-                        index for index, session in enumerate(sessions) if session.get("key") == key
-                    )
-                    later_recorded = next(
-                        (
-                            str(session.get("key"))
-                            for session in sessions[current_position + 1 :]
-                            if (
-                                session.get("kind") == "fold"
-                                and fold_records.get(
-                                    (str(session.get("epoch_id")), str(session.get("fold_id")))
-                                )
-                                is not None
+                later_recorded = next(
+                    (
+                        str(session.get("key"))
+                        for session in sessions[current_position + 1 :]
+                        if (
+                            session.get("kind") == "fold"
+                            and fold_records.get(
+                                (str(session.get("epoch_id")), str(session.get("fold_id")))
                             )
-                            or (
-                                session.get("kind") == "meta_learning"
-                                and meta_records.get(
-                                    str(session.get("meta_learning_id") or session.get("epoch_id"))
-                                )
-                                is not None
+                            is not None
+                        )
+                        or (
+                            session.get("kind") == "meta_learning"
+                            and meta_records.get(
+                                str(session.get("meta_learning_id") or session.get("epoch_id"))
                             )
-                        ),
-                        None,
-                    )
-                    if later_recorded is not None:
-                        raise RuntimeError(
-                            f"rerun requested for {key}, but later session {later_recorded} already "
-                            f"consumed its frozen chain; roll back to {key} first"
+                            is not None
                         )
-                if restored is not None and not needs_rerun:
-                    parent = self._artifact_from_fold_record(restored)
-                else:
-                    if skip_now():
-                        skipping = True
-                        break
-                    if restored is None:
-                        self._require_no_orphan_artifact(epoch_id, fold.fold_id)
-                    elif needs_rerun and rerun_id:
-                        # A killed re-run freezes under the tagged id; surface an
-                        # unrecorded leftover before burning a whole session.
-                        self._require_no_orphan_artifact(
-                            epoch_id, fold.fold_id, artifact_suffix=f"__r{rerun_id[:8]}"
-                        )
-                    prefetch = early_prefetches.pop(
-                        (epoch_id, fold.fold_id), None
+                    ),
+                    None,
+                )
+                if later_recorded is not None:
+                    raise RuntimeError(
+                        f"rerun requested for {key}, but later session {later_recorded} already "
+                        f"consumed its frozen chain; roll back to {key} first"
                     )
-                    if prefetch is None and prefetch_pool is not None:
-                        prefetch = prefetch_pool.submit(prefetch_method, fold)
-                    directive = self._gate(key, phase="fold", epoch_id=epoch_id, fold_id=fold.fold_id)
-                    control = read_control(self.control_path)
-                    # User-side step rollback: a control-plane override replaces the
-                    # inherited frozen chain with a validated step-tree node snapshot.
-                    override_node = control.parent_overrides.get(key)
-                    session_parent = self._parent_from_step_node(override_node, key) if override_node else parent
-                    self.status.set(
-                        state="running_session", phase="fold", session_key=key,
-                        epoch_id=epoch_id, fold_id=fold.fold_id, run_id=None, trace_path=None,
-                        session_started_at=utc_now_iso(), fold_deadline_at=None,
-                        parent_override=override_node,
+            if restored is not None and not needs_rerun:
+                parent = self._artifact_from_fold_record(restored)
+            else:
+                if skip_now():
+                    break
+                if restored is None:
+                    self._require_no_orphan_artifact(epoch_id, fold.fold_id)
+                elif needs_rerun and rerun_id:
+                    # A killed re-run freezes under the tagged id; surface an
+                    # unrecorded leftover before burning a whole session.
+                    self._require_no_orphan_artifact(
+                        epoch_id, fold.fold_id, artifact_suffix=f"__r{rerun_id[:8]}"
                     )
-                    if prefetch is not None:
-                        # Join before run_fold: no prefetch can overlap an
-                        # Agent-triggered formal backtest.
-                        prefetch.result()
+                prefetch = early_prefetches.pop(
+                    (epoch_id, fold.fold_id), None
+                )
+                if prefetch is None and prefetch_pool is not None:
+                    prefetch = prefetch_pool.submit(prefetch_method, fold)
+                directive = self._gate(key, phase="fold", epoch_id=epoch_id, fold_id=fold.fold_id)
+                control = read_control(self.control_path)
+                # User-side step rollback: a control-plane override replaces the
+                # inherited frozen chain with a validated step-tree node snapshot.
+                override_node = control.parent_overrides.get(key)
+                session_parent = self._parent_from_step_node(override_node, key) if override_node else parent
+                self.status.set(
+                    state="running_session", phase="fold", session_key=key,
+                    epoch_id=epoch_id, fold_id=fold.fold_id, run_id=None, trace_path=None,
+                    session_started_at=utc_now_iso(), fold_deadline_at=None,
+                    parent_override=override_node,
+                )
+                if prefetch is not None:
+                    # Join before run_fold: no prefetch can overlap an
+                    # Agent-triggered formal backtest.
+                    prefetch.result()
+                try:
                     outcome = self.pipeline.run_fold(
                         fold,
                         epoch_id=epoch_id,
@@ -441,9 +361,12 @@ class InteractiveExperimentRunner:
                         # they are replayed below (registry shows latest-per-label).
                         heldout_done = set()
                     self._run_post_fold_hook(epoch_id, fold.fold_id, outcome)
+                finally:
+                    # Clear the host-only stage on failure too, or a failed
+                    # worker's status keeps a stale "running" stage forever.
                     self._clear_environment_progress()
-                completed += 1
-                self.status.set(completed_sessions=completed)
+            completed += 1
+            self.status.set(completed_sessions=completed)
         # A dynamic skip may leave Meta-started data work unused. Do not let it
         # compete with the held-out replay. Its failure is irrelevant after the
         # Fold was skipped; a prefetch for a Fold we enter still fails fast above.
@@ -461,16 +384,18 @@ class InteractiveExperimentRunner:
                 epoch_id=epoch_id, fold_id=None, run_id=None, trace_path=None,
                 session_started_at=utc_now_iso(), fold_deadline_at=None,
             )
-            self._environment_progress_hook("heldout", None)
-            summaries = self.pipeline.run_heldout(
-                parent,
-                trading_days,
-                epoch_id=epoch_id,
-                skip_labels=frozenset(heldout_done),
-                environment_progress_hook=self._environment_progress_hook,
-            )
+            try:
+                self._environment_progress_hook("heldout", None)
+                summaries = self.pipeline.run_heldout(
+                    parent,
+                    trading_days,
+                    epoch_id=epoch_id,
+                    skip_labels=frozenset(heldout_done),
+                    environment_progress_hook=self._environment_progress_hook,
+                )
+            finally:
+                self._clear_environment_progress()
             heldout_runs = len(summaries)
-            self._clear_environment_progress()
         completed += 1
         self.status.set(completed_sessions=completed, state="completed", phase=None, session_key=None)
         return {"final_strategy_artifact": parent.artifact_id, "heldout_runs": heldout_runs}
@@ -759,9 +684,12 @@ def _decision_alert_hook(experiment_id: str):
     """Feishu group alerts for states that need the researcher (docs §5.3 HITL).
 
     Opt-in via FEISHU_APP_ID/APP_SECRET/CHAT_ID in the gitignored .env; absent
-    credentials disable notifications entirely. Fired from the status
-    reporter's transition thread — best-effort by construction."""
+    credentials disable notifications entirely. Card formatting lives with the
+    notifier (autotrade.notify.feishu.decision_alert_card); this hook only
+    wires it to status transitions. Fired from the status reporter's
+    transition thread — best-effort by construction."""
     from autotrade.notify import FeishuBot, load_dotenv_values
+    from autotrade.notify.feishu import decision_alert_card
 
     env = load_dotenv_values()
     bot = FeishuBot.from_env(env)
@@ -770,7 +698,7 @@ def _decision_alert_hook(experiment_id: str):
     console_url = str(env.get("CONSOLE_BASE_URL", "")).rstrip("/")
 
     def hook(state: str, snapshot: dict[str, object]) -> None:
-        card = _decision_alert_card(experiment_id, state, snapshot)
+        card = decision_alert_card(experiment_id, state, snapshot)
         if card is None:
             return
         button = {}
@@ -779,39 +707,6 @@ def _decision_alert_hook(experiment_id: str):
         bot.send_card(card["title"], card["body"], color=card["color"], **button)
 
     return hook
-
-
-def _decision_alert_card(experiment_id: str, state: str, snapshot: dict[str, object]) -> dict[str, str] | None:
-    """Group-alert card: colored headline + experiment/session/progress context
-    so a message is actionable without opening the console first."""
-    session = str(snapshot.get("session_key") or "")
-    completed = snapshot.get("completed_sessions")
-    total = snapshot.get("total_sessions")
-    context = f"**实验** {experiment_id}"
-    if session:
-        context += f"\n**会话** {session}"
-    if completed is not None and total:
-        context += f"\n**进度** {completed}/{total}"
-    if state == "waiting_user":
-        return {"title": "⏸ 会话等待批准", "color": "orange",
-                "body": f"{context}\n请在控制台放行（可附研究指令）。"}
-    if state == "waiting_step_user":
-        summary = snapshot.get("step_summary") if isinstance(snapshot.get("step_summary"), dict) else {}
-        ret = summary.get("total_return")
-        metric = f"\n**验证收益** {float(ret) * 100:.2f}%" if isinstance(ret, (int, float)) else ""
-        return {"title": f"🛑 Step {snapshot.get('awaiting_step')} 待批准", "color": "orange",
-                "body": f"{context}{metric}\n请在控制台批准，可注入 Step 指令。"}
-    if state == "waiting_user_reply":
-        question = snapshot.get("awaiting_question") if isinstance(snapshot.get("awaiting_question"), dict) else {}
-        body = str(question.get("question") or "")
-        if len(body) > 300:
-            body = body[:300] + "……"
-        return {"title": f"❓ Agent 提问 #{question.get('index')}", "color": "blue",
-                "body": f"{context}\n{body}\n请在控制台答复（留空=由 Agent 自行决策）。"}
-    if state == "failed":
-        return {"title": "❌ 实验失败", "color": "red",
-                "body": f"{context}\n{snapshot.get('error')}"}
-    return None
 
 
 def run_interactive_worker(experiment_dir: Path, *, repo_root: Path, poll_seconds: float = 2.0) -> dict[str, object]:
@@ -842,7 +737,7 @@ def run_interactive_worker(experiment_dir: Path, *, repo_root: Path, poll_second
         )
 
     existing = read_status(hitl_dir / STATUS_NAME)
-    live_states = {"starting", "waiting_user", "paused", *_LIVE_RUN_STATES}
+    live_states = {"starting", "waiting_user", "paused", *LIVE_RUN_STATES}
     if existing and existing.get("state") in live_states and status_pid_alive(existing):
         raise RuntimeError(
             f"experiment {options.experiment_id} already has a live worker (pid {existing.get('pid')})"

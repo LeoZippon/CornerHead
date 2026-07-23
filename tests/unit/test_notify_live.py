@@ -14,7 +14,7 @@ from unittest.mock import patch
 from autotrade.live import QmtLiveMonitor, format_deal_card
 from autotrade.live.qmt_monitor import CN_TZ, PULL_FAILURE_ALERT_CYCLES
 from autotrade.notify import FeishuBot, load_dotenv_values
-from autotrade.pipelines.interactive import _decision_alert_card
+from autotrade.notify.feishu import decision_alert_card
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -109,7 +109,7 @@ class FeishuBotTest(unittest.TestCase):
 
 class DecisionAlertCardTest(unittest.TestCase):
     def test_states_map_to_cards(self):
-        step = _decision_alert_card("exp1", "waiting_step_user", {
+        step = decision_alert_card("exp1", "waiting_step_user", {
             "session_key": "epoch_001/fold_2025Q1", "awaiting_step": 3,
             "step_summary": {"total_return": 0.0123},
             "completed_sessions": 2, "total_sessions": 9,
@@ -119,16 +119,16 @@ class DecisionAlertCardTest(unittest.TestCase):
         self.assertIn("1.23%", step["body"])
         self.assertIn("**实验** exp1", step["body"])
         self.assertIn("**进度** 2/9", step["body"])
-        question = _decision_alert_card("exp1", "waiting_user_reply", {
+        question = decision_alert_card("exp1", "waiting_user_reply", {
             "session_key": "s", "awaiting_question": {"index": 2, "question": "方案A还是B？"},
         })
         self.assertIn("提问 #2", question["title"])
         self.assertIn("方案A还是B", question["body"])
-        self.assertIn("等待批准", _decision_alert_card("exp1", "waiting_user", {"session_key": "s"})["title"])
-        failed = _decision_alert_card("exp1", "failed", {"error": "boom"})
+        self.assertIn("等待批准", decision_alert_card("exp1", "waiting_user", {"session_key": "s"})["title"])
+        failed = decision_alert_card("exp1", "failed", {"error": "boom"})
         self.assertEqual(failed["color"], "red")
         self.assertIn("boom", failed["body"])
-        self.assertIsNone(_decision_alert_card("exp1", "running_session", {}))
+        self.assertIsNone(decision_alert_card("exp1", "running_session", {}))
 
 
 class StatusReporterNotifyTest(unittest.TestCase):

@@ -26,7 +26,7 @@ from autotrade.pipelines import (
 )
 from autotrade.pipelines.folds import heldout_periods, period_bounds, quarter_bounds
 from autotrade.pipelines.meta_schedule import meta_learning_trigger_counts
-from autotrade.pipelines.experiment import _agent_visible_ledger_record
+from autotrade.pipelines.agent_views import agent_visible_ledger_record
 from autotrade.pipelines.assembly import _session_config_summary
 from scripts.experiments._cli import (
     EXPERIMENT_META_REBUILD_HELP,
@@ -479,7 +479,7 @@ class PipelineEndToEndTest(unittest.TestCase):
                     },
                 },
             )
-            self.assertNotIn("test_result", _agent_visible_ledger_record(pipeline.ledger.read("fold")[0]))
+            self.assertNotIn("test_result", agent_visible_ledger_record(pipeline.ledger.read("fold")[0]))
             rendered_test = json.dumps(compact["test_result"], ensure_ascii=False)
             self.assertNotIn("result_path", rendered_test)
             self.assertNotIn("orders", rendered_test)
