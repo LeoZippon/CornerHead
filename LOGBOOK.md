@@ -1,3 +1,14 @@
+2026-07-23 双分支整合（refactor/repo-simplification-integrated，不并主干、待二次审计）
+
+- 以本分支 12 提交为基座，逐项甄别并入 `refactor/repository-simplification-20260722`（另一 Agent、单提交 ±69 文件）中有价值且不引入冗余的部分；两个来源分支均保留未动。
+- 已并入（安全面）：WebFetch DNS 重绑定修复（校验后的公网地址钉入直连 socket、保留 TLS 主机名校验与跨主机重定向拒绝；托管代理分支按文档保留）；QMT 桥状态文件损坏 fail-closed、payload/order 未知字段拒绝、state 0600/0700；QMT 监控 scp/ssh 强制 operator 提供的 pinned known_hosts；WebUI 无认证非回环监听需显式 `--allow-unauthenticated-network`。
+- 已并入（正确性面）：Broker 强平与末日强制清仓统一结清融资股份并按先息后本还款（via 标注 forced_close/mandatory_exit 区分）、`liquidation_complete` 要求零残余负债；回放日线重复业务键 fail-fast（快照构建期防御性去重不变）；BrokerProfile 严格标量校验与原始配置忠实记录（可重建）；realtime 轮询先持久化后确认（poll/acknowledge 分离、append 返回真实新增量）；`_profile_kwargs` 未知字段拒绝；pytest 发现范围限定 tests/（缓存入 .runtime）；prompt 导出去重渲染 + `--check`（PROMPTS.md 1269→805 行，Prompt 正文不变）。
+- 有据改造后并入：整槽内容 hash 复验仅限 frozen_eval（一次性最终评估），valid 热路径保持 snapshot_id 字符串比对——尊重 2026-07-18"回测逐次不做全量 hash"的成本决策；测试夹具新增 `replace_replay_minutes`（改分钟后重签清单）。
+- 明确不并入并记录原因：删除日线合成回退（文档化的刻意近似，语义变更留待人工审计裁决）；Explore shell argv 白名单（违反 2026-06-25 撤销静态 shell guard 的记录决策）；其 step 门控修复（本分支已修）；CLI 通配导出清理（fix 分支已完成）；季度默认参数删除（与现行文档冲突）；LOGBOOK 截断（历史保留）。
+- 评估后延后为后续工作（不在本分支落地）：ops 脚本生产主机/密钥参数化脱敏与部署文档改写（需运维先行 provisioning）、SIGCHLD 本地回收、快照 staging 目录事务化发布、Timeview schema 漂移硬拒绝与文本索引严格映射、ExperimentConfig/SnapshotConfig 严格标量校验、engine 同分钟 tick 归一（与被排除的回退删除纠缠）。
+- 运维附带处置：发现主工作树被另一 Agent 切至其分支（夜间 cron 将运行归档迁移前的 share_float 代码），已恢复至 fix/share-float-incremental-archive；raw 湖自 7-23 03:43 起 dirty（cn_nightly_pit_event_build 连续两晚被 SIGKILL，疑夜间内存压力，swap 满），按世代恢复合同以完全一致的 (job, 区间, command_hash) 精确重跑成功——湖回到 committed（新世代 bde41f8e），当晚 cron 链解封，缺失的 20260722 margin 分区落在晚间 30 天滚动窗口内可自愈。
+- Validation：整合后全量 tests/unit 956 passed + 49 subtests（170.8s）；`git diff --check` clean；两个来源分支与主工作树（fix 分支、干净）均未改动。
+
 2026-07-23 全库精简重构（refactor/repo-simplification 分支，不并主干、待二次审计）
 
 - 全库通读（6 份活文档亲读 + 11 路子代理证据报告 + 决策史地雷清单）后按收益/风险分四波落地；全程尊重既往"不做"决策（不模板化 download/audit、不合并 Runner/Explore/NL 工具循环、不拆 app.js/reporting/search/driver、不改 driver/broker_core 镜像烘焙文件、不新增缓存层）。

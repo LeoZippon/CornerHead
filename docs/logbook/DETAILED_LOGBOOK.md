@@ -1,3 +1,36 @@
+## 2026-07-23 Two-branch integration (refactor/repo-simplification-integrated)
+
+Scope: merge the valuable, non-redundant parts of a second agent's independent simplification branch (`refactor/repository-simplification-20260722`, one commit, 69 files, net −1,590 lines) onto this session's 12-commit refactor. Every candidate item was judged against the recorded decided-not-to-do list, the living design docs, and redundancy with work already landed; both source branches remain untouched for the human audit.
+
+Ported (security surfaces, evaluated/adapted under the sanctioned security agent then finished personally):
+- WebFetch DNS-rebinding fix: the resolved-and-validated public address is pinned into the direct-connection socket (TLS hostname verification retained; cross-host redirects still rejected). The documented managed-proxy branch (`use_proxy`) is preserved — pinning applies to direct fetches, proxy egress remains the proxy's responsibility.
+- QMT bridge: corrupt state files fail closed instead of resetting idempotency memory; payload/order objects reject unknown fields; state files are 0600 under 0700 directories. The live monitor's scp/ssh now require an operator-provided pinned known_hosts file (strict host key checking). Reconciled with this branch's earlier remark-collision validation; the bridge stays Python-3.6/stdlib/ASCII.
+- WebUI TCP serving: an unauthenticated non-loopback bind now requires an explicit --allow-unauthenticated-network flag; UDS remains the production path.
+
+Ported (correctness surfaces):
+- Broker: forced closes AND region-end mandatory liquidation both release financed shares and repay debt interest-first/oldest-first (audit events distinguish forced_close vs mandatory_exit); liquidation_complete now additionally requires zero residual liabilities; replay daily input rejects duplicate (trade_date, ts_code) keys (snapshot-build defensive dedup is untouched); BrokerProfile gains strict integer/boolean validation and records raw configuration faithfully (reconstructible); _profile_kwargs rejects unknown record fields. Their new regressions were ported (mandatory-exit reconciliation, duplicate-key rejection, strict fields); their fallback-related test deletion was not.
+- Realtime minutes: poll no longer implicitly acknowledges — acknowledge() is called only after durable append succeeds, and the store's append reports the genuinely persisted per-day delta.
+- Prompt export: deduplicated rendered blocks (PROMPTS.md 1269→805 lines; prompt CONTENT unchanged — verified by the round-trip test), absolute default path, and a --check staleness mode.
+- pytest discovery scoped to tests/ with the cache under .runtime/pytest_cache (vendored external_references are no longer collectable).
+- Test fixtures: replace_replay_minutes restamps a replay slot after mutating fixture minutes; the decision-snapshot fixture now carries up_limit/down_limit/is_suspended (also silences long-standing Timeview schema warnings in tests).
+
+Adapted with recorded justification:
+- Their per-backtest full snapshot/replay content re-hash conflicts with the 2026-07-18 decision (per-run full hashing declined on hot-path cost; string identity comparison retained). Landed as: content re-hash ONLY in frozen_eval — the one-shot, highest-stakes evaluation — while the valid hot path keeps the cheap snapshot_id comparison.
+
+Rejected (with reasons, for the auditor):
+- Removal of the synthetic daily market-event fallback and per-symbol supplementation: a documented deliberate approximation (environment_design 3.5) covering the recorded minute/daily universe mismatch; removing it changes evaluation semantics for thin/missing-minute names. Left as a divergence for the human audit; all its dependent prompt/doc/test changes were likewise excluded.
+- Explore shell argv-only allowlist: reintroduces the statically-parsed read-only shell guard reverted on 2026-06-25, and removes Explore's Python/DuckDB capability (agent-autonomy regression).
+- Their step-gate fix (this branch already fixed it), TuShare CLI star-export removal (already done on the share-float fix branch), quarter-default removal (contradicts current documented CLI), LOGBOOK.md truncation to an 81-line current view (history retention), their redundant private-fund round-trip test.
+
+Deferred as follow-ups (evaluated, not landed here):
+- Ops script parameterization removing embedded production hosts/keys/fingerprints plus the deployment-doc rewrite (valuable hygiene, but requires operator provisioning before any deploy; must keep the cron-facing CLI stable), SIGCHLD local reaping, transactional snapshot staging publication, Timeview schema-drift hard rejection and strict text-index mapping, strict scalar validation for ExperimentConfig/SnapshotConfig, same-minute tick canonicalization (entangled with the excluded fallback removal), residual webui manager/server/params_schema deltas.
+
+Operational actions during this session:
+- Found the primary working tree switched to the other agent's branch (its share-float path predates the physical archive migration; tonight's cron would have run it) — restored to fix/share-float-incremental-archive (tree was clean).
+- The raw lake had been dirty since 03:43 (cn_nightly_pit_event_build SIGKILLed two consecutive nights; likely nightly memory pressure — swap fully consumed). Verified via --dry-run that an exact (job, window, command_hash) rerun reproduces the recorded transaction identity, then ran the documented recovery midday: build+audit rc=0 in ~6 minutes, lake committed under generation bde41f8e55ee. Tonight's cron chain is unblocked; the missing 20260722 margin/margin_detail partitions fall inside the evening job's 30-day rolling window. Root cause (nightly RAM contention at 03:35) is unresolved and worth monitoring.
+
+Validation: integrated full suite 956 passed + 49 subtests in 170.8s (this branch's 950+45 plus ported coverage); git diff --check clean; ASCII check on the QMT bridge clean; both source branches and the primary tree (fix branch, clean) unmodified.
+
 ## 2026-07-23 Repository-wide simplification refactor (refactor/repo-simplification)
 
 Setup and operational safety:
