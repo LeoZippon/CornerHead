@@ -826,6 +826,17 @@ class BrokerPrimitiveTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "is_private_fund"):
             BrokerProfile(is_private_fund="false")
 
+    def test_float_profile_fields_reject_booleans(self):
+        # bool is an int subclass, so True would otherwise pass isfinite
+        # range checks as 1.0 (a silently wrong fee/cash/ratio).
+        for name in (
+            "commission_bps", "stock_initial_cash", "assure_ratio",
+            "max_single_name_weight", "fin_max_quota", "dividend_tax_rate",
+            "maintenance_withdraw_ratio",
+        ):
+            with self.subTest(field=name), self.assertRaisesRegex(ValueError, "not a boolean"):
+                BrokerProfile(**{name: True})
+
     def test_daily_market_rejects_duplicate_business_keys(self):
         duplicate = pd.concat([REPLAY, REPLAY.iloc[[0]]], ignore_index=True)
         with self.assertRaisesRegex(ValueError, "duplicate business keys"):

@@ -135,6 +135,21 @@ class BrokerProfile:
     maintenance_source: str = "https://www.gjzq.com.cn/main/a/rzrq/index.html"
 
     def __post_init__(self) -> None:
+        # bool is an int subclass: True would satisfy the isfinite range checks
+        # below as 1.0, so every float-valued field (optional ones included)
+        # rejects booleans explicitly before its range check.
+        for name in (
+            "stock_initial_cash", "credit_initial_cash", "commission_bps",
+            "min_commission_cny", "stamp_duty_sell_bps_before_cutover",
+            "stamp_duty_sell_bps_from_cutover", "transfer_fee_bps", "slippage_bps",
+            "fin_rate_annual", "slo_rate_annual", "fin_margin_ratio",
+            "slo_margin_ratio", "slo_margin_ratio_private_fund", "assure_ratio",
+            "dividend_tax_rate", "maintenance_closeout_ratio",
+            "maintenance_warning_ratio", "maintenance_withdraw_ratio",
+            "fin_max_quota", "slo_max_quota", "max_single_name_weight",
+        ):
+            if isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a number, not a boolean")
         # Range checks fail closed against NaN too: every `NaN <op> x` is False,
         # so the guards are written as "not (valid range)".
         for name in ("stock_initial_cash", "credit_initial_cash"):
