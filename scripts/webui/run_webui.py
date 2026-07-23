@@ -13,6 +13,7 @@ reachable by every local user.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import sys
 from pathlib import Path
 
@@ -27,11 +28,32 @@ add_repo_src(__file__)
 from autotrade.webui.server import run
 
 
+def validate_tcp_bind(host: str, *, allow_unauthenticated_network: bool) -> None:
+    if allow_unauthenticated_network or host.lower() == "localhost":
+        return
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise ValueError(
+            "the unauthenticated WebUI accepts only a loopback IP/localhost by default"
+        ) from exc
+    if not address.is_loopback:
+        raise ValueError(
+            "refusing unauthenticated non-loopback WebUI bind; use a protected Unix "
+            "socket or explicitly pass --allow-unauthenticated-network"
+        )
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1", help="Bind address; keep loopback unless proxied.")
     parser.add_argument("--port", type=int, default=38888, help="Listen port (default 38888).")
+    parser.add_argument(
+        "--allow-unauthenticated-network",
+        action="store_true",
+        help="Explicitly allow a non-loopback TCP bind despite the absence of authentication.",
+    )
     parser.add_argument(
         "--uds",
         type=Path,
@@ -46,6 +68,14 @@ def main() -> int:
         help="Experiments root directory shared with the pipeline CLIs.",
     )
     args = parser.parse_args()
+    if args.uds is None:
+        try:
+            validate_tcp_bind(
+                args.host,
+                allow_unauthenticated_network=args.allow_unauthenticated_network,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
     run(
         repo_root,
         host=args.host,

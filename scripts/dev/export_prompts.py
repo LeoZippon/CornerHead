@@ -18,13 +18,14 @@ if str(_SCRIPTS) not in sys.path:
 from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DOC_PATH = REPO_ROOT / "configs" / "prompts" / "PROMPTS.md"
 
 from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import (
     DEFAULT_ANTI_OVERFIT_PROMPT,
     DEFAULT_CONVERGENCE_PROMPT,
-    PROTOCOL_INSTRUCTION,
     WRAP_UP_PROMPT,
     build_meta_learning_prompt,
     build_system_prompt,
@@ -266,17 +267,9 @@ def render() -> str:
                 fold_directive="示例：本 Fold 优先检验行业中性化后的动量残差；若与验证证据冲突可降级。",
             ),
         ),
-        ("Fold Agent 协议模板（PROTOCOL_INSTRUCTION）", PROTOCOL_INSTRUCTION),
         ("收尾提示（WRAP_UP_PROMPT，T-5 分钟最多一次）", WRAP_UP_PROMPT),
         ("防过拟合构件（DEFAULT_ANTI_OVERFIT_PROMPT，注入“阶段策略与防过拟合”，两阶段都生效）", DEFAULT_ANTI_OVERFIT_PROMPT),
         ("收敛构件（DEFAULT_CONVERGENCE_PROMPT，仅收敛期注入“阶段策略与防过拟合”）", DEFAULT_CONVERGENCE_PROMPT),
-        (
-            "元学习 Agent System Prompt（含默认 Fold 探索方向示例）",
-            build_meta_learning_prompt(
-                experiment_facts=SAMPLE_META_FACTS,
-                fold_exploration_directive=str(SAMPLE_META_MANIFEST["fold_exploration_directive"]),
-            ),
-        ),
         (
             "元学习 Agent System Prompt（含默认 Fold 与当前 Meta 指令示例）",
             build_meta_learning_prompt(
@@ -299,7 +292,7 @@ def render() -> str:
         "- `src/autotrade/agent/prompts.py`",
         "- `src/autotrade/environment/nl/engine.py`",
         "",
-        "阅读说明：每个 Prompt 块都按模型实际接收的文本原样放入 `text` 代码块；为减少页面噪声，除第一节外默认折叠。NL Sub Agent 的用户消息为 JSON object：`{request: {ts_code?, prompt, kwargs}, company_context, decision_as_of, response_contract?}`；默认回答自由文本，存在 enum `response_contract` 时只返回一个允许值；只有 `text_retrieve` 工具调用使用内部工具 schema。",
+        "阅读说明：Fold 完整渲染已经包含 `PROTOCOL_INSTRUCTION`，因此不再重复导出同一大段静态文本；Meta 只保留一个带全部动态指令的完整示例。每个 Prompt 块都按模型实际接收的文本原样放入 `text` 代码块；为减少页面噪声，除第一节外默认折叠。NL Sub Agent 的用户消息为 JSON object：`{request: {ts_code?, prompt, kwargs}, company_context, decision_as_of, response_contract?}`；默认回答自由文本，存在 enum `response_contract` 时只返回一个允许值；只有 `text_retrieve` 工具调用使用内部工具 schema。",
         "",
         "## 导航",
         "",
@@ -314,10 +307,21 @@ def render() -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=Path("configs/prompts/PROMPTS.md"))
+    parser.add_argument("--output", type=Path, default=DOC_PATH)
+    parser.add_argument("--check", action="store_true", help="Fail when the committed snapshot is stale.")
     args = parser.parse_args()
+    rendered = render()
+    if args.check:
+        if not args.output.exists() or args.output.read_text(encoding="utf-8") != rendered:
+            print(
+                "configs/prompts/PROMPTS.md is stale; run scripts/dev/export_prompts.py",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"current: {args.output}")
+        return 0
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(render(), encoding="utf-8")
+    args.output.write_text(rendered, encoding="utf-8")
     print(f"wrote {args.output}")
     return 0
 
