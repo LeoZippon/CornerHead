@@ -542,7 +542,7 @@ scp order.json qmt-node:C:/xquant/inbox/.order.json.tmp
 
 **同步与成交通知（计算服务器侧）**
 
-- `ops/qmt/qmt_monitor.sh start|stop|status` 管理 `scripts/live/qmt_live_monitor.py`（核心逻辑在 `src/autotrade/live/qmt_monitor.py`）：每 20s 经 `scp`（`QMT_SSH_DEST`，逐文件拉取，容忍远端缺文件）把 outbox 同步到 `data/qmt_live/`；运行日志追加到 `logs/qmt/qmt_live_monitor.log`。
+- `ops/qmt/qmt_monitor.sh start|stop|status` 管理 `scripts/live/qmt_live_monitor.py`（核心逻辑在 `src/autotrade/live/qmt_monitor.py`）：每 20s 经 `scp`（`QMT_SSH_DEST`，逐文件拉取，容忍远端缺文件）把 outbox 同步到 `data/qmt_live/`；运行日志追加到 `logs/qmt/qmt_live_monitor.log`。scp/ssh 强制 `StrictHostKeyChecking=yes` 并且**必须**提供带外核验过的 pinned known_hosts 文件（`.env` 的 `QMT_SSH_KNOWN_HOSTS` 或 `--ssh-known-hosts`，指向存在的文件），缺失即拒绝启动；监控状态文件按 0600（目录 0700）落在 Linux 侧 `data/qmt_live/`。
 - 全部通知以交互式卡片投递（彩色标题按事件类型：待批准橙/提问蓝/失败与告警红/买入红/卖出绿；`.env` 配 `CONSOLE_BASE_URL` 时决策卡片附「打开控制台」跳转按钮）。每笔**新成交**经专用飞书 bot（`FEISHU_QMT_*`）向群推送一张卡片：代码/方向/量价/金额/委托号/成交时间/策略标记 + 账户总资产/可用/持仓市值/持仓数；已通知 traded_id 持久化在 `data/qmt_live/.monitor_state.json`，重启不重发。
 - 导出端异常（如 MiniQMT 断开）按错误内容去重推送一次「实盘链路告警」，链路中断不会静默。
 

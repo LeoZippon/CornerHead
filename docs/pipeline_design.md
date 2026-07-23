@@ -252,6 +252,7 @@ Fallback 规则：
 - Runner/root 绑定测试决策输入视图到 `/mnt/snapshot`。
 - 使用冻结产物自动执行 `frozen_eval`。
 - 测试前后校验 `output` hash 和 `models` hash 不变。
+- 回放开始前对测试决策输入与测试回放槽执行整槽内容 hash 复验（仅冻结评估；验证热路径保持 snapshot_id 身份比对）。
 - 测试结果完整明细只写宿主审计面，包括运行结果、development 账本、host manifest 和报告。已完成 Fold 的白名单指标（收益/风险、融券拒单数、订单/成交笔数、turnover、四项聚合 exposure 与紧凑 benchmark 归因）会投影给后续元学习会话，用于跨 Fold 泛化诊断；原始数据、排程、日志、路径、订单和逐日明细不投影，也不直接反馈给当前或下一 Fold Agent Prompt。
 - 冻结测试只作样本外诊断，不参与本 Fold 的策略接受。普通测试失败只记录原因，不撤销已冻结策略、不抹去 Fold 记录；测试前后策略/模型 hash 变化属于完整性失败：账本落盘（`state_changed_during_test=true`）后终止当前运行。
 

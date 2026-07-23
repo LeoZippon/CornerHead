@@ -4,7 +4,7 @@ Scope: merge the valuable, non-redundant parts of a second agent's independent s
 
 Ported (security surfaces, evaluated/adapted under the sanctioned security agent then finished personally):
 - WebFetch DNS-rebinding fix: the resolved-and-validated public address is pinned into the direct-connection socket (TLS hostname verification retained; cross-host redirects still rejected). The documented managed-proxy branch (`use_proxy`) is preserved — pinning applies to direct fetches, proxy egress remains the proxy's responsibility.
-- QMT bridge: corrupt state files fail closed instead of resetting idempotency memory; payload/order objects reject unknown fields; state files are 0600 under 0700 directories. The live monitor's scp/ssh now require an operator-provided pinned known_hosts file (strict host key checking). Reconciled with this branch's earlier remark-collision validation; the bridge stays Python-3.6/stdlib/ASCII.
+- QMT bridge (Windows side): corrupt state files fail closed instead of resetting idempotency memory; payload/order objects reject unknown fields. The Linux-side live monitor's scp/ssh now require an operator-provided pinned known_hosts file (strict host key checking), and ITS local state files are written 0600 under a 0700 directory (POSIX modes apply on the Linux monitor only — the Windows bridge has no such semantics). Reconciled with this branch's earlier remark-collision validation; the bridge stays Python-3.6/stdlib/ASCII.
 - WebUI TCP serving: an unauthenticated non-loopback bind now requires an explicit --allow-unauthenticated-network flag; UDS remains the production path.
 
 Ported (correctness surfaces):
