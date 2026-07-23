@@ -19,6 +19,8 @@ from autotrade.environment.llm.proxy import LLMProxy, LLMProxyError, ProviderRes
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.tools.base import ToolError, ToolSchemaError, agent_visible_tool_result
 
+from .compact import safe_error_summary
+
 EXPLORE_SYSTEM_PROMPT = """\
 # 角色
 你是主 Agent 的只读调查员，只回答委托给你的具体问题。你可以用 shell / grep / glob \
@@ -69,6 +71,8 @@ class ExploreSubAgentEngine:
         self.config = config or ExploreSubAgentConfig()
         self._specs = {"shell": shell.spec, "grep": search.grep_spec, "glob": search.glob_spec}
         self._schemas = [spec.to_tool_schema() for spec in self._specs.values()]
+        self._llm_calls = 0
+        self._usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     def run(self, *, task: str, max_rounds: int | None = None, parent_call_id: str | None = None) -> dict[str, object]:
         rounds_limit = max_rounds if isinstance(max_rounds, int) and max_rounds > 0 else self.config.max_rounds
@@ -142,8 +146,8 @@ class ExploreSubAgentEngine:
             "status": status,
             "rounds": rounds,
             "tool_calls": tool_calls_made,
-            "llm_calls": getattr(self, "_llm_calls", 0),
-            "usage_totals": dict(getattr(self, "_usage_totals", {}) or {}),
+            "llm_calls": self._llm_calls,
+            "usage_totals": dict(self._usage_totals),
             "digest": digest,
             "model": self.proxy.model,
         }
@@ -199,14 +203,12 @@ class ExploreSubAgentEngine:
             usage=response.usage,
         )
         self.trace.emit("explore_llm_call", detail, step_id=self.step_id, parent_call_id=parent_call_id)
-        self._llm_calls = getattr(self, "_llm_calls", 0) + 1
+        self._llm_calls += 1
         if isinstance(response.usage, dict):
-            totals = getattr(self, "_usage_totals", None)
-            if totals is not None:
-                for key in totals:
-                    value = response.usage.get(key)
-                    if isinstance(value, (int, float)) and not isinstance(value, bool):
-                        totals[key] += int(value)
+            for key in self._usage_totals:
+                value = response.usage.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    self._usage_totals[key] += int(value)
         return response
 
     def _parse_calls(
@@ -281,7 +283,7 @@ class ExploreSubAgentEngine:
             try:
                 return tool_call_id, name, self._dispatch(name, args or {}), True
             except ToolError as exc:
-                return tool_call_id, name, _tool_error_observation(name, exc), True
+                return tool_call_id, name, tool_error_observation(name, exc), True
 
         can_parallel = (
             len(calls) > 1
@@ -325,11 +327,13 @@ class ExploreSubAgentEngine:
         return time.monotonic() + remaining
 
 
-def _tool_error_observation(action: str, exc: ToolError) -> dict[str, object]:
+def tool_error_observation(action: str, exc: ToolError) -> dict[str, object]:
+    """Agent-visible error observation shared by the main Runner and Explore
+    (same redaction/prefixing so audits read one format)."""
     observation: dict[str, object] = {
         "observation": "error",
         "action": action,
-        "error": str(sanitize_for_log(str(exc))),
+        "error": safe_error_summary(exc),
     }
     observation.update(exc.to_record())
     return {key: value for key, value in observation.items() if value not in (None, {}, "")}

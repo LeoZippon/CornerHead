@@ -204,6 +204,10 @@ class StrategyNLService:
                         activity_cache_status = "hit"
                         record = copy.deepcopy(cached_record)
                         if record.get("state") == "no_matching_evidence":
+                            # no_evidence_skips counts LOGICAL calls that skipped
+                            # the provider for lack of evidence — reuse of a
+                            # cached no-evidence record included (so it can
+                            # exceed the number of distinct gating decisions).
                             self.no_evidence_skips += 1
                         source_task_id = str(record.get("task_id") or "")
                         record["task_id"] = new_id("nlreuse")
