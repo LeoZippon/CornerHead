@@ -32,6 +32,9 @@ import math
 from pathlib import Path
 from typing import Mapping
 
+import numpy as np
+import pandas as pd
+
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.runtime import utc_now_iso
 
@@ -49,7 +52,6 @@ def _slot_benchmark(replay_dir: Path) -> dict[str, float]:
     path = Path(replay_dir) / "macro.parquet"
     if not path.exists():
         return {}
-    import pandas as pd
 
     df = pd.read_parquet(path)
     if "dataset" not in df.columns or "ts_code" not in df.columns:
@@ -71,7 +73,6 @@ def _snapshot_industry(snapshot_dir: Path) -> dict[str, str]:
     path = Path(snapshot_dir) / "universe.parquet"
     if not path.exists():
         return {}
-    import pandas as pd
 
     df = pd.read_parquet(path)
     if "l1_name" not in df.columns:
@@ -232,8 +233,6 @@ def _rank_cross_section(df) -> dict[str, tuple[float, float, float, float]]:
 
     Vectorized: this runs for every replay day of every backtest, and a per-row
     Python loop over the ~5k-code cross-section cost seconds per replay."""
-    import numpy as np
-    import pandas as pd
 
     closes = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=float)
     codes = df["ts_code"].astype(str).to_numpy()

@@ -640,8 +640,6 @@ class MainCtxReplayTest(unittest.TestCase):
             self.executor,
             self.sandbox.paths,
             timeout_seconds=30.0,
-            decision_time="2022-01-04T09:30:00+08:00",
-            replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             return run_main_ctx_replay(
@@ -669,8 +667,6 @@ class MainCtxReplayTest(unittest.TestCase):
             self.executor,
             self.sandbox.paths,
             timeout_seconds=30.0,
-            decision_time="2022-01-04T09:30:00+08:00",
-            replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             result = run_main_ctx_replay(
@@ -703,7 +699,6 @@ class MainCtxReplayTest(unittest.TestCase):
         profile = BrokerProfile()
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:30:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             result = run_main_ctx_replay(
@@ -754,7 +749,6 @@ class MainCtxReplayTest(unittest.TestCase):
         profile = BrokerProfile()
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:30:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             result = run_main_ctx_replay(
@@ -784,7 +778,6 @@ class MainCtxReplayTest(unittest.TestCase):
         )
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:30:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             run_main_ctx_replay(
@@ -800,7 +793,6 @@ class MainCtxReplayTest(unittest.TestCase):
     def _run_with(self, replay: pd.DataFrame, minutes: pd.DataFrame | None = None, **replay_kwargs) -> object:
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             return run_main_ctx_replay(
@@ -910,7 +902,6 @@ def main(ctx):
         )
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             result = run_main_ctx_replay(
@@ -963,7 +954,6 @@ def main(ctx):
         )
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             result = run_main_ctx_replay(
@@ -996,7 +986,6 @@ def main(ctx):
         )
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             result = run_main_ctx_replay(
@@ -1112,7 +1101,6 @@ def main(ctx):
         (self.sandbox.paths.agent_output / "main.py").write_text(STALE_QUEUED_CANCEL_MAIN, encoding="utf-8")
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="minute",
         ) as policy:
             policy.validate_main()
             result = run_main_ctx_replay(
@@ -1134,7 +1122,6 @@ def main(ctx):
         (self.sandbox.paths.agent_output / "main.py").write_text(WORKING_CANCEL_MAIN, encoding="utf-8")
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="minute",
         ) as policy:
             policy.validate_main()
             result = run_main_ctx_replay(
@@ -1196,7 +1183,6 @@ def main(ctx):
         (self.sandbox.paths.agent_output / "main.py").write_text(SUBSTEP_OVERRUN_MAIN, encoding="utf-8")
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             result = run_main_ctx_replay(
@@ -1376,7 +1362,6 @@ def main(ctx):
         pings: list[tuple] = []
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-03T09:25:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             run_main_ctx_replay(
@@ -1401,7 +1386,6 @@ def main(ctx):
         (self.sandbox.paths.agent_output / "main.py").write_text(NOOP_MAIN, encoding="utf-8")
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             with self.assertRaisesRegex(BacktestError, "compute budget"):
@@ -1423,7 +1407,6 @@ def main(ctx):
         (self.sandbox.paths.agent_output / "main.py").write_text(slow, encoding="utf-8")
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=1.0,  # the per-decision cap
-            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             with self.assertRaisesRegex(BacktestError, "decision exceeded") as raised:
@@ -1572,7 +1555,6 @@ def main(ctx):
         (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
             decision_max_sim_minutes=10.0,
         ) as policy:
             policy.validate_main()
@@ -1595,7 +1577,6 @@ def main(ctx):
         (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             result = run_main_ctx_replay(
@@ -1622,7 +1603,6 @@ def main(ctx):
         (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             result = run_main_ctx_replay(
@@ -1655,7 +1635,6 @@ def main(ctx):
         (self.sandbox.paths.agent_output / "main.py").write_text(main, encoding="utf-8")
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="daily",
         ) as policy:
             policy.validate_main()
             result = run_main_ctx_replay(
@@ -1694,7 +1673,6 @@ def main(ctx):
         )
         with MainPolicyRunner(
             self.executor, self.sandbox.paths, timeout_seconds=30.0,
-            decision_time="2022-01-04T09:25:00+08:00", replay_granularity="minute",
         ) as policy:
             policy.validate_main()
             result = run_main_ctx_replay(
@@ -1872,7 +1850,7 @@ class DayTickPlanTest(unittest.TestCase):
                 "available_at": "2022-01-04T09:28:36+08:00",
             }]
         )
-        plan = _day_tick_plan(rows, 2, auction_results=auction)
+        plan = _day_tick_plan(rows, 2, offsession_tick_minutes=15, auction_results=auction)
         blind = next(t for t in plan if t.minute_key == "09:25")
         self.assertTrue(blind.group.empty)
         result = next(t for t in plan if t.minute_key == "09:29")
@@ -1898,7 +1876,7 @@ class DayTickPlanTest(unittest.TestCase):
             }]
         )
         rows = MinuteMarketData(minutes).rows_for_date("20220104")
-        plan = _day_tick_plan(rows, 5, auction_results=auction)
+        plan = _day_tick_plan(rows, 5, offsession_tick_minutes=15, auction_results=auction)
 
         opening = [tick for tick in plan if tick.minute_key == "09:30"]
         self.assertEqual(len(opening), 1)
@@ -1946,6 +1924,26 @@ class MarketStateEncodingTest(unittest.TestCase):
             with self.subTest(dtype=str(values.dtype)):
                 expected = [_float_or_none(value) for value in values.tolist()]
                 self.assertEqual(_columnar_float_values(values), expected)
+
+
+class DriverVerbMapTest(unittest.TestCase):
+    def test_driver_verb_map_matches_broker(self) -> None:
+        """driver.py is stdlib-only and cannot import the broker, so its
+        verb -> (account, op_type) copy must stay pinned to the host map:
+        the driver's op codes are agent-visible via pending() records."""
+        import importlib.util
+        from pathlib import Path as _P
+
+        from autotrade.environment.broker import _ACTION_TO_ACCOUNT_OP
+
+        driver_path = _P(__file__).resolve().parents[2] / "src" / "autotrade" / "environment" / "replay" / "driver.py"
+        spec = importlib.util.spec_from_file_location("_verbmap_driver", driver_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(
+            module._ACTION_ACCOUNT_OP,
+            {action: (account, int(op)) for action, (account, op) in _ACTION_TO_ACCOUNT_OP.items()},
+        )
 
 
 class PackedBarsRoundTripTest(unittest.TestCase):

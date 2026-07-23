@@ -30,9 +30,8 @@ def main() -> int:
     # Benchmark returns come from each ledger record's frozen benchmark block
     # (computed at replay time); the report never reads the raw lake.
     summary = build_experiment_report(ledger, output_dir)
-    # build_experiment_report sets summary["status"] (ok|warning); default to ok.
+    # build_experiment_report always sets summary["status"] (ok|warning).
     result = {"output_dir": str(output_dir), **summary}
-    result.setdefault("status", "ok")
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 

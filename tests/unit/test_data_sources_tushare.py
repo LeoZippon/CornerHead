@@ -3040,14 +3040,17 @@ class RealtimeMinuteTest(unittest.TestCase):
         self.assertEqual(len(first), 2)  # watchlist deduped
         self.assertEqual(first.loc[0, "trade_date"], "20260713")
         self.assertEqual(first.loc[0, "available_at"], "2026-07-13T09:31:00+08:00")
-        # Second poll returns the same bars -> all filtered as already seen.
+        # Polling does not acknowledge before persistence: a failed append can
+        # retry the same bars. Explicit acknowledgement advances the feed.
+        self.assertEqual(len(feed.poll()), 2)
+        feed.acknowledge(first)
         self.assertTrue(feed.poll().empty)
 
         with tempfile.TemporaryDirectory() as tmp:
             store = RealtimeMinuteStore(Path(tmp) / "rt_min_live")
             self.assertEqual(store.append(first), {"20260713": 2})
             # Re-append overlaps: dedup by (ts_code, trade_time), atomic replace.
-            store.append(first)
+            self.assertEqual(store.append(first), {"20260713": 0})
             bars = store.bars("20260713")
             self.assertEqual(len(bars), 2)
             self.assertEqual(list(bars.columns), STK_MINS_REQUIRED_COLUMNS)

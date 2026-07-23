@@ -58,6 +58,11 @@ class RealtimeMinuteFeed:
         self._seen: set[tuple[str, str]] = set()
 
     def poll(self) -> pd.DataFrame:
+        """Return unseen bars without acknowledging them.
+
+        Call :meth:`acknowledge` only after durable persistence succeeds. A
+        failed append therefore leaves the same bars eligible for the next poll.
+        """
         parts: list[pd.DataFrame] = []
         for ts_code in self.watchlist:
             result = self.client.query("rt_min", {"ts_code": ts_code, "freq": RT_MIN_FREQ})
@@ -67,9 +72,13 @@ class RealtimeMinuteFeed:
         fresh_mask = [
             (row.ts_code, row.trade_time) not in self._seen for row in merged.itertuples(index=False)
         ]
-        fresh = merged.loc[fresh_mask].reset_index(drop=True)
-        self._seen.update((row.ts_code, row.trade_time) for row in fresh.itertuples(index=False))
-        return fresh
+        return merged.loc[fresh_mask].reset_index(drop=True)
+
+    def acknowledge(self, bars: pd.DataFrame) -> None:
+        self._seen.update(
+            (str(row.ts_code), str(row.trade_time))
+            for row in bars.itertuples(index=False)
+        )
 
 
 class RealtimeMinuteStore:
@@ -93,9 +102,12 @@ class RealtimeMinuteStore:
         self.root.mkdir(parents=True, exist_ok=True)
         for trade_date, group in bars.groupby("trade_date"):
             path = self.partition_path(str(trade_date))
+            prior = pd.DataFrame(columns=group.columns)
             merged = group
             if path.exists():
-                merged = concat_rows([pd.read_parquet(path), group])
+                prior = pd.read_parquet(path)
+                merged = concat_rows([prior, group])
+            prior_count = len(prior.drop_duplicates(["ts_code", "trade_time"]))
             merged = (
                 merged.drop_duplicates(["ts_code", "trade_time"], keep="last")
                 .sort_values(["trade_time", "ts_code"])
@@ -104,7 +116,7 @@ class RealtimeMinuteStore:
             tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
             merged.to_parquet(tmp, index=False)
             tmp.replace(path)
-            appended[str(trade_date)] = len(group)
+            appended[str(trade_date)] = len(merged) - prior_count
         return appended
 
     def bars(self, trade_date: str) -> pd.DataFrame:

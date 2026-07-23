@@ -9,7 +9,7 @@ const STATE_LABELS = {
   launching: "启动中", starting: "初始化", running_session: "运行中", waiting_user: "等待批准",
   waiting_step_user: "等待 Step 批准", waiting_user_reply: "等待答复提问", paused: "已暂停",
   completed: "已完成", stopped: "已停止", failed: "失败", interrupted: "已中断", terminated: "已强制终止",
-  created: "未启动", legacy: "历史实验", unreadable: "不可解析", unknown: "未知",
+  created: "未启动", unreadable: "不可解析", unknown: "未知",
 };
 const KIND_LABELS = { fold: "Fold", meta_learning: "元学习", heldout: "Held-out" };
 const ENVIRONMENT_STAGE_LABELS = {
@@ -299,11 +299,6 @@ function themeInk() {
     validLight: "#86b6ef", testLight: "#66cfa4",
     grid: "#e9ebf1", baseline: "#c2c7d2", muted: "#68717f", faint: "#a5abb8", ring: "#ffffff",
   };
-}
-
-function seriesSpec() {
-  const ink = themeInk();
-  return { valid: { color: ink.validColor, label: "验证" }, test: { color: ink.testColor, label: "测试" } };
 }
 
 let $chartTip = null;
@@ -811,7 +806,6 @@ function experimentCard(item) {
     el("h3", {},
       el("a", { href: `#/exp/${encodeURIComponent(item.experiment_id)}` }, item.experiment_id),
       stateBadge(item.state),
-      item.kind === "legacy" ? el("span", { class: "badge kind" }, "只读") : null,
     ),
     el("div", { class: "meta-line" },
       `创建 ${fmtTs(item.created_at)}`,
@@ -1245,7 +1239,6 @@ async function renderDetailPage(experimentId, selectedKey) {
       el("a", { href: "#/" }, "← 实验"),
       detail.experiment_id,
       stateBadge(detail.state),
-      detail.kind === "legacy" ? el("span", { class: "badge kind" }, "只读") : null,
       consoleCodeBadge(detail),
       detail.worker_alive && status.code_version && detail.repo_code_version
         && status.code_version !== detail.repo_code_version
@@ -2521,7 +2514,6 @@ function stepTreeRow(detail, payload, node, { guides, connector, childCount, col
   if (node.is_current) badges.push(el("span", { class: "badge state-running_session" }, "当前位置"));
   for (const key of node.frozen_for || []) badges.push(el("span", { class: "badge state-completed" }, `冻结 ${key}`));
   if (failed) badges.push(el("span", { class: "badge state-failed" }, "失败"));
-  if (node.has_snapshot && !node.restorable) badges.push(el("span", { class: "badge kind" }, "旧格式"));
   const actions = el("span", { class: "step-actions" });
   if (node.has_snapshot) {
     actions.append(el("a", {
@@ -2529,7 +2521,7 @@ function stepTreeRow(detail, payload, node, { guides, connector, childCount, col
       onclick: (event) => event.stopPropagation(),
     }, "下载"));
   }
-  if (node.restorable && detail.kind === "hitl") {
+  if (node.has_snapshot && detail.kind === "hitl") {
     actions.append(el("button", {
       class: "btn small",
       onclick: (event) => { event.stopPropagation(); hideStepTip(); openStepParentOverrideModal(detail, payload, node); },
@@ -2622,14 +2614,12 @@ function openStepNodeModal(detail, payload, node) {
     ),
     node.has_snapshot
       ? el("p", { class: "hint" },
-          node.restorable
-            ? "「下载源码 + 结果」包含该版本完整 output/ 源代码、models/ 参数与该次验证的明细结果文件。"
-            : "旧格式节点：可下载完整源代码与验证明细（打包为节点目录原样），不支持设为回滚起点。")
+          "「下载源码 + 结果」包含该版本完整 output/ 源代码、models/ 参数与该次验证的明细结果文件。")
       : el("p", { class: "hint" }, "失败尝试不保存产物快照，仅记录失败原因供避坑。"),
   );
   const buttons = [el("button", { class: "btn", onclick: closeModal }, "关闭")];
   if (node.has_snapshot) buttons.push(el("a", { class: "btn", href: zipUrl }, "下载源码 + 结果"));
-  if (node.restorable && detail.kind === "hitl") {
+  if (node.has_snapshot && detail.kind === "hitl") {
     buttons.push(el("button", {
       class: "btn primary",
       onclick: () => openStepParentOverrideModal(detail, payload, node),

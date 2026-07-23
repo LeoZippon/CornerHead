@@ -18,7 +18,8 @@ from autotrade.environment.artifacts import ModificationConstraints
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.managed_proxy import ManagedProxySpec
 from autotrade.environment.sandbox import SandboxSpec, link_copytree
-from autotrade.environment.data.snapshot import SnapshotBuilder, SnapshotConfig, read_raw_generation
+from autotrade.environment.data.contracts import read_committed_raw_generation
+from autotrade.environment.data.snapshot import SnapshotBuilder, SnapshotConfig
 from autotrade.environment.tools import ToolContext
 
 from .folds import FoldSpec, assert_no_overlap
@@ -152,7 +153,7 @@ class CachingSnapshotProvider:
     ) -> dict[str, object]:
         # Raw-lake generation in the key: a cron mutation between folds must
         # rebuild, never resurface a view of the previous lake.
-        generation = read_raw_generation(getattr(self._provider, "raw_dir", None))
+        generation = read_committed_raw_generation(getattr(self._provider, "raw_dir", None))
         generation_key = str((generation or {}).get("generation_id", ""))
         key = hashlib.sha256(
             "|".join(

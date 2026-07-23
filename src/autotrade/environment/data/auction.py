@@ -95,7 +95,6 @@ def apply_open_auction_correction(
     open_values = np.zeros(len(out), dtype=bool)
     valid_times = time_ids >= 0
     open_values[valid_times] = unique_open[time_ids[valid_times]]
-    open_mask = pd.Series(open_values, index=out.index, dtype=bool)
 
     out["auction_market_bucket"] = buckets
     out["auction_open_bar"] = open_values

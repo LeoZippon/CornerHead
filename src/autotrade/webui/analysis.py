@@ -31,6 +31,13 @@ class AnalysisService:
         with self._lock:
             return (experiment_id, epoch_id, fold_id) in self._pending
 
+    def pending_for_experiment(self, experiment_id: str) -> bool:
+        """Whether ANY analysis for this experiment is still in flight; its
+        worker thread writes under experiments/<id>/hitl/analysis/, so the
+        manager refuses to delete the experiment until this drains."""
+        with self._lock:
+            return any(key[0] == experiment_id for key in self._pending)
+
     def regenerate(self, experiments_root: Path, experiment_id: str, epoch_id: str, fold_id: str) -> None:
         key = (experiment_id, epoch_id, fold_id)
         with self._lock:

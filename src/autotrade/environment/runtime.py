@@ -164,44 +164,29 @@ class SandboxPaths:
         return self.artifacts / "parent_models"
 
     @property
-    def parent_models(self) -> Path:
-        return self.parent_model_artifacts
-
-    @property
     def workspace(self) -> Path:
         return self.agent / "workspace"
 
     @property
     def agent_output(self) -> Path:
+        """Agent formal strategy output directory, mounted as /mnt/agent/output."""
         return self.agent / "output"
 
     @property
     def output(self) -> Path:
-        """Agent formal strategy output directory.
-
-        ``agent_output`` remains the internal API name for the strategy
-        artifact concept; the sandbox-visible path is /mnt/agent/output.
-        """
+        """Agent-facing name for ``agent_output``. Load-bearing: the structured
+        search tool resolves its ``SEARCH_ROOTS`` names via ``getattr`` on this
+        object, and the agent-visible root name is ``output``."""
         return self.agent_output
 
     @property
     def model_artifacts(self) -> Path:
-        """Agent model-parameter artifact directory.
+        """Agent model-parameter artifact directory (/mnt/agent/models).
 
-        Strategy code lives in ``output``. Optional trained parameters and
-        weights live here and are hashed/frozen separately.
+        Strategy code lives in ``agent_output``. Optional trained parameters
+        and weights live here and are hashed/frozen separately.
         """
         return self.agent / "models"
-
-    @property
-    def models(self) -> Path:
-        return self.model_artifacts
-
-    @property
-    def writable_roots(self) -> tuple[Path, ...]:
-        """The three sandbox roots the agent may write to (single source of truth
-        for the shell write guard and the artifact_io tools)."""
-        return (self.workspace, self.agent_output, self.model_artifacts)
 
     @property
     def writable_root_map(self) -> dict[str, Path]:
@@ -360,11 +345,6 @@ class RunManifest:
         manifest.data.setdefault("backtest_summaries", [])
         manifest.save()
         return manifest
-
-    @classmethod
-    def load(cls, path: str | Path) -> "RunManifest":
-        path = Path(path)
-        return cls(path=path, data=json.loads(path.read_text(encoding="utf-8")))
 
     def save(self) -> None:
         if self.host_path is not None:
@@ -570,7 +550,9 @@ def _agent_visible_experiment_parameters(record: dict[str, object]) -> dict[str,
     return {
         key: value
         for key, value in record.items()
-        if key != "periods" and not str(key).startswith("heldout_")
+        if key != "periods"
+        and not str(key).startswith("test_")
+        and not str(key).startswith("heldout_")
     }
 
 

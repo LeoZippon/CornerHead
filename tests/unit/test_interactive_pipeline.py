@@ -1030,6 +1030,25 @@ class InteractiveRunnerTest(unittest.TestCase):
         self.assertEqual(status._data["run_id"], "run_fast_question")
         self.assertTrue(str(status._data["trace_path"]).endswith("agent_trace.jsonl"))
 
+    def test_failed_session_clears_environment_progress_stage(self) -> None:
+        # B4: a session that dies mid-replay must not leave the host-only
+        # environment stage stuck on the failed worker's status forever.
+        pipeline = FakePipeline(self.config, meta_enabled=False)
+
+        def failing_fold(fold, **kwargs):
+            hook = kwargs.get("environment_progress_hook")
+            if hook is not None:
+                hook("frozen_test", {"day_index": 1, "total_days": 61})
+            raise RuntimeError("fold exploded mid-replay")
+
+        pipeline.run_fold = failing_fold
+        self._control(mode="auto")
+        with self.assertRaisesRegex(RuntimeError, "fold exploded"):
+            self._runner(pipeline).run(TRADING_DAYS)
+        status = read_status(self.hitl_dir / STATUS_NAME)
+        self.assertIsNone(status.get("environment_stage"))
+        self.assertIsNone(status.get("environment_progress"))
+
     def test_post_fold_hook_failure_is_advisory(self) -> None:
         pipeline = FakePipeline(self.config, meta_enabled=False)
         self._control(mode="auto")

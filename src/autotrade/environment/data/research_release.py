@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Iterator
 
 from autotrade.data_quality import read_quality_report
+from autotrade.environment.data.contracts import require_committed_generation
 
 
 DOMAIN_STATUS_FILES: dict[str, str] = {
@@ -652,8 +653,7 @@ def _quality_report_type(name: str, fundamental_status_name: str) -> str:
 
 
 def _committed_generation_id(generation: dict[str, object]) -> str:
-    if generation.get("schema_version") != 2 or generation.get("state") != "committed":
-        raise RuntimeError("raw generation is not an explicit schema-v2 committed record")
+    require_committed_generation(generation)
     generation_id = str(generation.get("generation_id") or "")
     _validate_generation_text(generation_id)
     return generation_id

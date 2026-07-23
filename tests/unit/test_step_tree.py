@@ -552,6 +552,13 @@ class PhasePromptTest(unittest.TestCase):
                         "test_decision_input": {"snapshot_id": "test"},
                         "test_replay": {"snapshot_id": "test_replay"},
                     },
+                    "experiment_parameters": {
+                        "fold_period": "quarter",
+                        "epochs": 3,
+                        "periods": {"first_test_period": "2022Q1", "heldout_first_period": "2025Q1"},
+                        "test_first_period": "2022Q1",
+                        "heldout_periods": ["2025Q1", "2025Q2"],
+                    },
                     "backtest_summaries": [
                         {"mode": "valid", "total_return": 0.1},
                         {"mode": "frozen_eval", "total_return": 0.2},
@@ -567,6 +574,13 @@ class PhasePromptTest(unittest.TestCase):
             self.assertNotIn("test_decision_input", public["snapshots"])
             self.assertNotIn("test_replay", public["snapshots"])
             self.assertEqual([item["mode"] for item in public["backtest_summaries"]], ["valid"])
+            # experiment_parameters must be projected with the same test/held-out
+            # stripping as snapshots: any test_* or heldout_* key is a schedule leak.
+            self.assertNotIn("periods", public["experiment_parameters"])
+            self.assertNotIn("test_first_period", public["experiment_parameters"])
+            self.assertNotIn("heldout_periods", public["experiment_parameters"])
+            self.assertEqual(public["experiment_parameters"]["fold_period"], "quarter")
+            self.assertEqual(host["experiment_parameters"]["test_first_period"], "2022Q1")
             self.assertEqual(host["fold"]["test_period"], "20220101..20220331")
             self.assertIn("test_replay", host["snapshots"])
             # Budget/replay config is pure (no test/held-out leak) and is asserted in the

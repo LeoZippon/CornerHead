@@ -17,10 +17,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import uuid
 from pathlib import Path
 
 from autotrade.environment.artifacts import combined_artifact_hash, copy_artifact, copy_model_artifacts
-from autotrade.environment.runtime import sanitize_for_log, utc_now_iso
+from autotrade.environment.runtime import sanitize_for_log, utc_now_iso, write_json_atomic
 
 TREE_FILE = "tree.json"
 # Node subdirectories reserved for the snapshot itself; attachments must not
@@ -164,17 +165,18 @@ class StepTree:
         # hardlinked copy of the experiment-level tree, so an in-place write
         # would mutate the experiment copy mid-fold and an aborted fold could
         # leave it referencing node snapshots that were never copied back.
-        self._write_atomic(
-            self.tree_path, json.dumps(safe_data, ensure_ascii=False, indent=2, sort_keys=True)
-        )
+        write_json_atomic(self.tree_path, safe_data)
         # Always refresh the human/Agent-readable rendering alongside the JSON.
-        self._write_atomic(self.root / "tree.txt", self.render_ascii() + "\n")
+        self._write_text_atomic(self.root / "tree.txt", self.render_ascii() + "\n")
 
     @staticmethod
-    def _write_atomic(path: Path, content: str) -> None:
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_text(content, encoding="utf-8")
-        tmp.replace(path)
+    def _write_text_atomic(path: Path, content: str) -> None:
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     # ---- read views ----
 

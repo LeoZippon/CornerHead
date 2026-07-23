@@ -1,8 +1,6 @@
 import tempfile
 import unittest
-import urllib.error
 from datetime import datetime, timedelta, timezone
-from email.message import Message
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,27 +10,8 @@ from autotrade.environment.tools.web_fetch import AgentWebFetchTool
 from autotrade.environment.web.fetch import WebFetchError, WebFetchResult, WebFetchService
 from autotrade.environment.web.fetch import _is_same_host_redirect
 
+from .fixtures_http import FakeHTTPResponse
 from .test_tools_flow import build_sandbox
-
-
-class FakeHTTPResponse:
-    status = 200
-
-    def __init__(self, body: bytes, *, content_type: str = "text/html") -> None:
-        self.body = body
-        self.headers = Message()
-        self.headers["Content-Type"] = content_type
-
-    def __enter__(self) -> "FakeHTTPResponse":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        return False
-
-    def read(self, size: int = -1) -> bytes:
-        if size is None or size < 0:
-            return self.body
-        return self.body[:size]
 
 
 class FakeOpener:
@@ -48,27 +27,62 @@ class FakeOpener:
 class WebFetchServiceTest(unittest.TestCase):
     def test_fetch_converts_html_to_markdown(self):
         service = WebFetchService()
-        service._direct_opener = FakeOpener(  # type: ignore[attr-defined]
-            FakeHTTPResponse(
-                b"<html><body><h1>Title</h1><p>Hello <a href='https://example.com/a'>link</a></p></body></html>"
-            )
+        response = FakeHTTPResponse(
+            b"<html><body><h1>Title</h1><p>Hello <a href='https://example.com/a'>link</a></p></body></html>"
         )
-        with patch("socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 443))]):
+        with (
+            patch("socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 443))]),
+            patch(
+                "autotrade.environment.web.fetch._open_pinned_response",
+                return_value=response,
+            ) as opened,
+        ):
             result = service.fetch("https://example.com")
+        self.assertEqual(opened.call_args.args[1], ("93.184.216.34",))
         self.assertEqual(result.status_code, 200)
         self.assertIn("# Title", result.markdown)
         self.assertIn("Hello link (https://example.com/a)", result.markdown)
         self.assertEqual(result.content_type, "text/html")
         self.assertFalse(result.use_proxy)
 
+    def test_fetch_pins_the_validated_address_against_dns_rebinding(self):
+        service = WebFetchService()
+        response = FakeHTTPResponse(b"ok", content_type="text/plain")
+        resolver = [(0, 0, 0, "", ("93.184.216.34", 443))]
+        with (
+            patch("socket.getaddrinfo", return_value=resolver) as resolve,
+            patch(
+                "autotrade.environment.web.fetch._open_pinned_response",
+                return_value=response,
+            ) as opened,
+        ):
+            service.fetch("https://rebind.example/page")
+        resolve.assert_called_once()
+        self.assertEqual(opened.call_args.args[1], ("93.184.216.34",))
+
+    def test_action_schema_keeps_documented_proxy_toggle(self):
+        from autotrade.environment.tools.web_fetch import build_web_fetch_spec
+
+        self.assertIn("use_proxy", {field.name for field in build_web_fetch_spec().fields})
+
     def test_fetch_use_proxy_selects_proxy_opener(self):
         service = WebFetchService()
-        service._direct_opener = FakeOpener(AssertionError("direct opener should not be used"))  # type: ignore[attr-defined]
         proxy_opener = FakeOpener(FakeHTTPResponse(b"proxied", content_type="text/plain"))
-        with patch("autotrade.environment.web.fetch._build_proxy_opener", return_value=proxy_opener) as build:
-            with patch("socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 443))]):
-                result = service.fetch("https://example.com", use_proxy=True, proxy_env={"HTTPS_PROXY": "http://proxy.test:8080"})
+        with (
+            patch(
+                "autotrade.environment.web.fetch._build_proxy_opener",
+                return_value=proxy_opener,
+            ) as build,
+            patch("autotrade.environment.web.fetch._open_pinned_response") as pinned,
+            patch("socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 443))]),
+        ):
+            result = service.fetch(
+                "https://example.com",
+                use_proxy=True,
+                proxy_env={"HTTPS_PROXY": "http://proxy.test:8080"},
+            )
         build.assert_called_once_with({"HTTPS_PROXY": "http://proxy.test:8080"})
+        pinned.assert_not_called()
         self.assertEqual(result.markdown, "proxied")
         self.assertTrue(result.use_proxy)
 
@@ -79,13 +93,13 @@ class WebFetchServiceTest(unittest.TestCase):
         self.assertIn("no active proxy", str(raised.exception))
 
     def test_fetch_rejects_cross_host_redirect(self):
-        headers = Message()
-        headers["Location"] = "https://other.example/path"
         service = WebFetchService()
-        service._direct_opener = FakeOpener(  # type: ignore[attr-defined]
-            urllib.error.HTTPError("https://example.com", 302, "Found", headers, None)
-        )
-        with patch("socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 443))]):
+        response = FakeHTTPResponse(b"", status=302)
+        response.headers["Location"] = "https://other.example/path"
+        with (
+            patch("socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 443))]),
+            patch("autotrade.environment.web.fetch._open_pinned_response", return_value=response),
+        ):
             with self.assertRaises(WebFetchError) as raised:
                 service.fetch("https://example.com")
         self.assertIn("cross-host redirect", str(raised.exception))

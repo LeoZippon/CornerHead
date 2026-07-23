@@ -181,16 +181,13 @@ def copy_artifact(source_root: str | Path, dest_root: str | Path) -> None:
     _copy_formal_files(source_root, dest_root, relpaths)
 
 
-def clear_model_artifacts(dest_root: str | Path) -> None:
-    """Replace the model artifact directory with an empty validated directory."""
-    _replace_artifact_root(Path(dest_root))
-
-
 def copy_model_artifacts(source_root: str | Path | None, dest_root: str | Path) -> None:
-    """Copy optional model artifact directories, replacing any existing copy."""
+    """Copy optional model artifact directories, replacing any existing copy.
+
+    ``source_root=None`` replaces the destination with an empty directory."""
     dest_root = Path(dest_root)
     if source_root is None:
-        clear_model_artifacts(dest_root)
+        _replace_artifact_root(dest_root)
         return
     source_root = Path(source_root)
     relpaths = _model_artifact_files(source_root, missing_ok=True)

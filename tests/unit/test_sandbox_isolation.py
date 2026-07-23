@@ -32,22 +32,9 @@ from autotrade.environment.web.search import (
     WebSearchResult,
 )
 
+from .fixtures_http import FakeHTTPResponse
 from .fixtures_sandbox import TEMPLATE_DIR, write_strategy
 from .test_tools_flow import build_sandbox
-
-
-class FakeHTTPResponse:
-    def __init__(self, payload: dict[str, object]) -> None:
-        self.payload = payload
-
-    def __enter__(self) -> "FakeHTTPResponse":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        return False
-
-    def read(self) -> bytes:
-        return json.dumps(self.payload).encode("utf-8")
 
 
 class SandboxSpecTest(unittest.TestCase):
@@ -75,8 +62,10 @@ class SandboxSpecTest(unittest.TestCase):
             {"index": 3, "name": "NVIDIA L20", "memory_free_mib": 5000, "memory_total_mib": 46000},
         ]
         with patch("autotrade.environment.gpu.list_gpus", return_value=fake):
-            self.assertEqual(select_gpus(2), [1, 3])
-            self.assertEqual(select_gpus(1, require_name=None), [2])
+            # The name filter comes from SandboxSpec.gpu_name_filter at the call
+            # site; select_gpus itself defaults to any visible GPU.
+            self.assertEqual(select_gpus(2, require_name="L20"), [1, 3])
+            self.assertEqual(select_gpus(1), [2])
 
     def test_docker_sandbox_can_resolve_fixed_gpu_lists_without_docker(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -349,7 +338,6 @@ class SandboxSpecTest(unittest.TestCase):
             self.assertNotIn("hf-secret-for-test", command)
             self.assertNotIn("gh-secret-for-test", command)
             allocation = docker.allocation_record()
-            self.assertEqual(allocation["requested_env_passthrough"], ["HF_TOKEN", "GITHUB_TOKEN", "MISSING_SECRET"])
             self.assertEqual(allocation["requested_env_passthrough"], ["HF_TOKEN", "GITHUB_TOKEN", "MISSING_SECRET"])
             self.assertEqual(allocation["active_env_passthrough"], ["HF_TOKEN", "GITHUB_TOKEN"])
             self.assertTrue(allocation["add_host_gateway"])

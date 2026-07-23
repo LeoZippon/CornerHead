@@ -26,7 +26,7 @@ from autotrade.pipelines import (
 )
 from autotrade.pipelines.folds import heldout_periods, period_bounds, quarter_bounds
 from autotrade.pipelines.meta_schedule import meta_learning_trigger_counts
-from autotrade.pipelines.experiment import _agent_visible_ledger_record
+from autotrade.pipelines.agent_views import agent_visible_ledger_record
 from autotrade.pipelines.assembly import _session_config_summary
 from scripts.experiments._cli import (
     EXPERIMENT_META_REBUILD_HELP,
@@ -36,9 +36,9 @@ from scripts.experiments._cli import (
 )
 from autotrade.environment.sandbox import SandboxSpec
 
-from .fixtures_sandbox import TEMPLATE_DIR, TRADING_DAYS, FakeSnapshotProvider, write_strategy
+from .fixtures_sandbox import REPO_ROOT, TEMPLATE_DIR, TRADING_DAYS, FakeSnapshotProvider, write_strategy
 
-SRC_ENV_DIR = Path(__file__).resolve().parents[2] / "src" / "autotrade" / "environment"
+SRC_ENV_DIR = REPO_ROOT / "src" / "autotrade" / "environment"
 
 
 class ScriptedFoldAgent:
@@ -226,7 +226,7 @@ class ExperimentCliTest(unittest.TestCase):
         return parser
 
     def test_help_exposes_meta_learning_network_options(self):
-        script = Path(__file__).resolve().parents[2] / "scripts" / "experiments" / "run_experiment.py"
+        script = REPO_ROOT / "scripts" / "experiments" / "run_experiment.py"
         result = subprocess.run(
             [sys.executable, str(script), "--help"],
             capture_output=True,
@@ -336,7 +336,7 @@ class ExperimentCliTest(unittest.TestCase):
                 build_meta_learning_managed_proxy_spec(args, repo_root=repo_root, sandbox_spec=spec)
 
     def test_non_quarter_period_requires_explicit_generic_periods(self):
-        script = Path(__file__).resolve().parents[2] / "scripts" / "experiments" / "run_experiment.py"
+        script = REPO_ROOT / "scripts" / "experiments" / "run_experiment.py"
         result = subprocess.run(
             [sys.executable, str(script), "--experiment-id", "x", "--fold-period", "month"],
             capture_output=True,
@@ -349,7 +349,7 @@ class ExperimentCliTest(unittest.TestCase):
     def test_audit_session_non_quarter_period_requires_explicit_generic_periods(self):
         # The audit CLI must share the production guard instead of silently
         # feeding its quarter defaults into a non-quarter schedule.
-        script = Path(__file__).resolve().parents[2] / "scripts" / "experiments" / "run_audit_session.py"
+        script = REPO_ROOT / "scripts" / "experiments" / "run_audit_session.py"
         result = subprocess.run(
             [sys.executable, str(script), "--mode", "fold", "--experiment-id", "x", "--fold-period", "month"],
             capture_output=True,
@@ -479,7 +479,7 @@ class PipelineEndToEndTest(unittest.TestCase):
                     },
                 },
             )
-            self.assertNotIn("test_result", _agent_visible_ledger_record(pipeline.ledger.read("fold")[0]))
+            self.assertNotIn("test_result", agent_visible_ledger_record(pipeline.ledger.read("fold")[0]))
             rendered_test = json.dumps(compact["test_result"], ensure_ascii=False)
             self.assertNotIn("result_path", rendered_test)
             self.assertNotIn("orders", rendered_test)

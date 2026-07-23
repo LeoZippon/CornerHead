@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from .explore import ExploreSubAgentEngine
+from .explore import ExploreSubAgentEngine, tool_error_observation
 from autotrade.environment.llm.proxy import LLMProxy, LLMProxyError, ProviderResponse
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
 from autotrade.environment.tools import (
@@ -35,13 +35,12 @@ from autotrade.environment.tools import (
     ToolError,
 )
 from autotrade.environment.tools.artifact_io import ArtifactIOTool
-from autotrade.environment.tools.backtest import agent_visible_backtest_result
 from autotrade.environment.tools.base import (
     ActionField,
     ActionSpec,
     SessionInterrupt,
     ToolSchemaError,
-    agent_visible_tool_result,
+    llm_observation,
 )
 from autotrade.environment.tools.web_search import META_SEARCH_PERSPECTIVES, build_web_search_spec
 from autotrade.environment.web.fetch import WebFetchError
@@ -107,17 +106,6 @@ class AgentSessionConfig:
     def __post_init__(self) -> None:
         if self.trim_message_headroom < 0:
             raise ValueError("trim_message_headroom cannot be negative")
-
-
-def _llm_observation(record: dict[str, object]) -> dict[str, object]:
-    """Project a tool summary for the LLM message: host coordinates are removed
-    (same rule as the trace projection) and the static ``tool_spec`` echo is
-    dropped — identical native tool definitions already ride on every provider
-    call, so re-embedding ~2KB per observation only burns Agent context. The
-    trace event keeps the full record including ``tool_spec``."""
-    projected = dict(agent_visible_tool_result(record))
-    projected.pop("tool_spec", None)
-    return projected
 
 
 class AgentSessionRunner:
@@ -220,6 +208,8 @@ class AgentSessionRunner:
         self._researcher_wait_seconds: float = 0.0
         self._backtest_count: int = 0
         self._accepted_steps: int = 0
+        self._question_count: int = 0
+        self._explore_totals: dict[str, int] | None = None
         self._token_totals: dict[str, int] = {
             key: 0
             for key in (
@@ -526,7 +516,7 @@ class AgentSessionRunner:
             max_output_chars=int(args["max_output_chars"]),
             timeout_seconds=int(args["timeout_seconds"]),
         )
-        return {"observation": "shell", **_llm_observation(result.to_record())}
+        return {"observation": "shell", **llm_observation(result.to_record())}
 
     def _do_write_file(self, args: dict[str, object]) -> dict[str, object]:
         return {"observation": "write_file", **self.artifact_io.write_file(**args)}
@@ -535,21 +525,21 @@ class AgentSessionRunner:
         return {"observation": "edit_file", **self.artifact_io.edit_file(**args)}
 
     def _do_grep(self, args: dict[str, object]) -> dict[str, object]:
-        return {"observation": "grep", **_llm_observation(self.search.grep(**args))}
+        return {"observation": "grep", **llm_observation(self.search.grep(**args))}
 
     def _do_glob(self, args: dict[str, object]) -> dict[str, object]:
-        return {"observation": "glob", **_llm_observation(self.search.glob(**args))}
+        return {"observation": "glob", **llm_observation(self.search.glob(**args))}
 
     def _do_read(self, args: dict[str, object]) -> dict[str, object]:
-        return {"observation": "read", **_llm_observation(self.search.read(**args))}
+        return {"observation": "read", **llm_observation(self.search.read(**args))}
 
     def _do_modification_check(self, args: dict[str, object]) -> dict[str, object]:
-        return {"observation": "modification_check", **_llm_observation(self.modification_check.run())}
+        return {"observation": "modification_check", **llm_observation(self.modification_check.run())}
 
     def _do_step_rollback(self, args: dict[str, object]) -> dict[str, object]:
         return {
             "observation": "step_rollback",
-            **_llm_observation(
+            **llm_observation(
                 self.step_rollback.run(str(args["node_id"]), include_models=bool(args["include_models"]))
             ),
         }
@@ -595,34 +585,34 @@ class AgentSessionRunner:
                 step_id=self.ctx.current_step_id,
             )
         researcher_directive = ""
-        # Step-level HITL: after a formal (non-probe) validation the researcher
-        # may hold the session at this step and inject guidance. The wait is
+        successful_validation = bool(result.get("status") == "ok" and result.get("complete_validation"))
+        if successful_validation:
+            self._accepted_steps += 1
+        # Step-level HITL: after a SUCCESSFUL formal validation the researcher
+        # may hold the session at this step and inject guidance; probes and
+        # failed backtests do not gate (pipeline_design.md §5.1). The wait is
         # credited back to the deadline like backtest wall-time; the directive
         # reaches the model inside this tool observation, clearly labelled.
+        # The step index does NOT match valid_NNN result names (successful
+        # probes also create valid_NNN dirs); correlate via result_name.
         hook = self.ctx.extra.get("step_gate_hook")
-        if hook is not None and not (args or {}).get("replay_window"):
-            # Gate steps count SUCCESSFUL formal validations only. This index
-            # does NOT match valid_NNN result names (successful probes also
-            # create valid_NNN dirs); correlate via the payload's result_name.
-            self._gated_step_count = getattr(self, "_gated_step_count", 0) + 1
+        if hook is not None and successful_validation:
             gate_started = time.monotonic()
-            directive = hook(self._gated_step_count, dict(result))
+            directive = hook(self._accepted_steps, dict(result))
             waited_seconds = time.monotonic() - gate_started
             self._excluded_backtest_seconds += waited_seconds
             self._researcher_wait_seconds += waited_seconds
             if waited_seconds >= 1.0:
                 self.ctx.trace.emit(
                     "step_gate",
-                    {"step": self._gated_step_count, "waited_seconds": round(waited_seconds, 1)},
+                    {"step": self._accepted_steps, "waited_seconds": round(waited_seconds, 1)},
                     step_id=self.ctx.current_step_id,
                 )
             if directive and str(directive).strip():
                 researcher_directive = str(directive).strip()
-        if result.get("status") == "ok" and result.get("complete_validation"):
-            self._accepted_steps += 1
         observation = {
             "observation": "backtest",
-            **agent_visible_backtest_result(result),
+            **llm_observation(result),
             **self._backtest_budget(),
         }
         if researcher_directive:
@@ -648,7 +638,7 @@ class AgentSessionRunner:
         }
         if hook is None:
             return unattended
-        self._question_count = getattr(self, "_question_count", 0) + 1
+        self._question_count += 1
         started = time.monotonic()
         # The hook holds until the researcher replies (or returns None when
         # nobody is attending); a stop request raises through it.
@@ -695,7 +685,7 @@ class AgentSessionRunner:
             max_chars=int(args["max_chars"]),
             use_proxy=bool(args["use_proxy"]),
         )
-        return {"observation": "web_fetch", **_llm_observation(result)}
+        return {"observation": "web_fetch", **llm_observation(result)}
 
     def _do_explore(self, args: dict[str, object]) -> dict[str, object]:
         engine = ExploreSubAgentEngine(
@@ -850,7 +840,7 @@ class AgentSessionRunner:
         """Explore Sub Agent calls bill the same provider account but bypass
         _accumulate_usage; without this the session summary understated real
         cost by up to ~15% in observed sessions."""
-        totals = getattr(self, "_explore_totals", None)
+        totals = self._explore_totals
         if totals is None:
             totals = {"llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             self._explore_totals = totals
@@ -868,7 +858,7 @@ class AgentSessionRunner:
         totals = dict(self._token_totals)
         prompt = totals.get("prompt_tokens", 0)
         totals["cache_hit_ratio"] = round(totals["cache_hit_tokens"] / prompt, 4) if prompt else 0.0
-        explore = getattr(self, "_explore_totals", None)
+        explore = self._explore_totals
         if explore is not None:
             totals["explore"] = dict(explore)
             totals["total_tokens_including_explore"] = int(totals.get("total_tokens", 0)) + int(explore.get("total_tokens", 0))
@@ -1005,7 +995,7 @@ class AgentSessionRunner:
         except SessionInterrupt:
             raise  # researcher stop at a gate: abort the session, never an observation
         except ToolError as exc:
-            observation = _tool_error_observation(action, exc)
+            observation = tool_error_observation(action, exc)
             if action == "backtest":
                 observation.update(self._backtest_budget())
             return observation
@@ -1118,9 +1108,13 @@ class AgentSessionRunner:
         # Token-triggered entry with nothing to drop: rewriting index 1 with a
         # fresh summary every turn would reset the provider prefix cache without
         # shortening anything (the config comment's explicit non-goal). Let the
-        # semantic compactor handle real size pressure until messages overflow.
-        if len(messages) <= self.config.max_history_messages and len(non_summary) <= max(
-            self.config.max_history_messages - 3, 0
+        # semantic compactor handle real size pressure until messages overflow —
+        # unless compaction is disabled, in which case this trim is the only
+        # pressure valve and must shed a batch of the oldest raw messages.
+        if (
+            self.compactor is not None
+            and len(messages) <= self.config.max_history_messages
+            and len(non_summary) <= max(self.config.max_history_messages - 3, 0)
         ):
             return messages
         latest_llm_summary = next(
@@ -1137,6 +1131,11 @@ class AgentSessionRunner:
         # turns while retaining at least one recent raw message when possible.
         headroom = min(self.config.trim_message_headroom, max(max_tail - 1, 0))
         keep = max_tail - headroom
+        if self.compactor is None and keep >= len(non_summary):
+            # Deterministic-only sessions (compaction disabled) reach here on the
+            # token trigger with the tail still under the cap; keep fewer than we
+            # have so the trim genuinely drops old messages instead of looping.
+            keep = max(len(non_summary) - max(headroom, 1), 1)
         tail = self.drop_leading_orphan_tools(non_summary[-keep:]) if keep else []
         if kept_llm_compaction:
             trimmed = [messages[0], latest_llm_summary, summary_message, *tail]
@@ -1325,13 +1324,3 @@ def _read_json_if_exists(path) -> dict[str, object]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
-
-
-def _tool_error_observation(action: str, exc: ToolError) -> dict[str, object]:
-    observation: dict[str, object] = {
-        "observation": "error",
-        "action": action,
-        "error": safe_error_summary(exc),
-    }
-    observation.update(exc.to_record())
-    return {key: value for key, value in observation.items() if value not in (None, {}, "")}

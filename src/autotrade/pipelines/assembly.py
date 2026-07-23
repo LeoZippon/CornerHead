@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 from autotrade.agent import AgentSessionConfig, AgentSessionRunner, ContextCompactionConfig
+from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.llm import DeepSeekProxy
 from autotrade.environment.managed_proxy import (
     DEFAULT_XRAY_CONFIG_ENVS,
@@ -37,8 +38,9 @@ from autotrade.environment.tools import ToolContext
 from autotrade.environment.web.search import SemanticScholarSearchProvider, TavilySearchProvider
 from autotrade.notify import load_dotenv_values
 
-from .config import ExperimentConfig, RawSnapshotProvider
+from .config import AcceptanceRules, ExperimentConfig, RawSnapshotProvider
 from .experiment import ExperimentPipeline
+from .hitl_state import PARAM_DEFAULTS
 
 
 DEFAULT_AGENT_MODEL = "deepseek-v4-pro"
@@ -310,6 +312,119 @@ def build_meta_learning_managed_proxy_spec(
         listen_host=listen_host,
         container_host=container_host,
         disabled_status=disabled_status,
+    )
+
+
+def build_experiment_config(
+    args,
+    *,
+    repo_root: Path,
+    sandbox_spec: SandboxSpec,
+    meta_learning_directive: str | None = None,
+    fold_exploration_directive: str | None = None,
+    extra_dotenv_keys: tuple[str, ...] = (),
+) -> ExperimentConfig:
+    """The single namespace -> ExperimentConfig mapping for every entrypoint.
+
+    ``args`` is either an argparse namespace (CLI dests only) or the resolved
+    HITL options namespace (every PARAM_DEFAULTS key). Identity, paths, period
+    labels, and the snapshot-window knobs must be present on ``args`` (missing
+    ones fail fast); optional knobs absent from a caller's surface fall back to
+    ``PARAM_DEFAULTS`` — the dataclass-pinned defaults the CLI mirrors — so a
+    knob missing from one entrypoint cannot silently diverge from the shared
+    default. The directives are parameters because the CLIs resolve optional
+    ``--*-directive-file`` variants before building the config; ``sandbox_spec``
+    is a parameter because each entrypoint applies its own overrides (HITL GPU
+    count, audit image/GPU ids). Callers needing a different session count
+    apply an explicit ``dataclasses.replace`` (audit pins ``epochs=1``).
+    """
+
+    def param(name: str):
+        return getattr(args, name, PARAM_DEFAULTS[name])
+
+    meta_learning_sandbox_spec = build_meta_learning_sandbox_spec(
+        args, sandbox_spec, repo_root=repo_root, extra_dotenv_keys=extra_dotenv_keys
+    )
+    meta_learning_managed_proxy = build_meta_learning_managed_proxy_spec(
+        args,
+        repo_root=repo_root,
+        sandbox_spec=meta_learning_sandbox_spec,
+    )
+    broker_profile = replace(
+        BrokerProfile(),
+        stock_initial_cash=float(param("stock_initial_cash")),
+        credit_initial_cash=float(param("credit_initial_cash")),
+        commission_bps=float(param("commission_bps")),
+        slippage_bps=float(param("slippage_bps")),
+        max_total_holdings=(
+            int(param("max_total_holdings")) if param("max_total_holdings") is not None else None
+        ),
+        max_single_name_weight=(
+            float(param("max_single_name_weight")) if param("max_single_name_weight") is not None else None
+        ),
+        fin_rate_annual=float(param("fin_rate_annual")),
+        slo_rate_annual=float(param("slo_rate_annual")),
+    )
+    return ExperimentConfig(
+        experiment_id=str(args.experiment_id),
+        experiments_root=Path(args.experiments_root).resolve(),
+        work_root=Path(args.work_root).resolve(),
+        template_dir=Path(args.template_dir).resolve(),
+        first_test_period=str(args.first_test_period),
+        last_test_period=str(args.last_test_period),
+        heldout_first_period=str(args.heldout_first_period),
+        heldout_last_period=str(args.heldout_last_period),
+        fold_period=str(param("fold_period")),
+        epochs=int(param("epochs")),
+        window_months=int(param("window_months")),
+        max_fold_minutes=int(param("max_fold_minutes")),
+        finalize_before_deadline_seconds=int(param("finalize_before_deadline_seconds")),
+        per_call_timeout_seconds=int(param("per_call_timeout_seconds")),
+        max_steps_per_fold=int(param("max_steps_per_fold")),
+        max_backtests_per_fold=int(param("max_backtests_per_fold")),
+        offsession_tick_minutes=int(param("offsession_tick_minutes")),
+        intraday_decision_minutes=int(param("intraday_decision_minutes")),
+        execution_lag_bars=int(param("execution_lag_bars")),
+        decision_max_sim_minutes=(
+            float(param("decision_max_sim_minutes")) if param("decision_max_sim_minutes") is not None else None
+        ),
+        backtest_max_seconds_per_decision=float(param("backtest_max_seconds_per_decision")),
+        backtest_max_seconds_per_trading_day=float(param("backtest_max_seconds_per_trading_day")),
+        nl_max_calls_per_decision_day=int(param("nl_max_calls_per_decision_day")),
+        nl_max_calls_per_backtest=(
+            int(param("nl_max_calls_per_backtest")) if param("nl_max_calls_per_backtest") is not None else None
+        ),
+        snapshot_config=build_snapshot_config(args),
+        nl_failure_policy=str(param("nl_failure_policy")),
+        convergence_start_epoch=int(param("convergence_start_epoch")),
+        meta_learning_directive=(
+            str(param("meta_learning_directive")) if meta_learning_directive is None else meta_learning_directive
+        ),
+        fold_exploration_directive=(
+            str(param("fold_exploration_directive"))
+            if fold_exploration_directive is None
+            else fold_exploration_directive
+        ),
+        meta_learning_fold_interval=int(param("meta_learning_fold_interval")),
+        meta_memory_max_epochs=int(param("meta_memory_max_epochs")),
+        step_tree_enabled=not bool(param("disable_step_tree")),
+        record_failed_attempts=bool(param("record_failed_attempts")),
+        acceptance=AcceptanceRules(
+            min_return=float(param("min_return")),
+            min_sharpe=float(param("min_sharpe")),
+            max_drawdown=float(param("max_drawdown")),
+            # A fold only freezes a fully-completed validation (the freeze
+            # candidate pool hard-filters to complete_validation runs).
+            require_complete_validation=True,
+        ),
+        broker_profile=broker_profile,
+        sandbox_spec=sandbox_spec,
+        meta_learning_sandbox_spec=meta_learning_sandbox_spec,
+        meta_learning_managed_proxy=meta_learning_managed_proxy,
+        meta_sandbox_rebuild_enabled=not bool(param("disable_meta_sandbox_rebuild")),
+        meta_sandbox_rebuild_timeout_seconds=int(param("meta_sandbox_rebuild_timeout_seconds")),
+        meta_sandbox_image_keep=int(param("meta_sandbox_image_keep")),
+        use_docker=not bool(param("local_dev")),
     )
 
 

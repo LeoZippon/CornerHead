@@ -86,22 +86,32 @@ class QmtLiveMonitor:
         local_dir: Path,
         notify,  # callable(title, body, *, color) -> bool (FeishuBot.send_card) or None
         ssh_dest: str,
+        ssh_known_hosts: Path,
         remote_outbox: str = "C:/xquant/outbox",
         scp_timeout_seconds: float = 60.0,
     ) -> None:
         self.local_dir = Path(local_dir)
         self.notify = notify
         self.ssh_dest = ssh_dest
+        self.ssh_known_hosts = Path(ssh_known_hosts)
         self.remote_outbox = remote_outbox.rstrip("/")
         self.scp_timeout_seconds = scp_timeout_seconds
         self.state_path = self.local_dir / ".monitor_state.json"
 
     # ---- state --------------------------------------------------------------
     def _load_state(self) -> dict:
-        try:
-            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        # Fail closed: a corrupt state file must not silently reset dedup memory
+        # (that would re-notify old fills). A missing file is the normal cold
+        # start and reads as empty.
+        if not self.state_path.exists():
             payload = {}
+        else:
+            try:
+                payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise RuntimeError(f"cannot load QMT monitor state {self.state_path}: {exc}") from exc
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"QMT monitor state root must be an object: {self.state_path}")
         alerts = payload.get("alerts")
         state = {
             "notified_deals": set(payload.get("notified_deals", [])),
@@ -129,14 +139,17 @@ class QmtLiveMonitor:
     def _save_state(self, state: dict) -> None:
         min_day = (datetime.datetime.now(CN_TZ) - datetime.timedelta(days=1)).strftime("%Y%m%d")
         state["notified_deals"] = self._prune_notified(state["notified_deals"], min_day)
-        self.local_dir.mkdir(parents=True, exist_ok=True)
+        self.local_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.local_dir.chmod(0o700)
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps({
             "notified_deals": sorted(state["notified_deals"]),
             "alerts": state["alerts"],
             "pull_failures": state["pull_failures"],
         }, ensure_ascii=False), encoding="utf-8")
+        tmp.chmod(0o600)
         tmp.replace(self.state_path)
+        self.state_path.chmod(0o600)
 
     # ---- sync ---------------------------------------------------------------
     def _pull(self, names: list[str]) -> list[str]:
@@ -145,13 +158,16 @@ class QmtLiveMonitor:
         for the JSON snapshot, only when the payload parses). A missing remote
         file is normal before the exporter's first write. Returns the names
         that did NOT update this cycle; a hung/failed scp never propagates."""
-        self.local_dir.mkdir(parents=True, exist_ok=True)
+        self.local_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.local_dir.chmod(0o700)
         failed: list[str] = []
         for name in names:
             tmp = self.local_dir / f"{name}.pull"
             try:
                 completed = subprocess.run(
-                    ["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                    ["scp", "-q", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+                     "-o", f"UserKnownHostsFile={self.ssh_known_hosts}",
+                     "-o", "ConnectTimeout=10",
                      f"{self.ssh_dest}:{self.remote_outbox}/{name}", str(tmp)],
                     capture_output=True, timeout=self.scp_timeout_seconds,
                 )
@@ -174,7 +190,10 @@ class QmtLiveMonitor:
                     tmp.unlink(missing_ok=True)
                     failed.append(name)
                     continue
-            tmp.replace(self.local_dir / name)
+            target = self.local_dir / name
+            tmp.chmod(0o600)
+            tmp.replace(target)
+            target.chmod(0o600)
         return failed
 
     @staticmethod

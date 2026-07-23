@@ -17,6 +17,8 @@ import subprocess
 import sys
 import threading
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from autotrade.environment.runtime import utc_now_iso
@@ -189,12 +191,37 @@ class ManagerError(RuntimeError):
     """User-facing lifecycle error (mapped to HTTP 4xx by the server)."""
 
 
+@dataclass
+class _ControlRequest:
+    """Resolved per-request context handed to a control-action handler."""
+
+    experiment_id: str
+    experiment_dir: Path
+    hitl_dir: Path
+    control_path: Path
+    control: ControlState
+    session_key: str | None
+    directive: str | None
+    mode: str | None
+
+
 class ExperimentManager:
-    def __init__(self, repo_root: Path, experiments_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        repo_root: Path,
+        experiments_root: Path | None = None,
+        *,
+        analysis_pending: Callable[[str], bool] | None = None,
+    ) -> None:
         self.repo_root = Path(repo_root).resolve()
         self.experiments_root = Path(experiments_root or self.repo_root / "experiments").resolve()
         self.worker_script = self.repo_root / "scripts" / "experiments" / "run_interactive_experiment.py"
         self.log_dir = self.repo_root / "logs" / "webui"
+        # AnalysisService worker threads write into <experiment>/hitl/analysis/;
+        # the server wires in the service's pending view so delete can refuse
+        # while such a write may still be in flight. Standalone managers (tests,
+        # scripts) have no background analyses to guard against.
+        self._analysis_pending = analysis_pending
         # Serializes all lifecycle mutations across the server's request threads.
         # Without it, concurrent requests race on control.json read-modify-write
         # (lost approvals/directives), on the check-then-spawn in start_worker
@@ -346,9 +373,9 @@ class ExperimentManager:
 
     def _start_worker(self, experiment_id: str) -> dict[str, object]:
         experiment_dir = resolve_experiment_dir(self.experiments_root, experiment_id)
+        if not (experiment_dir / HITL_DIR_NAME).is_dir():
+            raise ManagerError(f"experiment {experiment_id!r} has no hitl/ control plane; it cannot be started")
         state = experiment_state(experiment_dir)
-        if state.get("kind") != "hitl":
-            raise ManagerError(f"experiment {experiment_id!r} is legacy/read-only; it cannot be started")
         if state.get("worker_alive"):
             raise ManagerError(f"experiment {experiment_id!r} already has a live worker")
         if state.get("state") == "launching":
@@ -408,226 +435,314 @@ class ExperimentManager:
         experiment_dir = resolve_experiment_dir(self.experiments_root, experiment_id)
         hitl_dir = experiment_dir / HITL_DIR_NAME
         if not hitl_dir.is_dir():
-            raise ManagerError(f"experiment {experiment_id!r} is legacy/read-only")
+            raise ManagerError(f"experiment {experiment_id!r} has no hitl/ control plane")
         control_path = hitl_dir / CONTROL_NAME
         control = read_control(control_path)
         # Effective seal: manual reveal OR held-out completed (auto-reveal).
         if action in _SEALED_BLOCKED_ACTIONS and test_results_revealed(experiment_dir):
             raise ManagerError("测试结果已揭示，实验已封存：不能再进行影响后续学习的控制操作")
-        if action == "reveal_test_results":
-            # One-way: showing OOS results to the researcher makes every later
-            # directive/rerun/rollback informed by them — seal the experiment.
-            control.test_revealed = True
-        elif action == "pause":
-            control.request = "pause"
-        elif action == "resume":
-            # Clears a pause; if the worker died, relaunch it (ledger resume).
-            control.request = None
-            write_control(control_path, control)
-            state = experiment_state(experiment_dir)
-            if not state.get("worker_alive") and state.get("state") in _TERMINAL_RESUMABLE_STATES:
-                return {"control": control.to_record(), **self.start_worker(experiment_id)}
-            return {"control": control.to_record()}
-        elif action == "stop":
-            control.request = "stop"
-        elif action == "set_mode":
-            if mode not in ("auto", "manual", "step"):
-                raise ManagerError("set_mode requires mode auto|manual|step")
-            control.mode = mode
-        elif action == "approve":
-            if not session_key:
-                raise ManagerError("approve requires session_key")
-            if directive is not None:
-                control.directives[session_key] = directive
-            control.approved_sessions = tuple(dict.fromkeys([*control.approved_sessions, session_key]))
-        elif action == "set_directive":
-            if not session_key:
-                raise ManagerError("set_directive requires session_key")
-            if directive:
-                control.directives[session_key] = directive
-            else:
-                control.directives.pop(session_key, None)
-        elif action == "set_prompt_override":
-            if not session_key:
-                raise ManagerError("set_prompt_override requires session_key")
-            if directive and directive.strip():
-                control.prompt_overrides[session_key] = directive
-            else:
-                control.prompt_overrides.pop(session_key, None)
-        elif action == "set_gpu_count":
-            if not session_key:
-                raise ManagerError("set_gpu_count requires session_key")
-            if directive and str(directive).strip():
-                try:
-                    count = int(str(directive).strip())
-                except ValueError as exc:
-                    raise ManagerError("GPU 数量必须是正整数") from exc
-                if not 1 <= count <= 4:
-                    raise ManagerError("GPU 数量须在 1..4 之间")
-                control.gpu_counts[session_key] = count
-            else:
-                control.gpu_counts.pop(session_key, None)
-        elif action == "set_step_gate":
-            # "1" -> on, "0" -> explicitly off (overrides mode="step"), "" -> clear
-            # back to the mode default.
-            if not session_key:
-                raise ManagerError("set_step_gate requires session_key")
-            value = str(directive or "").strip()
-            if not value:
-                control.step_gate.pop(session_key, None)
-            else:
-                control.step_gate[session_key] = value not in ("0", "false", "off")
-        elif action == "approve_step":
-            # Release the session held at its current step gate; the optional
-            # directive is delivered inside that step's tool observation.
-            if not session_key:
-                raise ManagerError("approve_step requires session_key")
-            status = read_status(hitl_dir / STATUS_NAME)
-            if str(status.get("state")) != "waiting_step_user" or str(status.get("session_key")) != session_key:
-                raise ManagerError("该会话当前没有等待批准的 Step")
-            step_index = int(status.get("awaiting_step") or 0)
-            if step_index <= 0:
-                raise ManagerError("status.json 缺少 awaiting_step")
-            if directive and str(directive).strip():
-                control.step_directives[f"{session_key}#{step_index}"] = str(directive).strip()
-            control.step_go[session_key] = max(int(control.step_go.get(session_key, 0)), step_index)
-        elif action == "reply_question":
-            # Answer the ask_user question the worker is holding on. An empty
-            # directive releases without guidance (the Agent decides).
-            if not session_key:
-                raise ManagerError("reply_question requires session_key")
-            status = read_status(hitl_dir / STATUS_NAME)
-            question = status.get("awaiting_question") if isinstance(status.get("awaiting_question"), dict) else None
-            if (
-                str(status.get("state")) != "waiting_user_reply"
-                or str(status.get("session_key")) != session_key
-                or not question
-            ):
-                raise ManagerError("该会话当前没有等待答复的提问")
-            index = int(question.get("index") or 0)
-            if index <= 0:
-                raise ManagerError("status.json 缺少提问序号")
-            reply_key = str(question.get("reply_key") or f"{session_key}#q{index}")
-            if reply_key.split("#", 1)[0] != session_key:
-                raise ManagerError("status.json 提问 reply_key 与 session_key 不一致")
-            control.user_replies[reply_key] = str(directive or "").strip()
-        elif action == "set_parent_override":
-            if not session_key:
-                raise ManagerError("set_parent_override requires session_key")
-            node_id = str(directive or "").strip()
-            if node_id:
-                self._validate_parent_override(experiment_dir, session_key, node_id)
-                control.parent_overrides[session_key] = node_id
-            else:
-                control.parent_overrides.pop(session_key, None)
-        elif action == "skip_to_heldout":
-            from .registry import read_ledger_records, latest_fold_records
-
-            if not latest_fold_records(read_ledger_records(experiment_dir)):
-                raise ManagerError("尚无已完成的 Fold，无法提前进入 Held-out")
-            control.skip_to_heldout = True
-            control.request = None
-            write_control(control_path, control)
-            state = experiment_state(experiment_dir)
-            if not state.get("worker_alive") and state.get("state") in _TERMINAL_RESUMABLE_STATES:
-                return {"control": control.to_record(), **self.start_worker(experiment_id)}
-            return {"control": control.to_record()}
-        elif action == "cancel_skip_to_heldout":
-            control.skip_to_heldout = False
-        elif action == "rollback_fold":
-            if not session_key:
-                raise ManagerError("rollback_fold requires session_key")
-            state = experiment_state(experiment_dir)
-            if state.get("worker_alive") or state.get("state") == "launching":
-                raise ManagerError("先停止运行中的 worker（停止/强制终止）再回滚")
-            summary = self._rollback_to_fold(experiment_dir, session_key, control)
-            control.request = None
-            control.skip_to_heldout = False
-            write_control(control_path, control)
-            return {"control": control.to_record(), **summary, **self.start_worker(experiment_id)}
-        elif action == "rerun_fold":
-            if not session_key:
-                raise ManagerError("rerun_fold requires session_key")
-            self._validate_rerun_target(experiment_dir, session_key)
-            state = experiment_state(experiment_dir)
-            if state.get("worker_alive") or state.get("state") == "launching":
-                raise ManagerError("先停止运行中的 worker（停止/强制终止）再重跑该 Fold")
-            control.rerun_sessions[session_key] = uuid.uuid4().hex[:12]
-            # The re-run must be re-approved (prompt edits land first) and its
-            # step gating starts afresh: stale step_go would auto-release the
-            # first N step holds, stale per-step directives would replay.
-            _require_session_reapproval(control, session_key)
-            control.step_go.pop(session_key, None)
-            for mapping in (control.step_directives, control.user_replies):
-                for key in list(mapping):
-                    if key.split("#", 1)[0] == session_key:
-                        mapping.pop(key, None)
-            control.request = None
-            write_control(control_path, control)
-            return {"control": control.to_record(), **self.start_worker(experiment_id)}
-        elif action == "restart":
-            # Terminate-and-restart in one step: SIGTERM the live worker, wait
-            # for the pid to die (bounded), then resume via the ledger.
-            status = read_status(hitl_dir / STATUS_NAME)
-            if status_pid_alive(status):
-                _signal_worker_group(int(status["pid"]), signal.SIGTERM)
-                import time as _time
-
-                deadline = _time.monotonic() + 30.0
-                while _time.monotonic() < deadline and status_pid_alive(read_status(hitl_dir / STATUS_NAME)):
-                    _time.sleep(0.5)
-                if status_pid_alive(read_status(hitl_dir / STATUS_NAME)):
-                    raise ManagerError("worker 未在 30s 内退出；请稍后重试或强制终止后手动恢复")
-            _reclaim_sandbox_containers(experiment_id)
-            return {"restarted": True, **self.start_worker(experiment_id)}
-        elif action == "terminate":
-            # Graceful first, then guaranteed: the worker's SIGTERM handler
-            # unwinds through finally blocks, but blocking work (LLM retries,
-            # derived-image docker build) can ignore it for a long time — test6
-            # kept heartbeating for an hour. After a short grace, SIGKILL the
-            # whole process group (worker runs with start_new_session=True).
-            status = read_status(hitl_dir / STATUS_NAME)
-            if not status_pid_alive(status):
-                raise ManagerError("no live worker to terminate")
-            pid = int(status["pid"])
-            session_key = str(status.get("session_key") or "")
-            try:
-                _signal_worker_group(pid, signal.SIGTERM)
-            except ProcessLookupError as exc:  # exited between check and signal
-                raise ManagerError("worker 已退出") from exc
-            import time as _time
-
-            deadline = _time.monotonic() + 10.0
-            while _time.monotonic() < deadline:
-                if not status_pid_alive(read_status(hitl_dir / STATUS_NAME)):
-                    reclaimed = _reclaim_sandbox_containers(experiment_id)
-                    result: dict[str, object] = {
-                        "terminated_pid": pid,
-                        "escalated": False,
-                        "reclaimed_containers": reclaimed,
-                    }
-                    revoked = _revoke_unsettled_session_approval(experiment_dir, session_key, control)
-                    if revoked is not None:
-                        result["approval_revoked_session"] = revoked
-                    return result
-                _time.sleep(0.5)
-            _signal_worker_group(pid, signal.SIGKILL)
-            reclaimed = _reclaim_sandbox_containers(experiment_id)
-            # SIGKILL leaves no worker to stamp a terminal state; without this
-            # the page shows a stale running state until pid-liveness kicks in
-            # and the user cannot tell whether termination worked.
-            status = read_status(hitl_dir / STATUS_NAME)
-            status.update({"state": "terminated", "error": None, "terminated_at": utc_now_iso()})
-            write_json_atomic(hitl_dir / STATUS_NAME, status)
-            result = {"terminated_pid": pid, "escalated": True, "reclaimed_containers": reclaimed}
-            revoked = _revoke_unsettled_session_approval(experiment_dir, session_key, control)
-            if revoked is not None:
-                result["approval_revoked_session"] = revoked
-            return result
-        else:
+        handler = self._CONTROL_ACTIONS.get(action)
+        if handler is None:
             raise ManagerError(f"unknown control action: {action!r}")
+        result = handler(self, _ControlRequest(
+            experiment_id=experiment_id,
+            experiment_dir=experiment_dir,
+            hitl_dir=hitl_dir,
+            control_path=control_path,
+            control=control,
+            session_key=session_key,
+            directive=directive,
+            mode=mode,
+        ))
+        if result is not None:
+            return result
         write_control(control_path, control)
         return {"control": control.to_record()}
+
+    # ---- control actions -----------------------------------------------------
+    # One method per console action, dispatched via _CONTROL_ACTIONS below
+    # (always under self._mutate). A handler mutates request.control and
+    # returns None to fall through to the shared write_control + {"control"}
+    # response, or returns the full response itself (actions that spawn or
+    # signal workers manage their own control writes).
+
+    def _control_reveal_test_results(self, request: _ControlRequest) -> dict[str, object] | None:
+        # One-way: showing OOS results to the researcher makes every later
+        # directive/rerun/rollback informed by them — seal the experiment.
+        request.control.test_revealed = True
+        return None
+
+    def _control_pause(self, request: _ControlRequest) -> dict[str, object] | None:
+        request.control.request = "pause"
+        return None
+
+    def _control_resume(self, request: _ControlRequest) -> dict[str, object] | None:
+        # Clears a pause; if the worker died, relaunch it (ledger resume).
+        control = request.control
+        control.request = None
+        write_control(request.control_path, control)
+        state = experiment_state(request.experiment_dir)
+        if not state.get("worker_alive") and state.get("state") in _TERMINAL_RESUMABLE_STATES:
+            return {"control": control.to_record(), **self.start_worker(request.experiment_id)}
+        return {"control": control.to_record()}
+
+    def _control_stop(self, request: _ControlRequest) -> dict[str, object] | None:
+        request.control.request = "stop"
+        return None
+
+    def _control_set_mode(self, request: _ControlRequest) -> dict[str, object] | None:
+        if request.mode not in ("auto", "manual", "step"):
+            raise ManagerError("set_mode requires mode auto|manual|step")
+        request.control.mode = request.mode
+        return None
+
+    def _control_approve(self, request: _ControlRequest) -> dict[str, object] | None:
+        session_key, control = request.session_key, request.control
+        if not session_key:
+            raise ManagerError("approve requires session_key")
+        if request.directive is not None:
+            control.directives[session_key] = request.directive
+        control.approved_sessions = tuple(dict.fromkeys([*control.approved_sessions, session_key]))
+        return None
+
+    def _control_set_directive(self, request: _ControlRequest) -> dict[str, object] | None:
+        session_key = request.session_key
+        if not session_key:
+            raise ManagerError("set_directive requires session_key")
+        if request.directive:
+            request.control.directives[session_key] = request.directive
+        else:
+            request.control.directives.pop(session_key, None)
+        return None
+
+    def _control_set_prompt_override(self, request: _ControlRequest) -> dict[str, object] | None:
+        session_key, directive = request.session_key, request.directive
+        if not session_key:
+            raise ManagerError("set_prompt_override requires session_key")
+        if directive and directive.strip():
+            request.control.prompt_overrides[session_key] = directive
+        else:
+            request.control.prompt_overrides.pop(session_key, None)
+        return None
+
+    def _control_set_gpu_count(self, request: _ControlRequest) -> dict[str, object] | None:
+        session_key, directive = request.session_key, request.directive
+        if not session_key:
+            raise ManagerError("set_gpu_count requires session_key")
+        if directive and str(directive).strip():
+            try:
+                count = int(str(directive).strip())
+            except ValueError as exc:
+                raise ManagerError("GPU 数量必须是正整数") from exc
+            if not 1 <= count <= 4:
+                raise ManagerError("GPU 数量须在 1..4 之间")
+            request.control.gpu_counts[session_key] = count
+        else:
+            request.control.gpu_counts.pop(session_key, None)
+        return None
+
+    def _control_set_step_gate(self, request: _ControlRequest) -> dict[str, object] | None:
+        # "1" -> on, "0" -> explicitly off (overrides mode="step"), "" -> clear
+        # back to the mode default.
+        session_key = request.session_key
+        if not session_key:
+            raise ManagerError("set_step_gate requires session_key")
+        value = str(request.directive or "").strip()
+        if not value:
+            request.control.step_gate.pop(session_key, None)
+        else:
+            request.control.step_gate[session_key] = value not in ("0", "false", "off")
+        return None
+
+    def _control_approve_step(self, request: _ControlRequest) -> dict[str, object] | None:
+        # Release the session held at its current step gate; the optional
+        # directive is delivered inside that step's tool observation.
+        session_key, directive, control = request.session_key, request.directive, request.control
+        if not session_key:
+            raise ManagerError("approve_step requires session_key")
+        status = read_status(request.hitl_dir / STATUS_NAME)
+        if str(status.get("state")) != "waiting_step_user" or str(status.get("session_key")) != session_key:
+            raise ManagerError("该会话当前没有等待批准的 Step")
+        step_index = int(status.get("awaiting_step") or 0)
+        if step_index <= 0:
+            raise ManagerError("status.json 缺少 awaiting_step")
+        if directive and str(directive).strip():
+            control.step_directives[f"{session_key}#{step_index}"] = str(directive).strip()
+        control.step_go[session_key] = max(int(control.step_go.get(session_key, 0)), step_index)
+        return None
+
+    def _control_reply_question(self, request: _ControlRequest) -> dict[str, object] | None:
+        # Answer the ask_user question the worker is holding on. An empty
+        # directive releases without guidance (the Agent decides).
+        session_key = request.session_key
+        if not session_key:
+            raise ManagerError("reply_question requires session_key")
+        status = read_status(request.hitl_dir / STATUS_NAME)
+        question = status.get("awaiting_question") if isinstance(status.get("awaiting_question"), dict) else None
+        if (
+            str(status.get("state")) != "waiting_user_reply"
+            or str(status.get("session_key")) != session_key
+            or not question
+        ):
+            raise ManagerError("该会话当前没有等待答复的提问")
+        index = int(question.get("index") or 0)
+        if index <= 0:
+            raise ManagerError("status.json 缺少提问序号")
+        reply_key = str(question.get("reply_key") or f"{session_key}#q{index}")
+        if reply_key.split("#", 1)[0] != session_key:
+            raise ManagerError("status.json 提问 reply_key 与 session_key 不一致")
+        request.control.user_replies[reply_key] = str(request.directive or "").strip()
+        return None
+
+    def _control_set_parent_override(self, request: _ControlRequest) -> dict[str, object] | None:
+        session_key = request.session_key
+        if not session_key:
+            raise ManagerError("set_parent_override requires session_key")
+        node_id = str(request.directive or "").strip()
+        if node_id:
+            self._validate_parent_override(request.experiment_dir, session_key, node_id)
+            request.control.parent_overrides[session_key] = node_id
+        else:
+            request.control.parent_overrides.pop(session_key, None)
+        return None
+
+    def _control_skip_to_heldout(self, request: _ControlRequest) -> dict[str, object] | None:
+        from .registry import read_ledger_records, latest_fold_records
+
+        if not latest_fold_records(read_ledger_records(request.experiment_dir)):
+            raise ManagerError("尚无已完成的 Fold，无法提前进入 Held-out")
+        control = request.control
+        control.skip_to_heldout = True
+        control.request = None
+        write_control(request.control_path, control)
+        state = experiment_state(request.experiment_dir)
+        if not state.get("worker_alive") and state.get("state") in _TERMINAL_RESUMABLE_STATES:
+            return {"control": control.to_record(), **self.start_worker(request.experiment_id)}
+        return {"control": control.to_record()}
+
+    def _control_cancel_skip_to_heldout(self, request: _ControlRequest) -> dict[str, object] | None:
+        request.control.skip_to_heldout = False
+        return None
+
+    def _control_rollback_fold(self, request: _ControlRequest) -> dict[str, object] | None:
+        session_key, control = request.session_key, request.control
+        if not session_key:
+            raise ManagerError("rollback_fold requires session_key")
+        state = experiment_state(request.experiment_dir)
+        if state.get("worker_alive") or state.get("state") == "launching":
+            raise ManagerError("先停止运行中的 worker（停止/强制终止）再回滚")
+        summary = self._rollback_to_fold(request.experiment_dir, session_key, control)
+        control.request = None
+        control.skip_to_heldout = False
+        write_control(request.control_path, control)
+        return {"control": control.to_record(), **summary, **self.start_worker(request.experiment_id)}
+
+    def _control_rerun_fold(self, request: _ControlRequest) -> dict[str, object] | None:
+        session_key, control = request.session_key, request.control
+        if not session_key:
+            raise ManagerError("rerun_fold requires session_key")
+        self._validate_rerun_target(request.experiment_dir, session_key)
+        state = experiment_state(request.experiment_dir)
+        if state.get("worker_alive") or state.get("state") == "launching":
+            raise ManagerError("先停止运行中的 worker（停止/强制终止）再重跑该 Fold")
+        control.rerun_sessions[session_key] = uuid.uuid4().hex[:12]
+        # The re-run must be re-approved (prompt edits land first) and its
+        # step gating starts afresh: stale step_go would auto-release the
+        # first N step holds, stale per-step directives would replay.
+        _require_session_reapproval(control, session_key)
+        control.step_go.pop(session_key, None)
+        for mapping in (control.step_directives, control.user_replies):
+            for key in list(mapping):
+                if key.split("#", 1)[0] == session_key:
+                    mapping.pop(key, None)
+        control.request = None
+        write_control(request.control_path, control)
+        return {"control": control.to_record(), **self.start_worker(request.experiment_id)}
+
+    def _control_restart(self, request: _ControlRequest) -> dict[str, object] | None:
+        # Terminate-and-restart in one step: SIGTERM the live worker, wait
+        # for the pid to die (bounded), then resume via the ledger.
+        hitl_dir = request.hitl_dir
+        status = read_status(hitl_dir / STATUS_NAME)
+        if status_pid_alive(status):
+            _signal_worker_group(int(status["pid"]), signal.SIGTERM)
+            import time as _time
+
+            deadline = _time.monotonic() + 30.0
+            while _time.monotonic() < deadline and status_pid_alive(read_status(hitl_dir / STATUS_NAME)):
+                _time.sleep(0.5)
+            if status_pid_alive(read_status(hitl_dir / STATUS_NAME)):
+                raise ManagerError("worker 未在 30s 内退出；请稍后重试或强制终止后手动恢复")
+        _reclaim_sandbox_containers(request.experiment_id)
+        return {"restarted": True, **self.start_worker(request.experiment_id)}
+
+    def _control_terminate(self, request: _ControlRequest) -> dict[str, object] | None:
+        # Graceful first, then guaranteed: the worker's SIGTERM handler
+        # unwinds through finally blocks, but blocking work (LLM retries,
+        # derived-image docker build) can ignore it for a long time — test6
+        # kept heartbeating for an hour. After a short grace, SIGKILL the
+        # whole process group (worker runs with start_new_session=True).
+        hitl_dir = request.hitl_dir
+        status = read_status(hitl_dir / STATUS_NAME)
+        if not status_pid_alive(status):
+            raise ManagerError("no live worker to terminate")
+        pid = int(status["pid"])
+        session_key = str(status.get("session_key") or "")
+        try:
+            _signal_worker_group(pid, signal.SIGTERM)
+        except ProcessLookupError as exc:  # exited between check and signal
+            raise ManagerError("worker 已退出") from exc
+        import time as _time
+
+        deadline = _time.monotonic() + 10.0
+        while _time.monotonic() < deadline:
+            if not status_pid_alive(read_status(hitl_dir / STATUS_NAME)):
+                reclaimed = _reclaim_sandbox_containers(request.experiment_id)
+                result: dict[str, object] = {
+                    "terminated_pid": pid,
+                    "escalated": False,
+                    "reclaimed_containers": reclaimed,
+                }
+                revoked = _revoke_unsettled_session_approval(request.experiment_dir, session_key, request.control)
+                if revoked is not None:
+                    result["approval_revoked_session"] = revoked
+                return result
+            _time.sleep(0.5)
+        _signal_worker_group(pid, signal.SIGKILL)
+        reclaimed = _reclaim_sandbox_containers(request.experiment_id)
+        # SIGKILL leaves no worker to stamp a terminal state; without this
+        # the page shows a stale running state until pid-liveness kicks in
+        # and the user cannot tell whether termination worked.
+        status = read_status(hitl_dir / STATUS_NAME)
+        status.update({"state": "terminated", "error": None, "terminated_at": utc_now_iso()})
+        write_json_atomic(hitl_dir / STATUS_NAME, status)
+        result = {"terminated_pid": pid, "escalated": True, "reclaimed_containers": reclaimed}
+        revoked = _revoke_unsettled_session_approval(request.experiment_dir, session_key, request.control)
+        if revoked is not None:
+            result["approval_revoked_session"] = revoked
+        return result
+
+    _CONTROL_ACTIONS: dict[str, Callable[["ExperimentManager", _ControlRequest], dict[str, object] | None]] = {
+        "reveal_test_results": _control_reveal_test_results,
+        "pause": _control_pause,
+        "resume": _control_resume,
+        "stop": _control_stop,
+        "set_mode": _control_set_mode,
+        "approve": _control_approve,
+        "set_directive": _control_set_directive,
+        "set_prompt_override": _control_set_prompt_override,
+        "set_gpu_count": _control_set_gpu_count,
+        "set_step_gate": _control_set_step_gate,
+        "approve_step": _control_approve_step,
+        "reply_question": _control_reply_question,
+        "set_parent_override": _control_set_parent_override,
+        "skip_to_heldout": _control_skip_to_heldout,
+        "cancel_skip_to_heldout": _control_cancel_skip_to_heldout,
+        "rollback_fold": _control_rollback_fold,
+        "rerun_fold": _control_rerun_fold,
+        "restart": _control_restart,
+        "terminate": _control_terminate,
+    }
 
     def _rollback_to_fold(
         self, experiment_dir: Path, session_key: str, control: ControlState
@@ -643,7 +758,7 @@ class ExperimentManager:
         """
         from .registry import read_ledger_records, latest_fold_records
 
-        schedule = read_json(experiment_dir / HITL_DIR_NAME / "schedule.json")
+        schedule = read_json(experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME)
         sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
         fold_keys = [str(s.get("key")) for s in sessions if s.get("kind") == "fold"]
         if session_key not in fold_keys:
@@ -819,7 +934,7 @@ class ExperimentManager:
         break the parent chain the later records were built on."""
         from .registry import latest_fold_records, read_ledger_records
 
-        schedule = read_json(experiment_dir / HITL_DIR_NAME / "schedule.json")
+        schedule = read_json(experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME)
         sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
         fold_keys = [str(s.get("key")) for s in sessions if s.get("kind") == "fold"]
         if session_key not in fold_keys:
@@ -863,9 +978,9 @@ class ExperimentManager:
         from autotrade.environment.step_tree import StepTree
         from autotrade.pipelines.hitl_state import assert_node_not_from_later_fold
 
-        from .steps import node_export_dir, node_layout
+        from .steps import node_export_dir
 
-        schedule = read_json(experiment_dir / HITL_DIR_NAME / "schedule.json")
+        schedule = read_json(experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME)
         sessions = schedule.get("sessions") if isinstance(schedule.get("sessions"), list) else []
         fold_keys = [str(s.get("key")) for s in sessions if s.get("kind") == "fold"]
         if session_key not in fold_keys:
@@ -874,8 +989,6 @@ class ExperimentManager:
             node_export_dir(experiment_dir, node_id)
         except ValueError as exc:
             raise ManagerError(str(exc)) from exc
-        if node_layout(experiment_dir / "steps", node_id) != "split":
-            raise ManagerError("旧格式节点仅支持查看与下载，无法设为父产物起点")
         node = StepTree(experiment_dir / "steps").get_node(node_id)
         try:
             assert_node_not_from_later_fold(node, session_key, fold_keys)
@@ -894,11 +1007,17 @@ class ExperimentManager:
             raise ManagerError(
                 f"experiment {experiment_id!r} has a live worker; stop or terminate it before deleting"
             )
+        # AnalysisService background threads write into hitl/analysis/ after the
+        # HTTP request returns; rmtree under a live writer would race it.
+        if self._analysis_pending is not None and self._analysis_pending(experiment_id):
+            raise ManagerError(
+                f"experiment {experiment_id!r} has a strategy analysis in progress; wait for it to finish before deleting"
+            )
         removed_work_root: str | None = None
         params = read_json(experiment_dir / HITL_DIR_NAME / PARAMS_NAME)
         work_root = params.get("work_root")
         # The per-experiment sandbox dir is derived from the experiment id, so
-        # it is removed even when params.json is unreadable/legacy; an explicit
+        # it is removed even when params.json is unreadable; an explicit
         # work_root is honored only when it IS that dir (never a shared root).
         expected = (self.repo_root / ".runtime" / "sandboxes" / experiment_id).resolve()
         work_path = Path(str(work_root)).resolve() if work_root else expected

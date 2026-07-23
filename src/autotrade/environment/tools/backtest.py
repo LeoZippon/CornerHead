@@ -44,7 +44,7 @@ from autotrade.environment.nl.service import StrategyNLService, cleanup_nl_rpc_f
 from autotrade.environment.replay.market import ParquetMinuteReplaySource
 from autotrade.environment.identity import agent_visible_ref
 from autotrade.environment.runtime import chmod_tree, new_id, sanitize_for_log, utc_now_iso
-from autotrade.environment.data.snapshot import load_snapshot_manifest
+from autotrade.environment.data.snapshot import load_snapshot_manifest, verify_snapshot_hash
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.replay.style import replay_style_analysis
 
@@ -56,7 +56,7 @@ from .base import (
     SessionInterrupt,
     ToolContext,
     ToolError,
-    agent_visible_tool_result,
+    llm_observation,
 )
 from .modification_check import ModificationCheckTool
 
@@ -98,17 +98,6 @@ class _ProcessPeakRSS:
         self.peak_bytes = max(self.peak_bytes, resident)
 
 MODES = ("valid", "frozen_eval")
-
-
-def agent_visible_backtest_result(summary: dict[str, object]) -> dict[str, object]:
-    """Remove host-only filesystem coordinates from Agent-visible channels."""
-    result = agent_visible_tool_result(summary)
-    # The tool schema arrives natively with every function-calling turn; echoing
-    # ~2KB of it per success observation only burns context window. Error paths
-    # attach tool_spec deliberately (it corrects malformed calls) and the host
-    # manifest keeps the full summary for audit.
-    result.pop("tool_spec", None)
-    return result
 
 
 class BacktestTool:
@@ -193,65 +182,33 @@ class BacktestTool:
         with guard:
             try:
                 return self._execute(mode=mode, result_name=result_name, replay_window=replay_window)
-            except (BacktestError, ArtifactError) as exc:
-                public_error = self._public_failure(str(exc), source=exc)
-                self._record_failure(
-                    mode, str(public_error), error_record=public_error.to_record()
-                )
-                raise public_error from exc
-            except ToolError as exc:
-                # A pre-flight rejection happens before backtest_start, so no
-                # bracket is open. Post-start failures must terminate the audit;
-                # Probe details remain host-only regardless of exception class.
-                public_error = self._public_failure(str(exc), source=exc)
-                if self._backtest_started:
-                    self._record_failure(
-                        mode,
-                        str(public_error),
-                        status="error",
-                        error_record=public_error.to_record(),
-                    )
-                if public_error is not exc:
-                    raise public_error from exc
-                raise
-            except SessionInterrupt as exc:
-                # Researcher stop/ask control flow is not a strategy failure and
-                # must reach the session loop unchanged. If the replay bracket is
-                # already open, still close its host audit record first.
-                if self._backtest_started:
-                    public_error = self._public_failure(
-                        f"{type(exc).__name__}: {exc}", source=exc
-                    )
-                    self._record_failure(
-                        mode,
-                        str(public_error),
-                        status="aborted",
-                        error_record=public_error.to_record(),
-                    )
-                raise
-            except Exception as exc:  # noqa: BLE001 - strategy/runtime failures are normalized
-                detail = f"{type(exc).__name__}: {exc}"
-                public_error = self._public_failure(detail, source=exc)
-                if self._backtest_started:
-                    self._record_failure(
-                        mode,
-                        str(public_error),
-                        status="aborted",
-                        error_record=public_error.to_record(),
-                    )
-                raise public_error from exc
-            except BaseException as exc:  # noqa: BLE001 - preserve stop/interrupt semantics
-                # KeyboardInterrupt/SystemExit must propagate, but their
+            except BaseException as exc:  # noqa: BLE001 - one normalize-and-record path
+                # Classify once. record_always: expected replay/artifact failures
+                # enter the host audit even pre-start; everything else records
+                # only when the backtest_start bracket is already open (pre-flight
+                # ToolError rejections open no bracket). propagate_public: whether
+                # the Agent-visible normalized error replaces the original —
+                # control-flow signals (researcher stop, KeyboardInterrupt or
+                # SystemExit) must reach the session loop unchanged. Probe
+                # details remain host-only regardless of exception class, and
                 # potentially strategy-derived text is never written publicly.
-                detail = f"{type(exc).__name__}: {exc}"
+                if isinstance(exc, (BacktestError, ArtifactError)):
+                    detail, record_always, status, propagate_public = str(exc), True, "error", True
+                elif isinstance(exc, ToolError):
+                    detail, record_always, status, propagate_public = str(exc), False, "error", True
+                elif isinstance(exc, SessionInterrupt):
+                    detail, record_always, status, propagate_public = f"{type(exc).__name__}: {exc}", False, "aborted", False
+                elif isinstance(exc, Exception):
+                    detail, record_always, status, propagate_public = f"{type(exc).__name__}: {exc}", False, "aborted", True
+                else:  # KeyboardInterrupt / SystemExit
+                    detail, record_always, status, propagate_public = f"{type(exc).__name__}: {exc}", False, "aborted", False
                 public_error = self._public_failure(detail, source=exc)
-                if self._backtest_started:
+                if record_always or self._backtest_started:
                     self._record_failure(
-                        mode,
-                        str(public_error),
-                        status="aborted",
-                        error_record=public_error.to_record(),
+                        mode, str(public_error), status=status, error_record=public_error.to_record()
                     )
+                if propagate_public and public_error is not exc:
+                    raise public_error from exc
                 raise
             finally:
                 if self._public_nl_tmp is not None and self._public_nl_tmp.exists():
@@ -263,8 +220,6 @@ class BacktestTool:
         guard = guard_factory() if callable(guard_factory) else contextlib.nullcontext()
         with guard:
             artifact = load_strategy_artifact(self.ctx.paths.agent_output)
-            decision_time = str(self.ctx.manifest.require("valid_decision_time"))
-            replay_granularity = "minute"  # fixed clock; market rows are optional
             snapshot_dir = self._resolved_snapshot()
             with _formal_artifacts_readonly(self.ctx.paths, restore_writable=not self.ctx.write_locked):
                 with _formal_replay_execution(self.ctx) as (executor, runtime_dir, _rpc_agent):
@@ -272,8 +227,6 @@ class BacktestTool:
                         executor,
                         self.ctx.paths,
                         timeout_seconds=float(self.ctx.manifest.get("per_call_timeout_seconds", 300)),
-                        decision_time=decision_time,
-                        replay_granularity=replay_granularity,
                         runtime_dir=runtime_dir,
                         snapshot_path=(
                             snapshot_dir
@@ -304,6 +257,13 @@ class BacktestTool:
         self._verify_snapshot_binding(mode, snapshot_dir)
         decision_time = str(manifest.require("valid_decision_time" if mode == "valid" else "test_decision_time"))
         replay_dir = self.ctx.paths.valid if mode == "valid" else self.ctx.paths.test
+        if mode == "frozen_eval":
+            # Full content re-hash only for the one-shot frozen evaluation: the
+            # hot valid path keeps the cheap snapshot_id comparison (recorded
+            # decision — per-backtest full hashing of multi-GB slots was
+            # declined on cost), while the unrepeatable final evaluation gets
+            # the strongest integrity check.
+            self._verify_snapshot_content(replay_dir, label=f"{mode} replay slot")
         # A short debug window replays the first N strategy days plus one distinct
         # liquidation day; such a run is never accept-eligible.
         complete_validation = replay_window is None
@@ -366,7 +326,6 @@ class BacktestTool:
                 "auction_source_bytes": _path_bytes(replay_dir / "auction.parquet"),
             }
         )
-        replay_granularity = "minute"  # one official fixed-minute replay engine
         result_dir = self._planned_result_dir(mode, result_name)
         if result_dir.exists():
             raise ToolError(f"result directory already exists: {result_dir}")
@@ -384,7 +343,7 @@ class BacktestTool:
                 {
                     "tool": self.name, "mode": mode, "result_name": result_dir.name,
                     "complete_validation": complete_validation, "replay_window": replay_window,
-                    "replay_granularity": replay_granularity, "total_trade_days": total_trade_days,
+                    "replay_granularity": "minute", "total_trade_days": total_trade_days,
                     "strategy_trade_days": strategy_trade_days, "exit_trade_days": exit_trade_days,
                     "artifact_hash": artifact.artifact_hash, "started_at": started_at,
                 },
@@ -511,8 +470,6 @@ class BacktestTool:
                                 formal_executor,
                                 self.ctx.paths,
                                 timeout_seconds=decision_cap,
-                                decision_time=decision_time,
-                                replay_granularity=replay_granularity,
                                 nl_service=nl_service,
                                 requests_path=requests_host,
                                 responses_path=responses_host,
@@ -818,7 +775,7 @@ class BacktestTool:
         self.ctx.manifest.append_backtest_summary(summary)
         if mode == "valid":
             self.ctx.trace.emit(
-                "backtest", agent_visible_backtest_result(summary), step_id=self.ctx.current_step_id
+                "backtest", llm_observation(summary), step_id=self.ctx.current_step_id
             )
         if mode == "valid" and complete_validation and self.ctx.manifest.get("step_tree_enabled"):
             StepTree(self.ctx.paths.steps).record_step(
@@ -915,6 +872,15 @@ class BacktestTool:
                 f"bound snapshot does not match the pipeline record for {expected_key}: "
                 f"{actual.get('snapshot_id')} != {expected.get('snapshot_id')}"
             )
+        if mode == "frozen_eval":
+            self._verify_snapshot_content(snapshot_dir, label=expected_key)
+
+    @staticmethod
+    def _verify_snapshot_content(path: Path, *, label: str) -> None:
+        try:
+            verify_snapshot_hash(path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise ToolError(f"{label} content verification failed: {exc}") from exc
 
     def _planned_result_dir(self, mode: str, result_name: str | None) -> Path:
         results_root = self.ctx.paths.results
@@ -1039,6 +1005,10 @@ def _probe_error_identity(detail: str, source: BaseException) -> str:
 
 def _profile_kwargs(record: dict[str, object]) -> dict[str, object]:
     fields = set(BrokerProfile.__dataclass_fields__)
+    derived = {"stamp_duty_cutover_date", "credit_rates_are_assumed"}
+    unknown = sorted(set(record) - fields - derived)
+    if unknown:
+        raise ToolError(f"broker_profile has unknown fields: {unknown}")
     return {key: value for key, value in record.items() if key in fields}
 
 

@@ -8,9 +8,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from autotrade.environment.data.snapshot import finalize_snapshot_dir
+from autotrade.environment.data.snapshot import finalize_snapshot_dir, load_snapshot_manifest
 
-TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "configs" / "agent_output_template"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TEMPLATE_DIR = REPO_ROOT / "configs" / "agent_output_template"
 TS_CODE = "000001.SZ"
 
 STRATEGY_MAIN = '''
@@ -71,7 +72,17 @@ def write_strategy(agent_output: Path) -> None:
 def make_snapshot_dir(out_dir: Path, *, decision_date: str, kind: str) -> dict[str, object]:
     out_dir.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(
-        [{"trade_date": decision_date, "ts_code": TS_CODE, "open": 10.0, "close": 10.5, "vol": 100000.0, "amount": 1050000.0}]
+        [{
+            "trade_date": decision_date,
+            "ts_code": TS_CODE,
+            "open": 10.0,
+            "close": 10.5,
+            "vol": 100000.0,
+            "amount": 1050000.0,
+            "up_limit": 12.0,
+            "down_limit": 8.0,
+            "is_suspended": False,
+        }]
     ).to_parquet(out_dir / "daily.parquet", index=False)
     pd.DataFrame([{"ts_code": TS_CODE, "name": "平安银行", "exchange": "SZSE"}]).to_parquet(
         out_dir / "universe.parquet", index=False
@@ -112,6 +123,36 @@ def make_replay_dir(out_dir: Path, *, start: str, end: str, label: str) -> dict[
     ]
     pd.DataFrame(rows).to_parquet(out_dir / "daily.parquet", index=False)
     return finalize_snapshot_dir(out_dir, kind="replay_slot", label=label, period_start=start, period_end=end)
+
+
+def replace_replay_minutes(
+    replay_dir: Path,
+    rows: list[dict[str, object]],
+    *,
+    trade_date: str | None = None,
+) -> dict[str, object]:
+    """Replace all or one day's minute fixture rows and restamp the replay slot.
+
+    The formal backtest verifies the replay-slot content hash against its
+    manifest, so a fixture that mutates minute rows after finalization must
+    restamp instead of writing the parquet directly."""
+    path = replay_dir / "intraday_1min.parquet"
+    replacement = pd.DataFrame(
+        rows,
+        columns=["trade_date", "ts_code", "trade_time", "open", "high", "low", "close"],
+    )
+    if trade_date is not None and path.exists():
+        current = pd.read_parquet(path)
+        current = current[current["trade_date"].astype(str) != str(trade_date)]
+        replacement = pd.concat([current, replacement], ignore_index=True)
+    replacement.to_parquet(path, index=False)
+    previous = load_snapshot_manifest(replay_dir)
+    fields = {
+        key: value
+        for key, value in previous.items()
+        if key not in {"snapshot_id", "snapshot_hash", "created_at"}
+    }
+    return finalize_snapshot_dir(replay_dir, **fields)
 
 
 class FakeSnapshotProvider:

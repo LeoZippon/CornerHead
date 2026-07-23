@@ -32,7 +32,6 @@ LONG_COLOR = "#2ca02c"
 SHORT_COLOR = "#ff7f0e"
 BENCHMARK_COLOR = "#4d5566"
 GRID_COLOR = "#d9dde3"
-LEGACY_REPORT_FILES = ("fold_returns.png", "cumulative_test_return.png", "summary.json")
 DEFAULT_BENCHMARK_CODE = "000300.SH"
 DEFAULT_BENCHMARK_LABEL = "CSI 300"
 
@@ -56,7 +55,6 @@ def build_experiment_report(ledger_path: str | Path, output_dir: str | Path) -> 
     rows += [_heldout_row(record) for record in heldout]
     benchmark_info = _benchmark_summary(rows)
 
-    _remove_legacy_report_files(output_dir)
     epoch_files = _plot_epoch_returns(rows, output_dir / "epoch_returns")
     epoch_comparison = output_dir / "epoch_comparison_returns.png"
     _plot_epoch_comparison(rows, epoch_comparison)
@@ -174,13 +172,6 @@ def _benchmark_summary(rows: list[dict[str, object]]) -> dict[str, object]:
         "covered_periods": covered,
         "total_periods": len(scored),
     }
-
-
-def _remove_legacy_report_files(output_dir: Path) -> None:
-    for name in LEGACY_REPORT_FILES:
-        path = output_dir / name
-        if path.exists() and path.is_file():
-            path.unlink()
 
 
 def _plot_epoch_returns(rows: list[dict[str, object]], output_dir: Path) -> list[Path]:

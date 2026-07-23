@@ -18,6 +18,7 @@ from autotrade.environment.replay.stats import ReplayResult, compute_return_stat
 from autotrade.environment.sandbox import hide_snapshot_slots_from_agent
 from autotrade.environment.runtime import SandboxPaths
 from autotrade.environment.tools.backtest import _profile_kwargs
+from autotrade.environment.tools.base import ToolError
 
 
 def _held(state, code):
@@ -809,6 +810,71 @@ class BrokerPrimitiveTest(unittest.TestCase):
         self.assertEqual(restored.maintenance_source, "broker-doc")
         private_restored = BrokerProfile(**_profile_kwargs(BrokerProfile(is_private_fund=True).to_record()))
         self.assertEqual(private_restored.effective_slo_margin_ratio, 1.2)
+
+    def test_profile_record_rejects_unknown_fields(self):
+        record = BrokerProfile().to_record()
+        record["ignored_typo"] = 1
+        with self.assertRaisesRegex(ToolError, "unknown fields"):
+            _profile_kwargs(record)
+
+    def test_debt_term_and_boolean_profile_fields_are_strict(self):
+        for value in (0, -1, 180.5, True):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "debt_contract_term_days"):
+                BrokerProfile(debt_contract_term_days=value)
+        with self.assertRaisesRegex(ValueError, "debt_contract_auto_extend"):
+            BrokerProfile(debt_contract_auto_extend=1)
+        with self.assertRaisesRegex(ValueError, "is_private_fund"):
+            BrokerProfile(is_private_fund="false")
+
+    def test_float_profile_fields_reject_booleans(self):
+        # bool is an int subclass, so True would otherwise pass isfinite
+        # range checks as 1.0 (a silently wrong fee/cash/ratio).
+        for name in (
+            "commission_bps", "stock_initial_cash", "assure_ratio",
+            "max_single_name_weight", "fin_max_quota", "dividend_tax_rate",
+            "maintenance_withdraw_ratio",
+        ):
+            with self.subTest(field=name), self.assertRaisesRegex(ValueError, "not a boolean"):
+                BrokerProfile(**{name: True})
+
+    def test_daily_market_rejects_duplicate_business_keys(self):
+        duplicate = pd.concat([REPLAY, REPLAY.iloc[[0]]], ignore_index=True)
+        with self.assertRaisesRegex(ValueError, "duplicate business keys"):
+            MarketData(duplicate)
+
+    def test_mandatory_exit_reconciles_financed_shares_and_reports_residual_debt(self):
+        crash = make_daily(
+            [
+                ("20220104", "000001.SZ", 10.0, 10.0, 11.0, 9.0, False),
+                ("20220105", "000001.SZ", 1.0, 1.0, 1.1, 0.9, False),
+            ]
+        )
+        broker = SimBroker(
+            BrokerProfile(credit_initial_cash=60_000.0),
+            MarketData(crash),
+            shortable_codes=frozenset({"000001.SZ"}),
+        )
+        broker.execute("000001.SZ", "fin_buy", trade_date="20220104", raw_price=10.0, amount=5000)
+        broker.roll_to_date("20220105")
+        broker.close_all("20220105")
+
+        self.assertEqual(broker.credit.positions, {})
+        self.assertEqual(broker._fin_shares_outstanding("000001.SZ"), 0)
+        repayment = next(
+            event for event in broker.events
+            if event["event_type"] == "debt_repaid" and event.get("via") == "mandatory_exit"
+        )
+        self.assertGreater(repayment["principal_paid"], 0.0)
+        result = ReplayResult(
+            equity_curve=pd.Series({"20220104": broker.initial_equity, "20220105": broker.equity()}),
+            broker=broker,
+            decision_date="20220104",
+            exit_date="20220105",
+        )
+        stats = compute_return_stats(result)
+        self.assertFalse(stats["liquidation_complete"])
+        self.assertEqual(stats["unliquidated_positions"], [])
+        self.assertGreater(stats["remaining_liabilities"], 0.0)
 
 
 # Ex-date replay: 000001.SZ closes 10.0, then opens the next day 0.5 lower — the
@@ -2042,8 +2108,6 @@ class CandidateIsolationTest(unittest.TestCase):
                 FailingPopenExecutor(),
                 paths,
                 timeout_seconds=1.0,
-                decision_time=DECISION,
-                replay_granularity="minute",
             )
             with self.assertRaisesRegex(RuntimeError, "popen failed"):
                 runner.__enter__()

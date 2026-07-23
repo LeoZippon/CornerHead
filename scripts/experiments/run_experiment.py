@@ -33,34 +33,29 @@ from _cli import (
     add_path_arguments,
     add_snapshot_window_arguments,
     add_web_search_arguments,
-    build_meta_learning_sandbox_spec,
-    build_meta_learning_managed_proxy_spec,
+    build_experiment_config,
     build_pipeline,
     build_proxies,
     build_session_builders,
-    build_snapshot_config,
     build_web_search_providers,
     require_generic_period_args,
     resolve_fold_exploration_directive,
     resolve_meta_learning_directive,
 )
-# Re-exported for the pipeline e2e test, which imports it from this module.
 
 from autotrade.environment.sandbox import SandboxSpec
-from autotrade.pipelines import AcceptanceRules, ExperimentConfig, load_sse_trading_days
+from autotrade.pipelines import load_sse_trading_days
 
 
-def _resolve_period_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> tuple[str, str, str, str]:
-    if args.fold_period != "quarter":
-        require_generic_period_args(parser, args)
-        return args.first_test_period, args.last_test_period, args.heldout_first_period, args.heldout_last_period
-    first_test_period = args.first_test_period or args.first_test_quarter
-    last_test_period = args.last_test_period or args.last_test_quarter
-    heldout_first_period = args.heldout_first_period or args.heldout_first_quarter
-    heldout_last_period = args.heldout_last_period or args.heldout_last_quarter
-    if not heldout_first_period or not heldout_last_period:
-        parser.error("held-out period is required: pass --heldout-first-period/--heldout-last-period or legacy quarter args")
-    return first_test_period, last_test_period, heldout_first_period, heldout_last_period
+def _resolve_period_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    """Quarter runs keep the standing development defaults (held-out stays
+    explicit); every other cadence demands all four labels."""
+    require_generic_period_args(parser, args)
+    if args.fold_period == "quarter":
+        args.first_test_period = args.first_test_period or "2022Q1"
+        args.last_test_period = args.last_test_period or "2025Q4"
+        if not args.heldout_first_period or not args.heldout_last_period:
+            parser.error("held-out period is required: pass --heldout-first-period/--heldout-last-period")
 
 
 def build_parser(repo_root: Path) -> argparse.ArgumentParser:
@@ -76,14 +71,16 @@ def build_parser(repo_root: Path) -> argparse.ArgumentParser:
         default="quarter",
         help="Decision/replay period cadence for each Fold (day folds cannot satisfy the 2-trade-date replay minimum).",
     )
-    parser.add_argument("--first-test-period", help="Generic first test period label for the selected fold period.")
-    parser.add_argument("--last-test-period", help="Generic last test period label for the selected fold period.")
+    parser.add_argument(
+        "--first-test-period",
+        help="Generic first test period label for the selected fold period; quarter runs default to 2022Q1.",
+    )
+    parser.add_argument(
+        "--last-test-period",
+        help="Generic last test period label for the selected fold period; quarter runs default to 2025Q4.",
+    )
     parser.add_argument("--heldout-first-period", help="Generic first held-out period label for the selected fold period.")
     parser.add_argument("--heldout-last-period", help="Generic last held-out period label for the selected fold period.")
-    parser.add_argument("--first-test-quarter", default="2022Q1")
-    parser.add_argument("--last-test-quarter", default="2025Q4")
-    parser.add_argument("--heldout-first-quarter")
-    parser.add_argument("--heldout-last-quarter")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument(
         "--meta-learning-fold-interval",
@@ -135,49 +132,14 @@ def main() -> int:
     args = parser.parse_args()
     meta_learning_directive = resolve_meta_learning_directive(parser, args)
     fold_exploration_directive = resolve_fold_exploration_directive(parser, args)
-    first_test_period, last_test_period, heldout_first_period, heldout_last_period = _resolve_period_args(args, parser)
+    _resolve_period_args(args, parser)
 
-    snapshot_config = build_snapshot_config(args)
-    sandbox_spec = SandboxSpec.from_host_fraction()
-    meta_learning_sandbox_spec = build_meta_learning_sandbox_spec(args, sandbox_spec, repo_root=repo_root)
-    meta_learning_managed_proxy = build_meta_learning_managed_proxy_spec(
+    config = build_experiment_config(
         args,
         repo_root=repo_root,
-        sandbox_spec=meta_learning_sandbox_spec,
-    )
-    config = ExperimentConfig(
-        experiment_id=args.experiment_id,
-        experiments_root=args.experiments_root.resolve(),
-        work_root=args.work_root.resolve(),
-        template_dir=args.template_dir.resolve(),
-        first_test_period=first_test_period,
-        last_test_period=last_test_period,
-        heldout_first_period=heldout_first_period,
-        heldout_last_period=heldout_last_period,
-        fold_period=args.fold_period,
-        epochs=args.epochs,
-        window_months=args.window_months,
-        max_fold_minutes=args.max_fold_minutes,
-        snapshot_config=snapshot_config,
-        nl_failure_policy=args.nl_failure_policy,
-        convergence_start_epoch=args.convergence_start_epoch,
+        sandbox_spec=SandboxSpec.from_host_fraction(),
         meta_learning_directive=meta_learning_directive,
         fold_exploration_directive=fold_exploration_directive,
-        meta_learning_fold_interval=args.meta_learning_fold_interval,
-        step_tree_enabled=not args.disable_step_tree,
-        acceptance=AcceptanceRules(
-            min_return=args.min_return,
-            min_sharpe=args.min_sharpe,
-            max_drawdown=args.max_drawdown,
-            # A fold only freezes a fully-completed validation (the freeze candidate
-            # pool hard-filters to complete_validation runs), so this stays strict.
-            require_complete_validation=True,
-        ),
-        sandbox_spec=sandbox_spec,
-        meta_learning_sandbox_spec=meta_learning_sandbox_spec,
-        meta_learning_managed_proxy=meta_learning_managed_proxy,
-        meta_sandbox_rebuild_enabled=not args.disable_meta_sandbox_rebuild,
-        use_docker=not args.local_dev,
     )
     proxies = build_proxies(args)
     web_search_providers = build_web_search_providers(args)

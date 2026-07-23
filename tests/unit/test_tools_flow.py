@@ -35,7 +35,14 @@ from autotrade.environment.tools import (
     ToolError,
 )
 
-from .fixtures_sandbox import TEMPLATE_DIR, make_replay_dir, make_snapshot_dir, nl_subagent_response, write_strategy
+from .fixtures_sandbox import (
+    TEMPLATE_DIR,
+    make_replay_dir,
+    make_snapshot_dir,
+    nl_subagent_response,
+    replace_replay_minutes,
+    write_strategy,
+)
 
 IDS = {
     "experiment_id": "exp_test",
@@ -847,7 +854,8 @@ def main(ctx):
     def test_minute_replay_when_available(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
-            pd.DataFrame(
+            replace_replay_minutes(
+                ctx.paths.valid,
                 [
                     {
                         "trade_date": "20211008",
@@ -876,8 +884,9 @@ def main(ctx):
                         "low": 10.0,
                         "close": 10.25,
                     },
-                ]
-            ).to_parquet(ctx.paths.valid / "intraday_1min.parquet", index=False)
+                ],
+                trade_date="20211008",
+            )
             (ctx.paths.agent_output / "main.py").write_text(MINUTE_STRATEGY_MAIN, encoding="utf-8")
 
             summary = BacktestTool(ctx).run(mode="valid")
@@ -958,7 +967,8 @@ def main(ctx):
     def test_custom_trading_function_runs_during_minute_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
-            pd.DataFrame(
+            replace_replay_minutes(
+                ctx.paths.valid,
                 [
                     {
                         "trade_date": "20211008",
@@ -987,8 +997,9 @@ def main(ctx):
                         "low": 10.0,
                         "close": 10.1,
                     },
-                ]
-            ).to_parquet(ctx.paths.valid / "intraday_1min.parquet", index=False)
+                ],
+                trade_date="20211008",
+            )
             (ctx.paths.agent_output / "main.py").write_text(CUSTOM_POLICY_MAIN, encoding="utf-8")
             (ctx.paths.agent_output / "trading.py").write_text(CUSTOM_POLICY_TRADING, encoding="utf-8")
 
@@ -1008,10 +1019,7 @@ def main(ctx):
     def test_empty_minute_replay_file_keeps_fixed_minute_granularity(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, ctx = build_sandbox(Path(tmp))
-            pd.DataFrame(columns=["trade_date", "ts_code", "trade_time", "open", "high", "low", "close"]).to_parquet(
-                ctx.paths.valid / "intraday_1min.parquet",
-                index=False,
-            )
+            replace_replay_minutes(ctx.paths.valid, [])
             (ctx.paths.agent_output / "main.py").write_text(MINUTE_STRATEGY_MAIN, encoding="utf-8")
 
             summary = BacktestTool(ctx).run(mode="valid")

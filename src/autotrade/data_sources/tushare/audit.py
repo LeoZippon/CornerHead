@@ -1737,7 +1737,7 @@ def audit_fundamental_completeness(raw_dir: Path, args: argparse.Namespace, add)
         "expected_ann_month_partitions": len(months),
         "expected_ts_code_partitions": len(stock_codes),
     })
-    for dataset in selected_integrated_fundamental_datasets(args):
+    for dataset in selected_fundamental_datasets(getattr(args, "fundamental_datasets", None)):
         spec = FUNDAMENTAL_SPECS[dataset]
         if spec.strategy == "period":
             audit_fundamental_dataset(raw_dir, spec, periods, "period", add)
@@ -1764,13 +1764,6 @@ def audit_fundamental_unit_and_pit_semantics(raw_dir: Path, add) -> None:
         },
         "doc_refs": {key: INTEGRATED_DOC_REFS[key] for key in sorted(INTEGRATED_DOC_REFS)},
     })
-
-def selected_integrated_text_datasets(args: argparse.Namespace) -> list[str]:
-    datasets = list(getattr(args, "text_datasets", None) or TEXT_DEFAULT_DATASETS)
-    invalid = sorted(set(datasets) - set(TEXT_SPECS))
-    if invalid:
-        raise RuntimeError(f"unknown text datasets: {invalid}")
-    return datasets
 
 from dataclasses import dataclass as _dataclass
 
@@ -2023,7 +2016,7 @@ def expected_text_paths(raw_dir: Path, spec: TextDataset, start_date: str, end_d
     raise RuntimeError(f"unsupported text strategy {spec.strategy} for {spec.api_name}")
 
 def audit_text_completeness(raw_dir: Path, args: argparse.Namespace, add) -> None:
-    datasets = selected_integrated_text_datasets(args)
+    datasets = selected_text_datasets(getattr(args, "text_datasets", None))
     text_end = args.text_end_date or args.end_date
     add("info", "text_expected_scope", "optional TuShare text/NL datasets included in this audit", {
         "datasets": datasets,
@@ -2046,7 +2039,7 @@ def audit_text_only(args: argparse.Namespace) -> int:
     def add(severity: str, check: str, message: str, details: dict[str, Any] | None = None) -> None:
         findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
 
-    datasets = selected_integrated_text_datasets(args)
+    datasets = selected_text_datasets(getattr(args, "text_datasets", None))
     audit_integrated_filesystem(raw_dir, datasets, add)
     audit_text_completeness(raw_dir, args, add)
     report = build_quality_report(
@@ -2077,11 +2070,7 @@ def audit_text_only(args: argparse.Namespace) -> int:
     return 1 if counts["error"] else 0
 
 def selected_audit_macro_datasets(args: argparse.Namespace) -> list[str]:
-    datasets = list(getattr(args, "datasets", None) or MACRO_DATASETS)
-    invalid = sorted(set(datasets) - set(MACRO_SPECS))
-    if invalid:
-        raise RuntimeError(f"unknown macro/global datasets: {invalid}; supported={sorted(MACRO_SPECS)}")
-    return datasets
+    return select_datasets(getattr(args, "datasets", None), default=MACRO_DATASETS, allowed=MACRO_SPECS, label="macro/global")
 
 def expected_macro_paths(raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
     start = max(start_date, spec.start_date)
@@ -2880,9 +2869,9 @@ def audit_unified(args: argparse.Namespace) -> int:
         findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
 
     daily_datasets = selected_daily_datasets(args)
-    fundamental_datasets = selected_integrated_fundamental_datasets(args)
-    text_datasets = selected_integrated_text_datasets(args) if getattr(args, "include_text", False) else []
-    intraday_datasets = selected_integrated_intraday_datasets(args) if getattr(args, "include_intraday", False) else []
+    fundamental_datasets = selected_fundamental_datasets(getattr(args, "fundamental_datasets", None))
+    text_datasets = selected_text_datasets(getattr(args, "text_datasets", None)) if getattr(args, "include_text", False) else []
+    intraday_datasets = selected_intraday_datasets(getattr(args, "intraday_datasets", None)) if getattr(args, "include_intraday", False) else []
     datasets = REFERENCE_DATASETS + daily_datasets + fundamental_datasets + intraday_datasets + text_datasets
     audit_integrated_filesystem(raw_dir, datasets, add)
 
@@ -2986,7 +2975,7 @@ def audit_intraday_only(args: argparse.Namespace) -> int:
     def add(severity: str, check: str, message: str, details: dict[str, Any] | None = None) -> None:
         findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
 
-    intraday_datasets = selected_integrated_intraday_datasets(args)
+    intraday_datasets = selected_intraday_datasets(getattr(args, "intraday_datasets", None))
     audit_integrated_filesystem(raw_dir, intraday_datasets, add)
     if STK_MINS_DATASET in intraday_datasets:
         audit_stk_mins_completeness(raw_dir, args, add)

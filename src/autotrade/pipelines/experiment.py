@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import time
 import traceback
 from dataclasses import replace
@@ -42,6 +41,11 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import PHASE_FROZEN, BacktestTool, ModificationCheckTool, ToolContext
 from autotrade.environment.tools.finish_fold import cleanup_agent_processes
 
+from .agent_views import (
+    agent_visible_ledger_record as _agent_visible_ledger_record,
+    compact_fold_history as _compact_fold_history,
+    metrics as _metrics,
+)
 from .config import (
     AgentFactory,
     CachingSnapshotProvider,
@@ -52,8 +56,9 @@ from .config import (
     SnapshotProvider,
 )
 from .folds import FoldSpec, build_fold_schedule, heldout_periods
+from .hitl_state import iter_development_sessions
 from .ledger import ExperimentLedger, latest_fold_records
-from .meta_schedule import meta_learning_id, meta_learning_trigger_counts, meta_record_id
+from .meta_schedule import meta_learning_id, meta_record_id
 
 
 class FrozenArtifactMutatedError(RuntimeError):
@@ -162,22 +167,24 @@ class ExperimentPipeline:
         parent: FrozenArtifact | None = None
         taste_prompt = ""
         epoch_id = ""
-        for epoch_index in range(1, self.config.epochs + 1):
-            epoch_id = f"epoch_{epoch_index:03d}"
-            meta_triggers = set(
-                meta_learning_trigger_counts(len(folds), self.config.meta_learning_fold_interval)
-            )
-            for fold_index, fold in enumerate(folds):
-                if self.meta_learner is not None and fold_index in meta_triggers:
-                    parent, taste_prompt = self.run_meta_learning(
-                        epoch_id=epoch_id,
-                        meta_learning_id=meta_learning_id(epoch_id, fold_index),
-                        trigger_after_folds=fold_index,
-                        parent=parent,
-                        previous_taste=taste_prompt,
-                        visible_fold=fold,
-                    )
-                outcome = self.run_fold(fold, epoch_id=epoch_id, parent=parent, taste_prompt=taste_prompt)
+        for session in iter_development_sessions(
+            self.config.epochs,
+            folds,
+            meta_enabled=self.meta_learner is not None,
+            meta_learning_fold_interval=self.config.meta_learning_fold_interval,
+        ):
+            epoch_id = session.epoch_id
+            if session.kind == "meta_learning":
+                parent, taste_prompt = self.run_meta_learning(
+                    epoch_id=epoch_id,
+                    meta_learning_id=meta_learning_id(epoch_id, session.fold_index),
+                    trigger_after_folds=session.fold_index,
+                    parent=parent,
+                    previous_taste=taste_prompt,
+                    visible_fold=session.fold,
+                )
+            else:
+                outcome = self.run_fold(session.fold, epoch_id=epoch_id, parent=parent, taste_prompt=taste_prompt)
                 parent = outcome.frozen
         if parent is None:
             raise RuntimeError("experiment produced no frozen strategy artifact")
@@ -1565,81 +1572,6 @@ def _assert_single_raw_generation(**inputs: dict[str, object]) -> None:
         )
 
 
-def _metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
-    if not summary:
-        return None
-    keys = (
-        "total_return",
-        "long_return",
-        "short_return",
-        "sharpe",
-        "max_drawdown",
-        "margin_secs_reject_count",
-        "order_count",
-        "trade_count",
-        "turnover",
-        # Compact Barra-lite block (benchmark/excess return, beta, size tilt)
-        # from the backtest tool — descriptive attribution per step.
-        "benchmark",
-    )
-    metrics = {key: summary.get(key) for key in keys if key in summary}
-    exposure = summary.get("exposure")
-    if isinstance(exposure, dict):
-        metrics["exposure"] = {
-            key: exposure.get(key)
-            for key in ("avg_gross", "max_gross", "zero_position_days", "replay_days")
-            if key in exposure
-        }
-    return metrics
-
-
-def _agent_visible_metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
-    """Compact metric projection safe for Meta workspace history."""
-
-    metrics = _metrics(summary)
-    if metrics is None:
-        return None
-    metrics = {
-        key: value
-        for key, value in metrics.items()
-        if key in {"benchmark", "exposure"}
-        or (isinstance(value, (int, float)) and not isinstance(value, bool))
-    }
-    benchmark = metrics.get("benchmark")
-    if isinstance(benchmark, dict):
-        metrics["benchmark"] = {
-            key: benchmark.get(key)
-            for key in ("label", "benchmark_return", "excess_return", "beta", "n_days", "size_tilt")
-            if key in benchmark
-            and (
-                (key == "label" and isinstance(benchmark.get(key), str))
-                or (
-                    key != "label"
-                    and isinstance(benchmark.get(key), (int, float))
-                    and not isinstance(benchmark.get(key), bool)
-                )
-            )
-        }
-    else:
-        metrics.pop("benchmark", None)
-    exposure = metrics.get("exposure")
-    if isinstance(exposure, dict):
-        compact_exposure = {
-            key: exposure.get(key)
-            for key in ("avg_gross", "max_gross", "zero_position_days", "replay_days")
-            if key in exposure
-            and isinstance(exposure.get(key), (int, float))
-            and not isinstance(exposure.get(key), bool)
-        }
-        if compact_exposure:
-            metrics["exposure"] = compact_exposure
-        else:
-            metrics.pop("exposure", None)
-    else:
-        metrics.pop("exposure", None)
-    return metrics
-
-
 def _check_has_changes(check: dict[str, object]) -> bool:
     delta = check.get("delta")
     model_delta = check.get("model_delta")
@@ -1655,150 +1587,6 @@ def _check_has_changes(check: dict[str, object]) -> bool:
             int(model_delta.get("changed_file_count") or 0) > 0,
         ]
     )
-
-
-def _compact_fold_history(
-    record: dict[str, object], *, include_frozen_test_metrics: bool = False
-) -> dict[str, object]:
-    manifest = _read_json(Path(str(record.get("run_manifest_ref", ""))))
-    backtests = []
-    if isinstance(manifest.get("backtest_summaries"), list):
-        for summary in manifest["backtest_summaries"]:
-            if not isinstance(summary, dict):
-                continue
-            backtests.append(
-                {
-                    key: summary.get(key)
-                    for key in (
-                        "result_name",
-                        "mode",
-                        "status",
-                        "complete_validation",
-                        "total_return",
-                        "long_return",
-                        "short_return",
-                        "sharpe",
-                        "max_drawdown",
-                        "order_count",
-                        "trade_count",
-                        # Exit health + benchmark-relative view: a lineage whose
-                        # every exit is a host liquidation, or whose "gains" trail
-                        # the index, must stay visible to later epochs.
-                        "host_exit_liquidation_count",
-                        "strategy_exit_fill_count",
-                        "liquidation_complete",
-                        "benchmark",
-                        # Overfitting tells (lzp-test21 post-mortem): structural
-                        # low exposure and turnover cost drove the held-out loss
-                        # while the dev metrics looked healthy — meta-learning
-                        # must see them, not just returns.
-                        "exposure",
-                        "turnover",
-                        "error",
-                    )
-                    if key in summary
-                }
-            )
-    compact = {
-        "epoch_id": record.get("epoch_id"),
-        "fold_id": _agent_visible_ref(record.get("fold_id"), prefix="fold_ref"),
-        "fold_status": record.get("fold_status"),
-        "finish_reason": record.get("finish_reason"),
-        "validation_result": record.get("validation_result"),
-        "accept_reasons": record.get("accept_reasons"),
-        "accept_warnings": record.get("accept_warnings"),
-        "backtest_summaries": backtests,
-    }
-    if include_frozen_test_metrics and record.get("record_type") == "fold":
-        compact["test_result"] = _agent_visible_metrics(
-            record.get("test_result") if isinstance(record.get("test_result"), dict) else None
-        )
-    return compact
-
-
-def _agent_visible_ledger_record(
-    record: dict[str, object], *, include_frozen_test_metrics: bool = False
-) -> dict[str, object]:
-    public = json.loads(json.dumps(record, ensure_ascii=False, default=str))
-    if not isinstance(public, dict):
-        return {}
-    allowed = {
-        "record_type",
-        "experiment_id",
-        "epoch_id",
-        "meta_learning_id",
-        "trigger_after_folds",
-        "run_id",
-        "parent_strategy_artifact_id",
-        "finish_reason",
-        "fold_status",
-        "accept_reasons",
-        "accept_warnings",
-        "selected_step_id",
-        "steps",
-        "frozen_strategy_artifact_id",
-        "frozen_strategy_artifact_hash",
-        "frozen_model_artifact_hash",
-        "frozen_combined_artifact_hash",
-        "validation_result",
-        "state_changed_during_test",
-        "snapshot_ids",
-        "status",
-        "modification_check",
-        "taste_chars",
-        "agent_session_summary",
-        "meta_learning_directive",
-        "fold_exploration_directive",
-        "web_search_engines",
-        "input_window",
-        "validation_period",
-        "valid_decision_time",
-    }
-    public = {key: value for key, value in public.items() if key in allowed}
-    if include_frozen_test_metrics and record.get("record_type") == "fold":
-        public["test_result"] = _agent_visible_metrics(
-            record.get("test_result") if isinstance(record.get("test_result"), dict) else None
-        )
-    if "fold_id" in record:
-        public["fold_id"] = _agent_visible_ref(record.get("fold_id"), prefix="fold_ref")
-    for key in ("parent_strategy_artifact_id", "frozen_strategy_artifact_id"):
-        if public.get(key):
-            public[key] = _agent_visible_ref(public[key], prefix="strategy_ref")
-    steps = public.get("steps")
-    if isinstance(steps, list):
-        public["steps"] = [_agent_visible_step_record(step) for step in steps if isinstance(step, dict)]
-    snapshot_ids = public.get("snapshot_ids")
-    if isinstance(snapshot_ids, dict):
-        public["snapshot_ids"] = {
-            key: value
-            for key, value in snapshot_ids.items()
-            if not str(key).startswith("test_") and not str(key).startswith("heldout_")
-        }
-    return public
-
-
-def _agent_visible_step_record(record: dict[str, object]) -> dict[str, object]:
-    allowed = {
-        "step_id",
-        "status",
-        "strategy_artifact_ref",
-        "model_artifact_ref",
-        "combined_artifact_ref",
-        "modification_delta_summary",
-        "timing",
-        "decision_reason",
-        "summary",
-    }
-    return {key: value for key, value in record.items() if key in allowed}
-
-
-def _read_json(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
 
 
 def _researcher_wait_seconds(summary: object) -> float:

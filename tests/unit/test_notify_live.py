@@ -14,7 +14,7 @@ from unittest.mock import patch
 from autotrade.live import QmtLiveMonitor, format_deal_card
 from autotrade.live.qmt_monitor import CN_TZ, PULL_FAILURE_ALERT_CYCLES
 from autotrade.notify import FeishuBot, load_dotenv_values
-from autotrade.pipelines.interactive import _decision_alert_card
+from autotrade.notify.feishu import decision_alert_card
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -109,7 +109,7 @@ class FeishuBotTest(unittest.TestCase):
 
 class DecisionAlertCardTest(unittest.TestCase):
     def test_states_map_to_cards(self):
-        step = _decision_alert_card("exp1", "waiting_step_user", {
+        step = decision_alert_card("exp1", "waiting_step_user", {
             "session_key": "epoch_001/fold_2025Q1", "awaiting_step": 3,
             "step_summary": {"total_return": 0.0123},
             "completed_sessions": 2, "total_sessions": 9,
@@ -119,16 +119,16 @@ class DecisionAlertCardTest(unittest.TestCase):
         self.assertIn("1.23%", step["body"])
         self.assertIn("**实验** exp1", step["body"])
         self.assertIn("**进度** 2/9", step["body"])
-        question = _decision_alert_card("exp1", "waiting_user_reply", {
+        question = decision_alert_card("exp1", "waiting_user_reply", {
             "session_key": "s", "awaiting_question": {"index": 2, "question": "方案A还是B？"},
         })
         self.assertIn("提问 #2", question["title"])
         self.assertIn("方案A还是B", question["body"])
-        self.assertIn("等待批准", _decision_alert_card("exp1", "waiting_user", {"session_key": "s"})["title"])
-        failed = _decision_alert_card("exp1", "failed", {"error": "boom"})
+        self.assertIn("等待批准", decision_alert_card("exp1", "waiting_user", {"session_key": "s"})["title"])
+        failed = decision_alert_card("exp1", "failed", {"error": "boom"})
         self.assertEqual(failed["color"], "red")
         self.assertIn("boom", failed["body"])
-        self.assertIsNone(_decision_alert_card("exp1", "running_session", {}))
+        self.assertIsNone(decision_alert_card("exp1", "running_session", {}))
 
 
 class StatusReporterNotifyTest(unittest.TestCase):
@@ -174,7 +174,10 @@ class QmtLiveMonitorTest(unittest.TestCase):
                 sent.append((title, body, color))
                 return True
 
-            monitor = QmtLiveMonitor(local_dir=local, notify=notify, ssh_dest="test@host")
+            monitor = QmtLiveMonitor(
+                local_dir=local, notify=notify, ssh_dest="test@host",
+                ssh_known_hosts=local / "known_hosts",
+            )
             deals = local / f"deals_{today}.jsonl"
             deals.write_text(json.dumps(self._deal("T1")) + "\n", encoding="utf-8")
             (local / "account_snapshot.json").write_text(json.dumps({
@@ -222,7 +225,10 @@ class QmtLiveMonitorTest(unittest.TestCase):
                 sent.append(title)
                 return outcome["ok"]
 
-            monitor = QmtLiveMonitor(local_dir=local, notify=notify, ssh_dest="test@host")
+            monitor = QmtLiveMonitor(
+                local_dir=local, notify=notify, ssh_dest="test@host",
+                ssh_known_hosts=local / "known_hosts",
+            )
             (local / f"deals_{today}.jsonl").write_text(json.dumps(self._deal("T1")) + "\n", encoding="utf-8")
             # Seed pre-existing state: an old-day key and a legacy bare traded_id.
             (local / ".monitor_state.json").write_text(json.dumps({
@@ -253,7 +259,10 @@ class QmtLiveMonitorTest(unittest.TestCase):
                 sent.append((title, body, color))
                 return True
 
-            monitor = QmtLiveMonitor(local_dir=local, notify=notify, ssh_dest="test@host")
+            monitor = QmtLiveMonitor(
+                local_dir=local, notify=notify, ssh_dest="test@host",
+                ssh_known_hosts=local / "known_hosts",
+            )
             stale_at = (datetime.datetime.now(CN_TZ) - datetime.timedelta(seconds=600)) \
                 .replace(tzinfo=None).isoformat()[:19]
             (local / "account_snapshot.json").write_text(
@@ -285,7 +294,10 @@ class QmtLiveMonitorTest(unittest.TestCase):
                 sent.append((title, body, color))
                 return True
 
-            monitor = QmtLiveMonitor(local_dir=local, notify=notify, ssh_dest="test@host")
+            monitor = QmtLiveMonitor(
+                local_dir=local, notify=notify, ssh_dest="test@host",
+                ssh_known_hosts=local / "known_hosts",
+            )
             with patch("autotrade.live.qmt_monitor.subprocess.run",
                        side_effect=subprocess.TimeoutExpired(cmd="scp", timeout=1)):
                 results = [monitor.run_once() for _ in range(PULL_FAILURE_ALERT_CYCLES)]
@@ -310,7 +322,11 @@ class QmtLiveMonitorTest(unittest.TestCase):
     def test_pull_honors_return_code_and_keeps_previous_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             local = Path(tmp)
-            monitor = QmtLiveMonitor(local_dir=local, notify=None, ssh_dest="test@host")
+            known_hosts = local / "known_hosts"
+            known_hosts.write_text("host ssh-ed25519 AAAA\n", encoding="utf-8")
+            monitor = QmtLiveMonitor(
+                local_dir=local, notify=None, ssh_dest="test@host", ssh_known_hosts=known_hosts
+            )
             snapshot = local / "account_snapshot.json"
             snapshot.write_text('{"ok": true}', encoding="utf-8")
 
@@ -402,6 +418,40 @@ class QmtClientBridgeTest(unittest.TestCase):
         self.assertTrue(any("volume" in e for e in errors(orders=float_volume)))
         bool_volume = [{"code": "600000.SH", "side": "BUY", "volume": True, "price": 10.0}]
         self.assertTrue(any("volume" in e for e in errors(orders=bool_volume)))
+
+    def test_payload_rejects_colliding_order_remarks(self):
+        # The broker-side idempotency wall keys on the remark; a payload whose
+        # orders share one remark identity must be rejected before submission.
+        bridge = _load_bridge()
+        config = self._execution_config()
+
+        def payload(orders):
+            return {
+                "schema_version": 2, "payload_id": "p", "strategy_id": "s1",
+                "trade_date": bridge._today(), "execute": False, "confirm": "",
+                "orders": orders,
+            }
+
+        explicit = [
+            {"code": "600000.SH", "side": "BUY", "volume": 100, "price": 10.0, "remark": "dup"},
+            {"code": "600016.SH", "side": "BUY", "volume": 100, "price": 10.0, "remark": "dup"},
+        ]
+        self.assertTrue(any("collides" in e for e in bridge._validate_payload(payload(explicit), config)))
+
+        # An explicit remark equal to another order's positional index shares
+        # that order's default identity: orders[2] remark "1" == orders[1] default.
+        positional = [
+            {"code": "600000.SH", "side": "BUY", "volume": 100, "price": 10.0},
+            {"code": "600016.SH", "side": "BUY", "volume": 100, "price": 10.0},
+            {"code": "600028.SH", "side": "BUY", "volume": 100, "price": 10.0, "remark": "1"},
+        ]
+        self.assertTrue(any("collides" in e for e in bridge._validate_payload(payload(positional), config)))
+
+        distinct = [
+            {"code": "600000.SH", "side": "BUY", "volume": 100, "price": 10.0},
+            {"code": "600016.SH", "side": "SELL", "volume": 100, "price": 10.0, "remark": "exit-leg"},
+        ]
+        self.assertEqual(bridge._validate_payload(payload(distinct), config), [])
 
     def test_export_dedup_keys_are_day_scoped_and_state_is_pruned(self):
         bridge = _load_bridge()

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -20,7 +19,7 @@ from dataclasses import MISSING, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Mapping
+from typing import Iterator, Mapping, NamedTuple, Sequence
 
 from autotrade.agent.compact import ContextCompactionConfig
 from autotrade.environment.broker import BrokerProfile
@@ -38,7 +37,7 @@ STATUS_NAME = "status.json"
 SCHEDULE_NAME = "schedule.json"
 ANALYSIS_DIR_NAME = "analysis"
 HELDOUT_SESSION_KEY = "heldout"
-_LIVE_RUN_STATES = {"running_session", "waiting_step_user", "waiting_user_reply"}
+LIVE_RUN_STATES = {"running_session", "waiting_step_user", "waiting_user_reply"}
 _RESEARCHER_WAIT_STATES = {"waiting_step_user", "waiting_user_reply"}
 
 # auto: run continuously; manual: approve each SESSION before it starts;
@@ -481,7 +480,7 @@ class StatusReporter:
             self._data.update(fields)
             state = self._data.get("state")
             changed = "state" in fields and state != previous
-            if changed and state in _LIVE_RUN_STATES:
+            if changed and state in LIVE_RUN_STATES:
                 # A session can reach ask_user/Step wait before the first
                 # heartbeat. Discover its run synchronously so Trace does not
                 # remain stuck in "preparing" for the whole researcher wait.
@@ -513,7 +512,7 @@ class StatusReporter:
     def _heartbeat_loop(self) -> None:
         while not self._stop.wait(self.interval_seconds):
             with self._lock:
-                if self._data.get("state") in _LIVE_RUN_STATES:
+                if self._data.get("state") in LIVE_RUN_STATES:
                     self._refresh_live_run_locked()
                 self._write_locked()
 
@@ -655,41 +654,70 @@ def fold_session_key(epoch_id: str, fold_id: str) -> str:
     return f"{epoch_id}/{fold_id}"
 
 
-def _epoch_ids(epochs: int) -> list[str]:
+def epoch_ids(epochs: int) -> list[str]:
     return [f"epoch_{index:03d}" for index in range(1, epochs + 1)]
+
+
+class DevelopmentSession(NamedTuple):
+    """One development session in canonical order (``kind`` is
+    ``meta_learning`` or ``fold``; ``fold`` is the upcoming/current FoldSpec)."""
+
+    kind: str
+    epoch_id: str
+    fold_index: int
+    fold: object
+
+
+def iter_development_sessions(
+    epochs: int, folds: Sequence, *, meta_enabled: bool, meta_learning_fold_interval: int
+) -> Iterator[DevelopmentSession]:
+    """The canonical Epoch -> Meta-trigger -> Fold session order.
+
+    Single source for the batch run loop, the interactive (HITL) run loop, and
+    the schedule projection: each Epoch starts with the mandatory Meta session,
+    interval-triggered Meta sessions land immediately before their upcoming
+    Fold (sharing its snapshot view), and no trigger trails the last Fold."""
+    meta_triggers = set(meta_learning_trigger_counts(len(folds), meta_learning_fold_interval))
+    for epoch_id in epoch_ids(epochs):
+        for fold_index, fold in enumerate(folds):
+            if meta_enabled and fold_index in meta_triggers:
+                yield DevelopmentSession("meta_learning", epoch_id, fold_index, fold)
+            yield DevelopmentSession("fold", epoch_id, fold_index, fold)
 
 
 def build_session_plan(config: ExperimentConfig, folds, heldout, *, meta_enabled: bool) -> list[dict[str, object]]:
     sessions: list[dict[str, object]] = []
-    meta_triggers = set(
-        meta_learning_trigger_counts(len(folds), config.meta_learning_fold_interval)
-    )
-    for epoch_id in _epoch_ids(config.epochs):
-        for fold_index, fold in enumerate(folds):
-            if meta_enabled and fold_index in meta_triggers:
-                sessions.append(
-                    {
-                        "key": meta_session_key(epoch_id, fold_index),
-                        "kind": "meta_learning",
-                        "epoch_id": epoch_id,
-                        "meta_learning_id": meta_learning_id(epoch_id, fold_index),
-                        "trigger_after_folds": fold_index,
-                        "before_fold_id": fold.fold_id,
-                    }
-                )
+    for session in iter_development_sessions(
+        config.epochs,
+        folds,
+        meta_enabled=meta_enabled,
+        meta_learning_fold_interval=config.meta_learning_fold_interval,
+    ):
+        if session.kind == "meta_learning":
             sessions.append(
                 {
-                    "key": fold_session_key(epoch_id, fold.fold_id),
+                    "key": meta_session_key(session.epoch_id, session.fold_index),
+                    "kind": "meta_learning",
+                    "epoch_id": session.epoch_id,
+                    "meta_learning_id": meta_learning_id(session.epoch_id, session.fold_index),
+                    "trigger_after_folds": session.fold_index,
+                    "before_fold_id": session.fold.fold_id,
+                }
+            )
+        else:
+            sessions.append(
+                {
+                    "key": fold_session_key(session.epoch_id, session.fold.fold_id),
                     "kind": "fold",
-                    "epoch_id": epoch_id,
-                    **fold.to_record(),
+                    "epoch_id": session.epoch_id,
+                    **session.fold.to_record(),
                 }
             )
     sessions.append(
         {
             "key": HELDOUT_SESSION_KEY,
             "kind": "heldout",
-            "epoch_id": _epoch_ids(config.epochs)[-1],
+            "epoch_id": epoch_ids(config.epochs)[-1],
             "periods": [
                 {"label": period["label"], "start": period["start"], "end": period["end"]} for period in heldout
             ],

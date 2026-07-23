@@ -17,6 +17,9 @@ from autotrade.environment.runtime import utc_now_iso
 LARGE_TABLE_ROW_THRESHOLD = 1_000_000
 LARGE_TABLE_SIZE_THRESHOLD_BYTES = 100 * 1024 * 1024
 LARGE_TABLE_NAMES = {"events.parquet", "text_index.parquet", "intraday_1min.parquet"}
+# Single source for the Parquet footer-statistics column sets: the snapshot
+# builder's large-frame profile (snapshot.py) imports these so both surfaces
+# profile the identical columns.
 DATE_COLUMNS = ("trade_date", "date", "available_at", "trade_time", "ann_date", "end_date")
 NULL_COUNT_COLUMNS = (
     "ts_code",
@@ -209,6 +212,22 @@ def _parquet_file_summary(path: Path, root: Path, mount_root: str, *, detailed: 
     return record
 
 
+def iter_column_statistics(metadata, column_index: int):
+    """Yield ``(row_group_metadata, column_statistics)`` for one column across
+    all row groups. Shared footer walk for this summary and the snapshot
+    builder's large-frame profile; each caller keeps its own missing-statistics
+    policy (tolerant skip here, strict fallback in the builder)."""
+    for group_index in range(metadata.num_row_groups):
+        group = metadata.row_group(group_index)
+        yield group, group.column(column_index).statistics
+
+
+def scalar_to_text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
 def _metadata_ranges(metadata, columns: list[str]) -> dict[str, dict[str, str]]:
     ranges: dict[str, dict[str, str]] = {}
     column_index = {name: index for index, name in enumerate(columns)}
@@ -217,13 +236,11 @@ def _metadata_ranges(metadata, columns: list[str]) -> dict[str, dict[str, str]]:
             continue
         mins: list[str] = []
         maxs: list[str] = []
-        index = column_index[name]
-        for group_index in range(metadata.num_row_groups):
-            stats = metadata.row_group(group_index).column(index).statistics
+        for _group, stats in iter_column_statistics(metadata, column_index[name]):
             if stats is None or not stats.has_min_max:
                 continue
-            mins.append(_scalar_to_text(stats.min))
-            maxs.append(_scalar_to_text(stats.max))
+            mins.append(scalar_to_text(stats.min))
+            maxs.append(scalar_to_text(stats.max))
         if mins and maxs:
             ranges[name] = {"min": min(mins), "max": max(maxs)}
     return ranges
@@ -237,9 +254,7 @@ def _metadata_null_counts(metadata, columns: list[str]) -> dict[str, int]:
             continue
         total = 0
         seen = False
-        index = column_index[name]
-        for group_index in range(metadata.num_row_groups):
-            stats = metadata.row_group(group_index).column(index).statistics
+        for _group, stats in iter_column_statistics(metadata, column_index[name]):
             if stats is None or stats.null_count is None:
                 continue
             seen = True
@@ -247,12 +262,6 @@ def _metadata_null_counts(metadata, columns: list[str]) -> dict[str, int]:
         if seen:
             counts[name] = total
     return counts
-
-
-def _scalar_to_text(value: object) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return str(value)
 
 
 def _metadata_error_message(exc: Exception, *, path: Path, root: Path, mount_path: object) -> str:

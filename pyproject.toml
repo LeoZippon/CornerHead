@@ -26,3 +26,7 @@ webui = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+cache_dir = ".runtime/pytest_cache"

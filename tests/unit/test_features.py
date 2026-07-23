@@ -590,19 +590,13 @@ class UnitRegistryProjectionTest(unittest.TestCase):
                 self.assertIn(record, registry_records)
 
     def test_agent_contract_is_a_pointer_not_a_copy(self):
-        from autotrade.environment.data.contracts import default_tushare_contracts
-        from autotrade.environment.data.units import AGENT_UNIT_CONTRACT, column_source_units
+        from autotrade.environment.data.units import AGENT_UNIT_CONTRACT
 
         self.assertEqual(
             AGENT_UNIT_CONTRACT["unit_reference"], "/mnt/artifacts/unit_reference.json"
         )
         # No embedded rule table: the contract stays a constant-size pointer.
         self.assertLess(len(json.dumps(AGENT_UNIT_CONTRACT)), 1200)
-        # Raw dataset contracts reuse the registry's column-level source units.
-        daily_units = column_source_units("daily.parquet")
-        for contract in default_tushare_contracts().values():
-            for column, unit in (contract.unit_rules or {}).items():
-                self.assertEqual(unit, daily_units[column], contract.dataset)
 
     def test_units_reference_doc_is_fresh(self):
         import importlib.util

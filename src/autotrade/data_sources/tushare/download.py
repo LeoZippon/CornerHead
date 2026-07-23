@@ -1202,10 +1202,7 @@ def download_event_flow(args: argparse.Namespace) -> int:
 
 def selected_event_flow_download_datasets(args: argparse.Namespace) -> list[str]:
     default = [dataset for dataset in EVENT_FLOW_DATASETS if dataset != "share_float"]
-    datasets = list(args.datasets or default)
-    invalid = sorted(set(datasets) - set(EVENT_FLOW_SPECS))
-    if invalid:
-        raise RuntimeError(f"unknown event/flow datasets: {invalid}; supported={sorted(EVENT_FLOW_SPECS)}")
+    datasets = select_datasets(args.datasets, default=default, allowed=EVENT_FLOW_SPECS, label="event/flow")
     if "share_float" in datasets:
         raise RuntimeError(
             "share_float must be downloaded with download-share-float-complete; "
@@ -2058,7 +2055,7 @@ def download_fundamental(args: argparse.Namespace) -> int:
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
-    datasets = selected_fundamental_datasets(args)
+    datasets = selected_fundamental_datasets(args.datasets)
     stock_codes: list[str] = []
     if any(FUNDAMENTAL_SPECS[name].strategy == "ts_code" for name in datasets):
         explicit_codes = [str(code).strip() for code in (getattr(args, "codes", None) or []) if str(code).strip()]
@@ -2372,7 +2369,7 @@ def download_intraday(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    datasets = selected_intraday_datasets(args)
+    datasets = selected_intraday_datasets(args.datasets)
     if STK_MINS_DATASET not in datasets:
         print("intraday minute download finished: no supported dataset selected")
         return 0
@@ -2703,7 +2700,7 @@ def download_text(args: argparse.Namespace) -> int:
     allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     windows = month_windows(args.start_date, args.end_date)
     days = date_range_days(args.start_date, args.end_date)
-    for dataset in selected_text_datasets(args):
+    for dataset in selected_text_datasets(args.datasets, news_src=args.news_src):
         spec = TEXT_SPECS[dataset]
         start_date = max(args.start_date, spec.start_date)
         dataset_windows = [(s, e, m) for s, e, m in windows if e >= start_date]

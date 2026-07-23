@@ -13,6 +13,7 @@ import datetime as dt
 import sys
 import time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 _SCRIPTS = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS) not in sys.path:
@@ -29,6 +30,8 @@ from autotrade.data_sources.tushare.realtime import (
     RealtimeMinuteStore,
 )
 
+CN_TZ = ZoneInfo("Asia/Shanghai")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -40,6 +43,12 @@ def main() -> int:
     parser.add_argument("--store-dir", default=str(REPO_ROOT / "data" / "raw" / LIVE_MINUTE_DIRNAME))
     parser.add_argument("--min-interval-seconds", type=float, default=0.22)
     args = parser.parse_args()
+    if args.interval_seconds <= 0:
+        parser.error("--interval-seconds must be positive")
+    try:
+        stop_at = dt.datetime.strptime(args.until, "%H:%M").time()
+    except ValueError:
+        parser.error("--until must be a valid HH:MM time")
 
     client = TuShareClient(load_token(REPO_ROOT), min_interval=args.min_interval_seconds, timeout=30)
     feed = RealtimeMinuteFeed(client, [code.strip() for code in args.codes.split(",") if code.strip()])
@@ -48,12 +57,13 @@ def main() -> int:
         print(bars.to_string(index=False) if not bars.empty else "(no bars returned)")
         return 0
     store = RealtimeMinuteStore(args.store_dir)
-    stop_at = dt.datetime.strptime(args.until, "%H:%M").time()
-    while dt.datetime.now().time() < stop_at:
-        appended = store.append(feed.poll())
+    while dt.datetime.now(CN_TZ).time() < stop_at:
+        bars = feed.poll()
+        appended = store.append(bars)
+        feed.acknowledge(bars)
         if appended:
-            print(f"{dt.datetime.now():%H:%M:%S} appended {appended}", flush=True)
-        time.sleep(max(1.0, args.interval_seconds))
+            print(f"{dt.datetime.now(CN_TZ):%H:%M:%S} appended {appended}", flush=True)
+        time.sleep(args.interval_seconds)
     print("follow window ended")
     return 0
 

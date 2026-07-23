@@ -11,6 +11,7 @@ from __future__ import annotations
 import tempfile
 import time
 import zipfile
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
@@ -33,8 +34,13 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI:
     repo_root = Path(repo_root).resolve()
-    manager = ExperimentManager(repo_root, experiments_root)
     analysis_service = AnalysisService(repo_root)
+    # The manager must see the analysis service's pending work: its background
+    # threads write into experiments/<id>/hitl/analysis/, so deletion is
+    # refused (409) while an analysis for that experiment is still running.
+    manager = ExperimentManager(
+        repo_root, experiments_root, analysis_pending=analysis_service.pending_for_experiment
+    )
     app = FastAPI(title="CornerHead Console", docs_url=None, redoc_url=None)
     trading_days_cache: dict[str, list[str] | None] = {}
     service_code_version = repo_code_version(repo_root)
@@ -179,24 +185,20 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             **_code_status(),
         }
 
-    # ---- folds -------------------------------------------------------------------
-    def _strategy_zip_response(
-        strategy_dir: Path, model_dir: Path | None, filename: str
-    ) -> FileResponse:
+    # ---- zip downloads ---------------------------------------------------------
+    def _zip_response(members: Iterable[tuple[Path, Path]], filename: str) -> FileResponse:
+        """One-shot zip download: ``members`` yields (archive_name, file_path)
+        pairs written into a temp archive that is unlinked after the response
+        is sent — or immediately if archiving fails."""
         handle = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
         handle.close()
         zip_path = Path(handle.name)
         try:
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-                for file in sorted(strategy_dir.rglob("*")):
-                    if file.is_file():
-                        archive.write(file, Path("output") / file.relative_to(strategy_dir))
-                if model_dir is not None and model_dir.is_dir():
-                    for file in sorted(model_dir.rglob("*")):
-                        if file.is_file():
-                            archive.write(file, Path("models") / file.relative_to(model_dir))
+                for archive_name, file in members:
+                    archive.write(file, archive_name)
         except Exception:
-            zip_path.unlink(missing_ok=True)
+            zip_path.unlink(missing_ok=True)  # archive failed: never orphan the temp file
             raise
         return FileResponse(
             zip_path,
@@ -204,6 +206,24 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             filename=filename,
             background=BackgroundTask(zip_path.unlink, missing_ok=True),
         )
+
+    def _strategy_zip_response(
+        strategy_dir: Path, model_dir: Path | None, filename: str
+    ) -> FileResponse:
+        """Frozen strategy package: output/ tree plus optional models/ tree."""
+
+        def members() -> Iterator[tuple[Path, Path]]:
+            for file in sorted(strategy_dir.rglob("*")):
+                if file.is_file():
+                    yield Path("output") / file.relative_to(strategy_dir), file
+            if model_dir is not None and model_dir.is_dir():
+                for file in sorted(model_dir.rglob("*")):
+                    if file.is_file():
+                        yield Path("models") / file.relative_to(model_dir), file
+
+        return _zip_response(members(), filename)
+
+    # ---- folds -------------------------------------------------------------------
 
     @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}")
     def get_fold(experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
@@ -244,25 +264,13 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             node_dir = steps.node_export_dir(experiment_dir, node_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return _step_zip_response(node_dir, f"{experiment_id}__{node_id}.zip")
-
-    def _step_zip_response(node_dir: Path, filename: str) -> FileResponse:
-        handle = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
-        handle.close()
-        zip_path = Path(handle.name)
-        try:
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-                for file in sorted(node_dir.rglob("*")):
-                    if file.is_file():
-                        archive.write(file, file.relative_to(node_dir))
-        except Exception:
-            zip_path.unlink(missing_ok=True)  # archive failed: never orphan the temp file
-            raise
-        return FileResponse(
-            zip_path,
-            media_type="application/zip",
-            filename=filename,
-            background=BackgroundTask(zip_path.unlink, missing_ok=True),
+        return _zip_response(
+            (
+                (file.relative_to(node_dir), file)
+                for file in sorted(node_dir.rglob("*"))
+                if file.is_file()
+            ),
+            f"{experiment_id}__{node_id}.zip",
         )
 
     def _current_step_snapshot(experiment_id: str) -> tuple[Path, dict[str, object], str, Path]:

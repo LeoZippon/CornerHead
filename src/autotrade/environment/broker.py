@@ -135,6 +135,21 @@ class BrokerProfile:
     maintenance_source: str = "https://www.gjzq.com.cn/main/a/rzrq/index.html"
 
     def __post_init__(self) -> None:
+        # bool is an int subclass: True would satisfy the isfinite range checks
+        # below as 1.0, so every float-valued field (optional ones included)
+        # rejects booleans explicitly before its range check.
+        for name in (
+            "stock_initial_cash", "credit_initial_cash", "commission_bps",
+            "min_commission_cny", "stamp_duty_sell_bps_before_cutover",
+            "stamp_duty_sell_bps_from_cutover", "transfer_fee_bps", "slippage_bps",
+            "fin_rate_annual", "slo_rate_annual", "fin_margin_ratio",
+            "slo_margin_ratio", "slo_margin_ratio_private_fund", "assure_ratio",
+            "dividend_tax_rate", "maintenance_closeout_ratio",
+            "maintenance_warning_ratio", "maintenance_withdraw_ratio",
+            "fin_max_quota", "slo_max_quota", "max_single_name_weight",
+        ):
+            if isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a number, not a boolean")
         # Range checks fail closed against NaN too: every `NaN <op> x` is False,
         # so the guards are written as "not (valid range)".
         for name in ("stock_initial_cash", "credit_initial_cash"):
@@ -164,8 +179,22 @@ class BrokerProfile:
             raise ValueError(f"unsupported corporate_actions={self.corporate_actions}")
         if not 0.0 <= self.dividend_tax_rate < 1.0:
             raise ValueError("dividend_tax_rate must be in [0, 1)")
-        if self.max_total_holdings is not None and self.max_total_holdings <= 0:
-            raise ValueError("max_total_holdings must be positive")
+        if self.max_total_holdings is not None and (
+            isinstance(self.max_total_holdings, bool)
+            or not isinstance(self.max_total_holdings, int)
+            or self.max_total_holdings <= 0
+        ):
+            raise ValueError("max_total_holdings must be a positive integer")
+        if (
+            isinstance(self.debt_contract_term_days, bool)
+            or not isinstance(self.debt_contract_term_days, int)
+            or self.debt_contract_term_days <= 0
+        ):
+            raise ValueError("debt_contract_term_days must be a positive integer")
+        if not isinstance(self.debt_contract_auto_extend, bool):
+            raise ValueError("debt_contract_auto_extend must be a boolean")
+        if not isinstance(self.is_private_fund, bool):
+            raise ValueError("is_private_fund must be a boolean")
         if self.max_single_name_weight is not None and not (
             math.isfinite(self.max_single_name_weight) and self.max_single_name_weight > 0
         ):
@@ -227,7 +256,9 @@ class BrokerProfile:
             "max_total_holdings": self.max_total_holdings,
             "short_inventory_mode": self.short_inventory_mode,
             "fin_margin_ratio": self.fin_margin_ratio,
-            "slo_margin_ratio": self.effective_slo_margin_ratio,
+            "slo_margin_ratio": self.slo_margin_ratio,
+            "slo_margin_ratio_private_fund": self.slo_margin_ratio_private_fund,
+            "is_private_fund": self.is_private_fund,
             "fin_rate_annual": self.fin_rate_annual,
             "slo_rate_annual": self.slo_rate_annual,
             "credit_rates_are_assumed": True,
@@ -261,6 +292,15 @@ class MarketData:
         frame = daily.copy()
         frame["trade_date"] = frame["trade_date"].astype(str)
         frame["ts_code"] = frame["ts_code"].astype(str)
+        duplicate = frame.duplicated(["trade_date", "ts_code"], keep=False)
+        if duplicate.any():
+            keys = (
+                frame.loc[duplicate, ["trade_date", "ts_code"]]
+                .drop_duplicates()
+                .head(5)
+                .to_dict("records")
+            )
+            raise ValueError(f"replay daily data has duplicate business keys: {keys}")
         self._bars = frame.set_index(["trade_date", "ts_code"]).sort_index()
         self.trade_dates = sorted(frame["trade_date"].unique())
         # Codes present anywhere in the replay region: orders outside this set
@@ -272,7 +312,7 @@ class MarketData:
             row = self._bars.loc[(str(trade_date), str(ts_code))]
         except KeyError:
             return None
-        return row.iloc[0] if isinstance(row, pd.DataFrame) else row
+        return row
 
     @staticmethod
     def is_suspended(bar: pd.Series | None) -> bool:
@@ -1602,12 +1642,11 @@ class SimBroker:
                 "exit_liquidated_by_host", ts_code=ts_code, side=side,
                 trade_date=trade_date, quantity=sellable, account=state.name,
             )
-        if forced and state.name == "credit" and side == "long" and fill is not None:
-            # 强平所得偿还融资负债 (interest first, oldest first): the broker keeps
-            # the liquidation proceeds against outstanding 融资 debt rather than
-            # leaving the principal accruing interest. Voluntary 担保品卖出 keeps
-            # its proceeds in cash (only sell_repay repays by choice), and the
-            # exit-day mandatory liquidation nets debt in equity as before.
+        if state.name == "credit" and side == "long" and fill is not None:
+            # 强平 and region-end mandatory liquidation both settle financed
+            # shares and apply their proceeds to debt (interest first, oldest
+            # first). Voluntary 担保品卖出 still keeps its proceeds in cash
+            # (only sell_repay repays by choice).
             release_fin_shares(state.contracts, ts_code, sellable)
             repaid = repay_fin(state.contracts, max(0.0, fill.cash_delta), release_shares=False)
             if repaid["applied"] > 0:
@@ -1615,7 +1654,7 @@ class SimBroker:
                 self.interest_paid_total += repaid["interest_paid"]
                 self._event(
                     "debt_repaid", trade_date=trade_date, ts_code=ts_code,
-                    kind="fin", via="forced_close", **repaid,
+                    kind="fin", via="forced_close" if forced else "mandatory_exit", **repaid,
                 )
         return True
 
