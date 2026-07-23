@@ -2,6 +2,7 @@
 # QMT live monitor lifecycle (sync + Feishu fill notifications).
 # Usage: ops/qmt/qmt_monitor.sh {start|stop|status}
 set -euo pipefail
+umask 077
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON="${QUANT_PYTHON:-$HOME/miniconda3/envs/quant/bin/python}"

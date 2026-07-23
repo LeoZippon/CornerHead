@@ -12,13 +12,15 @@
 从本机上传配置样例与策略源码：
 
 ```bash
-ssh Administrator@39.105.46.212 \
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes qmt-node \
   'powershell -NoProfile -Command "New-Item -ItemType Directory -Force C:\xquant\config,C:\xquant\inbox,C:\xquant\outbox,C:\xquant\archive,C:\xquant\state | Out-Null"'
 scp ops/qmt/qmt_bridge_config.example.json \
-  Administrator@39.105.46.212:C:/xquant/config/qmt_bridge.json
+  qmt-node:C:/xquant/config/qmt_bridge.json
 scp ops/qmt/qmt_client_bridge.py \
-  Administrator@39.105.46.212:C:/xquant/qmt_client_bridge.py
+  qmt-node:C:/xquant/qmt_client_bridge.py
 ```
+
+`qmt-node` 必须由仓库外 SSH inventory 提供，启用严格主机校验并指向带外核验过的专用 known_hosts；仓库不保存节点地址、账户、公钥或主机指纹。
 
 在 Windows 上编辑 `C:\xquant\config\qmt_bridge.json`：
 
@@ -41,7 +43,8 @@ scp ops/qmt/qmt_client_bridge.py \
 启动约 10 秒后在本机确认快照与同步链路：
 
 ```bash
-ssh Administrator@39.105.46.212 "type C:\\xquant\\outbox\\account_snapshot.json"
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes qmt-node \
+  "type C:\\xquant\\outbox\\account_snapshot.json"
 ops/qmt/qmt_monitor.sh status     # 计算服务器守护：20 秒拉回 data/qmt_live/ 并推送飞书成交/告警
 ```
 
@@ -68,7 +71,7 @@ ops/qmt/qmt_monitor.sh status     # 计算服务器守护：20 秒拉回 data/qm
 执行语义：
 
 - 三重独立闸门：配置 `execution.enabled` ∧ payload `execute` ∧ `confirm == payload_id`，全部为真才会 `passorder`。`enabled` 或 `execute` 任一为假即 dry_run（校验+回写，不下单）；但请求了实盘（两布尔为真）而 `confirm` 不匹配、或处于交易时段之外时，直接以 error 拒绝该 payload——不会降级为 dry_run。`enabled` 与 `execute` 只接受 JSON 真布尔（字符串 `"false"` 直接拒绝，不再按真值解释）。
-- 严格解析：配置与 payload 的 JSON 拒绝 `NaN/Infinity` 常量；`volume` 必须是 JSON 整数、`price` 必须是有限数值、名义金额上限必须是有限正数。
+- 严格解析：配置与 payload 的 JSON 拒绝 `NaN/Infinity` 常量和所有未知字段；根对象只接受示例中的 7 个字段，订单只接受 `code/side/volume/price/remark`（remark 可选）。`volume` 必须是 JSON 整数、`price` 必须是有限数值、名义金额上限必须是有限正数。
 - 校验：schema/白名单 strategy_id/当日 trade_date/SH·SZ 代码/BUY 100 股整手/正数量价/单笔与整包名义金额上限/交易时段。
 - 幂等：每单 remark = `MQ:<payload_id>:<序号或自定义 remark>`；提交前对照柜台当日委托 remark 与本地已处理记录，重复到达不重复下单。已处理记录按交易日限定（`<交易日>:<payload_id>` 键，过期键随状态清理）；跨日到达的旧 payload 由 `trade_date == 当日` 校验拦截，不依赖永久黑名单。
 - 逐单日志：每次 `passorder` 前写 intent、成功后写 submitted、异常写 error 终态到 `state\order_journal_YYYYMMDD.jsonl`；中途异常即中止剩余订单并回写 `error_*.json`（该 payload 不记为已处理，重投时靠 remark 幂等墙保护已提交订单），失败/重启后可按 remark 与柜台当日委托对账。
@@ -84,7 +87,7 @@ ops/qmt/qmt_monitor.sh status     # 计算服务器守护：20 秒拉回 data/qm
 
 ## 6. 计算服务器侧（同步 + 飞书通知）
 
-`.env` 需 `FEISHU_QMT_APP_ID/APP_SECRET/CHAT_ID` 与 `QMT_SSH_DEST`：
+`.env` 需 `FEISHU_QMT_APP_ID/APP_SECRET/CHAT_ID`、`QMT_SSH_DEST` 与指向专用固定 host-key 文件的 `QMT_SSH_KNOWN_HOSTS`：
 
 ```bash
 ops/qmt/qmt_monitor.sh start|stop|status

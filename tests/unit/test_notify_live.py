@@ -174,7 +174,10 @@ class QmtLiveMonitorTest(unittest.TestCase):
                 sent.append((title, body, color))
                 return True
 
-            monitor = QmtLiveMonitor(local_dir=local, notify=notify, ssh_dest="test@host")
+            monitor = QmtLiveMonitor(
+                local_dir=local, notify=notify, ssh_dest="test@host",
+                ssh_known_hosts=local / "known_hosts",
+            )
             deals = local / f"deals_{today}.jsonl"
             deals.write_text(json.dumps(self._deal("T1")) + "\n", encoding="utf-8")
             (local / "account_snapshot.json").write_text(json.dumps({
@@ -222,7 +225,10 @@ class QmtLiveMonitorTest(unittest.TestCase):
                 sent.append(title)
                 return outcome["ok"]
 
-            monitor = QmtLiveMonitor(local_dir=local, notify=notify, ssh_dest="test@host")
+            monitor = QmtLiveMonitor(
+                local_dir=local, notify=notify, ssh_dest="test@host",
+                ssh_known_hosts=local / "known_hosts",
+            )
             (local / f"deals_{today}.jsonl").write_text(json.dumps(self._deal("T1")) + "\n", encoding="utf-8")
             # Seed pre-existing state: an old-day key and a legacy bare traded_id.
             (local / ".monitor_state.json").write_text(json.dumps({
@@ -253,7 +259,10 @@ class QmtLiveMonitorTest(unittest.TestCase):
                 sent.append((title, body, color))
                 return True
 
-            monitor = QmtLiveMonitor(local_dir=local, notify=notify, ssh_dest="test@host")
+            monitor = QmtLiveMonitor(
+                local_dir=local, notify=notify, ssh_dest="test@host",
+                ssh_known_hosts=local / "known_hosts",
+            )
             stale_at = (datetime.datetime.now(CN_TZ) - datetime.timedelta(seconds=600)) \
                 .replace(tzinfo=None).isoformat()[:19]
             (local / "account_snapshot.json").write_text(
@@ -285,7 +294,10 @@ class QmtLiveMonitorTest(unittest.TestCase):
                 sent.append((title, body, color))
                 return True
 
-            monitor = QmtLiveMonitor(local_dir=local, notify=notify, ssh_dest="test@host")
+            monitor = QmtLiveMonitor(
+                local_dir=local, notify=notify, ssh_dest="test@host",
+                ssh_known_hosts=local / "known_hosts",
+            )
             with patch("autotrade.live.qmt_monitor.subprocess.run",
                        side_effect=subprocess.TimeoutExpired(cmd="scp", timeout=1)):
                 results = [monitor.run_once() for _ in range(PULL_FAILURE_ALERT_CYCLES)]
@@ -310,7 +322,11 @@ class QmtLiveMonitorTest(unittest.TestCase):
     def test_pull_honors_return_code_and_keeps_previous_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             local = Path(tmp)
-            monitor = QmtLiveMonitor(local_dir=local, notify=None, ssh_dest="test@host")
+            known_hosts = local / "known_hosts"
+            known_hosts.write_text("host ssh-ed25519 AAAA\n", encoding="utf-8")
+            monitor = QmtLiveMonitor(
+                local_dir=local, notify=None, ssh_dest="test@host", ssh_known_hosts=known_hosts
+            )
             snapshot = local / "account_snapshot.json"
             snapshot.write_text('{"ok": true}', encoding="utf-8")
 

@@ -29,6 +29,7 @@ def main() -> int:
     parser.add_argument("--interval-seconds", type=float, default=20.0)
     parser.add_argument("--local-dir", type=Path, default=Path("data/qmt_live"))
     parser.add_argument("--ssh-dest", default="")
+    parser.add_argument("--ssh-known-hosts", type=Path)
     parser.add_argument("--remote-outbox", default=os.environ.get("QMT_REMOTE_OUTBOX", "C:/xquant/outbox"))
     parser.add_argument("--once", action="store_true", help="run a single cycle and exit (smoke test)")
     args = parser.parse_args()
@@ -44,9 +45,18 @@ def main() -> int:
     if not ssh_dest:
         print("QMT_SSH_DEST missing (.env or --ssh-dest), e.g. <user>@<qmt-host>", file=sys.stderr)
         return 1
+    # Host identity is pinned to an out-of-band verified known_hosts file so scp
+    # cannot trust-on-first-use a spoofed QMT node; never a repo constant.
+    known_hosts = args.ssh_known_hosts or (
+        Path(env["QMT_SSH_KNOWN_HOSTS"]) if env.get("QMT_SSH_KNOWN_HOSTS") else None
+    )
+    if known_hosts is None or not known_hosts.is_file():
+        print("QMT_SSH_KNOWN_HOSTS must name a pinned known_hosts file (.env or --ssh-known-hosts)", file=sys.stderr)
+        return 1
     monitor = QmtLiveMonitor(
         local_dir=args.local_dir, notify=bot.send_card,
-        ssh_dest=ssh_dest, remote_outbox=args.remote_outbox,
+        ssh_dest=ssh_dest, ssh_known_hosts=known_hosts,
+        remote_outbox=args.remote_outbox,
     )
     print(f"{time.strftime('%F %T')} qmt_live_monitor: {ssh_dest}:{args.remote_outbox} -> {args.local_dir} every {args.interval_seconds}s")
     # Fills always log. Errors log on state transitions (first failure, error

@@ -129,16 +129,25 @@ def _load_state():
     global _STATE
     if _STATE is not None:
         return _STATE
+    # Fail closed: a missing state file is the normal cold start (empty state),
+    # but a present-yet-corrupt file must NOT reset the idempotency memory to
+    # empty -- that would let already-submitted payloads be resubmitted. Raise
+    # so bridge_poll writes an error snapshot and processes no orders.
+    if not os.path.exists(STATE_PATH):
+        _STATE = {"processed_payloads": {}, "order_fingerprints": {}, "seen_deal_ids": set()}
+        return _STATE
     try:
         with io.open(STATE_PATH, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
+        if not isinstance(payload, dict):
+            raise ValueError("bridge state root must be an object")
         _STATE = {
             "processed_payloads": dict(payload.get("processed_payloads", {})),
             "order_fingerprints": dict(payload.get("order_fingerprints", {})),
             "seen_deal_ids": set(payload.get("seen_deal_ids", [])),
         }
-    except Exception:
-        _STATE = {"processed_payloads": {}, "order_fingerprints": {}, "seen_deal_ids": set()}
+    except Exception as exc:
+        raise RuntimeError("cannot load QMT bridge state %s: %s" % (STATE_PATH, exc))
     return _STATE
 
 
@@ -354,6 +363,20 @@ def _export_cycle(state, accounts):
 def _validate_payload(payload, config):
     errors = []
     execution = config["execution"]
+    # Reject unknown fields: an operator/host typo (e.g. a field they believe
+    # gates or resizes an order) must fail loudly instead of being silently
+    # ignored while the recognized fields still execute. The frozen schema is
+    # the 7 root fields and the 5 per-order fields (remark optional).
+    allowed_payload_keys = set((
+        "schema_version", "payload_id", "strategy_id", "trade_date",
+        "execute", "confirm", "orders",
+    ))
+    allowed_order_keys = set(("code", "side", "volume", "price", "remark"))
+    if not isinstance(payload, dict):
+        return ["payload must be an object"]
+    unknown_payload_keys = sorted(set(payload) - allowed_payload_keys)
+    if unknown_payload_keys:
+        errors.append("unknown payload fields: %s" % ", ".join(unknown_payload_keys))
     if payload.get("schema_version") != 2:
         errors.append("schema_version must be 2")
     if not str(payload.get("payload_id") or "").strip():
@@ -380,6 +403,9 @@ def _validate_payload(payload, config):
         if not isinstance(order, dict):
             errors.append(prefix + " must be an object")
             continue
+        unknown_order_keys = sorted(set(order) - allowed_order_keys)
+        if unknown_order_keys:
+            errors.append(prefix + " has unknown fields: %s" % ", ".join(unknown_order_keys))
         code = str(order.get("code") or "")
         side = str(order.get("side") or "").upper()
         if not (code.endswith(".SH") or code.endswith(".SZ")):
@@ -564,8 +590,8 @@ def _poll_inbox(config, state, ContextInfo):
 # QMT entry points
 # ---------------------------------------------------------------------------
 def bridge_poll(ContextInfo):
-    state = _load_state()
     try:
+        state = _load_state()
         config = _load_config()
         changed = _export_cycle(state, config["accounts"])
         if changed:

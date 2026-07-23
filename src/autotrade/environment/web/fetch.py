@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import html
+import http.client
 import ipaddress
 import re
 import socket
+import ssl
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
 from html.parser import HTMLParser
 
@@ -87,7 +89,6 @@ class WebFetchService:
         self.timeout_seconds = float(timeout_seconds)
         self.max_bytes = int(max_bytes)
         self.max_redirects = int(max_redirects)
-        self._direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
 
     def fetch(
         self,
@@ -101,20 +102,39 @@ class WebFetchService:
         redirect_chain: list[str] = []
         started_at = utc_now_iso()
         started = time.monotonic()
-        opener = _build_proxy_opener(proxy_env) if use_proxy else self._direct_opener
+        proxy_opener = _build_proxy_opener(proxy_env) if use_proxy else None
 
         for _attempt in range(self.max_redirects + 1):
-            _validate_public_host(current_url)
-            request = urllib.request.Request(
-                current_url,
-                headers={
-                    "Accept": "text/html,text/plain,application/json,application/xml;q=0.9,*/*;q=0.1",
-                    "User-Agent": USER_AGENT,
-                },
-                method="GET",
-            )
+            addresses = _validated_public_addresses(current_url)
+            if proxy_opener is not None:
+                response_cm = _open_proxy_response(
+                    proxy_opener, current_url, timeout_seconds=self.timeout_seconds
+                )
+            else:
+                response_cm = _open_pinned_response(
+                    current_url, addresses, timeout_seconds=self.timeout_seconds
+                )
             try:
-                with opener.open(request, timeout=self.timeout_seconds) as response:  # noqa: S310 - URL is guarded
+                with response_cm as response:
+                    status = int(response.status)
+                    if 300 <= status < 400:
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise WebFetchError(
+                                f"redirect response missing Location header: HTTP {status}"
+                            )
+                        next_url = _validate_url(urllib.parse.urljoin(current_url, location))
+                        if not _is_same_host_redirect(current_url, next_url):
+                            raise WebFetchError(
+                                "cross-host redirect is not followed automatically: "
+                                f"{_redacted_url(current_url)} -> {_redacted_url(next_url)}"
+                            )
+                        redirect_chain.append(next_url)
+                        current_url = next_url
+                        continue
+                    if status >= 400:
+                        body = response.read(500).decode("utf-8", errors="replace")
+                        raise WebFetchError(f"web_fetch HTTP {status}: {sanitize_for_log(body)}")
                     return self._read_response(
                         response,
                         original_url=original_url,
@@ -124,23 +144,6 @@ class WebFetchService:
                         started_at=started_at,
                         started=started,
                     )
-            except urllib.error.HTTPError as exc:
-                if 300 <= int(exc.code) < 400:
-                    location = exc.headers.get("Location")
-                    if not location:
-                        raise WebFetchError(f"redirect response missing Location header: HTTP {exc.code}") from exc
-                    next_url = urllib.parse.urljoin(current_url, location)
-                    next_url = _validate_url(next_url)
-                    if not _is_same_host_redirect(current_url, next_url):
-                        raise WebFetchError(
-                            "cross-host redirect is not followed automatically: "
-                            f"{_redacted_url(current_url)} -> {_redacted_url(next_url)}"
-                        ) from exc
-                    redirect_chain.append(next_url)
-                    current_url = next_url
-                    continue
-                body = exc.read(500).decode("utf-8", errors="replace")
-                raise WebFetchError(f"web_fetch HTTP {exc.code}: {sanitize_for_log(body)}") from exc
             except WebFetchError:
                 raise
             except Exception as exc:  # noqa: BLE001 - normalize request failures
@@ -192,9 +195,17 @@ class WebFetchService:
         )
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ANN201
-        return None
+class _PassthroughHTTPErrorProcessor(urllib.request.HTTPErrorProcessor):
+    """Return non-2xx proxied responses instead of raising or auto-redirecting.
+
+    The status is then classified by ``fetch`` exactly like the direct path, so
+    redirect and error handling stay single-sourced across direct/proxy fetches.
+    """
+
+    def http_response(self, request, response):  # noqa: ANN001, ANN201
+        return response
+
+    https_response = http_response
 
 
 class _MarkdownHTMLParser(HTMLParser):
@@ -272,7 +283,13 @@ def _validate_url(url: str) -> str:
     return urllib.parse.urlunsplit(parsed)
 
 
-def _validate_public_host(url: str) -> None:
+def _validated_public_addresses(url: str) -> tuple[str, ...]:
+    """Resolve and validate the host, returning the concrete public addresses.
+
+    Returning the exact resolved addresses lets the direct fetch pin the socket
+    to an already-validated IP, so a hostname that re-resolves to a private
+    address between validation and connection (DNS rebinding) cannot be reached.
+    """
     parsed = urllib.parse.urlsplit(url)
     host = parsed.hostname or ""
     if host.lower() in {"localhost", "host.docker.internal"}:
@@ -290,10 +307,93 @@ def _validate_public_host(url: str) -> None:
         except socket.gaierror as exc:
             raise WebFetchError(f"web_fetch cannot resolve host: {host}") from exc
         for info in infos:
-            address = info[4][0]
-            _reject_private_ip(address)
-        return
+            _reject_private_ip(info[4][0])
+        addresses = tuple(dict.fromkeys(info[4][0] for info in infos))
+        if not addresses:
+            raise WebFetchError(f"web_fetch cannot resolve host: {host}")
+        return addresses
     _reject_private_ip(str(ip))
+    return (str(ip),)
+
+
+@contextmanager
+def _open_pinned_response(
+    url: str,
+    addresses: tuple[str, ...],
+    *,
+    timeout_seconds: float,
+):
+    """Connect a direct GET to a validated address without re-resolving the host.
+
+    TLS still verifies the certificate against the original hostname (SNI + host
+    check), so pinning the TCP target to an already-validated public IP closes
+    the DNS-rebinding TOCTOU without weakening transport authentication.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    host = parsed.hostname or ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    headers = {
+        "Accept": "text/html,text/plain,application/json,application/xml;q=0.9,*/*;q=0.1",
+        "User-Agent": USER_AGENT,
+        "Host": host if parsed.port is None else f"{host}:{parsed.port}",
+    }
+    last_error: Exception | None = None
+    for address in addresses:
+        if parsed.scheme == "https":
+            connection: http.client.HTTPConnection = http.client.HTTPSConnection(
+                host,
+                port,
+                timeout=timeout_seconds,
+                context=ssl.create_default_context(),
+            )
+        else:
+            connection = http.client.HTTPConnection(host, port, timeout=timeout_seconds)
+
+        def create_connection(_target, timeout=None, source_address=None, *, _address=address):
+            return socket.create_connection(
+                (_address, port),
+                timeout=timeout,
+                source_address=source_address,
+            )
+
+        connection._create_connection = create_connection  # type: ignore[method-assign]
+        try:
+            connection.request("GET", path, headers=headers)
+            response = connection.getresponse()
+        except Exception as exc:  # try another already-validated public address
+            connection.close()
+            last_error = exc
+            continue
+        try:
+            yield response
+        finally:
+            connection.close()
+        return
+    raise WebFetchError(
+        f"web_fetch could not connect to any validated address for {host}: "
+        f"{sanitize_for_log(str(last_error or 'unknown error'))}"
+    )
+
+
+@contextmanager
+def _open_proxy_response(
+    opener: urllib.request.OpenerDirector,
+    url: str,
+    *,
+    timeout_seconds: float,
+):
+    """Fetch through the managed proxy; the proxy owns resolution and egress."""
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "text/html,text/plain,application/json,application/xml;q=0.9,*/*;q=0.1",
+            "User-Agent": USER_AGENT,
+        },
+        method="GET",
+    )
+    with opener.open(request, timeout=timeout_seconds) as response:  # noqa: S310 - URL is guarded
+        yield response
 
 
 def _validate_hostname(host: str) -> None:
@@ -366,7 +466,9 @@ def _build_proxy_opener(proxy_env: dict[str, str] | None) -> urllib.request.Open
     proxies = _proxy_mapping(proxy_env or {})
     if not proxies:
         raise WebFetchError("web_fetch proxy requested but no active proxy is configured")
-    return urllib.request.build_opener(urllib.request.ProxyHandler(proxies), _NoRedirectHandler())
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler(proxies), _PassthroughHTTPErrorProcessor()
+    )
 
 
 def _proxy_mapping(proxy_env: dict[str, str]) -> dict[str, str]:
