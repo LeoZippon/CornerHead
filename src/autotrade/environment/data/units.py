@@ -17,7 +17,7 @@ Resolution order for one ``(file, dataset, column)``:
    snapshot build instead of shipping without unit metadata.
 
 Projections (never maintained by hand elsewhere): the snapshot conversion
-tables and ``DatasetContract.unit_rules`` derive from factor rules; audit
+tables derive from factor rules; audit
 report metadata selects by each domain's dataset list; ``unit_reference.json``
 (written next to data_summary.json) enumerates every column of the live
 snapshot; ``docs/units_reference.md`` renders the registry for humans.

@@ -1,8 +1,10 @@
 """GPU selection for sandbox containers.
 
-Default policy: allocate the requested number of L20 GPUs with the most free
-video memory at container start. A one-GPU sandbox is the normal case, but the
-same selector supports wider ML experiments without changing Docker plumbing.
+Default policy: allocate the requested number of GPUs with the most free video
+memory at container start, optionally restricted to a device-name substring
+(``SandboxSpec.gpu_name_filter`` is the single configuration source). A one-GPU
+sandbox is the normal case, but the same selector supports wider ML experiments
+without changing Docker plumbing.
 """
 
 from __future__ import annotations
@@ -46,11 +48,11 @@ def list_gpus() -> list[dict[str, object]]:
     return gpus
 
 
-def select_gpus(count: int = 1, *, require_name: str | None = "L20") -> list[int]:
+def select_gpus(count: int = 1, *, require_name: str | None = None) -> list[int]:
     """GPU indexes sorted by descending free memory.
 
-    ``require_name`` keeps the default tied to the local L20 pool. Passing
-    ``None`` allows any visible NVIDIA GPU.
+    ``require_name`` restricts selection to devices whose name contains the
+    substring (case-insensitive); ``None`` allows any visible NVIDIA GPU.
     """
     if count <= 0:
         raise ValueError(f"count must be positive: {count}")

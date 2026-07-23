@@ -57,6 +57,12 @@ from autotrade.environment.data.units import (
     validate_snapshot_units,
 )
 from autotrade.environment.data.research_release import DOMAIN_REPORT_TYPES, DOMAIN_STATUS_FILES
+from autotrade.environment.data.summary import (
+    DATE_COLUMNS as PROFILE_DATE_COLUMNS,
+    NULL_COUNT_COLUMNS as PROFILE_NULL_COLUMNS,
+    iter_column_statistics,
+    scalar_to_text,
+)
 from autotrade.environment.runtime import new_id, utc_now_iso
 
 SNAPSHOT_DOMAIN_WORKERS = 2
@@ -221,9 +227,9 @@ class SnapshotConfig:
         )
 
     def __post_init__(self) -> None:
-        for name, value in self.to_record()["decision_windows"].items():
-            if int(value) <= 0:
-                raise ValueError(f"{name} must be positive")
+        for domain in ("daily", "fundamentals", "events", "macro", "text"):
+            if self.months_for(domain) <= 0:
+                raise ValueError(f"{domain}_months must be positive")
         if self.intraday_trade_days <= 0:
             raise ValueError("intraday_trade_days must be positive")
         if self.screen_exclude_new_listed_days < 0:
@@ -1790,9 +1796,7 @@ def finalize_snapshot_dir(snapshot_dir: str | Path, **fields: object) -> dict[st
     manifest: dict[str, object] = {"snapshot_id": new_id("snap"), "created_at": utc_now_iso(), **fields}
     manifest["snapshot_hash"] = _snapshot_hash(snapshot_dir)
     validate_snapshot_units(snapshot_dir, manifest)
-    (snapshot_dir / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8"
-    )
+    _write_manifest(snapshot_dir, manifest, trim_trade_dates=False)
     return manifest
 
 
@@ -1835,20 +1839,8 @@ def _snapshot_hash(snapshot_dir: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-PROFILE_DATE_COLUMNS = ("trade_date", "date", "available_at", "trade_time", "ann_date", "end_date")
-PROFILE_NULL_COLUMNS = (
-    "ts_code",
-    "trade_date",
-    "available_at",
-    "open",
-    "high",
-    "low",
-    "close",
-    "amount",
-    "vol",
-    "dataset",
-    "text_id",
-)
+# Profiled column sets are shared with the agent data summary (summary.py),
+# imported above as PROFILE_DATE_COLUMNS / PROFILE_NULL_COLUMNS.
 PROFILE_FULL_SCAN_MAX_ROWS = 1_000_000
 
 
@@ -1956,17 +1948,15 @@ def _parquet_footer_profile(
             return None
         minimums: list[str] = []
         maximums: list[str] = []
-        for group_index in range(metadata.num_row_groups):
-            group = metadata.row_group(group_index)
-            statistics = group.column(index).statistics
+        for group, statistics in iter_column_statistics(metadata, index):
             if statistics is None or statistics.null_count is None:
                 return None
             if int(statistics.null_count) == int(group.num_rows):
                 continue
             if not statistics.has_min_max:
                 return None
-            minimums.append(_footer_stat_text(statistics.min))
-            maximums.append(_footer_stat_text(statistics.max))
+            minimums.append(scalar_to_text(statistics.min))
+            maximums.append(scalar_to_text(statistics.max))
         if minimums:
             date_ranges[column] = {"min": min(minimums), "max": max(maximums)}
 
@@ -1975,19 +1965,12 @@ def _parquet_footer_profile(
         if index is None:
             continue
         null_count = 0
-        for group_index in range(metadata.num_row_groups):
-            statistics = metadata.row_group(group_index).column(index).statistics
+        for _group, statistics in iter_column_statistics(metadata, index):
             if statistics is None or statistics.null_count is None:
                 return None
             null_count += int(statistics.null_count)
         key_nulls[column] = null_count
     return date_ranges, key_nulls
-
-
-def _footer_stat_text(value: object) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return str(value)
 
 
 def _profile_date_ranges(frame: pd.DataFrame) -> dict[str, dict[str, str]]:
@@ -2045,10 +2028,14 @@ def _fundamental_dataset_columns(raw_dir: Path, datasets: tuple[str, ...]) -> di
     return out
 
 
-def _write_manifest(output_dir: Path, manifest: dict[str, object]) -> None:
-    trimmed = json.loads(json.dumps(manifest, ensure_ascii=False, default=str))
-    for domain in trimmed.get("domains", {}).values():
-        domain.pop("trade_dates", None)  # keep the manifest small; coverage fields remain
+def _write_manifest(output_dir: Path, manifest: dict[str, object], *, trim_trade_dates: bool = True) -> None:
+    """Single manifest.json writer. The builder trims bulky per-domain
+    ``trade_dates`` (coverage fields remain); ``finalize_snapshot_dir`` keeps
+    the caller's fields verbatim."""
+    if trim_trade_dates:
+        manifest = json.loads(json.dumps(manifest, ensure_ascii=False, default=str))
+        for domain in manifest.get("domains", {}).values():
+            domain.pop("trade_dates", None)  # keep the manifest small; coverage fields remain
     (output_dir / "manifest.json").write_text(
-        json.dumps(trimmed, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8"
     )

@@ -404,49 +404,68 @@ def _runtime_env_record(
     if mode == "docker":
         if image_probe is None:
             raise ValueError("docker runtime env requires an image probe (probe_image_runtime)")
-        packages = dict(image_probe.get("packages") or {})
-        tools = dict(image_probe.get("tools") or {})
-        return {
-            "schema_version": RUNTIME_ENV_SCHEMA_VERSION,
-            "generated_at": utc_now_iso(),
-            "mode": "docker",
-            "probe_mode": "image_probe",
-            "python": {"version": str(image_probe.get("python_version"))},
-            "network": sandbox_spec.network if sandbox_spec is not None else "none",
-            "sandbox_spec": sandbox_spec.to_record() if sandbox_spec is not None else None,
-            "python_packages": dict(sorted(packages.items(), key=lambda kv: str(kv[0]).lower())),
-            "tools": {
-                str(tool): {"available": path is not None, "path": path}
-                for tool, path in tools.items()
-            },
-            "policy": _runtime_policy(),
-            "notes": [
+        return _assemble_runtime_env(
+            mode="docker",
+            probe_mode="image_probe",
+            python={"version": str(image_probe.get("python_version"))},
+            network=sandbox_spec.network if sandbox_spec is not None else "none",
+            sandbox_spec=sandbox_spec,
+            packages=dict(image_probe.get("packages") or {}),
+            tool_paths=dict(image_probe.get("tools") or {}),
+            notes=[
                 "Probed from the session image itself; meta-learning derived-image packages appear here automatically.",
                 "python_packages maps distribution name to version; import names may differ (e.g. scikit-learn -> sklearn).",
                 "Host writes this contract before Docker starts because /mnt/artifacts is mounted read-only.",
             ],
-        }
-    return {
-        "schema_version": RUNTIME_ENV_SCHEMA_VERSION,
-        "generated_at": utc_now_iso(),
-        "mode": "local",
-        "probe_mode": "host_python",
-        "python": {
+        )
+    return _assemble_runtime_env(
+        mode="local",
+        probe_mode="host_python",
+        python={
             "version": platform.python_version(),
             "executable": sys.executable,
             "implementation": platform.python_implementation(),
             "platform": platform.platform(),
         },
-        "network": "host",
-        "sandbox_spec": sandbox_spec.to_record() if sandbox_spec is not None else None,
-        "python_packages": _local_package_records(),
-        "tools": {tool: {"available": shutil.which(tool) is not None, "path": shutil.which(tool)} for tool in IMPORTANT_TOOLS},
-        "policy": _runtime_policy(),
-        "notes": [
+        network="host",
+        sandbox_spec=sandbox_spec,
+        packages=_local_package_records(),
+        tool_paths={tool: shutil.which(tool) for tool in IMPORTANT_TOOLS},
+        notes=[
             "Local mode is for development and tests only; formal experiments should use Docker.",
             "python_packages maps distribution name to version; import names may differ (e.g. scikit-learn -> sklearn).",
             "If a dependency is uncertain, use a read-only shell import probe before relying on it.",
         ],
+    )
+
+
+def _assemble_runtime_env(
+    *,
+    mode: str,
+    probe_mode: str,
+    python: dict[str, object],
+    network: object,
+    sandbox_spec: SandboxSpec | None,
+    packages: dict[str, object],
+    tool_paths: dict[str, object],
+    notes: list[str],
+) -> dict[str, object]:
+    """Single runtime_env.json schema assembly shared by local and docker modes."""
+    return {
+        "schema_version": RUNTIME_ENV_SCHEMA_VERSION,
+        "generated_at": utc_now_iso(),
+        "mode": mode,
+        "probe_mode": probe_mode,
+        "python": python,
+        "network": network,
+        "sandbox_spec": sandbox_spec.to_record() if sandbox_spec is not None else None,
+        "python_packages": dict(sorted(packages.items(), key=lambda kv: str(kv[0]).lower())),
+        "tools": {
+            str(tool): {"available": path is not None, "path": path}
+            for tool, path in tool_paths.items()
+        },
+        "policy": _runtime_policy(),
+        "notes": notes,
     }
 
 
@@ -456,7 +475,7 @@ def _local_package_records() -> dict[str, str]:
         name = dist.metadata["Name"]
         if name:
             records[str(name)] = str(dist.version)
-    return dict(sorted(records.items(), key=lambda kv: kv[0].lower()))
+    return records
 
 
 def _runtime_policy() -> dict[str, object]:

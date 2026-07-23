@@ -75,8 +75,10 @@ class SandboxSpecTest(unittest.TestCase):
             {"index": 3, "name": "NVIDIA L20", "memory_free_mib": 5000, "memory_total_mib": 46000},
         ]
         with patch("autotrade.environment.gpu.list_gpus", return_value=fake):
-            self.assertEqual(select_gpus(2), [1, 3])
-            self.assertEqual(select_gpus(1, require_name=None), [2])
+            # The name filter comes from SandboxSpec.gpu_name_filter at the call
+            # site; select_gpus itself defaults to any visible GPU.
+            self.assertEqual(select_gpus(2, require_name="L20"), [1, 3])
+            self.assertEqual(select_gpus(1), [2])
 
     def test_docker_sandbox_can_resolve_fixed_gpu_lists_without_docker(self):
         with tempfile.TemporaryDirectory() as tmp:
