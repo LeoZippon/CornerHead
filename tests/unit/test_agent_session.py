@@ -12,9 +12,8 @@ from pathlib import Path
 from autotrade.agent import AgentSessionConfig, AgentSessionRunner
 from autotrade.environment.llm.proxy import ScriptedLLM
 
+from .fixtures_sandbox import REPO_ROOT
 from .test_tools_flow import build_sandbox
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _make_runner(ctx, *, compact_proxy=None, **config_kwargs):

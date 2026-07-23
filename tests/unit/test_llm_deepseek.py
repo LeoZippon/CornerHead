@@ -11,26 +11,13 @@ from urllib.error import HTTPError
 from autotrade.environment.llm.deepseek import ChatMessage, DeepSeekAPIError, DeepSeekClient, DeepSeekConfig, DeepSeekResponse, load_deepseek_api_key
 from autotrade.environment.llm.proxy import DeepSeekProxy
 
+from .fixtures_http import FakeHTTPResponse
+
 
 def test_config(**kwargs):
     values = {"api_key": "secret", "conversation_log_dir": None}
     values.update(kwargs)
     return DeepSeekConfig(**values)
-
-
-class FakeHTTPResponse:
-    def __init__(self, payload):
-        self.payload = payload
-        self.status = 200
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, traceback):
-        return False
-
-    def read(self):
-        return json.dumps(self.payload).encode("utf-8")
 
 
 class FakeRawHTTPResponse:

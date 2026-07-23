@@ -20,7 +20,7 @@ from autotrade.environment.artifacts import (
     model_artifact_hash,
 )
 
-TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "configs" / "agent_output_template"
+from .fixtures_sandbox import TEMPLATE_DIR
 
 VALID_MAIN = """
 def main(ctx):

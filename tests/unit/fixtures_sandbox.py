@@ -10,7 +10,8 @@ import pandas as pd
 
 from autotrade.environment.data.snapshot import finalize_snapshot_dir
 
-TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "configs" / "agent_output_template"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TEMPLATE_DIR = REPO_ROOT / "configs" / "agent_output_template"
 TS_CODE = "000001.SZ"
 
 STRATEGY_MAIN = '''

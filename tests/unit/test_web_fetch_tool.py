@@ -12,27 +12,8 @@ from autotrade.environment.tools.web_fetch import AgentWebFetchTool
 from autotrade.environment.web.fetch import WebFetchError, WebFetchResult, WebFetchService
 from autotrade.environment.web.fetch import _is_same_host_redirect
 
+from .fixtures_http import FakeHTTPResponse
 from .test_tools_flow import build_sandbox
-
-
-class FakeHTTPResponse:
-    status = 200
-
-    def __init__(self, body: bytes, *, content_type: str = "text/html") -> None:
-        self.body = body
-        self.headers = Message()
-        self.headers["Content-Type"] = content_type
-
-    def __enter__(self) -> "FakeHTTPResponse":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        return False
-
-    def read(self, size: int = -1) -> bytes:
-        if size is None or size < 0:
-            return self.body
-        return self.body[:size]
 
 
 class FakeOpener:
