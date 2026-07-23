@@ -216,6 +216,7 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
             if start > 0
         ]
 
+    remaining_liabilities = float(broker.outstanding_liabilities())
     return {
         "initial_cash": initial,
         "final_equity": float(curve.iloc[-1]) if len(curve) else initial,
@@ -253,9 +254,9 @@ def compute_return_stats(result: ReplayResult) -> dict[str, object]:
         # count means the strategy never sold on its own — it measured
         # "buy once, hold, host closes", not a sustainable rebalancing policy.
         "host_exit_liquidation_count": sum(1 for e in broker.events if e["event_type"] == "exit_liquidated_by_host"),
-        "liquidation_complete": not unliquidated,
+        "liquidation_complete": not unliquidated and remaining_liabilities <= 1e-9,
         "unliquidated_positions": unliquidated,
-        "remaining_liabilities": float(broker.outstanding_liabilities()),
+        "remaining_liabilities": remaining_liabilities,
         "replay_granularity": result.granularity,
         "replay_wall_seconds": result.replay_wall_seconds,
         "replayed_trade_days": result.replayed_trade_days,

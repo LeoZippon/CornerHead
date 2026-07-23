@@ -44,7 +44,7 @@ from autotrade.environment.nl.service import StrategyNLService, cleanup_nl_rpc_f
 from autotrade.environment.replay.market import ParquetMinuteReplaySource
 from autotrade.environment.identity import agent_visible_ref
 from autotrade.environment.runtime import chmod_tree, new_id, sanitize_for_log, utc_now_iso
-from autotrade.environment.data.snapshot import load_snapshot_manifest
+from autotrade.environment.data.snapshot import load_snapshot_manifest, verify_snapshot_hash
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.replay.style import replay_style_analysis
 
@@ -257,6 +257,13 @@ class BacktestTool:
         self._verify_snapshot_binding(mode, snapshot_dir)
         decision_time = str(manifest.require("valid_decision_time" if mode == "valid" else "test_decision_time"))
         replay_dir = self.ctx.paths.valid if mode == "valid" else self.ctx.paths.test
+        if mode == "frozen_eval":
+            # Full content re-hash only for the one-shot frozen evaluation: the
+            # hot valid path keeps the cheap snapshot_id comparison (recorded
+            # decision — per-backtest full hashing of multi-GB slots was
+            # declined on cost), while the unrepeatable final evaluation gets
+            # the strongest integrity check.
+            self._verify_snapshot_content(replay_dir, label=f"{mode} replay slot")
         # A short debug window replays the first N strategy days plus one distinct
         # liquidation day; such a run is never accept-eligible.
         complete_validation = replay_window is None
@@ -865,6 +872,15 @@ class BacktestTool:
                 f"bound snapshot does not match the pipeline record for {expected_key}: "
                 f"{actual.get('snapshot_id')} != {expected.get('snapshot_id')}"
             )
+        if mode == "frozen_eval":
+            self._verify_snapshot_content(snapshot_dir, label=expected_key)
+
+    @staticmethod
+    def _verify_snapshot_content(path: Path, *, label: str) -> None:
+        try:
+            verify_snapshot_hash(path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise ToolError(f"{label} content verification failed: {exc}") from exc
 
     def _planned_result_dir(self, mode: str, result_name: str | None) -> Path:
         results_root = self.ctx.paths.results
@@ -989,6 +1005,10 @@ def _probe_error_identity(detail: str, source: BaseException) -> str:
 
 def _profile_kwargs(record: dict[str, object]) -> dict[str, object]:
     fields = set(BrokerProfile.__dataclass_fields__)
+    derived = {"stamp_duty_cutover_date", "credit_rates_are_assumed"}
+    unknown = sorted(set(record) - fields - derived)
+    if unknown:
+        raise ToolError(f"broker_profile has unknown fields: {unknown}")
     return {key: value for key, value in record.items() if key in fields}
 
 
