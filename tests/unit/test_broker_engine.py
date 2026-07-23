@@ -2042,8 +2042,6 @@ class CandidateIsolationTest(unittest.TestCase):
                 FailingPopenExecutor(),
                 paths,
                 timeout_seconds=1.0,
-                decision_time=DECISION,
-                replay_granularity="minute",
             )
             with self.assertRaisesRegex(RuntimeError, "popen failed"):
                 runner.__enter__()

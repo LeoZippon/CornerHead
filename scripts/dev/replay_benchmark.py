@@ -191,8 +191,6 @@ def main() -> int:
             executor,
             paths,
             timeout_seconds=float(manifest.get("backtest_max_seconds_per_decision", 1800.0)),
-            decision_time=decision_time,
-            replay_granularity="minute",
             nl_service=nl_service,
             requests_path=requests_host,
             responses_path=responses_host,

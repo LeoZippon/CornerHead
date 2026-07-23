@@ -209,8 +209,6 @@ class MainPolicyRunner:
         paths,
         *,
         timeout_seconds: float,
-        decision_time: str,
-        replay_granularity: str,
         nl_service=None,
         requests_path: Path | None = None,
         responses_path: Path | None = None,
@@ -221,8 +219,6 @@ class MainPolicyRunner:
         self.executor = executor
         self.paths = paths
         self.timeout_seconds = timeout_seconds
-        self.decision_time = decision_time
-        self.replay_granularity = replay_granularity
         self.decision_max_sim_minutes = decision_max_sim_minutes
         self.nl_service = nl_service
         self.requests_path = requests_path
@@ -260,8 +256,6 @@ class MainPolicyRunner:
                 "AT_MODEL_DIR": self.executor.map_path(self.paths.model_artifacts),
                 "AT_STATE_DIR": self.executor.map_path(self.state_dir),
                 "AT_STATE_STAGING_DIR": self.executor.map_path(self.staging_dir),
-                "AT_DECISION_TIME": self.decision_time,
-                "AT_REPLAY_GRANULARITY": self.replay_granularity,
                 "AT_FORBIDDEN_PATHS": (
                     "/mnt/agent/workspace:/mnt/artifacts:/mnt/snapshots"
                     if self.formal_isolation
@@ -391,9 +385,12 @@ class MainPolicyRunner:
             # them through _jsonable every tick is pure overhead.
             state = record.get("state")
             bars = state.pop("bars", None) if isinstance(state, dict) else None
-            encoded = _jsonable(record)
+            try:
+                encoded = _jsonable(record)
+            finally:
+                if bars is not None:
+                    state["bars"] = bars  # restore the caller's record even on failure
             if bars is not None:
-                state["bars"] = bars  # restore the caller's record
                 encoded_state = encoded.get("state")
                 if isinstance(encoded_state, dict):
                     encoded_state["bars"] = bars
@@ -892,7 +889,6 @@ def run_main_ctx_replay(
         broker=broker,
         decision_date=entry_date,
         exit_date=exit_date,
-        granularity="minute",
         substep_runtime=substep_runtime or None,
         replay_wall_seconds=replay_wall_seconds,
         replayed_trade_days=len(replay_days),
@@ -976,7 +972,7 @@ def _day_tick_plan(
     minute_rows: pd.DataFrame,
     execution_lag_bars: int,
     *,
-    offsession_tick_minutes: int = 15,
+    offsession_tick_minutes: int,
     afterhours_time: str | None = None,
     auction_results: pd.DataFrame | None = None,
 ) -> list[_Tick]:
