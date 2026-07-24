@@ -623,6 +623,28 @@ def assert_node_not_from_later_fold(node: dict[str, object], session_key: str, f
         raise ValueError("不能把更晚 Fold 会话的节点设为更早会话的起点（未来验证信息泄漏）")
 
 
+def assert_no_live_writer(experiment_dir: str | Path) -> None:
+    """Rolling-upgrade write isolation for maintenance rewrites.
+
+    A running experiment worker keeps its launch-time code in memory and keeps
+    writing that code's formats regardless of what is deployed or migrated on
+    disk: rewriting experiment-owned files (ledger, hitl state) under it loses
+    in-flight appends and reintroduces the pre-migration format afterwards.
+    Every migration/maintenance rewrite must call this first and stop the
+    worker if it raises. This is process coexistence, not format compatibility.
+    """
+    status_path = Path(experiment_dir) / HITL_DIR_NAME / STATUS_NAME
+    if not status_path.exists():
+        return
+    status = read_status(status_path)
+    if status_pid_alive(status):
+        raise RuntimeError(
+            f"experiment {Path(experiment_dir).name!r} has a live worker "
+            f"(pid {status.get('pid')}, code {status.get('code_version')}); "
+            "stop it before rewriting experiment-owned files"
+        )
+
+
 def status_pid_alive(status: Mapping[str, object]) -> bool:
     pid = status.get("pid")
     if not isinstance(pid, int) or pid <= 0:

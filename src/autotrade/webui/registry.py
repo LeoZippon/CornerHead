@@ -329,6 +329,14 @@ def list_experiments(experiments_root: Path) -> list[dict[str, object]]:
 def experiment_detail(experiments_root: Path, experiment_id: str) -> dict[str, object]:
     experiment_dir = resolve_experiment_dir(experiments_root, experiment_id)
     detail = summarize_experiment(experiment_dir)
+    if detail.get("state") == "unreadable":
+        # Same isolation as the homepage list: a broken experiment renders as
+        # a structured error detail (state + error), never a 500 — it stays
+        # inspectable and deletable from the console.
+        detail.update(
+            {"sessions": [], "control": None, "test_revealed": False, "params": {}, "heldout_records": []}
+        )
+        return detail
     hitl_dir = experiment_dir / HITL_DIR_NAME
     records = read_ledger_records(experiment_dir)
     fold_map = latest_fold_records(records)

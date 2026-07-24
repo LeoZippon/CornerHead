@@ -1357,6 +1357,77 @@ class WebuiBackendTest(unittest.TestCase):
         payload = self.client.get("/api/experiments/exp_hitl/equity").json()
         self.assertEqual(payload["benchmark"]["dates"], [])
 
+    def test_broken_experiment_is_isolated_from_creation_and_detail(self) -> None:
+        # A worker that outlived a migration appends records in its old format;
+        # the resulting broken ledger must degrade to a structured unreadable
+        # view without breaking the creation form or its own detail page.
+        broken = self.experiments_root / "exp_broken"
+        (broken / "ledgers").mkdir(parents=True)
+        (broken / "ledgers" / "experiment_ledger.jsonl").write_text(
+            json.dumps({"record_type": "fold", "epoch_id": "epoch_001"}) + "\n",
+            encoding="utf-8",
+        )
+        schema = self.client.get("/api/parameter-schema")
+        self.assertEqual(schema.status_code, 200)
+        fields = {field["key"]: field for group in schema.json()["groups"] for field in group["fields"]}
+        self.assertNotIn("exp_broken", fields["inherit_from"]["choices"])
+        self.assertIn("exp_hitl", fields["inherit_from"]["choices"])
+        detail = self.client.get("/api/experiments/exp_broken")
+        self.assertEqual(detail.status_code, 200)
+        payload = detail.json()
+        self.assertEqual(payload["state"], "unreadable")
+        self.assertIn("schema_version", str(payload["error"]))
+        self.assertEqual(payload["sessions"], [])
+        # The broken experiment stays deletable through the console.
+        deleted = self.client.delete("/api/experiments/exp_broken", params={"confirm": "exp_broken"})
+        self.assertEqual(deleted.status_code, 200)
+        self.assertFalse(broken.exists())
+
+    def test_health_reports_running_workers_on_stale_code(self) -> None:
+        from autotrade.pipelines.hitl_state import proc_start_ticks
+
+        write_json_atomic(
+            self.experiments_root / "exp_hitl" / "hitl" / "status.json",
+            {
+                "schema_version": 1,
+                "pid": os.getpid(),
+                "pid_start_ticks": proc_start_ticks(os.getpid()),
+                "state": "running_session",
+                "code_version": "0000000",
+            },
+        )
+        health = self.client.get("/api/health").json()
+        self.assertIn("exp_hitl", health["running"])
+        self.assertEqual(
+            [entry["experiment_id"] for entry in health["stale_running"]], ["exp_hitl"]
+        )
+        self.assertEqual(health["stale_running"][0]["code_version"], "0000000")
+
+    def test_assert_no_live_writer_guards_migrations(self) -> None:
+        from autotrade.pipelines.hitl_state import assert_no_live_writer, proc_start_ticks
+
+        experiment_dir = self.experiments_root / "exp_hitl"
+        assert_no_live_writer(experiment_dir)  # fixture status has no live pid
+        write_json_atomic(
+            experiment_dir / "hitl" / "status.json",
+            {
+                "schema_version": 1,
+                "pid": os.getpid(),
+                "pid_start_ticks": proc_start_ticks(os.getpid()),
+                "state": "running_session",
+                "code_version": "0000000",
+            },
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            assert_no_live_writer(experiment_dir)
+        self.assertIn("live worker", str(ctx.exception))
+        # A dead process incarnation (stale start ticks) does not block.
+        write_json_atomic(
+            experiment_dir / "hitl" / "status.json",
+            {"schema_version": 1, "pid": os.getpid(), "pid_start_ticks": -1, "state": "running_session"},
+        )
+        assert_no_live_writer(experiment_dir)
+
     def test_delete_requires_confirm_and_no_live_worker(self) -> None:
         missing_confirm = self.client.delete("/api/experiments/exp_hitl")
         self.assertEqual(missing_confirm.status_code, 400)
