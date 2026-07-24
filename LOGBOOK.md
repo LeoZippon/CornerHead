@@ -1,3 +1,9 @@
+2026-07-24 补并 fix/share-float-incremental-archive（2042c01/a696f98）
+
+- 复审证实主干确实回退到旧行为，三项均实测：①`share_float_complete` 夜间全量重扫历史文件而非增量并入 canonical 基线；②`download.py:1846` 仍探测仓库内 `archive/data_raw`（该目录已外移至 /Data/lzp/MacroQuant_Archive 且仓库内已不存在）；③两个 crontab 安装器仍把备份写进仓库内 `archive/crontab`。根因是该分支未并主干——上一轮我把它与已并入的 `refactor/repo-simplification-integrated`（带"待二次审计"标记）混为一谈，误判为不应代为合并，导致修复滞留。
+- 合并（main 领先 26 提交，分支 2 提交）：3 处文本冲突（两份日志按时序保留双方；backtest.py import 保留主干 `verify_snapshot_hash`（frozen_eval 整槽复验在用）并删除分支已集中到 `environment/artifacts.py` 的 `chmod_tree`）。另有 2 处 git 无法察觉的语义冲突，均因分支早于主干的选择器整合：audit.py 仍 import 整合前的 `selected_integrated_{fundamental,intraday}_datasets`（函数体已用主干新名），download.py 因分支删通配导入而缺 `select_datasets`（主干后加的 `selected_event_flow_download_datasets` 调用它）——逐一按各自来源意图修正。
+- 运行前置检查：canonical 基线存在（12,725,144 行 / 141MB），新逻辑"基线缺失即硬失败"不会影响当晚定时任务；`ops/qmt/qmt_client_bridge.py` 的 `archive` 指向 QMT Windows 主机 `C:\xquant\archive`，与仓库归档外移无关，不在范围内。全量 tests 969+56 通过（分支新增 8 项），tushare 专项 104 通过。
+
 2026-07-24 Fold 初始 Prompt 查看；复审三项：代码身份改树 hash、rewrite 原语、归档外移
 
 - 新增：实验内页每个已完成 Fold 的 Trace 面板提供「查看初始 Prompt（实际运行）」——读取该 Fold run trace 的首次 llm_call 事件的 new_messages（系统提示词+初始用户消息），是会话真实起点（与运行前装配预览互补）；无记录/无 trace 均为 404。
