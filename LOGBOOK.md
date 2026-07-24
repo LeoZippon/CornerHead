@@ -1,3 +1,9 @@
+2026-07-24 滚动升级写隔离与控制台错误隔离；实验重置为 lcd-test2
+
+- 两个问题均实证确认：①7-22 账本 stamp 迁移未隔离在写进程——lcd-test1 的 worker（启动时代码在内存中）在迁移后（7-23 14:58/15:30）继续追加 2 条无 schema_version 记录，严格读取器随即拒绝整本账本；②该单点损坏使"新建实验"参数接口（inherit_from 扫描全部实验账本）与故障实验详情页均 500（首页列表已有隔离，独此二处缺失）。
+- 代码修复：`pipelines.hitl_state.assert_no_live_writer(experiment_dir)`（按 pid+内核启动 ticks 判定进程实例存活）作为一切实验文件维护性重写的强制前置，pipeline 文档成文"迁移写隔离是进程共存问题、非格式兼容问题"；`/api/health` 新增 `stale_running`（运行中 worker 的 code_version 与仓库不一致即列出），部署时可见共存窗口；inherit_from 扫描逐实验隔离（坏实验跳过、健康实验照常可选）；实验详情对 unreadable 返回与首页一致的结构化错误负载（状态+错误+空会话，可检查可删除），详情页内联显示解析错误。cherry-pick 到用户简化后的主干（无冲突），全量 tests 960+56 通过。
+- 运维重置（用户授权）：按修正后的流程迁移 lcd-test1 账本（守卫通过→归档 lcd-test1_pre_stamp.jsonl.gz sha256 f8828ff3…→补章 2 条→严格读取验证），实验恢复 completed（2 fold+1 heldout、已揭示）；三个旧实验整目录归档（archive/experiments/20260724/，sha256 见 manifest 与详细日志）后经控制台删除；创建 lcd-test2（同周期参数 2025Q1..2026Q1+heldout 2026Q2，inherit_from=lcd-test1，产物 hash 校验复制自 fold_2025Q2），worker 运行于当前代码（stale_running 空），step 模式等待批准。
+
 2026-07-23 双分支整合（refactor/repo-simplification-integrated，不并主干、待二次审计）
 
 - 以本分支 12 提交为基座，逐项甄别并入 `refactor/repository-simplification-20260722`（另一 Agent、单提交 ±69 文件）中有价值且不引入冗余的部分；两个来源分支均保留未动。
