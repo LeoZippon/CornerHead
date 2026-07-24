@@ -14,7 +14,6 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
-from autotrade.data_sources.tushare.audit import *  # noqa: F401,F403
 from autotrade.data_sources.tushare.audit import main
 
 

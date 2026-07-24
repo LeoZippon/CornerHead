@@ -14,8 +14,9 @@ from pathlib import Path
 BEGIN = "# BEGIN MacroQuant TuShare update"
 END = "# END MacroQuant TuShare update"
 REPO_ROOT = Path("/Data/lzp/MacroQuant")
+ARCHIVE_ROOT = Path("/Data/lzp/MacroQuant_Archive")
 TEMPLATE = REPO_ROOT / "ops/cron/tushare_update.cron"
-BACKUP_DIR = REPO_ROOT / "archive" / "crontab"
+BACKUP_DIR = ARCHIVE_ROOT / "crontab"
 # Shared with ops/webui/webui_stack.sh install-cron: both installers do a
 # crontab read-modify-write and must serialize on the same lock.
 CRONTAB_LOCK = REPO_ROOT / ".runtime" / "crontab.lock"

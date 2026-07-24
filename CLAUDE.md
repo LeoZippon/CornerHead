@@ -73,16 +73,19 @@ For experiment, training, inference, evaluation, or data-processing jobs:
 3. Recheck memory usage after the job starts and after it finishes.
 4. Write the detailed traceability record to `@docs/logbook/DETAILED_LOGBOOK.md`, write the concise result to `@LOGBOOK.md`, and keep `logs/` out of commits.
 
-## Development Principles
+## Repository Principles
 
 - Maintain a minimalist code architecture and implementation while ensuring logical correctness and completeness.
 - Achieve optimal performance while keeping the environment as close to real-world conditions as possible.
 - Maximize the Agent’s autonomy while lowering the complexity of interactions between the Agent and the environment.
-- Freeze the scope and define contracts and invariants first; require reproducible evidence of material impact, and distinguish defects from suggestions and accepted limitations.
-- Fix one root cause per small, self-contained change and leave overall code health better; redesign instead of stacking exceptions when complexity keeps growing.
-- Prefer explicit failure over silent fallback or false success when correctness cannot be guaranteed.
-- Test invariants, negative paths, and realistic end-to-end behavior rather than only the current implementation's happy path.
-- Record irreducible limitations honestly; do not add speculative abstractions, compatibility branches, or unsupported recovery behavior.
+
+## Development Principles
+
+- **Audit Principle**: Freeze the scope and define contracts and invariants first; require reproducible evidence of material impact, and distinguish defects from suggestions and accepted limitations.
+- **Repair Principle**: Fix one root cause per small, self-contained change and leave overall code health better; redesign instead of stacking exceptions when complexity keeps growing.
+- **Failure Principle**: Prefer explicit failure over silent fallback or false success when correctness cannot be guaranteed.
+- **Test Principle**: Test invariants, negative paths, and realistic end-to-end behavior rather than only the current implementation's happy path.
+- **Restraint Principle**: Record irreducible limitations honestly; do not add speculative abstractions, compatibility branches, or unsupported recovery behavior.
 
 ## Operational Guardrails
 
@@ -90,5 +93,5 @@ For experiment, training, inference, evaluation, or data-processing jobs:
 - Treat resource checks and logging as mandatory steps, not optional cleanup.
 - Keep the repository organized, clean and tidy.
 - When starting a sub-agent, always choose the best performing ones.
-- Include the three repository design principles above explicitly in every sub-agent's task prompt.
+- Include the Repository Principles and Development Principles above explicitly in every sub-agent's task prompt.
 - Dare to break thinking inertia and rethink when necessary.

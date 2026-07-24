@@ -728,7 +728,7 @@
       "domain": "event_flow",
       "frequency": "regular",
       "official_update": "限售股解禁；权限表为定期更新。",
-      "cron_policy": "daily_refresh_recent_and_rebuild_union",
+      "cron_policy": "daily_merge_recent_into_canonical",
       "doc_ref": "https://tushare.pro/document/2?doc_id=160"
     },
     {

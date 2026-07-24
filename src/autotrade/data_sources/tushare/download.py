@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import calendar
+import json
 import math
 import os
-import sys
+import re
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -17,13 +19,102 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-    from autotrade.data_sources.tushare import common as core
-    from autotrade.data_sources.tushare.common import *  # noqa: F401,F403
-else:
-    from . import common as core
-    from .common import *  # noqa: F401,F403
+from . import common as core
+from .common import (
+    ApiResult,
+    BAK_BASIC_SPEC,
+    BOARD_TRADING_SPECS,
+    DAILY_SPECS,
+    DEFAULT_CN_INDEX_CODES,
+    EVENT_FLOW_DATASETS,
+    EVENT_FLOW_SPECS,
+    FUNDAMENTAL_SPECS,
+    MACRO_RETAINED_FLOOR,
+    MACRO_SPECS,
+    NO_MUTATION_RETRY_EXIT_CODE,
+    REVISION_EVENTS_PATH,
+    SHARE_FLOAT_FIELDS,
+    SHARE_FLOAT_ROW_LIMIT,
+    SHARE_FLOAT_UNLOCK_TITLE_PATTERN,
+    STK_AUCTION_PRICE_ABS_TOLERANCE,
+    STK_MINS_API_NAME,
+    STK_MINS_BY_DATE_DATASET,
+    STK_MINS_DATASET,
+    STK_MINS_FIELDS,
+    STK_MINS_FREQ,
+    STK_MINS_PAGE_LIMIT,
+    STK_MINS_REQUIRED_COLUMNS,
+    TEXT_SPECS,
+    TRADE_DATE_PAGE_LIMIT,
+    BoardTradingDataset,
+    EventDataset,
+    FundamentalDataset,
+    MacroDataset,
+    TextDataset,
+    TradeDateDataset,
+    TuShareClient,
+    active_year_windows,
+    as_datetime_window,
+    augment_event_frame,
+    augment_macro_frame,
+    augment_stk_mins_frame,
+    augment_text_frame,
+    board_page_limit,
+    date_range_days,
+    event_page_limit,
+    file_sha256,
+    format_yyyymmdd,
+    frame,
+    intraday_expected_codes_for_day,
+    latest_sse_calendar_date,
+    load_minute_universe,
+    load_sse_open_dates,
+    load_stock_codes,
+    load_token,
+    macro_page_limit,
+    margin_missing_exchanges,
+    minute_datetime,
+    month_windows,
+    normalize_date_key,
+    normalize_stk_mins_by_date_frame,
+    parquet_meta,
+    parquet_rows,
+    parse_yyyymmdd,
+    quarter_periods,
+    query_paged,
+    read_many,
+    resolve_revision_ledger,
+    safe_partition_value,
+    select_datasets,
+    selected_board_dc_hot_markets,
+    selected_board_dc_hot_types,
+    selected_board_hot_is_new,
+    selected_board_kpl_tags,
+    selected_board_ths_hot_markets,
+    selected_board_ths_limit_types,
+    selected_board_trading_datasets,
+    selected_cn_index_codes,
+    selected_daily_datasets,
+    selected_eco_filter_values,
+    selected_fundamental_datasets,
+    selected_fx_codes,
+    selected_index_codes,
+    selected_intraday_datasets,
+    selected_libor_currencies,
+    selected_macro_datasets,
+    selected_news_sources,
+    selected_text_datasets,
+    stable_hash,
+    stk_mins_by_date_path,
+    text_page_limit,
+    validate_stk_mins_by_date_frame,
+    write_board_result,
+    write_macro_result,
+    write_parquet,
+    write_parquet_revision_aware,
+    yyyymmdd_to_month,
+    yyyymmdd_to_quarter,
+)
 
 from autotrade.environment.data.pit import concat_rows
 
@@ -1571,6 +1662,8 @@ def query_share_float_to_path(
         allow_empty_revision_overwrite=allow_empty_revision_overwrite,
         allow_key_removal_overwrite=True,
     )
+    if not did_write and not df.empty:
+        raise RuntimeError(f"share_float refresh was rejected by the revision guard: {path}")
     rows = len(df) if did_write else parquet_rows(path) if path.exists() else 0
     return {"path": str(path), "rows": rows, "skipped": not did_write, "source_cap_risk": rows >= SHARE_FLOAT_ROW_LIMIT}
 
@@ -1712,10 +1805,7 @@ def read_ts_codes_from_parquet(path: Path, *, extra_filter: tuple[str, str] | No
     columns = ["ts_code"]
     if extra_filter:
         columns.append(extra_filter[0])
-    try:
-        df = pd.read_parquet(path, columns=list(dict.fromkeys(columns)))
-    except Exception:
-        return []
+    df = pd.read_parquet(path, columns=list(dict.fromkeys(columns)))
     if extra_filter and extra_filter[0] in df.columns:
         df = df[df[extra_filter[0]].astype(str).str.strip() == extra_filter[1]]
     if "ts_code" not in df.columns:
@@ -1746,10 +1836,7 @@ def anns_unlock_candidate_codes(raw_dir: Path, ann_dates: list[str]) -> dict[str
         if not path.exists() or parquet_rows(path) == 0:
             continue
         columns = ["ann_date", "ts_code", "title"]
-        try:
-            df = pd.read_parquet(path, columns=columns)
-        except Exception:
-            continue
+        df = pd.read_parquet(path, columns=columns)
         df["ann_date"] = df["ann_date"].astype(str).str.strip()
         mask = df["ann_date"].isin(days) & df["title"].fillna("").astype(str).str.contains(SHARE_FLOAT_UNLOCK_TITLE_PATTERN)
         for day, group in df.loc[mask].groupby("ann_date"):
@@ -1763,10 +1850,7 @@ def share_float_float_path_ann_candidate_codes(raw_dir: Path, ann_dates: list[st
         path = raw_dir / "share_float" / f"date={day}.parquet"
         if not path.exists() or parquet_rows(path) == 0:
             continue
-        try:
-            df = pd.read_parquet(path, columns=["ann_date", "ts_code"])
-        except Exception:
-            continue
+        df = pd.read_parquet(path, columns=["ann_date", "ts_code"])
         df["ann_date"] = df["ann_date"].astype(str).str.strip()
         mask = df["ann_date"].isin(target_dates)
         for ann_date, group in df.loc[mask].groupby("ann_date"):
@@ -1780,10 +1864,7 @@ def share_float_ann_path_float_candidate_codes(raw_dir: Path, float_dates: list[
         path = raw_dir / "share_float_ann_date" / f"ann_date={day}.parquet"
         if not path.exists() or parquet_rows(path) == 0:
             continue
-        try:
-            df = pd.read_parquet(path, columns=["float_date", "ts_code"])
-        except Exception:
-            continue
+        df = pd.read_parquet(path, columns=["float_date", "ts_code"])
         df["float_date"] = df["float_date"].astype(str).str.strip()
         mask = df["float_date"].isin(target_dates)
         for float_date, group in df.loc[mask].groupby("float_date"):
@@ -1841,44 +1922,24 @@ def select_share_float_rescue_date_codes(raw_dir: Path, args: argparse.Namespace
     })
     return candidates, detail
 
-def share_float_union_roots(raw_dir: Path) -> list[Path]:
-    roots = [raw_dir]
-    archive_root = Path.cwd().resolve() / "archive" / "data_raw"
-    if archive_root.exists():
-        for root in sorted(archive_root.iterdir()):
-            if not root.is_dir():
-                continue
-            if any((root / name).exists() for name in (
-                "share_float_ann_date",
-                "share_float_ann_date_ts_code",
-                "share_float",
-                "share_float_float_date",
-                "share_float_float_date_ts_code",
-            )):
-                roots.append(root)
-    return roots
-
 def share_float_union_files(raw_dir: Path, args: argparse.Namespace) -> list[tuple[Path, str]]:
-    ann_start_date = getattr(args, "union_ann_start_date", None) or args.ann_start_date
-    ann_end_date = getattr(args, "union_ann_end_date", None) or args.ann_end_date
-    float_start_date = getattr(args, "union_float_start_date", None) or args.float_start_date
-    float_end_date = getattr(args, "union_float_end_date", None) or args.float_end_date
+    ann_start_date, ann_end_date = args.ann_start_date, args.ann_end_date
+    float_start_date, float_end_date = args.float_start_date, args.float_end_date
     files: list[tuple[Path, str]] = []
-    for root in share_float_union_roots(raw_dir):
-        for day in date_range_days(ann_start_date, ann_end_date):
-            path = root / "share_float_ann_date" / f"ann_date={day}.parquet"
-            if path.exists():
-                files.append((path, "ann_date"))
-            rescue_dir = root / "share_float_ann_date_ts_code" / f"ann_date={day}"
-            files.extend((path, "ann_date_ts_code") for path in sorted(rescue_dir.glob("ts_code=*.parquet")))
-        if not args.skip_float_date_union:
-            for day in date_range_days(float_start_date, float_end_date):
-                for dirname in ("share_float", "share_float_float_date"):
-                    path = root / dirname / f"date={day}.parquet"
-                    if path.exists():
-                        files.append((path, "float_date_existing"))
-                rescue_dir = root / "share_float_float_date_ts_code" / f"float_date={day}"
-                files.extend((path, "float_date_ts_code") for path in sorted(rescue_dir.glob("ts_code=*.parquet")))
+    for day in date_range_days(ann_start_date, ann_end_date):
+        path = raw_dir / "share_float_ann_date" / f"ann_date={day}.parquet"
+        if path.exists():
+            files.append((path, "ann_date"))
+        rescue_dir = raw_dir / "share_float_ann_date_ts_code" / f"ann_date={day}"
+        files.extend((path, "ann_date_ts_code") for path in sorted(rescue_dir.glob("ts_code=*.parquet")))
+    if not args.skip_float_date_union:
+        for day in date_range_days(float_start_date, float_end_date):
+            for dirname in ("share_float", "share_float_float_date"):
+                path = raw_dir / dirname / f"date={day}.parquet"
+                if path.exists():
+                    files.append((path, "float_date_existing"))
+            rescue_dir = raw_dir / "share_float_float_date_ts_code" / f"float_date={day}"
+            files.extend((path, "float_date_ts_code") for path in sorted(rescue_dir.glob("ts_code=*.parquet")))
     return files
 
 def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dict[str, Any]) -> None:
@@ -1889,79 +1950,128 @@ def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dic
         getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
         repo_root=repo_root,
     )
+    if not output.exists():
+        raise RuntimeError(f"share_float_complete baseline is missing at {output}; restore it before updating")
     files = share_float_union_files(raw_dir, args)
-    frames: list[pd.DataFrame] = []
+    existing_rows = parquet_rows(output)
+    active_frames: list[pd.DataFrame] = []
+    active_inputs: list[dict[str, str]] = []
     for path, source in files:
-        if parquet_rows(path) == 0:
+        rows = parquet_rows(path)
+        source_file = os.path.relpath(str(path), str(Path.cwd()))
+        active_inputs.append({"path": source_file, "parquet_sha256": file_sha256(path)})
+        if rows == 0:
             continue
         df = pd.read_parquet(path)
         df["download_path"] = source
         # Repo-relative provenance: an absolute host path would flow into the
         # Agent-visible events snapshot (isolation contract, env docs §2.2).
-        df["source_file"] = os.path.relpath(str(path), str(Path.cwd()))
-        df["source_cap_risk"] = parquet_rows(path) >= SHARE_FLOAT_ROW_LIMIT
-        frames.append(df)
+        df["source_file"] = source_file
+        df["source_cap_risk"] = rows >= SHARE_FLOAT_ROW_LIMIT
+        active_frames.append(df)
+    group_columns = ["ts_code", "ann_date", "float_date", "holder_name", "share_type"]
+    identity_columns = SHARE_FLOAT_FIELDS.split(",")
+    active = concat_rows(active_frames) if active_frames else pd.DataFrame(columns=identity_columns)
+    missing_identity_columns = [column for column in identity_columns if column not in active.columns]
+    if not active.empty and missing_identity_columns:
+        raise RuntimeError(
+            "share_float_complete active rows are missing identity columns: "
+            + ", ".join(missing_identity_columns)
+        )
+    safe_active_groups = (
+        active.loc[~active["source_cap_risk"], group_columns].drop_duplicates()
+        if not active.empty else pd.DataFrame(columns=group_columns)
+    )
+    if not active.empty:
+        active = active.sort_values("source_cap_risk", kind="stable")
+        active = active.drop_duplicates(identity_columns).reset_index(drop=True)
+    # The canonical union is the durable historical baseline. A refreshed
+    # coarse event group replaces the same baseline group; distinct source rows
+    # inside that group remain separate. Unchanged history is inherited without
+    # reopening archived process files.
+    baseline_hash = ""
+    revision_old = None
+    revision_new = None
+    capped_groups_preserved = 0
+    frames = [active] if not active.empty else []
+    existing = pd.read_parquet(output)
+    missing_baseline_columns = [column for column in identity_columns if column not in existing.columns]
+    if missing_baseline_columns:
+        raise RuntimeError(
+            "share_float_complete baseline is missing identity columns: "
+            + ", ".join(missing_baseline_columns)
+        )
+    existing_key_count = len(existing.drop_duplicates(group_columns))
+    baseline_hash = str(parquet_meta(output).get("parquet_sha256") or "")
+    baseline = existing
+    if not active.empty:
+        active_groups = active[group_columns].drop_duplicates()
+        refreshed_groups = pd.MultiIndex.from_frame(active_groups)
+        safe_refreshed_groups = pd.MultiIndex.from_frame(safe_active_groups)
+        baseline_groups = pd.MultiIndex.from_frame(baseline[group_columns])
+        refreshed = baseline_groups.isin(refreshed_groups)
+        safe_refreshed = baseline_groups.isin(safe_refreshed_groups)
+        capped_groups_preserved = len(active_groups) - len(safe_active_groups)
+        revision_old = baseline.loc[refreshed].reset_index(drop=True)
+        preserved_capped = baseline.loc[refreshed & ~safe_refreshed].reset_index(drop=True)
+        revision_new = concat_rows([active, preserved_capped]).drop_duplicates(identity_columns).reset_index(drop=True)
+        baseline = baseline.loc[~safe_refreshed].reset_index(drop=True)
+    else:
+        revision_old = baseline.iloc[:0].copy()
+        revision_new = active
+    frames.append(baseline)
     union = concat_rows(frames) if frames else pd.DataFrame(columns=SHARE_FLOAT_FIELDS.split(","))
     before = len(union)
-    # Canonical rows dedup on the DECLARED business key only: float_share /
-    # float_ratio are source-revisable values, so keying on them kept every
-    # revision as a separate event row. Input-file order defines precedence
-    # (first occurrence wins); raw partitions keep all revisions.
-    key_columns = ["ts_code", "ann_date", "float_date", "holder_name", "share_type"]
-    existing_key_columns = [col for col in key_columns if col in union.columns]
-    if existing_key_columns and not union.empty:
-        union = union.drop_duplicates(existing_key_columns).reset_index(drop=True)
-    allow_shrink = bool(getattr(args, "allow_union_shrink", False))
-    existing_rows = parquet_rows(output) if output.exists() else None
-    if output.exists() and existing_key_columns and not allow_shrink:
-        # Guard business-key coverage, not raw row count: value-revision dedup may
-        # legitimately drop rows, but the distinct declared keys must not shrink.
-        old_key_cols = [
-            col for col in existing_key_columns
-            if col in set(pq.ParquetFile(output).schema_arrow.names)
-        ]
-        if old_key_cols:
-            existing_key_count = len(pd.read_parquet(output, columns=old_key_cols).drop_duplicates(old_key_cols))
-            new_key_count = len(union.drop_duplicates(old_key_cols)) if not union.empty else 0
-            if new_key_count < existing_key_count:
-                raise RuntimeError(
-                    "share_float_complete union rebuild would shrink distinct business keys of "
-                    f"{output} from {existing_key_count} to {new_key_count} using {len(files)} input files; "
-                    "check active/archive process roots or pass --allow-union-shrink for an intentional rebuild."
-                )
-    union_source_hash = stable_hash({"input_files": [str(path) for path, _ in files], "rows": len(union), "columns": list(union.columns)})
-    write_parquet_revision_aware(
+    if not union.empty:
+        union = union.drop_duplicates(identity_columns).reset_index(drop=True)
+    # Refreshed groups replace their complete baseline group, preserving
+    # multiple distinct lots while removing superseded source revisions.
+    new_key_count = len(union.drop_duplicates(group_columns)) if not union.empty else 0
+    if new_key_count < existing_key_count:
+        raise RuntimeError(
+            "share_float_complete merge would shrink distinct event groups of "
+            f"{output} from {existing_key_count} to {new_key_count} using {len(files)} input files"
+        )
+    union_source_hash = stable_hash({
+        "baseline_parquet_sha256": baseline_hash,
+        "active_inputs": active_inputs,
+        "rows": len(union),
+        "columns": list(union.columns),
+    })
+    published = write_parquet_revision_aware(
         output,
         union,
         api_name="share_float_complete",
         params={
-            "strategy": "ann_date_float_date_union",
+            "strategy": "canonical_incremental_merge",
             "source_api": "share_float",
             "ann_start_date": args.ann_start_date,
             "ann_end_date": args.ann_end_date,
             "float_start_date": args.float_start_date,
             "float_end_date": args.float_end_date,
-            "union_ann_start_date": getattr(args, "union_ann_start_date", None) or args.ann_start_date,
-            "union_ann_end_date": getattr(args, "union_ann_end_date", None) or args.ann_end_date,
-            "union_float_start_date": getattr(args, "union_float_start_date", None) or args.float_start_date,
-            "union_float_end_date": getattr(args, "union_float_end_date", None) or args.float_end_date,
             "input_files": len(files),
         },
         fields=list(union.columns),
         source_hash=union_source_hash,
-        key_columns=key_columns,
+        key_columns=identity_columns,
         revision_ledger=revision_ledger,
-        source="share_float_union_rebuild",
+        source="share_float_union_merge",
         allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
         allow_key_removal_overwrite=True,
+        revision_comparison_old_df=revision_old,
+        revision_comparison_new_df=revision_new,
+        existing_df=existing,
     )
+    if not published:
+        raise RuntimeError(f"share_float_complete merge was not published to {output}")
     report["union"] = {
         "output": str(output),
         "input_files": len(files),
         "rows_before_dedup": before,
         "rows_after_dedup": len(union),
         "previous_rows": existing_rows,
-        "allow_union_shrink": allow_shrink,
+        "baseline_inherited": True,
+        "capped_groups_preserved": capped_groups_preserved,
     }
 
 def download_share_float_complete(args: argparse.Namespace) -> int:
@@ -1978,10 +2088,6 @@ def download_share_float_complete(args: argparse.Namespace) -> int:
             "ann_end_date": args.ann_end_date,
             "float_start_date": args.float_start_date,
             "float_end_date": args.float_end_date,
-            "union_ann_start_date": getattr(args, "union_ann_start_date", None) or args.ann_start_date,
-            "union_ann_end_date": getattr(args, "union_ann_end_date", None) or args.ann_end_date,
-            "union_float_start_date": getattr(args, "union_float_start_date", None) or args.float_start_date,
-            "union_float_end_date": getattr(args, "union_float_end_date", None) or args.float_end_date,
             "float_rescue_dates": args.float_rescue_date,
             "max_codes": args.max_codes,
         },
@@ -3005,10 +3111,6 @@ def update_share_float_complete_data(
             ann_end_date=args.end_date,
             float_start_date=start_date,
             float_end_date=args.end_date,
-            union_ann_start_date="20100101",
-            union_ann_end_date=args.end_date,
-            union_float_start_date="20200101",
-            union_float_end_date=args.end_date,
             skip_ann_date=False,
             rescue_ann_limit_hits=args.rescue_ann_limit_hits,
             rescue_ann_date=[],
@@ -3394,18 +3496,13 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         "--include-share-float-complete",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Refresh recent share_float raw partitions and rebuild the full share_float_complete union by default.",
+        help="Refresh recent share_float partitions and merge them into the durable share_float_complete baseline.",
     )
     parser.add_argument("--rescue-ann-limit-hits", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-ann-rescue-days", type=int, default=5)
     parser.add_argument("--rescue-universe", choices=["candidate", "explicit", "all_a"], default="candidate")
     parser.add_argument("--max-rescue-calls", type=int, default=50000)
     parser.add_argument("--union-output", default="data/raw/share_float_complete/share_float_complete.parquet")
-    parser.add_argument(
-        "--allow-union-shrink",
-        action="store_true",
-        help="Allow share_float_complete union rebuilds that produce fewer rows than the existing union.",
-    )
     parser.add_argument("--share-float-process-output", help="Optional temporary process report path for share_float_complete.")
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
     parser.add_argument("--allow-empty-revision-overwrite", action="store_true")
@@ -3473,16 +3570,7 @@ def add_share_float_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--max-codes", type=int)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--write-union", action="store_true")
-    parser.add_argument(
-        "--allow-union-shrink",
-        action="store_true",
-        help="Allow share_float_complete union rebuilds that produce fewer rows than the existing union.",
-    )
     parser.add_argument("--union-output", default="data/raw/share_float_complete/share_float_complete.parquet")
-    parser.add_argument("--union-ann-start-date", help="Optional ann_date lower bound used only when rebuilding the union.")
-    parser.add_argument("--union-ann-end-date", help="Optional ann_date upper bound used only when rebuilding the union.")
-    parser.add_argument("--union-float-start-date", help="Optional float_date lower bound used only when rebuilding the union.")
-    parser.add_argument("--union-float-end-date", help="Optional float_date upper bound used only when rebuilding the union.")
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
     parser.add_argument("--allow-empty-revision-overwrite", action="store_true")
     core.add_runtime_args(parser, min_interval=0.22, timeout=90)

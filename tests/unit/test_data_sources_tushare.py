@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+from pyarrow.lib import ArrowInvalid
 
 from autotrade.data_sources.tushare import audit, common, cron_update, download
 
@@ -441,11 +442,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=NoQueryClient()):
             self.assertEqual(download.download_event_flow(args), 0)
 
-    def test_share_float_union_rebuild_refuses_accidental_shrink(self):
+    def test_share_float_union_inherits_baseline_and_prefers_refreshed_rows(self):
         output = self.raw_dir / "share_float_complete" / "share_float_complete.parquet"
         existing = pd.DataFrame([
-            {"ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102"},
-            {"ts_code": "000002.SZ", "ann_date": "20200101", "float_date": "20200102"},
+            {"ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102",
+             "holder_name": "h1", "share_type": "t", "float_share": 1.0, "float_ratio": 0.1},
+            {"ts_code": "000002.SZ", "ann_date": "20200101", "float_date": "20200102",
+             "holder_name": "h2", "share_type": "t", "float_share": 2.0, "float_ratio": 0.2},
         ])
         common.write_parquet(output, existing, api_name="share_float", params={}, fields=list(existing.columns), source_hash="existing")
         args = argparse.Namespace(
@@ -454,27 +457,22 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             ann_end_date="20200102",
             float_start_date="20200101",
             float_end_date="20200102",
-            union_ann_start_date=None,
-            union_ann_end_date=None,
-            union_float_start_date=None,
-            union_float_end_date=None,
             skip_float_date_union=False,
-            allow_union_shrink=False,
         )
 
         with patch.object(download, "share_float_union_files", return_value=[]):
-            with self.assertRaisesRegex(RuntimeError, "would shrink"):
-                download.write_share_float_union(self.raw_dir, args, {})
+            report = {}
+            download.write_share_float_union(self.raw_dir, args, report)
         self.assertEqual(common.parquet_rows(output), 2)
+        self.assertTrue(report["union"]["baseline_inherited"])
 
-        # The non-shrinking success path must complete and report (a stale
-        # previous-rows reference once raised NameError right after the write).
+        # Refreshed source rows precede the baseline and replace matching keys.
         source = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
         rows = pd.DataFrame([
             {"ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102",
-             "holder_name": "h1", "share_type": "t"},
+             "holder_name": "h1", "share_type": "t", "float_share": 10.0, "float_ratio": 1.0},
             {"ts_code": "000002.SZ", "ann_date": "20200101", "float_date": "20200102",
-             "holder_name": "h2", "share_type": "t"},
+             "holder_name": "h2", "share_type": "t", "float_share": 20.0, "float_ratio": 2.0},
         ])
         common.write_parquet(source, rows, api_name="share_float", params={}, fields=list(rows.columns), source_hash="src")
         report = {}
@@ -482,7 +480,181 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             download.write_share_float_union(self.raw_dir, args, report)
         self.assertEqual(report["union"]["previous_rows"], 2)
         self.assertEqual(report["union"]["rows_after_dedup"], 2)
+        updated = pd.read_parquet(output).sort_values("ts_code")
+        self.assertEqual(updated["float_share"].tolist(), [10.0, 20.0])
         self.assertTrue((self.root / "revision_events.jsonl").exists())
+
+    def test_share_float_union_reads_baseline_once_and_hashes_active_content(self):
+        output = self.raw_dir / "share_float_complete" / "share_float_complete.parquet"
+        baseline = pd.DataFrame([{
+            "ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102",
+            "holder_name": "h1", "share_type": "t", "float_share": 1.0, "float_ratio": 0.1,
+        }])
+        source = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
+        args = argparse.Namespace(
+            union_output=str(output), ann_start_date="20200101", ann_end_date="20200102",
+            float_start_date="20200101", float_end_date="20200102", skip_float_date_union=False,
+        )
+
+        def publish(value: float) -> str:
+            common.write_parquet(output, baseline, api_name="share_float", params={}, fields=list(baseline.columns), source_hash="baseline")
+            active = baseline.copy()
+            active["float_share"] = value
+            common.write_parquet(source, active, api_name="share_float", params={}, fields=list(active.columns), source_hash="active")
+            with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
+                with patch.object(pd, "read_parquet", wraps=pd.read_parquet) as read_parquet:
+                    download.write_share_float_union(self.raw_dir, args, {})
+            output_reads = [
+                call for call in read_parquet.call_args_list
+                if Path(call.args[0]).resolve() == output.resolve()
+            ]
+            self.assertEqual(len(output_reads), 1)
+            return str(common.parquet_meta(output)["source_hash"])
+
+        self.assertNotEqual(publish(10.0), publish(11.0))
+
+    def test_share_float_union_requires_baseline_for_incremental_update(self):
+        output = self.raw_dir / "share_float_complete" / "share_float_complete.parquet"
+        args = argparse.Namespace(
+            union_output=str(output), ann_start_date="20200101", ann_end_date="20200102",
+            float_start_date="20200101", float_end_date="20200102",
+            skip_float_date_union=False,
+        )
+
+        with patch.object(download, "share_float_union_files") as list_files:
+            with self.assertRaisesRegex(RuntimeError, "baseline is missing"):
+                download.write_share_float_union(self.raw_dir, args, {})
+        list_files.assert_not_called()
+        self.assertFalse(output.exists())
+
+    def test_share_float_union_replaces_group_but_preserves_distinct_lots_idempotently(self):
+        output = self.raw_dir / "share_float_complete" / "share_float_complete.parquet"
+        existing = pd.DataFrame([
+            {"ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102",
+             "holder_name": "h1", "share_type": "t", "float_share": 1.0, "float_ratio": 0.1},
+            {"ts_code": "000002.SZ", "ann_date": "20200101", "float_date": "20200102",
+             "holder_name": "h2", "share_type": "t", "float_share": 2.0, "float_ratio": 0.2},
+        ])
+        common.write_parquet(output, existing, api_name="share_float", params={}, fields=list(existing.columns), source_hash="existing")
+        refreshed = pd.DataFrame([
+            {"ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102",
+             "holder_name": "h1", "share_type": "t", "float_share": 10.0, "float_ratio": 1.0},
+            {"ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102",
+             "holder_name": "h1", "share_type": "t", "float_share": 20.0, "float_ratio": 2.0},
+            {"ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102",
+             "holder_name": "h1", "share_type": "t", "float_share": 20.0, "float_ratio": 2.0},
+        ])
+        source = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
+        common.write_parquet(source, refreshed, api_name="share_float", params={}, fields=list(refreshed.columns), source_hash="src")
+        args = argparse.Namespace(
+            union_output=str(output), ann_start_date="20200101", ann_end_date="20200102",
+            float_start_date="20200101", float_end_date="20200102",
+            skip_float_date_union=False,
+        )
+
+        with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
+            download.write_share_float_union(self.raw_dir, args, {})
+            first = pd.read_parquet(output)
+            download.write_share_float_union(self.raw_dir, args, {})
+            second = pd.read_parquet(output)
+
+        self.assertEqual(len(first), 3)
+        group = first[first["ts_code"] == "000001.SZ"].sort_values("float_share")
+        self.assertEqual(group["float_share"].tolist(), [10.0, 20.0])
+        pd.testing.assert_frame_equal(first, second)
+        events = [
+            json.loads(line)
+            for line in (self.root / "revision_events.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertEqual((events[0]["old_rows"], events[0]["new_rows"]), (2, 3))
+
+    def test_share_float_union_file_scope_uses_active_window(self):
+        recent = self.raw_dir / "share_float_ann_date" / "ann_date=20200102.parquet"
+        historical = self.raw_dir / "share_float_ann_date" / "ann_date=20190101.parquet"
+        for path in (recent, historical):
+            common.write_parquet(path, pd.DataFrame(), api_name="share_float", params={}, fields=[], source_hash="src")
+        args = argparse.Namespace(
+            ann_start_date="20200101", ann_end_date="20200103",
+            float_start_date="20200101", float_end_date="20200103",
+            skip_float_date_union=False,
+        )
+
+        files = [path for path, _ in download.share_float_union_files(self.raw_dir, args)]
+        self.assertEqual(files, [recent])
+
+    def test_share_float_union_capped_group_preserves_complete_baseline(self):
+        output = self.raw_dir / "share_float_complete" / "share_float_complete.parquet"
+        existing = pd.DataFrame([
+            {"ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102",
+             "holder_name": "h1", "share_type": "t", "float_share": float(index), "float_ratio": 0.1}
+            for index in range(7000)
+        ])
+        common.write_parquet(output, existing, api_name="share_float", params={}, fields=list(existing.columns), source_hash="existing")
+        source = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
+        common.write_parquet(
+            source,
+            existing.iloc[:common.SHARE_FLOAT_ROW_LIMIT],
+            api_name="share_float",
+            params={},
+            fields=list(existing.columns),
+            source_hash="capped",
+        )
+        args = argparse.Namespace(
+            union_output=str(output), ann_start_date="20200101", ann_end_date="20200102",
+            float_start_date="20200101", float_end_date="20200102",
+            skip_float_date_union=False,
+        )
+
+        report = {}
+        with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
+            download.write_share_float_union(self.raw_dir, args, report)
+
+        self.assertEqual(common.parquet_rows(output), 7000)
+        self.assertEqual(report["union"]["rows_after_dedup"], 7000)
+        self.assertEqual(report["union"]["capped_groups_preserved"], 1)
+
+    def test_share_float_union_non_capped_source_makes_duplicate_group_replaceable(self):
+        output = self.raw_dir / "share_float_complete" / "share_float_complete.parquet"
+        existing = pd.DataFrame([
+            {"ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102",
+             "holder_name": "h1", "share_type": "t", "float_share": 1.0, "float_ratio": 0.1},
+        ])
+        common.write_parquet(output, existing, api_name="share_float", params={}, fields=list(existing.columns), source_hash="existing")
+        refreshed = pd.DataFrame([
+            {"ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102",
+             "holder_name": "h1", "share_type": "t", "float_share": 10.0, "float_ratio": 1.0},
+        ])
+        capped = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
+        rescue = self.raw_dir / "share_float_ann_date_ts_code" / "ann_date=20200101" / "ts_code=000001.SZ.parquet"
+        common.write_parquet(
+            capped,
+            pd.concat([refreshed] * common.SHARE_FLOAT_ROW_LIMIT, ignore_index=True),
+            api_name="share_float",
+            params={},
+            fields=list(refreshed.columns),
+            source_hash="capped",
+        )
+        common.write_parquet(rescue, refreshed, api_name="share_float", params={}, fields=list(refreshed.columns), source_hash="rescue")
+        args = argparse.Namespace(
+            union_output=str(output), ann_start_date="20200101", ann_end_date="20200102",
+            float_start_date="20200101", float_end_date="20200102",
+            skip_float_date_union=False,
+        )
+
+        report = {}
+        with patch.object(
+            download,
+            "share_float_union_files",
+            return_value=[(capped, "ann_date"), (rescue, "ann_date_ts_code")],
+        ):
+            download.write_share_float_union(self.raw_dir, args, report)
+
+        result = pd.read_parquet(output)
+        self.assertEqual(result["float_share"].tolist(), [10.0])
+        self.assertEqual(result["download_path"].tolist(), ["ann_date_ts_code"])
+        self.assertEqual(result["source_cap_risk"].tolist(), [False])
+        self.assertEqual(report["union"]["capped_groups_preserved"], 0)
 
     def test_share_float_empty_refresh_keeps_existing_cap_risk_signal(self):
         path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
@@ -518,6 +690,39 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(result["rows"], common.SHARE_FLOAT_ROW_LIMIT)
         self.assertTrue(result["source_cap_risk"])
         self.assertEqual(common.parquet_rows(path), common.SHARE_FLOAT_ROW_LIMIT)
+
+    def test_share_float_nonempty_rejected_refresh_fails(self):
+        path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
+        fields = common.SHARE_FLOAT_FIELDS.split(",")
+        existing = pd.DataFrame([
+            [f"{index:06d}.SZ", "20200101", "20200102", f"h{index}", "type", 1.0, 0.1]
+            for index in range(100)
+        ], columns=fields)
+        existing = common.augment_event_frame(existing, common.EVENT_FLOW_SPECS["share_float"])
+        common.write_parquet(path, existing, api_name="share_float", params={}, fields=list(existing.columns), source_hash="old")
+
+        class ShrunkClient:
+            def query(self, api_name, params=None, fields="", retries=5):
+                return common.ApiResult(
+                    common.SHARE_FLOAT_FIELDS.split(","),
+                    [["000000.SZ", "20200101", "20200102", "h0", "type", 1.0, 0.1]],
+                    "new",
+                )
+
+        with self.assertRaisesRegex(RuntimeError, "rejected by the revision guard"):
+            download.query_share_float_to_path(
+                ShrunkClient(), self.raw_dir, path, {"ann_date": "20200101"}, "ann_date", True,
+                revision_ledger=self.root / "revision_events.jsonl",
+            )
+        self.assertEqual(common.parquet_rows(path), 100)
+
+    def test_share_float_candidate_read_failure_is_not_silent(self):
+        path = self.raw_dir / "anns_d" / "month=202001.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([{"ann_date": "20200101", "title": "解禁"}]).to_parquet(path, index=False)
+
+        with self.assertRaises(ArrowInvalid):
+            download.anns_unlock_candidate_codes(self.raw_dir, ["20200101"])
 
     def test_generic_event_flow_download_excludes_dedicated_share_float_path(self):
         selected = download.selected_event_flow_download_datasets(argparse.Namespace(datasets=None))
@@ -2864,10 +3069,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
 # Source: test_tushare_intraday_by_date.py
 import argparse
-import importlib.util
 import json
 import types
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -2876,20 +3079,6 @@ import pandas as pd
 
 
 def load_tushare_data_module():
-    script_root = Path(__file__).resolve().parents[2] / "scripts"
-    sys.path.insert(0, str(script_root))
-
-    def load(name: str, path: Path):
-        spec = importlib.util.spec_from_file_location(name, path)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"cannot load {path}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        return module
-
-    download = load("autotrade_tushare_download", script_root / "data" / "tushare_download.py")
-    audit = load("autotrade_tushare_audit", script_root / "data" / "tushare_audit.py")
     return types.SimpleNamespace(
         compact_intraday_by_date=download.compact_intraday_by_date,
         audit_intraday_by_date=audit.audit_intraday_by_date,

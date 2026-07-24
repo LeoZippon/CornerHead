@@ -136,6 +136,8 @@ MacBook ──ssh -N -L 8888:127.0.0.1:8080──▶ 前端服务器 sshd
 | `deploy` | 推送静态 SPA，优雅重启控制台 API并校验 source fingerprint；保持隧道和实验 worker 不动 |
 | `install-cron` | 安装托管 crontab 块：`*/2` 分钟 `ensure` + `@reboot` |
 
+两套托管 crontab 安装器的私密备份统一写入宿主归档根 `/Data/lzp/MacroQuant_Archive/crontab/`；仓库内不保留运行归档目录。
+
 保活分三层：
 
 - autossh 通过 keepalive 和转发失败检测自愈网络断连。

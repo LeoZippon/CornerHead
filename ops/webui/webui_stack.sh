@@ -19,6 +19,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+ARCHIVE_ROOT="/Data/lzp/MacroQuant_Archive"
 PY="${PY:-$HOME/miniconda3/envs/quant/bin/python}"
 FRONTEND_HOST="${FRONTEND_HOST:-121.41.5.179}"
 TUNNEL_USER="${TUNNEL_USER:-cornerhead}"
@@ -180,11 +181,11 @@ $CRON_END"
         # Crontab backups are operational maintenance artifacts, not runtime
         # logs; the full crontab may reference unrelated jobs, so keep them
         # owner-only like the TuShare installer's backups.
-        mkdir -p "$REPO/archive/crontab"
-        chmod 700 "$REPO/archive/crontab"
+        mkdir -p "$ARCHIVE_ROOT/crontab"
+        chmod 700 "$ARCHIVE_ROOT/crontab"
         # Source prefix + pid: never collides with the TuShare installer's
         # backups (or a same-second rerun of this script).
-        ( umask 077; printf '%s\n' "$current" > "$REPO/archive/crontab/crontab-webui-$(date +%Y%m%d-%H%M%S)-$$.bak" )
+        ( umask 077; printf '%s\n' "$current" > "$ARCHIVE_ROOT/crontab/crontab-webui-$(date +%Y%m%d-%H%M%S)-$$.bak" )
     fi
     ( printf '%s\n' "$current" | sed "/^${CRON_BEGIN}\$/,/^${CRON_END}\$/d"; echo "$block" ) | crontab -
     crontab -l | grep -qF "$CRON_BEGIN" || { echo "FAILED: managed block missing after install" >&2; exit 1; }
