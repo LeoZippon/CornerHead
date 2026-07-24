@@ -1551,6 +1551,11 @@ function sessionDetailPanel(detail, selectedKey) {
     const statsHost = el("div", {});
     panel.append(el("div", { class: "panel section-gap" },
       el("h4", {}, "Agent Trace（回放）"),
+      session.kind === "fold"
+        ? el("div", { class: "section-gap" },
+            el("button", { class: "btn", onclick: () => openInitialPrompt(detail, session) },
+              "查看初始 Prompt（实际运行）"))
+        : null,
       statsHost,
       traceReplayNode(detail.experiment_id, session.record.run_id),
     ));
@@ -1763,6 +1768,30 @@ async function openPromptEditor(detail, session, directive) {
         "保存后本会话将【原样】使用此文本作为系统提示词：运行时不再注入自动生成的「当前实验事实」JSON 与其它自动段落，请保留必要的协议/合同/禁止行为段落。清除覆盖即恢复自动装配。覆盖内容会记录进 run manifest 供审计。"),
       editor,
     ), footer, "prompt-modal");
+}
+
+/* The prompt a completed fold session ACTUALLY started with: the first
+   llm_call's messages recorded in its trace (ground truth, unlike the
+   pre-session assembled preview, and unaffected by later code changes). */
+async function openInitialPrompt(detail, session) {
+  let data;
+  try {
+    data = await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}`
+      + `/folds/${encodeURIComponent(session.epoch_id)}/${encodeURIComponent(session.fold_id)}/initial-prompt`);
+  } catch (error) { toast(`加载失败：${error.message}`, true); return; }
+  const roleLabel = { system: "系统提示词", user: "初始用户消息" };
+  const blocks = (data.messages || []).map((message) => el("div", { class: "section-gap" },
+    el("h4", {}, roleLabel[message.role] || message.role),
+    el("pre", { class: "code-view", style: "white-space:pre-wrap; max-height:46vh" }, message.content || ""),
+  ));
+  showModal(`初始 Prompt（实际运行）— ${session.key}`,
+    el("div", {},
+      el("div", { class: "hint" },
+        `来自本 Fold 运行 trace 的首次 LLM 调用 ｜ run ${data.run_id || "?"} ｜ model ${data.model || "?"}`
+        + (data.started_at ? ` ｜ ${data.started_at}` : "")),
+      ...blocks,
+    ),
+    [el("button", { class: "btn", onclick: closeModal }, "关闭")], "prompt-modal");
 }
 
 /* Review-then-approve: assemble the session's system prompt (with the draft

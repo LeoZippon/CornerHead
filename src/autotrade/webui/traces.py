@@ -43,6 +43,33 @@ def resolve_trace_path(experiment_dir: Path, run_id: str | None) -> Path | None:
     return None
 
 
+def read_initial_prompt(path: Path) -> dict[str, object]:
+    """The messages the session actually started with: the first ``llm_call``
+    event's ``new_messages`` (system prompt + initial user turn) as recorded in
+    the trace — ground truth, unlike the pre-session assembled preview."""
+    with Path(path).open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # in-progress tail line of a live trace
+            if event.get("event_type") != "llm_call":
+                continue
+            return {
+                "run_id": event.get("run_id"),
+                "model": event.get("model"),
+                "started_at": event.get("started_at"),
+                "messages": [
+                    {"role": message.get("role"), "content": message.get("content")}
+                    for message in (event.get("new_messages") or [])
+                ],
+            }
+    raise KeyError("trace contains no llm_call event yet")
+
+
 def read_trace_page(path: Path, *, offset: int = 0, max_bytes: int = DEFAULT_PAGE_BYTES) -> dict[str, object]:
     """Read complete JSONL events from ``offset``; a partial tail line stays unread."""
     path = Path(path)
