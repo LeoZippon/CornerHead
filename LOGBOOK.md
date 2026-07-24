@@ -1,3 +1,8 @@
+2026-07-24 Fold 初始 Prompt 查看；复审三项：代码身份改树 hash、rewrite 原语、归档外移
+
+- 新增：实验内页每个已完成 Fold 的 Trace 面板提供「查看初始 Prompt（实际运行）」——读取该 Fold run trace 的首次 llm_call 事件的 new_messages（系统提示词+初始用户消息），是会话真实起点（与运行前装配预览互补）；无记录/无 trace 均为 404。
+- 复审三项均证实并修复：①stale_running 误报——code_version 由 git 提交号改为 src/ 代码树内容 hash（脏区覆盖层同步限定 src 路径），仅文档/日志的提交不再把控制台或 worker 标记为过期；上一条日志"stale_running 空"在 bfaf3fa（仅日志）提交后即失真，属提交号比较的固有误报，现从根因消除。②写隔离声明过强——assert_no_live_writer 此前无生产调用点；现内置进新的 ExperimentLedger.rewrite(records) 迁移原语（活 worker 拒绝、未盖章记录拒绝、原子替换），账本迁移禁止手工改写文件；非账本文件的一次性维护重写没有统一入口，属流程纪律并如实成文。③归档路径回归——20260724 实验 tar 与账本归档移至 /Data/lzp/MacroQuant_Archive/{experiments,ledgers}/，仓库内 archive/ 目录清除；根因 fix/share-float-incremental-archive 未并主干，该分支按用户"待二次审计"标记保留、不代为合并。全量 tests 961+56 通过。
+
 2026-07-24 滚动升级写隔离与控制台错误隔离；实验重置为 lcd-test2
 
 - 两个问题均实证确认：①7-22 账本 stamp 迁移未隔离在写进程——lcd-test1 的 worker（启动时代码在内存中）在迁移后（7-23 14:58/15:30）继续追加 2 条无 schema_version 记录，严格读取器随即拒绝整本账本；②该单点损坏使"新建实验"参数接口（inherit_from 扫描全部实验账本）与故障实验详情页均 500（首页列表已有隔离，独此二处缺失）。
