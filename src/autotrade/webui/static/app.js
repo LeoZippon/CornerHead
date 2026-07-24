@@ -1252,6 +1252,7 @@ async function renderDetailPage(experimentId, selectedKey) {
     ),
     el("div", { class: "sub" },
       `进度 ${detail.completed_sessions ?? 0}/${detail.total_sessions ?? "?"}`,
+      detail.state === "unreadable" && detail.error ? ` ｜ ${detail.error}` : "",
       status.error ? ` ｜ 错误：${status.error}` : "",
       // A worker-recorded analysis error is only current while that worker
       // lives; stale failures are visible per fold in the analysis section.

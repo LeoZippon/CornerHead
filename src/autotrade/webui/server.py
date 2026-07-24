@@ -92,12 +92,26 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     # ---- meta ----------------------------------------------------------------
     @app.get("/api/health")
     def health() -> dict[str, object]:
+        code = _code_status()
+        running = manager.running_experiments()
+        # Rolling-upgrade visibility: a running worker keeps its launch-time
+        # code in memory and keeps writing that code's formats; surface any
+        # worker whose recorded code_version differs from the current repo.
+        stale_running = []
+        for experiment_id in running:
+            status = read_json(
+                manager.experiments_root / experiment_id / HITL_DIR_NAME / STATUS_NAME
+            )
+            worker_version = status.get("code_version")
+            if worker_version and worker_version != code.get("repo_code_version"):
+                stale_running.append({"experiment_id": experiment_id, "code_version": worker_version})
         return {
             "status": "ok",
             "experiments_root": str(manager.experiments_root),
             "max_running_experiments": MAX_RUNNING_EXPERIMENTS,
-            "running": manager.running_experiments(),
-            **_code_status(),
+            "running": running,
+            "stale_running": stale_running,
+            **code,
         }
 
     def _inherit_sources() -> list[str]:
@@ -105,13 +119,16 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         root = manager.experiments_root
         if not root.is_dir():
             return []
-        return sorted(
-            entry.name
-            for entry in root.iterdir()
-            if entry.is_dir()
-            and not entry.name.startswith(".")
-            and registry.latest_fold_records(registry.read_ledger_records(entry))
-        )
+        sources = []
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            try:
+                if registry.latest_fold_records(registry.read_ledger_records(entry)):
+                    sources.append(entry.name)
+            except Exception:  # noqa: BLE001 - a broken experiment cannot seed a new one;
+                continue  # it stays visible (state=unreadable) in the list instead
+        return sources
 
     @app.get("/api/parameter-schema")
     def get_parameter_schema() -> dict[str, object]:
