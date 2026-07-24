@@ -440,7 +440,7 @@ experiments/<experiment_id>/
 |---|---|---|
 | `ledgers/experiment_ledger.jsonl` | Pipeline | Fold、meta-learning、held-out 主账本；每条记录 stamp `schema_version`，版本不匹配（含缺失）一律视为不兼容并拒绝加载 |
 
-**迁移写隔离（滚动升级共存，非格式兼容问题）**：运行中的实验 worker 在内存中持有其启动时的代码，部署或迁移都不会改变它继续按旧格式写盘的事实。因此对实验拥有文件（账本、hitl 状态等）的任何维护性重写，必须先停止该实验 worker，并调用 `pipelines.hitl_state.assert_no_live_writer(experiment_dir)`（按 pid+内核启动 ticks 判定进程实例存活）确认无在写进程，再走"归档 → 重写 → 校验"流程；否则迁移后旧进程的追加会重新引入迁移前格式并可能丢失在途写入。控制台 `/api/health` 的 `stale_running` 列出 code_version 与当前仓库不一致的运行中实验，用于部署时识别此类共存窗口。
+**迁移写隔离（滚动升级共存，非格式兼容问题）**：运行中的实验 worker 在内存中持有其启动时的代码，部署或迁移都不会改变它继续按旧格式写盘的事实。账本迁移必须使用 `ExperimentLedger.rewrite(records)` 而非手工改写文件——守卫内置于原语：重写前强制 `assert_no_live_writer(experiment_dir)`（按 pid+内核启动 ticks 判定进程实例存活），并拒绝任何未携带当前 `schema_version` 的记录；流程仍为"停 worker → 归档 → rewrite → 校验"。对账本以外实验文件的一次性维护重写没有统一入口，属流程纪律：脚本必须自行调用 `assert_no_live_writer`。`code_version` 是 `src/` 代码树的内容 hash（文档/日志提交不改变它）；控制台 `/api/health` 的 `stale_running` 列出与当前仓库代码树不一致的运行中 worker，用于部署时识别共存窗口。
 | `strategy_artifacts/` | Pipeline | 冻结策略产物和对应模型参数产物 |
 | `meta_learning/` | Pipeline | 元学习 Taste；trace 由账本 `agent_trace_ref` 指向 canonical run 目录 |
 | `artifacts/<run_id>/` | Environment | Sandbox run manifest、trace、results、logs |

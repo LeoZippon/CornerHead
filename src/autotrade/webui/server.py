@@ -27,7 +27,14 @@ from .analysis import AnalysisService
 from .manager import ExperimentManager, ManagerError, MAX_RUNNING_EXPERIMENTS
 from .params_schema import parameter_schema
 from .prompt_preview import build_prompt_preview
-from .traces import read_trace_page, read_trace_tail, resolve_trace_path, stream_trace, trace_stats
+from .traces import (
+    read_initial_prompt,
+    read_trace_page,
+    read_trace_tail,
+    resolve_trace_path,
+    stream_trace,
+    trace_stats,
+)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -241,6 +248,25 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         return _zip_response(members(), filename)
 
     # ---- folds -------------------------------------------------------------------
+
+    @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}/initial-prompt")
+    def get_fold_initial_prompt(experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:
+        """The prompt the fold session actually started with, from its trace."""
+        experiment_dir = _experiment_dir(experiment_id)
+        record = registry.latest_fold_records(registry.read_ledger_records(experiment_dir)).get(
+            (epoch_id, fold_id)
+        )
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"no fold record for {epoch_id}/{fold_id}")
+        run_id = str(record.get("run_id") or "") or None
+        trace_path = resolve_trace_path(experiment_dir, run_id)
+        if trace_path is None:
+            raise HTTPException(status_code=404, detail="no agent trace recorded for this fold")
+        try:
+            prompt = read_initial_prompt(trace_path)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"experiment_id": experiment_id, "epoch_id": epoch_id, "fold_id": fold_id, **prompt}
 
     @app.get("/api/experiments/{experiment_id}/folds/{epoch_id}/{fold_id}")
     def get_fold(experiment_id: str, epoch_id: str, fold_id: str) -> dict[str, object]:

@@ -11,7 +11,7 @@ from autotrade.environment.runtime import repo_code_version
 
 
 class RepoCodeVersionTest(unittest.TestCase):
-    def test_tracks_dirty_and_untracked_contents_without_counting_ignored_files(self) -> None:
+    def test_tracks_code_content_and_ignores_doc_only_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
 
@@ -25,33 +25,45 @@ class RepoCodeVersionTest(unittest.TestCase):
             git("config", "user.email", "runtime-version@example.invalid")
             git("config", "user.name", "Runtime Version Test")
             (root / ".gitignore").write_text("ignored/\n", encoding="utf-8")
-            source = root / "service.py"
+            source = root / "src" / "service.py"
+            source.parent.mkdir()
             source.write_text("VALUE = 1\n", encoding="utf-8")
-            git("add", ".gitignore", "service.py")
+            docs = root / "LOGBOOK.md"
+            docs.write_text("entry 1\n", encoding="utf-8")
+            git("add", ".gitignore", "src/service.py", "LOGBOOK.md")
             git("commit", "-qm", "initial")
 
-            head = git("rev-parse", "--short", "HEAD")
-            self.assertEqual(repo_code_version(root), head)
+            tree = git("rev-parse", "--short", "HEAD:src")
+            self.assertEqual(repo_code_version(root), tree)
+
+            # A commit touching only docs/logbooks does not change the code
+            # identity: no stale flag for running services after such pushes.
+            docs.write_text("entry 2\n", encoding="utf-8")
+            self.assertEqual(repo_code_version(root), tree)
+            git("add", "LOGBOOK.md")
+            git("commit", "-qm", "logbook only")
+            self.assertEqual(repo_code_version(root), tree)
+            self.assertEqual(git("rev-parse", "--short", "HEAD:src"), tree)
 
             source.write_text("VALUE = 2\n", encoding="utf-8")
             tracked_v1 = repo_code_version(root)
             source.write_text("VALUE = 3\n", encoding="utf-8")
             tracked_v2 = repo_code_version(root)
-            self.assertRegex(tracked_v1, rf"^{head}\+dirty\.[0-9a-f]{{12}}$")
+            self.assertRegex(tracked_v1, rf"^{tree}\+dirty\.[0-9a-f]{{12}}$")
             self.assertNotEqual(tracked_v1, tracked_v2)
 
             source.write_text("VALUE = 1\n", encoding="utf-8")
-            extra = root / "new_module.py"
+            extra = root / "src" / "new_module.py"
             extra.write_text("VALUE = 4\n", encoding="utf-8")
             untracked_v1 = repo_code_version(root)
             extra.write_text("VALUE = 5\n", encoding="utf-8")
             self.assertNotEqual(untracked_v1, repo_code_version(root))
 
             extra.unlink()
-            ignored = root / "ignored" / "cache.pyc"
+            ignored = root / "src" / "ignored" / "cache.pyc"
             ignored.parent.mkdir()
             ignored.write_bytes(b"runtime cache")
-            self.assertEqual(repo_code_version(root), head)
+            self.assertEqual(repo_code_version(root), tree)
 
     def test_returns_empty_outside_git_repository(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

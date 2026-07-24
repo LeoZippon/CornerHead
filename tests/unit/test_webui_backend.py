@@ -1357,6 +1357,54 @@ class WebuiBackendTest(unittest.TestCase):
         payload = self.client.get("/api/experiments/exp_hitl/equity").json()
         self.assertEqual(payload["benchmark"]["dates"], [])
 
+    def test_fold_initial_prompt_reads_the_recorded_trace(self) -> None:
+        # The endpoint returns what the fold session ACTUALLY started with:
+        # the first llm_call event's messages from the collected trace.
+        trace_path = self.experiments_root / "exp_hitl" / "artifacts" / "run_001" / "agent_trace.jsonl"
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        events = [
+            {"event_type": "session_started", "run_id": "run_001"},
+            {
+                "event_type": "llm_call",
+                "run_id": "run_001",
+                "model": "deepseek-v4-pro",
+                "started_at": "2026-07-21T13:00:00+00:00",
+                "new_messages": [
+                    {"_seq": 0, "role": "system", "content": "# 角色与目标\nfixture system prompt"},
+                    {"_seq": 1, "role": "user", "content": "开始本 Fold。"},
+                ],
+            },
+            {
+                "event_type": "llm_call",
+                "run_id": "run_001",
+                "new_messages": [{"_seq": 2, "role": "user", "content": "later turn"}],
+            },
+        ]
+        trace_path.write_text(
+            "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events),
+            encoding="utf-8",
+        )
+        response = self.client.get("/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/initial-prompt")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["run_id"], "run_001")
+        self.assertEqual(payload["model"], "deepseek-v4-pro")
+        self.assertEqual(
+            [message["role"] for message in payload["messages"]], ["system", "user"]
+        )
+        self.assertIn("fixture system prompt", payload["messages"][0]["content"])
+        self.assertEqual(payload["messages"][1]["content"], "开始本 Fold。")
+        # Unknown fold and missing trace are 404s, not 500s.
+        self.assertEqual(
+            self.client.get("/api/experiments/exp_hitl/folds/epoch_001/fold_9999/initial-prompt").status_code,
+            404,
+        )
+        trace_path.unlink()
+        self.assertEqual(
+            self.client.get("/api/experiments/exp_hitl/folds/epoch_001/fold_2022Q1/initial-prompt").status_code,
+            404,
+        )
+
     def test_broken_experiment_is_isolated_from_creation_and_detail(self) -> None:
         # A worker that outlived a migration appends records in its old format;
         # the resulting broken ledger must degrade to a structured unreadable
@@ -1421,12 +1469,24 @@ class WebuiBackendTest(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             assert_no_live_writer(experiment_dir)
         self.assertIn("live worker", str(ctx.exception))
+        # The ledger rewrite primitive embeds the same guard.
+        from autotrade.pipelines.ledger import ExperimentLedger
+
+        ledger = ExperimentLedger(experiment_dir / "ledgers" / "experiment_ledger.jsonl")
+        migrated = ledger.read()
+        with self.assertRaises(RuntimeError):
+            ledger.rewrite(migrated)
         # A dead process incarnation (stale start ticks) does not block.
         write_json_atomic(
             experiment_dir / "hitl" / "status.json",
             {"schema_version": 1, "pid": os.getpid(), "pid_start_ticks": -1, "state": "running_session"},
         )
         assert_no_live_writer(experiment_dir)
+        ledger.rewrite(migrated)
+        self.assertEqual(ledger.read(), migrated)
+        # rewrite refuses records a migration failed to stamp.
+        with self.assertRaises(ValueError):
+            ledger.rewrite([{**migrated[0], "schema_version": None}])
 
     def test_delete_requires_confirm_and_no_live_worker(self) -> None:
         missing_confirm = self.client.delete("/api/experiments/exp_hitl")

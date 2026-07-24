@@ -243,21 +243,29 @@ def chmod_tree(root: Path, *, file_mode: int, dir_mode: int) -> None:
         pass
 
 
+# Code-identity root: services and workers import their implementation from
+# here. Documentation, config, and logbook commits do not change running
+# behavior and must not flag deployments or workers as stale.
+CODE_IDENTITY_PATHSPEC = "src"
+
+
 def repo_code_version(repo_root: Path | None = None) -> str:
-    """Git HEAD plus a content stamp for local changes (best-effort).
+    """Content stamp of the implementation tree plus a dirty overlay (best-effort).
 
     Stamped into every run manifest so a frozen result can be tied to the
     implementation that produced it; long-lived workers import code at spawn,
     so the console also compares this against the repository's current source.
 
-    A HEAD-only stamp silently reports equality while tracked or untracked
-    source is edited after a process starts.  Hash the actual dirty diff and
-    untracked file contents so development deployments remain observable; the
-    clean, common case stays the familiar short commit id."""
+    The clean-case stamp is the git TREE hash of ``CODE_IDENTITY_PATHSPEC``,
+    not the commit id: a commit touching only docs/logbooks leaves the stamp
+    unchanged, so it cannot false-positive staleness checks. A tree-only stamp
+    would still silently report equality while tracked or untracked source is
+    edited after a process starts, so the actual dirty diff and untracked file
+    contents (scoped to the code root) are hashed on top."""
     cwd = Path(repo_root or Path.cwd())
     try:
         head_result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
+            ["git", "rev-parse", "--short", f"HEAD:{CODE_IDENTITY_PATHSPEC}"],
             cwd=cwd, capture_output=True, text=True, timeout=10,
         )
         # The WebUI process ignores SIGCHLD so subprocess return codes are not
@@ -266,7 +274,7 @@ def repo_code_version(repo_root: Path | None = None) -> str:
         if not re.fullmatch(r"[0-9a-fA-F]+", head):
             return ""
         status = subprocess.run(
-            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", CODE_IDENTITY_PATHSPEC],
             cwd=cwd, capture_output=True, timeout=10,
         ).stdout
         if not status:
@@ -275,12 +283,12 @@ def repo_code_version(repo_root: Path | None = None) -> str:
         digest = hashlib.sha256(status)
         digest.update(
             subprocess.run(
-                ["git", "diff", "--no-ext-diff", "--binary", "HEAD", "--"],
+                ["git", "diff", "--no-ext-diff", "--binary", "HEAD", "--", CODE_IDENTITY_PATHSPEC],
                 cwd=cwd, capture_output=True, timeout=10,
             ).stdout
         )
         untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", CODE_IDENTITY_PATHSPEC],
             cwd=cwd, capture_output=True, timeout=10,
         ).stdout
         top = subprocess.run(
